@@ -68,12 +68,12 @@ These principles are derived from 13 specific problems identified in the scrappe
 
 | Model | Type | Generation Method | Flow/LLM Coupling | Disaggregatable? |
 |-------|------|-------------------|-------------------|-----------------|
-| **BAGEL** | Unified (understand + generate) | Rectified Flow (configurable, default 50 steps) | Integrated -- each flow step runs a full LLM forward pass, but KV cache is frozen (`update_past_key_values=False`) and reused across steps | Partially -- KV cache transferred once (frozen), but LLM forward pass computation still needed per step. Less cross-GPU traffic than Show-o2 since KV doesn't change. |
+| **BAGEL** | Unified (understand + generate) | Rectified Flow (configurable, default 24 steps) | Integrated -- each flow step runs a full LLM forward pass, but KV cache is frozen (`update_past_key_values=False`) and reused across steps | Partially -- KV cache transferred once (frozen), but LLM forward pass computation still needed per step. Less cross-GPU traffic than Show-o2 since KV doesn't change. |
 | **Show-o2** | Unified (understand + generate) | ODE Flow Matching (50 steps) | Interleaved -- each flow step is a FULL LLM forward pass | No -- LLM + diffusion head must be co-located |
 | **Janus Pro** | Unified (understand + generate) | Autoregressive VQ (576 tokens) | N/A -- pure AR | Yes -- just standard AR decode |
-| **Qwen2.5-Omni** | Omni (text+image+audio in, text+speech out) | AR text + AR speech codec + Flow DiT | Thinker streams hidden states from layer 18 to Talker before `<EOS>` | Yes -- Thinker and Talker are separate models on separate GPUs |
-| **Qwen3-Omni** | Omni (text+image+audio+video in, text+speech out) | AR text + AR speech codec + ConvNet Code2Wav | Thinker streams middle-layer features to Talker | Yes -- Thinker (30B MoE) and Talker (3B MoE) are separate |
-| **Qwen3-VL** | VLM (text+image+video in, text out) | Autoregressive text only | N/A -- but DeepStack injects ViT features at LLM layers 1,2,3 | Standard LLM serving with vision encoder + multi-level feature injection |
+| **Qwen2.5-Omni** | Omni (text+image+audio in, text+speech out) | AR text + AR speech codec + Flow DiT | Thinker streams high-level representations to Talker before `<EOS>` | Yes -- Thinker and Talker are separate models on separate GPUs |
+| **Qwen3-Omni** | Omni (text+image+audio+video in, text+speech out) | AR text + AR speech codec + ConvNet Code2Wav | Thinker streams hidden states from layer 18 (`accept_hidden_layer=18`) to Talker | Yes -- Thinker (30B-A3B MoE) and Talker (3B-A0.3B MoE) are separate |
+| **Qwen3-VL** | VLM (text+image+video in, text out) | Autoregressive text only | N/A -- but DeepStack injects ViT (SigLIP-2) features at the first three LLM layers | Standard LLM serving with vision encoder + multi-level feature injection |
 | **VoxServe SpeechLMs** | SpeechLM (text in, audio out) | AR text→codec + detokenizer | LLM + detokenizer pipeline | Yes -- LLM and detokenizer can be disaggregated |
 | **World Models** | RL world model | RSSM / Diffusion U-Net | N/A | Yes -- encoder, dynamics, actor are separable |
 
@@ -83,7 +83,7 @@ These principles are derived from 13 specific problems identified in the scrappe
 ```
 Text + Image context → LLM prefill → LLM decode (AR text) → [DONE_WITH_FWD]
                                           ↓ (KV cache frozen after text generation)
-                         For each of ~50 flow steps:
+                         For each of ~24 flow steps:
                            noised latents → vae2llm projection → LLM forward (read-only KV) → llm2vae → velocity
                            update latents via Euler step
                          Final latents → VAE decode → Image
@@ -102,15 +102,15 @@ Text tokens + noise latents → LLM forward pass → velocity prediction at imag
 ```
 Each of the 50 flow steps requires a FULL LLM forward pass. No KV cache reuse across steps (latents change). CFG doubles all compute.
 
-**Pattern 3: Thinker-Talker Streaming (Qwen-Omni)**
+**Pattern 3: Thinker-Talker Streaming (Qwen2.5-Omni / Qwen3-Omni)**
 ```
 Inputs → Encoders (ViT, Audio) → Thinker (AR text) ──RELAY──→ Talker (AR speech codec)
                                        ↓                              ↓
-                                  DONE_WITH_FWD              Flow DiT / Code2Wav
+                                  DONE_WITH_FWD              Flow DiT (2.5) / Code2Wav (3)
                                        ↓                              ↓
                                  Text output                    Audio stream
 ```
-Thinker streams hidden representations to Talker before finishing its own generation. RELAY flag enables this inter-worker producer-consumer pattern.
+Thinker streams hidden states + text token IDs to Talker before finishing its own generation. RELAY flag enables this inter-worker producer-consumer pattern. What exactly gets streamed differs: Qwen2.5-Omni sends last-layer hidden states + input embeddings (element-wise sum); Qwen3-Omni sends intermediate hidden states from layer 18 (`accept_hidden_layer=18`). See Section 10.2 for the full comparison.
 
 **Pattern 4: Standard SpeechLM (VoxServe Models)**
 ```
@@ -979,24 +979,24 @@ A flag for **producer-consumer streaming between workers**. Distinct from STREAM
 
 **Purpose**: Enable inter-worker data streaming without routing through the Conductor.
 
-**Primary use case**: Qwen-Omni Thinker→Talker streaming. The Thinker sends hidden states from its middle layers (e.g., layer 18 in Qwen2.5-Omni) to the Talker BEFORE the Thinker finishes generating text.
+**Primary use case**: Qwen-Omni Thinker→Talker streaming. Both Qwen2.5-Omni and Qwen3-Omni use a Thinker-Talker architecture where the Thinker streams data to the Talker BEFORE the Thinker finishes generating text. What exactly gets streamed differs between the two models (see comparison below).
 
 **Flow**:
 ```
-Thinker Worker ──RELAY (hidden states)──→ Talker Worker
+Thinker Worker ──RELAY (hidden states + token IDs)──→ Talker Worker
 Thinker Worker ──DONE_WITH_FWD──→ Conductor
 Conductor ──(at <EOS>)──→ Talker Worker: STOP signal (ZMQ msg: req_id, STOP)
 ```
 
 **Conductor RELAY state**:
-- Pushes tensors to talker worker: ZMQ msg `(req_id, tensors, model_infra, metadata)`
+- Pushes hidden states and token IDs to talker worker: ZMQ msg `(req_id, hidden_states, token_ids, metadata)`
 - Maintains `{req_id: talker_id}` mapping to know which talker serves which request
 
 **Talker Worker internals** (from IMG_0725):
 
 ```python
 # Talker worker state
-buffer = {req_id: {"TMRoPE": [TMRoPE_IDs]}}    # consumed from RELAY stream
+buffer = {req_id: {"hidden_states": [...], "token_ids": [...]}}  # consumed from RELAY stream
 status = {req_id: "WAITING" | "TALKING"}
 
 # Talker loop (runs continuously):
@@ -1006,12 +1006,13 @@ while True:
         del buffer[stop_msg.req_id]
         del status[stop_msg.req_id]
 
-    # 2. Consume from RELAY streams (add new req_ids, buffer tensors)
+    # 2. Consume from RELAY streams (add new req_ids, buffer data)
     for relay_msg in recv_relay_data():
         if relay_msg.req_id not in buffer:
-            buffer[relay_msg.req_id] = {"TMRoPE": []}
+            buffer[relay_msg.req_id] = {"hidden_states": [], "token_ids": []}
             status[relay_msg.req_id] = "WAITING"
-        buffer[relay_msg.req_id]["TMRoPE"].extend(relay_msg.tmrope_ids)
+        buffer[relay_msg.req_id]["hidden_states"].extend(relay_msg.hidden_states)
+        buffer[relay_msg.req_id]["token_ids"].extend(relay_msg.token_ids)
 
     # 3. For all req_ids: check if can talk (enough data in buffer)
     for req_id in buffer:
@@ -1027,9 +1028,23 @@ while True:
         stream_to_api_server(req_id, audio_chunk)
 ```
 
-**Why RELAY exists**: For Qwen2.5-Omni, the hidden states from layer 18 are sent BEFORE `DONE_WITH_FWD` fires (since the Thinker continues generating text after layer 18). Going through the Conductor would add latency. Direct worker-to-worker streaming is essential.
+**Why RELAY exists**: The Thinker streams hidden states to the Talker BEFORE `DONE_WITH_FWD` fires — the Thinker is still generating text while the Talker has already begun speech synthesis. Going through the Conductor would add latency. Direct worker-to-worker streaming is essential.
 
-**Qwen3-Omni consideration**: The Thinker's features are decoupled from text output, so RELAY could theoretically be replaced by DONE_WITH_FWD + Conductor forwarding. However, the whiteboard notes present this as a trade-off rather than a settled decision. RELAY avoids the conductor communication hit but adds complexity.
+**Qwen2.5-Omni vs. Qwen3-Omni: what the Thinker streams to the Talker**
+
+These two models differ significantly in what flows via RELAY. Verified from the [HuggingFace Transformers Qwen2.5-Omni implementation](https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen2_5_omni/modeling_qwen2_5_omni.py) and the Qwen2.5-Omni technical report (arXiv:2503.20215):
+
+| | **Qwen2.5-Omni** | **Qwen3-Omni** |
+|---|---|---|
+| **Which hidden states?** | **Last-layer** output + input embeddings (element-wise sum): `final_hidden[i] + input_embed[i]`, 3584-dim per token. Multimodal positions (audio/image/video) are zeroed out in the input embeddings before summing. | Hidden states from **layer 18** (an intermediate layer, configured via `accept_hidden_layer=18` in the HuggingFace config). |
+| **Text token IDs** | Original prompt token IDs + generated token IDs are passed to the Talker. The Talker uses these to **recompute TMRoPE position IDs internally** via its own `get_rope_index()`. TMRoPE IDs are NOT directly transferred. | Thinker-generated token IDs (details TBD from implementation). |
+| **Talker input formula** | `talker_input = thinker_to_talker_proj(codec_embed(codec_token) + thinker_hidden_state)` — the Talker adds its own codec token embedding element-wise to the Thinker's combined hidden state, then projects via a Linear(3584→3584) layer. | TBD from implementation. |
+| **Speech decoder** | AR codec tokens → Flow-Matching DiT + modified BigVGAN → audio waveform | AR codec tokens → lightweight causal ConvNet (Code2Wav) → audio waveform |
+| **Data volume per token** | Dense: ~3584 × 2 bytes (float16) ≈ **7 KB per token** | Dense: ~hidden_dim × 2 bytes per token (from intermediate layer) |
+
+**Key insight**: The RELAY stream carries **dense hidden-state vectors**, not lightweight position IDs. For a 200-token response, that is ~1.4 MB of hidden states for Qwen2.5-Omni. This has bandwidth implications for inter-GPU transfer.
+
+**Qwen3-Omni RELAY consideration**: Because Qwen3-Omni extracts hidden states from an intermediate layer (layer 18) rather than the final layer, the Thinker's text generation (which uses the full transformer stack) is architecturally decoupled from the Talker's input. This means RELAY could theoretically be replaced by DONE_WITH_FWD + Conductor forwarding. However, the whiteboard notes present this as a trade-off rather than a settled decision. RELAY avoids the conductor communication hit but adds complexity. For Qwen2.5-Omni, the last-layer hidden states are tightly coupled to the Thinker's text generation, making RELAY more clearly necessary.
 
 ### 10.3 ptr Mechanism
 
@@ -1038,7 +1053,7 @@ From whiteboard IMG_0728, the `ptr` (pointer) concept maps outputs to destinatio
 ```python
 ptr = {
     "DONE_WITH_FWD": ["tokens"],           # flag
-    "RELAY": ["TMRoPE_IDs"],               # flag (inter-worker stream)
+    "RELAY": ["thinker_hidden_states"],     # flag (inter-worker stream)
     "flow_head": ["latents"],              # subgraph destination
     "STREAM_OUT": ["text_tokens"],          # client stream
 }
@@ -1048,7 +1063,7 @@ In the final dataclass design, this is encoded directly in `GraphStage.outputs`:
 ```python
 outputs = {
     "tokens": [GraphPointer("DONE_WITH_FWD", back_to_conductor=True)],
-    "TMRoPE_IDs": [GraphPointer("talker", back_to_conductor=False)],  # RELAY
+    "thinker_hidden_states": [GraphPointer("talker", back_to_conductor=False)],  # RELAY
     "latents": [GraphPointer("flow_head")],
     "text_tokens": [GraphPointer("STREAM_OUT")],
 }
@@ -1116,7 +1131,7 @@ For the Thinker-Talker pattern (Qwen-Omni), the Talker worker maintains:
 
 ```python
 talker_state = {
-    "buffer": {req_id: {"TMRoPE": [TMRoPE_IDs]}},  # consumed from RELAY stream
+    "buffer": {req_id: {"hidden_states": [...], "token_ids": [...]}},  # consumed from RELAY stream
     "status": {req_id: "WAITING" | "TALKING"},
 }
 ```
@@ -1221,7 +1236,7 @@ This supports:
    - Streams text tokens → API Server (STREAM_OUT)
    - At <BOI>: DONE_WITH_FWD → Conductor
 6. Conductor: flow loop phase begins. KV cache is now frozen on Worker 0.
-7. Worker 0: runs 50 flow steps internally:
+7. Worker 0: runs 24 flow steps internally:
    For each step:
      a. Project noised latents via vae2llm into LLM embedding space
      b. Run full LLM forward pass (reading frozen KV cache, update_past_key_values=False)
@@ -1235,7 +1250,7 @@ This supports:
 11. Conductor finishes request
 ```
 
-**Key**: The LLM is co-located with the flow loop because each of the 50 flow steps requires a full LLM forward pass. However, the KV cache is frozen after text generation, so it is reused (read-only) across all flow steps. The 3x CFG multiplier means each flow step actually runs 3 LLM forward passes (150 total). Only the final latents are transferred to Worker 1 for VAE decoding.
+**Key**: The LLM is co-located with the flow loop because each of the 24 flow steps requires a full LLM forward pass. However, the KV cache is frozen after text generation, so it is reused (read-only) across all flow steps. The 3x CFG multiplier means each flow step actually runs 3 LLM forward passes (72 total). Only the final latents are transferred to Worker 1 for VAE decoding.
 
 ### 13.3 Image Generation -- Show-o2 Pattern (Interleaved Flow)
 
@@ -1278,10 +1293,10 @@ This supports:
 6. Dispatch thinker → Worker 0
 7. Worker 0 runs thinker decode loop:
    - Streams text tokens → API Server (STREAM_OUT)
-   - Streams hidden states from middle layers → Worker 1 (RELAY)
+   - Streams hidden states from layer 18 (accept_hidden_layer) + token IDs → Worker 1 (RELAY)
    - At <EOS>: sends DONE_WITH_FWD → Conductor
 8. Worker 1 (talker loop, running concurrently):
-   - Buffers incoming hidden states from RELAY
+   - Buffers incoming hidden states + token IDs from RELAY
    - When sufficient data: runs talker AR decode
    - Talker → MTP module (residual codebooks) → Code2Wav → audio chunks
    - Streams audio → API Server (STREAM_OUT)
@@ -1292,7 +1307,7 @@ This supports:
 **Key features**:
 - Thinker and Talker run CONCURRENTLY on different GPUs
 - RELAY enables hidden state streaming before thinker finishes
-- TMRoPE IDs travel with the RELAY data for temporal alignment
+- Hidden states from layer 18 + text token IDs travel via RELAY (see Section 10.2 for Qwen2.5-Omni vs. Qwen3-Omni differences)
 - Talker maintains per-request buffer with WAITING/TALKING status
 
 ### 13.5 SpeechLM -- VoxServe Pattern (Orpheus, CosyVoice, etc.)
@@ -1408,7 +1423,7 @@ The conductor loop step h just says "check for messages" -- it doesn't prescribe
 ### 15.4 Tension 4: Two Diagrams of Step 2 (Image Generation)
 
 **Resolution**: They are TWO DIFFERENT model architectures:
-- **Diagram 1 (BAGEL pattern)**: LLM decode runs once, then 50 flow steps each re-entering the LLM backbone with frozen KV
+- **Diagram 1 (BAGEL pattern)**: LLM decode runs once, then 24 flow steps each re-entering the LLM backbone with frozen KV
 - **Diagram 2 (Show-o2 pattern)**: LLM_dec inside the loop, 50 × (LLM + diffusion_head + euler_step) with NO KV reuse across steps
 
 Not an expanded view of the same thing.
@@ -1433,11 +1448,12 @@ Not an expanded view of the same thing.
 
 | Architecture | Flow Separate from LLM? | Cross-GPU Transfers if Separated | Config |
 |---|---|---|---|
-| BAGEL | No (flow uses LLM backbone, frozen KV) | ~50 query tensors + ~50 hidden states if separated | Co-locate LLM + flow; only VAE separate |
+| BAGEL | No (flow uses LLM backbone, frozen KV) | ~24 query tensors + ~24 hidden states if separated | Co-locate LLM + flow; only VAE separate |
 | Show-o2 | No (interleaved, LLM invoked per step) | 2 × 50 = 100 if separated | MUST co-locate |
 | JanusFlow | No (interleaved) | 2 × 30 if separated | MUST co-locate |
 | Janus Pro | N/A (pure AR) | 0 | Standard AR |
-| Qwen-Omni | Yes (separate Thinker/Talker models) | TMRoPE IDs (tiny, streamed via RELAY) | Separate workers OK |
+| Qwen2.5-Omni | Yes (separate Thinker/Talker models) | Dense hidden states (~3584-dim/token) + token IDs, streamed via RELAY | Separate workers OK |
+| Qwen3-Omni | Yes (separate Thinker/Talker models) | Dense hidden states from layer 18 + token IDs, streamed via RELAY | Separate workers OK |
 
 ---
 
