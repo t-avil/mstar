@@ -795,8 +795,9 @@ class GraphStage(GraphSection):
 
 Visual:
 ```
-  inp_A ──→  ┌──────────┐ ──→ out_X → [dest1, dest2]
-  inp_B ──→  │  Stage   │ ──→ out_Y → [dest3]
+             ┌──────────┐
+  inp_A ──→  │  Stage   │ ──→ out_X → [dest1, dest2]
+  inp_B ──→  │          │ ──→ out_Y → [dest3]
              └──────────┘
 ```
 
