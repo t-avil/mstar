@@ -488,7 +488,7 @@ full_graph = Sequential([
             input_ids=["text_emb", "img_emb", "latents"],
             outputs={"latents": [GraphPointer("LLM_flow_step")]}  # loop-back
         ),
-        n_iters=50,
+        n_iters=24,
         outputs={
             "latents": [GraphPointer("vae_decoder")]
         }
@@ -502,7 +502,6 @@ full_graph = Sequential([
 ```
 
 Note: BAGEL uses the same LLM backbone for both text generation and flow steps. During flow steps, the LLM reads frozen KV cache (`update_past_key_values=False`) and processes noised latents projected via `vae2llm`. Velocity is extracted via `llm2vae` (a linear layer), not a separate diffusion head. CFG requires 3x forward passes per step (conditional + text-CFG + image-CFG), handled at the worker level by tripling the batch size. The `text_emb` and `img_emb` inputs to the flow loop are external inputs that persist across iterations (handled by `Loop.external_inputs`).
-```
 
 ### 7.4 Image Generation Graph (Show-o2 -- Interleaved)
 
@@ -689,7 +688,7 @@ For diffusion/flow-based stages (rectified flow, ODE solvers, VAE encode/decode)
 - CUDA-graph-friendly (fixed shapes)
 - CFG parallelism (2x or 3x batch for classifier-free guidance)
 
-**Implementation**: Custom worker that handles the flow step loop internally when dispatched a `Loop(flow_step, n_iters=50)` subgraph.
+**Implementation**: Custom worker that handles the flow step loop internally when dispatched a `Loop(flow_step, n_iters=N)` subgraph (e.g., N=24 for BAGEL, N=50 for Show-o2).
 
 ### 8.3 Worker Capabilities
 
