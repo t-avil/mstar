@@ -2,7 +2,7 @@ import sys
 
 from mminf.graph.request_queues import RequestQueues
 sys.path.insert(0, ".")
-from mminf.graph.base import GraphPointer, GraphStage, Loop, Parallel, Sequential
+from mminf.graph.base import GraphPointer, GraphStage, Loop, Parallel, Sequential, remove_flags
 import numpy as np
 
 
@@ -195,7 +195,7 @@ if __name__ == "__main__":
         ready=[],
         waiting=network
     )
-    queues.process_new_inputs(provided_inputs)
+    queues.process_new_inputs(remove_flags(provided_inputs))
 
     # loop until all stages are done and print out
     while len(queues.ready) > 0 or queues.waiting is not None:
@@ -212,7 +212,7 @@ if __name__ == "__main__":
         stage = queues.ready.pop(np.random.randint(0, len(queues.ready)))
         print(f"Processing stage {stage.name} with inputs {stage.input_ids}")
         new_inputs = stage.outputs
-        external_outputs = queues.process_new_inputs(new_inputs)
+        external_outputs = queues.process_new_inputs(remove_flags(new_inputs))
         if external_outputs:
             print(f"External outputs: {external_outputs}")
        

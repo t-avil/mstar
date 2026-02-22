@@ -3,7 +3,7 @@ from enum import Enum
 from typing import Type
 
 from mminf.graph.base import GraphSection, GraphStage, Loop, Parallel, Sequential
-from mminf.status import Status
+from mminf.ipc_formats import Status
 
 
 @dataclass
@@ -113,3 +113,17 @@ def collect_subgraphs(
             res[s.worker_id] = []
         res[s.worker_id].append(s)
     return res
+
+
+def get_stage_to_worker_id(
+    graph: GraphSection
+) -> dict[str, str]:
+    if isinstance(graph, GraphStage):
+        return {graph.worker_id: graph.name}
+    if isinstance(graph, Sequential) or isinstance(graph, Parallel):
+        res = {}
+        for s in graph.sections:
+            res.update(get_stage_to_worker_id(s))
+        return res
+    if isinstance(graph, Loop):
+        return get_stage_to_worker_id(graph.section)

@@ -1,6 +1,6 @@
 
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from mminf.graph.base import (
     GraphSection, GraphStage, SignalToDests, SignalToDestsAndFlags,
@@ -10,8 +10,8 @@ from mminf.graph.base import (
 
 @dataclass
 class RequestQueues:
-    ready: list[GraphStage]
     waiting: GraphSection
+    ready: list[GraphStage] = field(default_factory=list)
     
     def _update_ready_waiting(self):
         """
@@ -26,7 +26,7 @@ class RequestQueues:
     
     def process_new_inputs(
         self,
-        new_inputs: SignalToDestsAndFlags 
+        new_inputs: SignalToDests 
     ) -> SignalToDests:
         """
         Processes all outputs that feed into the waiting graph section, and
