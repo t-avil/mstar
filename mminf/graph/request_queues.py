@@ -1,0 +1,44 @@
+
+
+from dataclasses import dataclass
+
+from mminf.graph.base import (
+    GraphSection, GraphStage, SignalToDests, SignalToDestsAndFlags,
+    get_signal_to_dest_mapping, get_stage_to_inputs_mapping, remove_flags
+)
+
+
+@dataclass
+class RequestQueues:
+    ready: list[GraphStage]
+    waiting: GraphSection
+    
+    def _update_ready_waiting(self):
+        """
+        Moves sections from the waiting section to the ready queue,
+        replaces self.waiting with whatever's left
+        """
+        if self.waiting is None:
+            return
+        new_ready, new_waiting = self.waiting.split_off_ready()
+        self.ready += new_ready
+        self.waiting = new_waiting
+    
+    def process_new_inputs(
+        self,
+        new_inputs: SignalToDestsAndFlags 
+    ) -> SignalToDests:
+        """
+        Processes all outputs that feed into the waiting graph section, and
+        return a dictionary of external output pointers
+        """
+        if self.waiting is None:
+            return remove_flags(new_inputs)
+
+        new_inputs = get_stage_to_inputs_mapping(remove_flags(new_inputs))
+        self.waiting.ingest_inputs(new_inputs)
+        external_outputs = new_inputs
+        
+        self._update_ready_waiting()
+        return get_signal_to_dest_mapping(external_outputs)
+
