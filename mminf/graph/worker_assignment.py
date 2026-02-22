@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Type
+from uuid import uuid4
 
 from mminf.graph.base import GraphSection, GraphStage, Loop, Parallel, Sequential
 from mminf.ipc_formats import Status
@@ -12,6 +13,7 @@ class Subgraph:
     consumes_stream: bool = field(default=False)
     worker_id: str | None = field(default=None)
     status: Status = field(default=Status.WAITING)
+    subgraph_id: str = field(default_factory=lambda: str(uuid4()))
 
 
 def _combine_sections_sequential_or_parallel(

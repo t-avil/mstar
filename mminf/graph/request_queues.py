@@ -10,8 +10,9 @@ from mminf.graph.base import (
 
 @dataclass
 class RequestQueues:
-    waiting: GraphSection
+    waiting: GraphSection | None
     ready: list[GraphStage] = field(default_factory=list)
+    subgraph_id: str = field(default="")
     
     def _update_ready_waiting(self):
         """

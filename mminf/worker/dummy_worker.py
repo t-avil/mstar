@@ -1,17 +1,21 @@
 from dataclasses import dataclass, field
+import time
 
+import numpy as np
 import zmq
 
 from mminf.conductor.formats import TensorData
 from mminf.graph.base import GraphPointer, GraphStage, SignalToDests, SignalToDestsAndFlags, remove_flags
 from mminf.graph.request_queues import RequestQueues
 from mminf.graph.worker_assignment import Subgraph
+from mminf.ipc_formats import ConductorRequest, ConductorRequestType, ConductorTensors, InputTensors, NewFwdRequest, RemoveRequest, SubgraphsDone, WorkerRequest, WorkerRequestType
 
 
 @dataclass
 class StageOutputRouting:
     to_conductor: SignalToDestsAndFlags
-    to_workers: dict[str, SignalToDestsAndFlags] # worker id to signals
+    to_workers: dict[str, SignalToDests] # worker id to signals
+    completed_subgraphs: list[str] = field(default_factory=[])
 
 
 # TODO note: need to figure out how this works for producer-consumer streams;
@@ -27,10 +31,10 @@ class RequestManager:
     tensors: dict[str, TensorData] = field(default_factory=dict)
 
 
-    def process_init_inputs(self, initial_inputs: SignalToDestsAndFlags):
-        initial_inputs = remove_flags(initial_inputs)
+    def process_new_inputs(self, inputs: SignalToDests):
+        inputs = inputs
         for queue in self.queues:
-            initial_inputs = queue.process_new_inputs(initial_inputs)
+            inputs = queue.process_new_inputs(inputs)
 
     def get_ready_stage_names(self) -> list[str]:
         return sum(
@@ -57,18 +61,25 @@ class RequestManager:
 
         # process all internal-facing outputs
         outputs_no_flags = remove_flags(outputs)
-        for q in self.queues:
+
+        done_queue_idxs = []
+        completed_subgraphs = []
+        for i, q in enumerate(self.queues):
             outputs_no_flags = q.process_new_inputs(outputs_no_flags)
+            if q.waiting is None: # done with subgraph
+                done_queue_idxs.append(i)
+                completed_subgraphs.append(q.subgraph_id)
+        self.queues = [q for i, q in enumerate(self.queues) if i not in done_queue_idxs]
 
         # get mapping of worker to proper external outputs
-        to_workers: dict[str, SignalToDestsAndFlags] = {}
+        to_workers: dict[str, SignalToDests] = {}
         for signal, dests in outputs_no_flags.items():
             signal_to_workers: dict[str, list[GraphPointer]] = {} # worker: [graph_pointer]
             for dest in dests:
                 worker_id = self.stage_to_worker[dest]
                 if worker_id not in signal_to_workers:
                     signal_to_workers[worker_id] = []
-                signal_to_workers[worker_id].append(GraphPointer(dest))
+                signal_to_workers[worker_id].append(dest)
             for worker_id, pointers in signal_to_workers.items():
                 if worker_id not in to_workers:
                     to_workers[worker_id] = {}
@@ -76,7 +87,8 @@ class RequestManager:
 
         return StageOutputRouting(
             to_conductor=to_conductor,
-            to_workers=to_workers
+            to_workers=to_workers,
+            completed_subgraphs=completed_subgraphs
         )
 
 
@@ -112,27 +124,94 @@ class DummyWorker:
             self.inter_worker_sockets[id].setsockopt(zmq.LINGER, 0)
         
     def _ingest_request(
-        self, request_id: str,
-        subgraphs: list[Subgraph],
-        stage_to_worker: dict[str, str],
-        initial_inputs: SignalToDestsAndFlags,
-        # initial_tensors: dict[str, TensorData],
+        self, body: NewFwdRequest
     ):
-        queues = [RequestQueues(s) for s in subgraphs]
+        queues = [RequestQueues(s, subgraph_id=s.subgraph_id) for s in body.subgraphs]
         stage_to_queue_idx = {}
-        for i, s in enumerate(subgraphs):
+        for i, s in enumerate(body.subgraphs):
             stage_to_queue_idx.update({
                 stage: i for stage in s.section.get_stage_names()
             })
-        self.request_managers[request_id] = RequestManager(
+        self.request_managers[body.request_id] = RequestManager(
             queues=queues,
             stage_to_queue_idx=stage_to_queue_idx,
-            stage_to_worker=stage_to_worker
+            stage_to_worker=body.stage_to_worker
         )
-        self.request_managers[request_id].process_init_inputs(initial_inputs)
+        self.request_managers[body.request_id].process_new_inputs(
+            remove_flags(body.initial_inputs)
+        )
 
+    def _remove_request(self, body: RemoveRequest):
+        if body.request_id in self.request_managers:
+            del self.request_managers[body.request_id]
     
-    def _remove_request(self, request_id: str):
-        del self.request_managers[request_id]
+    def _process_new_inputs(
+        self, body: InputTensors
+    ):
+        if body.request_id in self.request_managers:
+            self.request_managers[body.request_id].process_new_inputs(body.inputs)
     
-    
+
+    def _process_requests(self):
+        """
+        Processes all pending requests
+        """
+        while True:
+            try:
+                request: WorkerRequest = self.request_socket.recv_pyobj(
+                    flags=zmq.NOBLOCK
+                )
+                if request.request_type == WorkerRequestType.NEW_FWD:
+                    self._ingest_request(request.request_body)
+                elif request.request_type == WorkerRequestType.REMOVE_REQUEST:
+                    self._remove_request(request.request_body)
+                elif request.request_type == WorkerRequestType.INPUT_TENSORS:
+                    self._process_new_inputs(request.request_body) 
+            except zmq.Again:
+                break
+
+    def _send_outputs(self, request_id: str, outputs: StageOutputRouting):
+        # to workers
+        for worker in outputs.to_workers:
+            request = WorkerRequest(
+                request_type=WorkerRequestType.INPUT_TENSORS,
+                request_body=InputTensors(
+                    request_id=request_id,
+                    inputs=outputs.to_workers[worker]
+                )
+            )
+            self.inter_worker_sockets[worker].send_pyobj(request)
+        
+        # to conductor
+        if outputs.to_conductor:
+            request = ConductorRequest(
+                request_type=ConductorRequestType.TENSORS,
+                request_body=ConductorTensors(
+                    request_id=request_id,
+                    inputs=outputs.to_conductor
+                )
+            )
+            self.result_socket.send_pyobj(request)
+        
+        if outputs.completed_subgraphs:
+            request = ConductorRequest(
+                request_type=ConductorRequestType.SUBGRAPHS_DONE,
+                request_body=SubgraphsDone(
+                    request_id=request_id,
+                    subgraph_ids=outputs.completed_subgraphs
+                )
+            )
+        
+    def run(self):
+        while True:
+            self._process_requests()
+            for request_id, manager in self.request_managers.items():
+                ready_stage_names = manager.get_ready_stage_names()
+                if not ready_stage_names:
+                    continue
+                stages = manager.pop_ready_stages(ready_stage_names)
+                # TODO actually execute the stages and get real outputs
+                for s in stages:
+                    outputs = manager.process_stage_outputs(s.outputs)
+                    self._send_outputs(request_id, outputs)
+            time.sleep(np.random.rand() * 2)
