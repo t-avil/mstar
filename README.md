@@ -1071,7 +1071,7 @@ This means the Conductor tracks "is this graph stage logically ready?" while the
 
 ### 11.2 Mooncake-Inspired Transfer Engine
 
-From the Mooncake research (FAST 2025 Best Paper), the inter-worker communication layer should:
+From the Mooncake research, the inter-worker communication layer should:
 
 1. **Use a Mooncake-style Transfer Engine** with topology-aware, multi-path data transfer
 2. **Support multiple protocols**: RDMA (for production), TCP (fallback), NVLink (intra-node), shared memory (same-machine)
