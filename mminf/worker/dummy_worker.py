@@ -34,7 +34,7 @@ class SubgraphQueues:
     inputs for each request, and which stages are ready to run per request.
     """
     subgraph_id: str
-    phase: str
+    phases: set[str]
     subgraph: Subgraph
     per_request_queues: dict[str, PerRequestStageQueues]
 
@@ -121,14 +121,14 @@ class SubgraphsManager:
     """
     queues: dict[str, SubgraphQueues] # subgraph_id to queues
     per_request_info: dict[str, PerRequestInfo] # request id to info
-    all_subgraph_ids_to_phase: dict[str, str] # for all subgraphs
+    all_subgraph_ids_to_phases: dict[str, set[str]] # for all subgraphs
     all_subgraph_ids_to_stages: dict[str, str]
 
     def update_phase(self, request_id: str, phase: str):
         self.per_request_info[request_id].current_phase = phase
         self.per_request_info[request_id].active_subgraph_ids = [
             id for id in self.per_request_info[request_id].subgraph_ids \
-                if self.all_subgraph_ids_to_phase[id] == phase 
+                if phase in self.all_subgraph_ids_to_phases[id]
         ]
     
     def get_phase(self, request_id: str):
@@ -208,17 +208,16 @@ class SubgraphsManager:
         """
         stage_to_worker = {}
         for id in subgraph_ids:
-            phase = self.queues[id].subgraph.phase
             self.queues[id].add_request(request_id)
         
         for subgraph_id, worker_id in subgraph_to_worker.items():
-            phase = self.all_subgraph_ids_to_phase[subgraph_id]
-            stage_to_worker.update({
-                StageAndPhase(
-                    stage=name,
-                    phase=phase
-                ): worker_id for name in self.all_subgraph_ids_to_stages[subgraph_id]
-            })
+            for phase in self.all_subgraph_ids_to_phases[subgraph_id]:
+                stage_to_worker.update({
+                    StageAndPhase(
+                        stage=name,
+                        phase=phase
+                    ): worker_id for name in self.all_subgraph_ids_to_stages[subgraph_id]
+                })
         self.per_request_info[request_id] = PerRequestInfo(
             stage_to_worker=stage_to_worker,
             subgraph_ids=subgraph_ids
@@ -226,9 +225,8 @@ class SubgraphsManager:
     
     def remove_request(self, request_id: str):
         if request_id in self.per_request_info:
-            for ids in self.per_request_info[request_id].phase_to_subgraph_ids.values():
-                for queue_id in ids:
-                    self.queues[queue_id].remove_request(request_id)
+            for queue_id in self.per_request_info[request_id].active_subgraph_ids:
+                self.queues[queue_id].remove_request(request_id)
             del self.per_request_info[request_id]
 
 
@@ -238,7 +236,7 @@ class DummyWorker:
         worker_id: str,
         worker_ids: list[str],
         my_subgraphs: list[Subgraph],
-        all_subgraph_ids_to_phase: dict[str, str], # for all subgraphs
+        all_subgraph_ids_to_phases: dict[str, set[str]], # for all subgraphs
         all_subgraph_ids_to_stages: dict[str, list[str]], # for all subgraphs
         worker_socket_path_prefix: str="/tmp/mminf/workers/",
         conductor_socket_path: str="/tmp/mminf/conductor.ipc"
@@ -248,13 +246,13 @@ class DummyWorker:
             queues={
                 subgraph.subgraph_id: SubgraphQueues(
                     subgraph_id=subgraph.subgraph_id,
-                    phase=subgraph.phase,
+                    phases=subgraph.phases,
                     subgraph=subgraph,
                     per_request_queues={}
                 ) for subgraph in my_subgraphs
             },
             per_request_info={},
-            all_subgraph_ids_to_phase=all_subgraph_ids_to_phase,
+            all_subgraph_ids_to_phases=all_subgraph_ids_to_phases,
             all_subgraph_ids_to_stages=all_subgraph_ids_to_stages
         )
 

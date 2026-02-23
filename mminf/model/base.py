@@ -17,7 +17,7 @@ STREAM_OUT = "stream_out"
 @dataclass
 class Subgraph:
     section: GraphSection
-    phase: str # e.g., prefill, decode, image_gen 
+    phases: set[str] # e.g., prefill, decode, image_gen 
     consumes_stream: bool = field(default=False)
     ranks: list[int] = field(default_factory=list)
     group_id: int = field(default=-1)
@@ -58,7 +58,7 @@ def _divide_into_subgraphs(
     if isinstance(graph, GraphStage):
         return [Subgraph(
             section=graph,
-            phase=phase,
+            phases=set([phase]),
             consumes_stream=graph.consumes_stream,
             group_id=stage_to_group_idx[graph.name],
             ranks=stage_groups[stage_to_group_idx[graph.name]]["ranks"]
@@ -184,6 +184,7 @@ class Model(ABC):
         with open(config_path, "r") as f:
             stage_groups = yaml.safe_load(f)["stage_groups"]
         
+        # TODO: merge identical subgraphs from different phases
         return sum([
             self._get_subgraphs_for_phase(phase, graph, stage_groups) \
                 for phase, graph in self.get_phase_graphs().items()
