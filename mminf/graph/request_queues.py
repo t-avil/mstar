@@ -9,7 +9,7 @@ from mminf.graph.base import (
 
 
 @dataclass
-class RequestQueues:
+class PerRequestStageQueues:
     waiting: GraphSection | None
     ready: list[GraphStage] = field(default_factory=list)
     subgraph_id: str = field(default="")

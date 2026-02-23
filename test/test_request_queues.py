@@ -1,6 +1,6 @@
 import sys
 
-from mminf.graph.request_queues import RequestQueues
+from mminf.graph.request_queues import PerRequestStageQueues
 sys.path.insert(0, ".")
 from mminf.graph.base import GraphPointer, GraphStage, Loop, Parallel, Sequential, remove_flags
 import numpy as np
@@ -191,7 +191,7 @@ if __name__ == "__main__":
         "mystery2": [GraphPointer("flow")]
     }
 
-    queues = RequestQueues(
+    queues = PerRequestStageQueues(
         ready=[],
         waiting=network
     )

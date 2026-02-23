@@ -27,16 +27,16 @@ class RequestBody(ABC):
 ######################################
 
 class WorkerRequestType(Enum):
-    NEW_FWD = "new_fwd"
+    NEW_REQUEST = "new_request"
     REMOVE_REQUEST = "remove_request"
     INPUT_TENSORS = "input_tensors"
 
 
 @dataclass
-class NewFwdRequest(RequestBody):
+class NewRequest(RequestBody):
     request_id: str
-    subgraphs: list[Subgraph]
-    stage_to_worker: dict[str, str]
+    subgraph_ids: list[str]
+    subgraph_to_worker: dict[str, str]
     initial_inputs: SignalToDestsAndFlags
     # TODO: actual tensors will be transferred via Ray. This metadata may be
     # transferred via Ray as well, but we are using ZMQ for the sake of
@@ -68,7 +68,7 @@ class WorkerRequest:
 class ConductorRequestType(Enum):
     TENSORS = "tensors"
     STAGE_DONE = "stage_done"
-    SUBGRAPH_DONE = "subgraph_done"
+    SUBGRAPHS_DONE = "subgraphs_done"
 
 
 @dataclass
@@ -86,7 +86,7 @@ class StageDone(RequestBody):
 @dataclass
 class SubgraphsDone(RequestBody):
     request_id: str
-    subgraph_id: list[str]
+    subgraph_ids: list[str]
 
 
 @dataclass
