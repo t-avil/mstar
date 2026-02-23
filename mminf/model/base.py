@@ -20,7 +20,7 @@ class Subgraph:
     phases: set[str] # e.g., prefill, decode, image_gen 
     consumes_stream: bool = field(default=False)
     ranks: list[int] = field(default_factory=list)
-    group_id: int = field(default=-1)
+    _group_id: int = field(default=-1) # used in going from config yaml to subgraphs
     subgraph_id: str = field(default_factory=lambda: str(uuid4()))
 
 
@@ -60,7 +60,7 @@ def _divide_into_subgraphs(
             section=graph,
             phases=set([phase]),
             consumes_stream=graph.consumes_stream,
-            group_id=stage_to_group_idx[graph.name],
+            _group_id=stage_to_group_idx[graph.name],
             ranks=stage_groups[stage_to_group_idx[graph.name]]["ranks"]
         )]
     
@@ -81,7 +81,7 @@ def _divide_into_subgraphs(
                 stage_to_group_idx=stage_to_group_idx,
                 stage_groups=stage_groups
             )
-            if new_subgraphs[0].group_id == subgraphs[-1].group_id and \
+            if new_subgraphs[0]._group_id == subgraphs[-1]._group_id and \
                     not new_subgraphs[0].consumes_stream:
                 subgraphs[-1].section = _combine_sections_sequential_or_parallel(
                     subgraphs[-1].section, new_subgraphs.pop(0).section,
@@ -104,13 +104,13 @@ def _divide_into_subgraphs(
         ]
         group_id_to_subgraph = {}
         for s in singleton_subgraphs:
-            if s.group_id in group_id_to_subgraph:
-                group_id_to_subgraph[s.group_id] = _combine_sections_sequential_or_parallel(
-                    group_id_to_subgraph[s.group_id], s.section,
+            if s._group_id in group_id_to_subgraph:
+                group_id_to_subgraph[s._group_id] = _combine_sections_sequential_or_parallel(
+                    group_id_to_subgraph[s._group_id], s.section,
                     comb_type=Parallel
                 )
             else:
-                group_id_to_subgraph[s.group_id] = s
+                group_id_to_subgraph[s._group_id] = s
 
         return list(group_id_to_subgraph.values()) + sum([
             s for s in all_subgraphs if len(s) > 1 or s[0].consumes_stream
@@ -144,6 +144,10 @@ def _divide_into_subgraphs(
 
 @dataclass
 class CurrentForwardMetadata:
+    """
+    Full-model forward pass-level metadata for running the current
+    forward pass
+    """
     input_modalities: list[str]
     output_modalities: list[str]
     phase: str
@@ -153,6 +157,10 @@ class CurrentForwardMetadata:
 
 @dataclass
 class ForwardPassInputs:
+    """
+    Inputs for the current full-model forward pass, with where each input
+    is routed to.
+    """
     tensors: dict[str, TensorData]
     pointers: SignalToDestsAndFlags
 
@@ -207,6 +215,13 @@ class Model(ABC):
         self, input_tensors: dict[str, TensorData],
         metadata: CurrentForwardMetadata,
     ) -> ForwardPassInputs:
+        """
+        Called by the conductor.
+
+        These are the external inputs that go from the conductor to the
+        workers at the beginning of the current forward pass; all other signals
+        are handled internally via IPC.
+        """
         pass
 
     @abstractmethod
@@ -215,6 +230,9 @@ class Model(ABC):
         input_tensors: dict[str, TensorData],
         new_outputs: dict[str, TensorData]
     ):
+        """
+        Called by the conductor at the end of a full model fwd pass.
+        """
         # e.g., check for BOI token, check if image was generated and should
         # be added to the input modalities and input tensors, adds new token
         # to the input text, etc...
@@ -228,5 +246,5 @@ class Model(ABC):
         input_tensors: dict[str, TensorData],
         state, # TODO: figure out state
         **kwargs
-    ):
+    ) -> dict[str, TensorData]:
         pass

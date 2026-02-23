@@ -58,8 +58,8 @@ class InputTensors(MessageBody):
 
 @dataclass
 class WorkerMessage:
-    request_type: WorkerMessageType
-    request_body: MessageBody
+    message_type: WorkerMessageType
+    body: MessageBody
 
 
 ######################################
@@ -95,5 +95,5 @@ class SubgraphsDone(MessageBody):
 
 @dataclass
 class ConductorMessage:
-    request_type: ConductorMessageType
-    request_body: MessageBody
+    message_type: ConductorMessageType
+    body: MessageBody

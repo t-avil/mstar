@@ -117,8 +117,8 @@ class DummyConductor:
                 initial_inputs=inputs_per_worker[worker]
             )
             self.worker_sockets[worker].send_pyobj(WorkerMessage(
-                request_type=WorkerMessageType.NEW_REQUEST,
-                request_body=message
+                message_type=WorkerMessageType.NEW_REQUEST,
+                body=message
             ))
     
     def _process_subgraphs_done(
@@ -153,8 +153,8 @@ class DummyConductor:
 
             for worker, inputs in inputs_per_worker.items():
                 message = WorkerMessage(
-                    request_type=WorkerMessageType.INPUT_TENSORS,
-                    request_body=InputTensors(
+                    message_type=WorkerMessageType.INPUT_TENSORS,
+                    body=InputTensors(
                         request_id=body.request_id,
                         phase=request_data.current_forward_metadata.phase,
                         inputs=inputs
@@ -168,13 +168,13 @@ class DummyConductor:
     def run(self):
         while True:
             message: ConductorMessage = self.result_socket.recv_pyobj()
-            if message.request_type == ConductorMessageType.NEW_REQUEST:
-                self._ingest_request(message.request_body)
-            elif message.request_type == ConductorMessageType.SUBGRAPHS_DONE:
-                self._process_subgraphs_done(message.request_body)
-            elif message.request_type == ConductorMessageType.TENSORS:
-                self._process_new_tensors(message.request_body)
+            if message.message_type == ConductorMessageType.NEW_REQUEST:
+                self._ingest_request(message.body)
+            elif message.message_type == ConductorMessageType.SUBGRAPHS_DONE:
+                self._process_subgraphs_done(message.body)
+            elif message.message_type == ConductorMessageType.TENSORS:
+                self._process_new_tensors(message.body)
             else:
-                raise ValueError(f"Unknown message type: {message.request_type}")
+                raise ValueError(f"Unknown message type: {message.message_type}")
             time.sleep(0.1) # just for dummy conductor!
             
