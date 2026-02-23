@@ -316,35 +316,45 @@ Indexes all workers by capability and tracks their state.
 
 #### 6.2.2 Scheduler
 
-The scheduler contains two distinct phases that operate at different timescales:
+At **initialization** time, the conductor assigns subgraphs to workers.
+In the data-parallel case, a subgraph may be assigned to multiple workers, and requests will be routed to one of the data-parallel ranks per subgraph.
+If there are multiple "phases" of computation (e.g., prefill, decode, image generation), components of those will have separate subgraphs where appropriate.
 
-**Request Management (steps a-f)** -- Runs once per new request or per requeue after a forward pass completes:
+For each request, the scheduler contains multiple roles that operate at different timescales:
+
+**Request Management (steps a-e)** -- Runs once per new request:
 
 | Step | Action | Inputs |
 |------|--------|--------|
 | a | Get request from queue, extract metadata | `model_name`, modalities |
 | b | Call `request.model.get_execution_strategy()` → Strategy object + full graph | Model object |
 | c | Determine stage plan for request | Request config (input/output modalities), server config (stage->worker mapping) |
-| d | Determine worker plan for request (e.g., random routing for DP) | server config (worker->gpu mappings) |
-| e | N/A | N/A |
-| f | Produce the needs/produces/ptr graph for stage groups. Add stages to **ready queue** (all inputs available) or **waiting queue** (missing inputs) | Execution plan, provided inputs |
+| d | Determine worker plan for request (e.g., random routing for DP) to get a subgraph to worker mapping for this request | server config (worker->gpu mappings) |
+| e | Communicate to the relevant workers the subgraph IDs for this request, as well as the subgraph to worker mapping (so that the workers can route their outputs properly to other workers) | outputs from c and d | 
 
-**Stage Management (steps g-i)** -- Runs every conductor loop iteration:
+**Forward Pass Management (steps f-j)** -- Runs every conductor full model forward pass (i.e., when all subgraphs have been completed).
 
 | Step | Action | Details |
 |------|--------|---------|
-| g | Dispatch from ready queue | Send stage work to assigned workers, update request state |
-| h | Check for completion messages from workers | Update request state, move newly-ready stages from waiting to ready |
-| i | If end of forward pass (DONE_WITH_FWD) | Update lifecycle state (saw `<BOI>`, saw `<EOS>`, etc.), wrangle inputs for next forward pass, requeue if not `<EOS>` |
+| f | Check for tensors from workers | The workers may push tensors to the conductor if they will be used in future forward passes |
+| g | Check for "subgraph done" signals from workers | Update what subgraphs have been completed for the current request forward pass. If all subgraphs have been completed, we have completed a forward pass. |
+
+**At the end of each forward pass and beginning of the next**:
+
+| Step | Action | Details |
+|------|--------|---------|
+| h | Update request lifecycle | Update lifecycle state (saw `<BOI>`, saw `<EOS>`, etc.), wrangle inputs for next forward pass. If `<EOS>`, end request (send signals to workers and API server) |
+| i | `execution_strategy.get_forward_pass_inputs()` | Get the inputs for the current forward pass (e.g., if we are doing image generation, this will include noisy latents) |
+| j | Dispatch inputs to workers | Send the input tensors for the current forward pass to thj appropriate workers. Also include metadata of which phase we are in (e.g. prefill, decode, image_gen), because that is required for routing |
 
 **Key data structures**:
-- `ready_queue: list[GraphStage]` -- stages whose inputs are all available
-- `waiting: GraphSection` -- remaining graph structure waiting for inputs
+<!-- - `ready_queue: list[GraphStage]` -- stages whose inputs are all available
+- `waiting: GraphSection` -- remaining graph structure waiting for inputs -->
 - `{req_id → {stage_name: worker_id}}` -- current stage-to-worker assignments
 - `{req_id → talker_id}` -- for RELAY relationships (Qwen-Omni)
 - `{req_id → request_state}` -- lifecycle tracking (seen_BOI, kv_location, num_tokens, etc.)
 
-#### 6.2.3 Ready/Waiting Queue Management
+<!-- #### 6.2.3 Ready/Waiting Queue Management
 
 The `RequestQueues` class (from `computation_graph_scratch_work.py`) manages the transition of stages from waiting to ready:
 
@@ -364,9 +374,9 @@ class RequestQueues:
         """
 ```
 
-The `ingest_inputs` → `split_off_ready` pattern recursively propagates through `Sequential`, `Parallel`, and `Loop` graph structures, correctly handling nested loops with loop-back signals.
+The `ingest_inputs` → `split_off_ready` pattern recursively propagates through `Sequential`, `Parallel`, and `Loop` graph structures, correctly handling nested loops with loop-back signals. -->
 
-### 6.3 Conductor Loop Pseudocode
+<!-- ### 6.3 Conductor Loop Pseudocode
 
 ```python
 while True:
@@ -415,14 +425,14 @@ while True:
         if "RELAY" in external:
             # Push tensors to talker worker
             push_relay_data(req_id, external["RELAY"])
-```
+``` -->
 
 ### 6.4 Subgraph Persistence (Note 7)
 
 The conductor does NOT recompute the execution plan every forward pass. Instead:
 
-1. On server initialization phase: determine stage->worker and worker->gpu mappings from yaml file
-2. On a new request arriving: compute the execution plan based on input/output modalities, stored in the request state. Only recompute IF input/output modalities change (e.g., `<BOI>` triggers adding flow subgraph)
+1. On server initialization phase: determine stage->worker and worker->gpu mappings from yaml file. This results in a static list of subgraphs that are being handled by each worker.
+2. On a new request arriving: compute the execution plan based on input/output modalities, stored in the request state. Only recompute IF input/output modalities change (e.g., `<BOI>` triggers adding flow subgraph). The conductor only to inform the workers about the mapping of subgraphs to workers for this request; the execution of the proper subgraphs for each forward pass can be handled via tensor routing between workers.
 
 The worker needs to know only (1) what the computation subgraphs are to compute, (2) what's in the incoming request queue, and (3) where to send the output, which is decided by the conductor as metadata for each request. This is assuming subgraph-to-worker mapping is static (i.e., there never exists LLM-only worker and LLM+flow worker at the same time)
 
