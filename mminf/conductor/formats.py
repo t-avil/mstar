@@ -1,6 +1,5 @@
 from dataclasses import dataclass
 
-import torch
 
 from mminf.graph.base import GraphSection
 from mminf.graph.worker_assignment import Subgraph
@@ -19,10 +18,3 @@ class RequestData:
     # TODO: will need to add to this as we build things out
 
 
-@dataclass
-class TensorData:
-    tensor: torch.Tensor
-
-    # list of segment boundaries (e.g., [(0, 10), (50, 100)] means tokens
-    # 0 (inclusive) to 10 (exclusive) and 50 to 100.
-    token_ranges: list[tuple[int, int]]

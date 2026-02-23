@@ -3,8 +3,6 @@ from dataclasses import asdict, dataclass
 from enum import Enum
 
 from mminf.graph.base import SignalToDests, SignalToDestsAndFlags
-from mminf.graph.worker_assignment import Subgraph
-
 
 class Status(Enum):
     WAITING = "waiting"
@@ -14,7 +12,7 @@ class Status(Enum):
 
 
 @dataclass
-class RequestBody(ABC):
+class MessageBody(ABC):
     def to_dict(self):
         return asdict(self)
     
@@ -33,10 +31,11 @@ class WorkerRequestType(Enum):
 
 
 @dataclass
-class NewRequest(RequestBody):
+class NewRequest(MessageBody):
     request_id: str
     subgraph_ids: list[str]
     subgraph_to_worker: dict[str, str]
+    initial_phase: str
     initial_inputs: SignalToDestsAndFlags
     # TODO: actual tensors will be transferred via Ray. This metadata may be
     # transferred via Ray as well, but we are using ZMQ for the sake of
@@ -44,21 +43,22 @@ class NewRequest(RequestBody):
 
 
 @dataclass
-class RemoveRequest(RequestBody):
+class RemoveRequest(MessageBody):
     request_id: str
 
 
 @dataclass
-class InputTensors(RequestBody):
+class InputTensors(MessageBody):
     request_id: str
+    phase: str
     inputs: SignalToDests
     # TODO: actual tensors to be transferred via Ray
 
 
 @dataclass
-class WorkerRequest:
+class WorkerMessage:
     request_type: WorkerRequestType
-    request_body: RequestBody
+    request_body: MessageBody
 
 
 ######################################
@@ -67,29 +67,21 @@ class WorkerRequest:
 
 class ConductorRequestType(Enum):
     TENSORS = "tensors"
-    STAGE_DONE = "stage_done"
     SUBGRAPHS_DONE = "subgraphs_done"
 
 
 @dataclass
-class ConductorTensors(RequestBody):
+class ConductorTensors(MessageBody):
     request_id: str
     tensors: SignalToDestsAndFlags
 
-
 @dataclass
-class StageDone(RequestBody):
-    request_id: str
-    stage_name: str
-
-
-@dataclass
-class SubgraphsDone(RequestBody):
+class SubgraphsDone(MessageBody):
     request_id: str
     subgraph_ids: list[str]
 
 
 @dataclass
-class ConductorRequest:
+class ConductorMessage:
     request_type: ConductorRequestType
-    request_body: RequestBody
+    request_body: MessageBody

@@ -100,7 +100,6 @@ class GraphStage(GraphSection):
 
     # populated as previous stages complete
     ready_input_ids: set[str] = field(default_factory=set)
-    worker_id: str | None = field(default=None)
 
     def __post_init__(self):
         # if the user inputs, e.g., a list, turn it into a set

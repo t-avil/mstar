@@ -1,0 +1,198 @@
+
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import Type
+from uuid import uuid4
+
+import torch
+import yaml
+
+from mminf.graph.base import GraphSection, GraphStage, Loop, Parallel, Sequential
+
+
+STREAM_OUT = "stream_out"
+
+
+@dataclass
+class Subgraph:
+    section: GraphSection
+    phase: str # e.g., prefill, decode, image_gen 
+    consumes_stream: bool = field(default=False)
+    ranks: list[int] = field(default_factory=list)
+    group_id: int = field(default=-1)
+    subgraph_id: str = field(default_factory=lambda: str(uuid4()))
+
+
+@dataclass
+class TensorData:
+    tensor: torch.Tensor
+
+    # list of segment boundaries (e.g., [(0, 10), (50, 100)] means tokens
+    # 0 (inclusive) to 10 (exclusive) and 50 to 100.
+    token_ranges: list[tuple[int, int]]
+
+
+def _combine_sections_sequential_or_parallel(
+    section: GraphSection, other: GraphSection,
+    comb_type: Type[Sequential] | Type[Parallel]
+):
+    if isinstance(section, comb_type) and isinstance(other, comb_type):
+        section.sections.extend(other.sections)
+        return section
+    if isinstance(section, comb_type):
+        section.sections.append(other)
+        return section
+    if isinstance(other, comb_type):
+        other.sections.insert(0, section)
+        return other
+    return comb_type([section, other])
+
+
+def _divide_into_subgraphs(
+    graph: GraphSection,
+    phase: str,
+    stage_to_group_idx: dict[str, int],
+    stage_groups: list[dict]
+) -> list[Subgraph]:
+    if isinstance(graph, GraphStage):
+        return [Subgraph(
+            section=graph,
+            phase=phase,
+            consumes_stream=graph.consumes_stream,
+            group_id=stage_to_group_idx[graph.name],
+            ranks=stage_groups[stage_to_group_idx[graph.name]]["ranks"]
+        )]
+    
+    if isinstance(graph, Sequential):
+        subgraphs = _divide_into_subgraphs(
+            graph.sections[0],
+            phase=phase,
+            stage_to_group_idx=stage_to_group_idx,
+            stage_groups=stage_groups
+        )
+
+        for i in range(1, len(graph.sections)):
+            # Go through it sequentially and merge adjacent sections
+            # that are on the same device
+            new_subgraphs = _divide_into_subgraphs(
+                graph.sections[i],
+                phase=phase,
+                stage_to_group_idx=stage_to_group_idx,
+                stage_groups=stage_groups
+            )
+            if new_subgraphs[0].group_id == subgraphs[-1].group_id and \
+                    not new_subgraphs[0].consumes_stream:
+                subgraphs[-1].section = _combine_sections_sequential_or_parallel(
+                    subgraphs[-1].section, new_subgraphs.pop(0).section,
+                    comb_type=Sequential
+                )
+            subgraphs.extend(new_subgraphs)
+        return subgraphs
+    
+    if isinstance(graph, Parallel):
+        all_subgraphs = [
+            _divide_into_subgraphs(
+                s, phase=phase,
+                stage_to_group_idx=stage_to_group_idx,
+                stage_groups=stage_groups
+            ) for s in graph.sections
+        ]
+        # parallel sections that are all on the same worker can be merged
+        singleton_subgraphs = [
+            s[0] for s in all_subgraphs if len(s) == 1 and not s[0].consumes_stream
+        ]
+        group_id_to_subgraph = {}
+        for s in singleton_subgraphs:
+            if s.group_id in group_id_to_subgraph:
+                group_id_to_subgraph[s.group_id] = _combine_sections_sequential_or_parallel(
+                    group_id_to_subgraph[s.group_id], s.section,
+                    comb_type=Parallel
+                )
+            else:
+                group_id_to_subgraph[s.group_id] = s
+
+        return list(group_id_to_subgraph.values()) + sum([
+            s for s in all_subgraphs if len(s) > 1 or s[0].consumes_stream
+        ], start=[]) # remaining subgraphs
+    
+    if isinstance(graph, Loop):
+        loop_section_subgraphs = _divide_into_subgraphs(
+            graph.section,
+            phase=phase,
+            stage_to_group_idx=stage_to_group_idx,
+            stage_groups=stage_groups
+        )
+        if len(loop_section_subgraphs) == 1:
+            # fully colocated case
+            loop_section_subgraphs[0].section = graph
+            return loop_section_subgraphs
+        
+        # in the disaggregated case, we need to wrap all subgraphs in a loop
+        # with the external signals and loop-back signals pre-computed
+        for s in loop_section_subgraphs:
+            s.section = Loop(
+                section=s.section,
+                n_iters=graph.n_iters,
+                curr_iter=graph.curr_iter,
+                external_inputs=graph.external_inputs,
+                loop_back_signals=graph.loop_back_signals,
+                outputs=graph.outputs
+            )
+        return loop_section_subgraphs
+
+
+
+class Model(ABC):
+    def _get_subgraphs_for_phase(
+        self, phase_name: str, graph: GraphSection,
+        stage_groups: list[dict],
+    ):
+        stage_groups = [
+            g for g in stage_groups if (
+                "phases" not in g or phase_name in g["phases"]
+            )
+        ]
+        stage_to_group_idx: dict[str, int] = {}
+        for i, group in enumerate(stage_groups):
+            stage_to_group_idx.update({
+                name: i for name in group["stage_names"]
+            })
+
+        return _divide_into_subgraphs(
+            graph,
+            phase=phase_name,
+            stage_to_group_idx=stage_to_group_idx,
+            stage_groups=stage_groups
+        )
+    
+    def get_subgraphs(self, config_path: str) -> list[Subgraph]:
+        with open(config_path, "r") as f:
+            stage_groups = yaml.safe_load(f)["stage_groups"]
+        
+        return sum([
+            self._get_subgraphs_for_phase(phase, graph, stage_groups) \
+                for phase, graph in self.get_phases().items()
+        ], start=[])
+        
+
+    @abstractmethod
+    def get_phases(self) -> dict[str, GraphSection]:
+        pass
+
+    @abstractmethod
+    def get_active_subgraph_ids(
+        self, input_modalities: list[str],
+        output_modalities: list[str],
+        **kwargs
+    ) -> list[str]:
+        pass
+
+    @abstractmethod
+    def step(
+        self, stage_name: str,
+        input_tensors: dict[str, TensorData],
+        state, # TODO: figure out state
+        **kwargs
+    ):
+        pass

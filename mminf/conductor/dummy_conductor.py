@@ -4,7 +4,7 @@ import zmq
 from mminf.conductor.formats import RequestData
 from mminf.graph.base import GraphSection, SignalToDestsAndFlags
 from mminf.graph.worker_assignment import collect_subgraphs, get_stage_to_worker_id
-from mminf.ipc_formats import NewRequest, WorkerRequest, WorkerRequestType
+from mminf.ipc_formats import NewRequest, WorkerMessage, WorkerRequestType
 
 
 class DummyConductor:
@@ -45,7 +45,7 @@ class DummyConductor:
 
         for worker in worker_subgraph:
             self.worker_sockets[worker].send_pyobj(
-                WorkerRequest(
+                WorkerMessage(
                     request_type=WorkerRequestType.NEW_FWD,
                     request_body=NewRequest(
                         request_id=request_id,

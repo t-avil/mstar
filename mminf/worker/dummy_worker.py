@@ -5,11 +5,19 @@ import time
 import numpy as np
 import zmq
 
-from mminf.conductor.formats import TensorData
+from mminf.model.base import Subgraph, TensorData
 from mminf.graph.base import GraphPointer, GraphStage, SignalToDests, SignalToDestsAndFlags, remove_flags
 from mminf.graph.request_queues import PerRequestStageQueues
-from mminf.graph.worker_assignment import Subgraph
-from mminf.ipc_formats import ConductorRequest, ConductorRequestType, ConductorTensors, InputTensors, NewRequest, RemoveRequest, SubgraphsDone, WorkerRequest, WorkerRequestType
+from mminf.ipc_formats import (
+    ConductorMessage, ConductorRequestType, ConductorTensors, InputTensors,
+    NewRequest, RemoveRequest, SubgraphsDone, WorkerMessage, WorkerRequestType
+)
+
+
+@dataclass(frozen=True)
+class IdAndPhase:
+    id: str
+    phase: str
 
 
 @dataclass
@@ -22,6 +30,7 @@ class StageOutputRouting:
 @dataclass
 class SubgraphQueues:
     subgraph_id: str
+    phase: str
     subgraph: Subgraph
     per_request_queues: dict[str, PerRequestStageQueues]
 
@@ -68,24 +77,37 @@ class SubgraphQueues:
 
 @dataclass
 class PerRequestInfo:
-    stage_to_worker: dict[str, str]
-    subgraph_ids: list[str]
+    stage_to_worker: dict[IdAndPhase, str]
+    phase_to_subgraph_ids: dict[str, str]
+    current_phase: str = field(default=None)
     tensors: dict[str, TensorData] = field(default_factory=dict)
+
 
 @dataclass
 class SubgraphsManager:
     queues: dict[str, SubgraphQueues] # subgraph_id to queues
     per_request_info: dict[str, PerRequestInfo] # request id to info
+    subgraph_id_to_phase: dict[str, str] # for all subgraphs
     all_subgraph_ids_to_stages: dict[str, str]
 
-    def process_new_inputs(self, request_id: str, inputs: SignalToDests):
-        for queue in self.queues.values():
-            queue.process_new_inputs(request_id, inputs)
+    def update_phase(self, request_id: str, phase: str):
+        self.per_request_info[request_id].current_phase = phase
+
+    def process_new_inputs(
+        self,
+        request_id: str,
+        inputs: SignalToDests
+    ):
+        phase = self.per_request_info[request_id].current_phase
+        subgraph_ids = self.per_request_info[request_id].phase_to_subgraph_ids[phase]
+        for subgraph_id in subgraph_ids:
+            self.queues[subgraph_id].process_new_inputs(request_id, inputs)
 
     def process_stage_outputs(
         self, request_id: str,
         outputs: SignalToDestsAndFlags
     ) -> StageOutputRouting:
+        phase = self.per_request_info[request_id].current_phase
         # find back_to_conductor flags
         to_conductor = {
             signal: [dest for dest in dests if dest.back_to_conductor] \
@@ -94,9 +116,11 @@ class SubgraphsManager:
 
         # process all internal-facing outputs
         outputs_no_flags = remove_flags(outputs)
+        subgraph_ids = self.per_request_info[request_id].phase_to_subgraph_ids[phase]
 
         completed_subgraphs = []
-        for subgraph_id, queue in self.queues.items():
+        for subgraph_id in subgraph_ids:
+            queue = self.queues[subgraph_id]
             outputs_no_flags = queue.process_new_inputs(request_id, outputs_no_flags)
             if queue.is_done(request_id):
                 completed_subgraphs.append(subgraph_id)
@@ -107,7 +131,9 @@ class SubgraphsManager:
         for signal, dests in outputs_no_flags.items():
             signal_to_workers: dict[str, list[GraphPointer]] = {} # worker: [graph_pointer]
             for dest in dests:
-                worker_id = self.per_request_info[request_id].stage_to_worker[dest]
+                worker_id = self.per_request_info[request_id].stage_to_worker[IdAndPhase(
+                    stage=dest, phase=phase
+                )]
                 if worker_id not in signal_to_workers:
                     signal_to_workers[worker_id] = []
                 signal_to_workers[worker_id].append(dest)
@@ -126,25 +152,36 @@ class SubgraphsManager:
     def add_request(
         self, request_id: str,
         subgraph_ids: list[str], # for our subgraphs
-        subgraph_to_worker_id: dict[str, str] # for other / all subgraphs
+        subgraph_to_worker: dict[str, str] # for other / all subgraphs
     ):
         stage_to_worker = {}
+        phase_to_subgraph_ids: dict[str, list[str]] = {}
         for id in subgraph_ids:
+            phase = self.queues[id].subgraph.phase
+            if phase not in phase_to_subgraph_ids:
+                phase_to_subgraph_ids[phase] = []
+            phase_to_subgraph_ids[phase].append(id)
+    
             self.queues[id].add_request(request_id)
         
-        for id, worker_id in subgraph_to_worker_id.items():
+        for subgraph_id, worker_id in subgraph_to_worker.items():
+            phase = self.subgraph_id_to_phase[subgraph_id]
             stage_to_worker.update({
-                name: worker_id for name in self.all_subgraph_ids_to_stages[id]
+                IdAndPhase(
+                    id=name,
+                    phase=phase
+                ): worker_id for name in self.all_subgraph_ids_to_stages[subgraph_id]
             })
         self.per_request_info[request_id] = PerRequestInfo(
             stage_to_worker=stage_to_worker,
-            subgraph_ids=subgraph_ids
+            phase_to_subgraph_ids=phase_to_subgraph_ids
         )
     
     def remove_request(self, request_id: str):
         if request_id in self.per_request_info:
-            for id in self.per_request_info[request_id].subgraph_ids:
-                self.queues[id].remove_request(request_id)
+            for ids in self.per_request_info[request_id].phase_to_subgraph_ids.values():
+                for queue_id in ids:
+                    self.queues[queue_id].remove_request(request_id)
             del self.per_request_info[request_id]
 
 
@@ -154,6 +191,7 @@ class DummyWorker:
         worker_id: str,
         worker_ids: list[str],
         my_subgraphs: list[Subgraph],
+        subgraph_id_to_phase: dict[str, str], # for all subgraphs
         subgraph_id_to_stages: dict[str, list[str]], # for all subgraphs
         worker_socket_path_prefix: str="/tmp/mminf/workers/",
         conductor_socket_path: str="/tmp/mminf/conductor.ipc"
@@ -163,11 +201,13 @@ class DummyWorker:
             queues={
                 subgraph.subgraph_id: SubgraphQueues(
                     subgraph_id=subgraph.subgraph_id,
+                    phase=subgraph.phase,
                     subgraph=subgraph,
                     per_request_queues={}
                 ) for subgraph in my_subgraphs
             },
             per_request_info={},
+            subgraph_id_to_phase=subgraph_id_to_phase,
             all_subgraph_ids_to_stages=subgraph_id_to_stages
         )
 
@@ -199,6 +239,9 @@ class DummyWorker:
             subgraph_ids=body.subgraph_ids,
             subgraph_to_worker_id=body.subgraph_to_worker
         )
+        self.subgraphs_manager.update_phase(
+            body.request_id, body.initial_phase
+        )
         self.subgraphs_manager.process_new_inputs(
             request_id=body.request_id,
             inputs=remove_flags(body.initial_inputs)
@@ -210,6 +253,9 @@ class DummyWorker:
     def _process_new_inputs(
         self, body: InputTensors
     ):
+        self.subgraphs_manager.update_phase(
+            body.request_id, body.phase
+        )
         self.subgraphs_manager.process_new_inputs(
             request_id=body.request_id,
             inputs=remove_flags(body.inputs)
@@ -221,7 +267,7 @@ class DummyWorker:
         """
         while True:
             try:
-                request: WorkerRequest = self.request_socket.recv_pyobj(
+                request: WorkerMessage = self.request_socket.recv_pyobj(
                     flags=zmq.NOBLOCK
                 )
                 if request.request_type == WorkerRequestType.NEW_REQUEST:
@@ -236,7 +282,7 @@ class DummyWorker:
     def _send_outputs(self, request_id: str, outputs: StageOutputRouting):
         # to workers
         for worker in outputs.to_workers:
-            request = WorkerRequest(
+            request = WorkerMessage(
                 request_type=WorkerRequestType.INPUT_TENSORS,
                 request_body=InputTensors(
                     request_id=request_id,
@@ -247,7 +293,7 @@ class DummyWorker:
         
         # to conductor
         if outputs.to_conductor:
-            request = ConductorRequest(
+            request = ConductorMessage(
                 request_type=ConductorRequestType.TENSORS,
                 request_body=ConductorTensors(
                     request_id=request_id,
@@ -257,7 +303,7 @@ class DummyWorker:
             self.result_socket.send_pyobj(request)
         
         if outputs.completed_subgraphs:
-            request = ConductorRequest(
+            request = ConductorMessage(
                 request_type=ConductorRequestType.SUBGRAPHS_DONE,
                 request_body=SubgraphsDone(
                     request_id=request_id,

@@ -1,0 +1,32 @@
+stage_groups:
+  - stage_names:
+      - text_emb
+    ranks:
+      - 0
+  
+  - stage_names:
+      - image_emb
+    ranks:
+      - 0
+  
+  - stage_names:
+      - LLM
+    ranks:
+      - 1
+    phases:
+      - prefill
+  
+  - stage_names:
+      - LLM
+      - flow
+    ranks:
+      - 2
+      - 3
+    phases:
+      - decode
+      - image_gen
+  
+  - stage_names:
+      - VAE_dec
+    ranks:
+      - 4
