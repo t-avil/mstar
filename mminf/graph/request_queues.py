@@ -45,9 +45,9 @@ class PerRequestStageQueues:
         to different subgraphs)
         """
         if self.waiting is None:
-            return remove_flags(new_inputs)
+            return new_inputs
 
-        new_inputs = get_stage_to_inputs_mapping(remove_flags(new_inputs))
+        new_inputs = get_stage_to_inputs_mapping(new_inputs)
         ingested = self.waiting.ingest_inputs(new_inputs)
         external_outputs = new_inputs
         

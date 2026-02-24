@@ -1,4 +1,5 @@
 import sys
+import time
 
 from mminf.graph.request_queues import PerRequestStageQueues
 sys.path.insert(0, ".")
@@ -134,15 +135,16 @@ if __name__ == "__main__":
                                 name="flow",
                                 input_ids=["hidden_states", "mystery", "mystery2"],
                                 outputs={
-                                    "mystery2": [GraphPointer("flow")],
+                                    "partial_mystery2": [GraphPointer("flow2")],
                                     "partial_latents": [GraphPointer("flow2")]
                                 }
                             ),
                             GraphStage(
                                 name="flow2",
-                                input_ids=["partial_latents"],
+                                input_ids=["partial_latents", "partial_mystery2"],
                                 outputs={
-                                    "latents": []
+                                    "latents": [],
+                                    "mystery2": [GraphPointer("flow")]
                                 }
                             ),
                         ]),
@@ -195,8 +197,9 @@ if __name__ == "__main__":
         ready=[],
         waiting=network
     )
-    queues.process_new_inputs(remove_flags(provided_inputs))
 
+    tic = time.perf_counter()
+    queues.process_new_inputs(remove_flags(provided_inputs))
     # loop until all stages are done and print out
     while len(queues.ready) > 0 or queues.waiting is not None:
         print("\n" + "="*60)
@@ -215,5 +218,7 @@ if __name__ == "__main__":
         external_outputs = queues.process_new_inputs(remove_flags(new_inputs))
         if external_outputs:
             print(f"External outputs: {external_outputs}")
-       
+    toc = time.perf_counter()
+    print(toc - tic)
+
     

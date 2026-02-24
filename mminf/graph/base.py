@@ -124,7 +124,7 @@ class GraphStage(GraphSection):
     
     def ingest_inputs(self, stage_to_inputs: DestToInputs):
         if self.name not in stage_to_inputs:
-            return
+            return set()
 
         ingested_ids = set([
             id for id in stage_to_inputs[self.name] \
@@ -132,8 +132,8 @@ class GraphStage(GraphSection):
         ]) # ingest ids that this stage takes in, and are not already ready
         self.ready_input_ids.update(ingested_ids)
 
-        if ingested_ids:
-            print(f"Stage {self.name} ingesting inputs {ingested_ids}")
+        # if ingested_ids:
+        #     print(f"Stage {self.name} ingesting inputs {ingested_ids}")
 
         # remove the ingested ids from the stage_to_inputs
         stage_to_inputs[self.name] = [
