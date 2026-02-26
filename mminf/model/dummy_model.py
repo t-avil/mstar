@@ -2,7 +2,7 @@ from copy import deepcopy
 
 import numpy as np
 
-from mminf.graph.base import GraphPointer, GraphStage, Loop, Parallel, Sequential, SignalToDestsAndFlags
+from mminf.graph.base import GraphPointer, GraphStage, Loop, Parallel, Sequential, SignalToGraphPointers
 from mminf.model.base import STREAM_OUT, CurrentForwardMetadata, ForwardPassInputs, Model, TensorData
 
 

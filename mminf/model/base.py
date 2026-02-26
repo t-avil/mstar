@@ -8,7 +8,7 @@ from uuid import uuid4
 import torch
 import yaml
 
-from mminf.graph.base import GraphSection, GraphStage, Loop, Parallel, Sequential, SignalToDestsAndFlags
+from mminf.graph.base import GraphSection, GraphStage, Loop, Parallel, Sequential
 
 
 STREAM_OUT = "stream_out"
@@ -165,7 +165,7 @@ class ForwardPassInputs:
     is routed to.
     """
     tensors: dict[str, TensorData]
-    pointers: SignalToDestsAndFlags
+    pointers: SignalToGraphPointers
 
 
 class Model(ABC):

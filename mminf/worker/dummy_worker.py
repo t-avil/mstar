@@ -3,11 +3,12 @@ from dataclasses import dataclass, field
 import time
 import zmq
 
+from mminf.communication.communicator import ZMQCommunicator
 from mminf.model.base import Subgraph, TensorData
-from mminf.graph.base import GraphPointer, GraphStage, SignalToDests, SignalToDestsAndFlags, remove_flags
+from mminf.graph.base import GraphPointer, GraphStage, SignalToDests, SignalToGraphPointers, remove_flags
 from mminf.graph.request_queues import PerRequestStageQueues, ProcessedInputs
 from mminf.ipc_formats import (
-    ConductorMessage, ConductorMessageType, ConductorTensors, InputTensors,
+    ConductorMessage, ConductorMessageType, ConductorTensors, InputSignals,
     NewRequest, RemoveRequest, SubgraphsDone, WorkerMessage, WorkerMessageType
 )
 
@@ -25,7 +26,7 @@ class StageAndPhase:
 @dataclass
 class StageOutputRouting:
     routed_to_this_subgraph: set[str] # set of tensor ids
-    to_conductor: SignalToDestsAndFlags # outputs that are going back to the conductor
+    to_conductor: SignalToGraphPointers # outputs that are going back to the conductor
     to_workers: dict[str, SignalToDests] # worker id to signals
     completed_subgraphs: list[str] = field(default_factory=[])  # list of subgraph IDs
 
@@ -124,7 +125,6 @@ class PerRequestInfo:
     current_phase: str = field(default=None)
     # phase_subgraph_ids = subgraphs for the current phase
     phase_subgraph_ids: list[str] = field(default_factory=list) # for this worker
-    tensors: dict[str, TensorData] = field(default_factory=dict)
 
 
 @dataclass
@@ -168,7 +168,7 @@ class SubgraphsManager:
 
     def process_stage_outputs(
         self, request_id: str,
-        outputs: SignalToDestsAndFlags
+        outputs: SignalToGraphPointers
     ) -> StageOutputRouting:
         """
         After a stage has finished processing, use its outputs to update
@@ -274,8 +274,7 @@ class DummyWorker:
         my_subgraphs: list[Subgraph],
         all_subgraph_ids_to_phases: dict[str, set[str]], # for all subgraphs
         all_subgraph_ids_to_stages: dict[str, list[str]], # for all subgraphs
-        worker_socket_path_prefix: str="/tmp/mminf/workers/",
-        conductor_socket_path: str="/tmp/mminf/conductor.ipc"
+        socket_path_prefix: str="/tmp/mminf/",
     ):
         """
         Initial in-progress worker implementation. This worker cannnot actually
@@ -297,25 +296,11 @@ class DummyWorker:
             all_subgraph_ids_to_stages=all_subgraph_ids_to_stages
         )
 
-        # set up sockets between the other workers
-        self.context = zmq.Context()
-        self.request_socket = self.context.socket(zmq.PULL)
-        self.request_socket.bind(f"ipc://{worker_socket_path_prefix}/{worker_id}.ipc")
-        self.request_socket.setsockopt(zmq.LINGER, 0)
-
-        self.result_socket = self.context.socket(zmq.PUSH)
-        self.result_socket.connect(f"ipc://{conductor_socket_path}")
-        self.result_socket.setsockopt(zmq.LINGER, 0)
-
-        self.inter_worker_sockets: dict[str, zmq.SyncSocket] = {}
-        for id in worker_ids:
-            if id == worker_id:
-                continue
-            self.inter_worker_sockets[id] = self.context.socket(zmq.PUSH)
-            self.inter_worker_sockets[id].connect(
-                f"ipc://{worker_socket_path_prefix}/{id}.ipc"
-            )
-            self.inter_worker_sockets[id].setsockopt(zmq.LINGER, 0)
+        self.communicator = ZMQCommunicator(
+            my_id=worker_id,
+            push_ids=worker_ids + ["conductor", "api_server"],
+            ipc_socket_path_prefix=socket_path_prefix
+        )
         
     def _add_new_request(
         self, body: NewRequest
@@ -346,7 +331,7 @@ class DummyWorker:
         self.subgraphs_manager.remove_request(body.request_id)
     
     def _process_new_inputs(
-        self, body: InputTensors
+        self, body: InputSignals
     ):
         """
         When either the conductor or other workers send tensors to this worker,
@@ -368,19 +353,14 @@ class DummyWorker:
         Processes all pending messages (communication from conductor and other
         workers to this worker)
         """
-        while True:
-            try:
-                message: WorkerMessage = self.request_socket.recv_pyobj(
-                    flags=zmq.NOBLOCK
-                )
-                if message.message_type == WorkerMessageType.NEW_REQUEST:
-                    self._add_new_request(message.body)
-                elif message.message_type == WorkerMessageType.REMOVE_REQUEST:
-                    self._remove_request(message.body)
-                elif message.message_type == WorkerMessageType.INPUT_TENSORS:
-                    self._process_new_inputs(message.body) 
-            except zmq.Again:
-                break
+        for message in self.communicator.get_all_new_messages():
+            if message.message_type == WorkerMessageType.NEW_REQUEST:
+                self._add_new_request(message.body)
+            elif message.message_type == WorkerMessageType.REMOVE_REQUEST:
+                self._remove_request(message.body)
+            elif message.message_type == WorkerMessageType.INPUT_SIGNALS:
+                self._process_new_inputs(message.body)
+            # TODO: handle the tensor received message
 
     def _send_outputs(
         self,
@@ -391,22 +371,22 @@ class DummyWorker:
         Sends outputs to other workers and to the conductor
         """
         for worker in outputs.to_workers:
-            request = WorkerMessage(
-                message_type=WorkerMessageType.INPUT_TENSORS,
-                body=InputTensors(
+            message = WorkerMessage(
+                message_type=WorkerMessageType.INPUT_SIGNALS,
+                body=InputSignals(
                     request_id=request_id,
                     phase=self.subgraphs_manager.get_phase(request_id),
                     inputs=outputs.to_workers[worker]
                 )
             )
-            self.inter_worker_sockets[worker].send_pyobj(request)
+            self.communicator.send(worker, message)
         
         # to conductor
         if outputs.to_conductor:
             tensors = self.subgraphs_manager.per_request_info[
                 request_id].tensors
-            request = ConductorMessage(
-                message_type=ConductorMessageType.TENSORS,
+            message = ConductorMessage(
+                message_type=ConductorMessageType.PERSIST_SIGNAL,
                 body=ConductorTensors(
                     request_id=request_id,
                     inputs=outputs.to_conductor,
@@ -415,16 +395,17 @@ class DummyWorker:
                     }
                 )
             )
-            self.result_socket.send_pyobj(request)
+            self.communicator.send("conductor", message)
         
         if outputs.completed_subgraphs:
-            request = ConductorMessage(
+            message = ConductorMessage(
                 message_type=ConductorMessageType.SUBGRAPHS_DONE,
                 body=SubgraphsDone(
                     request_id=request_id,
                     subgraph_ids=outputs.completed_subgraphs
                 )
             )
+            self.communicator.send("conductor", message)
         
     def run(self):
         # TODO: this is just a dummy version

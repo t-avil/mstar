@@ -6,7 +6,7 @@ import numpy as np
 import zmq
 
 from mminf.ipc_formats import (
-    ConductorMessage, ConductorMessageType, ConductorTensors, InputTensors,
+    ConductorMessage, ConductorMessageType, ConductorTensors, InputSignals,
     NewRequest, NewRequestConductor, SubgraphsDone, WorkerMessage,
     WorkerMessageType
 )
@@ -198,8 +198,8 @@ class DummyConductor:
 
             for worker, inputs in inputs_per_worker.items():
                 message = WorkerMessage(
-                    message_type=WorkerMessageType.INPUT_TENSORS,
-                    body=InputTensors(
+                    message_type=WorkerMessageType.INPUT_SIGNALS,
+                    body=InputSignals(
                         request_id=body.request_id,
                         phase=request_data.current_forward_metadata.phase,
                         inputs=inputs.pointers,
@@ -221,7 +221,7 @@ class DummyConductor:
                 self._ingest_request(message.body)
             elif message.message_type == ConductorMessageType.SUBGRAPHS_DONE:
                 self._process_subgraphs_done(message.body)
-            elif message.message_type == ConductorMessageType.TENSORS:
+            elif message.message_type == ConductorMessageType.PERSIST_SIGNAL:
                 self._process_new_tensors(message.body)
             else:
                 raise ValueError(f"Unknown message type: {message.message_type}")
