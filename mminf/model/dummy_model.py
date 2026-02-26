@@ -24,7 +24,7 @@ class DummyModel(Model):
                 name="concat_text",
                 input_ids=["new_text_emb", "existing_text_emb"],
                 outputs=[
-                    GraphPointer(next_stage="LLM", name="text_emb")
+                    GraphPointer(next_stage="LLM", name="text_emb", back_to_conductor=True)
                 ]
             )
         ])
@@ -42,7 +42,7 @@ class DummyModel(Model):
                 name="concat_img",
                 input_ids=["new_image_emb", "existing_image_emb"],
                 outputs=[
-                    GraphPointer(next_stage="LLM", name="img_emb")
+                    GraphPointer(next_stage="LLM", name="img_emb", back_to_conductor=True)
                 ]
              )
         ])
@@ -121,83 +121,45 @@ class DummyModel(Model):
         persist_signals: dict[str, TensorPointerInfo],
         prev_forward_metadata: CurrentForwardMetadata=None,
     ) -> list[GraphPointer]:
-        pointers = []
-        if metadata.is_prefill: # first forward
-            return [
-                GraphPointer(
-                    next_stage="text_emb",
-                    name="text",
-                    tensor_info=persist_signals.get("text", None)
-                ),
-                GraphPointer(
-                    next_stage="image_emb",
-                    name="images",
-                    tensor_info=persist_signals.get("images", None)
-                ),
-                GraphPointer(
-                    next_stage="concat_text",
-                    name="existing_text_emb",
-                    tensor_info=None
-                ),
-                GraphPointer(
-                    next_stage="concat_img",
-                    name="existing_image_emb",
-                    tensor_info=None
-                )
-            ]
-        
-        pointers = [
-            GraphPointer(
-                    next_stage="concat_text",
-                    name="existing_text_emb",
-                    tensor_info=persist_signals.get("existing_text_emb", None)
-                ),
-                GraphPointer(
-                    next_stage="concat_img",
-                    name="existing_image_emb",
-                    tensor_info=persist_signals.get("existing_image_emb", None)
-                )
-        ]
-        if prev_forward_metadata.phase == "image_gen":
-            pointers.append(
-                GraphPointer(
-                    next_stage="image_emb",
-                    name="images",
-                    tensor_info=persist_signals.get("image_output", None)
-                )
-            )
-            pointers.append(
-                GraphPointer(
-                    next_stage="text_emb",
-                    name="text",
-                    tensor_info=None
-                )
-            )
-        else:
-            pointers.append(
-                GraphPointer(
-                    next_stage="text_emb",
-                    name="text",
-                    tensor_info=persist_signals.get("new_token", None)
-                )
-            )
-            pointers.append(
-                GraphPointer(
-                    next_stage="image_emb",
-                    name="images",
-                    tensor_info=None
-                 )
-            )
-        
+        text_inp = GraphPointer(
+            next_stage="text_emb",
+            name="text",
+        )
+        img_inp = GraphPointer(
+            next_stage="image_emb",
+            name="images",
+        )
+        existing_text = GraphPointer(
+            next_stage="concat_text",
+            name="existing_text_emb",
+        )
+        existing_img = GraphPointer(
+            next_stage="concat_img",
+            name="existing_image_emb",
+        )
 
-        if metadata.phase == "image_gen":
-            pointers.append(
-                 GraphPointer(
-                    next_stage="LLM",
-                    name="latents",
-                    tensor_info=persist_signals.get("latents", None)
-                 )
-            )
+        pointers = [
+            text_inp, img_inp, existing_text, existing_img
+        ]
+
+        if metadata.is_prefill: # first forward
+            text_inp.tensor_info = persist_signals.get("text", None)
+            img_inp.tensor_info = persist_signals.get("images", None)
+        else:
+            existing_text.tensor_info = persist_signals.get("text_emb", None)
+            existing_img.tensor_info = persist_signals.get("img_emb", None)
+            if prev_forward_metadata.phase == "image_gen":
+                img_inp.tensor_info = persist_signals.get("image_output", None)
+                text_inp.tensor_info = persist_signals.get("new_token", None)
+        
+            if metadata.phase == "image_gen":
+                pointers.append(
+                    GraphPointer(
+                        next_stage="LLM",
+                        name="latents",
+                        tensor_info=persist_signals.get("latents", None)
+                    )
+                )
         return pointers
         
     def update_for_next_forward(
