@@ -25,10 +25,10 @@ class RequestData:
 
     # for tracking progress
     all_subgraph_ids: set[str]
+    current_subgraph_ids: set[str]
     completed_subgraph_ids: set[str] = field(default_factory=set)
 
     # TODO: will need to add to this as we build things out
-
 
 
 class DummyConductor:
@@ -110,6 +110,7 @@ class DummyConductor:
             persist_signals=body.initial_signals,
             subgraph_to_worker=subgraph_to_worker,
             all_subgraph_ids=set(subgraph_to_worker.keys()),
+            current_subgraph_ids=set(),
             new_tokens=[],
         )
         self.requests[body.request_id] = request_data
@@ -117,6 +118,10 @@ class DummyConductor:
         first_forward_inputs = self.model.get_forward_pass_inputs(
             request_data.current_forward_metadata,
             persist_signals=body.initial_signals
+        )
+        self._set_current_subgraph_ids(
+            body.request_id,
+            request_data.current_forward_metadata.phase
         )
 
         # send data to appropriate workers
@@ -145,6 +150,14 @@ class DummyConductor:
                 )
             )
     
+    def _set_current_subgraph_ids(
+        self, request_id: str, phase: str
+    ):
+        self.requests[request_id].current_subgraph_ids = set([
+            sg for sg in self.requests[request_id].all_subgraph_ids \
+                if phase in self.subgraphs[sg].phases
+        ])
+
     def _process_subgraphs_done(
         self, body: SubgraphsDone
     ):
@@ -161,7 +174,7 @@ class DummyConductor:
             body.subgraph_ids
         )
         
-        done_with_forward = request_data.all_subgraph_ids.issubset(
+        done_with_forward = request_data.current_subgraph_ids.issubset(
             request_data.completed_subgraph_ids
         )
 
@@ -174,6 +187,10 @@ class DummyConductor:
                     metadata=request_data.current_forward_metadata,
                     new_tokens=request_data.new_tokens,
                 )
+            self._set_current_subgraph_ids(
+                body.request_id,
+                request_data.current_forward_metadata.phase
+            )
 
             fwd_inputs = self.model.get_forward_pass_inputs(
                 metadata=request_data.current_forward_metadata,
