@@ -1,1292 +1,500 @@
-"""FastAPI server entry point and request orchestration."""
+"""FastAPI server entry point for multimodal inference requests."""
 
 import asyncio
-import atexit
+import base64
 import collections
-import io
 import json
-import queue
+import logging
 import signal
-import subprocess
-import sys
 import threading
 import time
 import uuid
-import wave
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Optional
 
-import torch
-import zmq
+import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
-from .utils import get_global_log_level, get_logger, set_global_log_level
+from mminf.communication.communicator import ZMQCommunicator
+from mminf.ipc_formats import (
+    ConductorMessage,
+    ConductorMessageType,
+    NewRequestConductor,
+)
 
-# Module-level logger - will be updated with proper log level in main()
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
+SUPPORTED_MODALITIES = frozenset({"text", "image", "audio", "video"})
+
+# Extension-based modality detection for uploaded files.
+_EXT_TO_MODALITY: dict[str, str] = {}
+for _mod, _exts in {
+    "image": (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff", ".gif"),
+    "audio": (".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac"),
+    "video": (".mp4", ".avi", ".mov", ".mkv", ".webm"),
+}.items():
+    for _ext in _exts:
+        _EXT_TO_MODALITY[_ext] = _mod
+
+
+def _detect_modality(filename: str) -> str:
+    return _EXT_TO_MODALITY.get(Path(filename).suffix.lower(), "unknown")
+
+
+# ------------------------------------------------------------------
+# Result messages: conductor -> API server
+#
+# The conductor sends these back via ZMQCommunicator.send("api_server", msg).
+# They are defined here (close to the consumer) rather than in ipc_formats
+# because the conductor->api_server protocol is still evolving.
+# ------------------------------------------------------------------
+
+@dataclass
+class ResultChunk:
+    """One chunk of generated output for a request."""
+    request_id: str
+    modality: str          # "text" | "image" | "audio" | "video"
+    data: bytes            # raw payload (text encoded as utf-8)
+    metadata: dict = field(default_factory=dict)
+
+
+@dataclass
+class RequestComplete:
+    """Signals that a request has finished processing."""
+    request_id: str
+
+
+@dataclass
+class APIServerMessage:
+    """Envelope for messages received by the API server."""
+    message_type: str  # "result_chunk" | "request_complete"
+    body: ResultChunk | RequestComplete
+
+
+# ------------------------------------------------------------------
+# APIServer
+# ------------------------------------------------------------------
 
 class APIServer:
-    """Manage scheduler processes and route API requests to the model backends."""
+    """Accept multimodal requests, forward to conductor, collect results."""
+
     def __init__(
         self,
-        model_name: str = "canopylabs/orpheus-3b-0.1-ft",
-        scheduler_type: str = "base",
-        request_socket_path: str = "/tmp/vox_serve_request.ipc",
-        result_socket_path: str = "/tmp/vox_serve_result.ipc",
-        output_dir: str = "/tmp/vox_serve_audio",
+        socket_path_prefix: str = "/tmp/mminf",
+        upload_dir: str = "/tmp/mminf_uploads",
         timeout_seconds: float = 600.0,
-        max_batch_size: int = 8,
-        top_p: float = None,
-        top_k: int = None,
-        min_p: float = None,
-        temperature: float = None,
-        max_tokens: int = None,
-        repetition_penalty: float = None,
-        repetition_window: int = None,
-        cfg_scale: float = None,
-        greedy: bool = False,
-        enable_cuda_graph: bool = True,
-        enable_disaggregation: bool = False,
-        enable_nvtx: bool = False,
-        enable_torch_compile: bool = False,
-        max_num_pages: int = None,
-        page_size: int = 2048,
-        async_scheduling: bool = False,
-        dp_size: int = 1,
-        detokenize_interval: int = None,
     ):
-        """Initialize the API server and start scheduler process(es).
-
-        Args:
-            model_name: Model identifier or local path.
-            scheduler_type: Scheduler backend to use.
-            request_socket_path: IPC path for request socket (without rank suffix).
-            result_socket_path: IPC path for result socket.
-            output_dir: Directory to write generated audio and uploads.
-            timeout_seconds: Per-request timeout in seconds.
-            max_batch_size: Maximum batch size for scheduler inference.
-            top_p: Top-p sampling parameter.
-            top_k: Top-k sampling parameter.
-            min_p: Min-p sampling parameter.
-            temperature: Sampling temperature.
-            max_tokens: Maximum number of tokens to generate.
-            repetition_penalty: Repetition penalty value.
-            repetition_window: Repetition window size.
-            cfg_scale: Classifier-free guidance scale.
-            greedy: Enable greedy decoding.
-            enable_cuda_graph: Enable CUDA graph optimization.
-            enable_disaggregation: Enable disaggregated execution (multi-GPU).
-            enable_nvtx: Enable NVTX profiling.
-            enable_torch_compile: Enable torch.compile optimization.
-            max_num_pages: Maximum number of KV cache pages.
-            page_size: Size of each KV cache page.
-            async_scheduling: Enable async scheduling mode.
-            dp_size: Data parallel replica count.
-            detokenize_interval: Interval for audio detokenization (model-specific).
-        """
-        self.model_name = model_name
-        self.request_socket_path = request_socket_path
-        self.result_socket_path = result_socket_path
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(exist_ok=True)
-        self.upload_dir = Path(output_dir) / "uploads"
-        self.upload_dir.mkdir(exist_ok=True)
+        self.upload_dir = Path(upload_dir)
+        self.upload_dir.mkdir(parents=True, exist_ok=True)
         self.timeout_seconds = timeout_seconds
-        self.max_batch_size = max_batch_size
-        self.top_p = top_p
-        self.top_k = top_k
-        self.min_p = min_p
-        self.temperature = temperature
-        self.max_tokens = max_tokens
-        self.repetition_penalty = repetition_penalty
-        self.repetition_window = repetition_window
-        self.cfg_scale = cfg_scale
-        self.greedy = greedy
-        self.enable_cuda_graph = enable_cuda_graph
-        self.enable_disaggregation = enable_disaggregation
-        self.enable_nvtx = enable_nvtx
-        self.enable_torch_compile = enable_torch_compile
-        self.max_num_pages = max_num_pages
-        self.page_size = page_size
-        self.scheduler_type = scheduler_type
-        self.async_scheduling = async_scheduling
-        self.dp_size = dp_size
-        self.detokenize_interval = detokenize_interval
-        self.scheduler_processes = None  # Will be a list for DP mode
-        self.logger = get_logger(__name__)
 
         # Concurrent request tracking
-        self.pending_requests: Dict[str, Dict] = {}  # request_id -> {chunks: [], event: threading.Event()}
-        # Track recently completed request_ids to absorb late messages without warnings
-        self.recently_completed = collections.OrderedDict()  # request_id -> timestamp
-        self.recently_completed_ttl_sec = 5.0
+        self.pending_requests: dict[str, dict] = {}
+        self.recently_completed: collections.OrderedDict[str, float] = (
+            collections.OrderedDict()
+        )
+        self._recently_completed_ttl = 5.0
         self.request_lock = threading.Lock()
         self.running = True
 
-        # Data parallel routing state
-        self.dp_request_counter = 0  # Round-robin counter for request routing
+        # ZMQ channel shared with conductor / workers
+        self.communicator = ZMQCommunicator(
+            my_id="api_server",
+            push_ids=["conductor"],
+            ipc_socket_path_prefix=socket_path_prefix,
+        )
 
-        # Start scheduler process(es)
-        self._start_schedulers()
+        # Background thread that drains results from conductor
+        self._msg_thread = threading.Thread(
+            target=self._process_messages, daemon=True
+        )
+        self._msg_thread.start()
 
-        # Wait a moment for schedulers to initialize
-        time.sleep(2)
+    # ----------------------------------------------------------
+    # Submitting a request
+    # ----------------------------------------------------------
 
-        # Initialize ZMQ context and sockets
-        # Always use rank suffix format for consistency
-        self.context = zmq.Context()
-        self.request_sockets = []
-        self.result_socket = self.context.socket(zmq.PULL)
+    def submit_request(
+        self,
+        *,
+        text: str | None = None,
+        file_paths: dict[str, list[str]] | None = None,
+        input_modalities: list[str],
+        output_modalities: list[str],
+        model_kwargs: dict | None = None,
+        streaming: bool = True,
+    ) -> str:
+        """Build a :class:`NewRequestConductor` and send it to the conductor.
 
-        # Connect to all scheduler sockets (even if just one)
-        for rank in range(self.dp_size):
-            req_socket = self.context.socket(zmq.PUSH)
-            req_socket.connect(f"ipc://{self.request_socket_path}_{rank}")
-            self.request_sockets.append(req_socket)
+        Returns the ``request_id``.
+        """
+        request_id = str(uuid.uuid4())
 
-        # Bind result socket (schedulers connect to us)
-        self.result_socket.bind(f"ipc://{result_socket_path}")
+        for m in input_modalities + output_modalities:
+            if m not in SUPPORTED_MODALITIES:
+                raise ValueError(f"Unsupported modality: {m!r}")
 
-        # Set socket options: lower HWMs to surface backpressure earlier
-        try:
-            for req_socket in self.request_sockets:
-                req_socket.setsockopt(zmq.SNDHWM, 256)
-                req_socket.setsockopt(zmq.LINGER, 0)
-            self.result_socket.setsockopt(zmq.RCVHWM, 1024)
-            self.result_socket.setsockopt(zmq.LINGER, 0)
-        except Exception:
-            pass
+        # Register pending request
+        with self.request_lock:
+            self.pending_requests[request_id] = {
+                "chunks": [],           # list[ResultChunk]
+                "event": threading.Event(),
+                "streaming": streaming,
+                "consumed_chunks": 0,
+                "input_modalities": input_modalities,
+                "output_modalities": output_modalities,
+            }
 
-        # Create bounded in-process queue and sender thread to avoid handler blocking on ZMQ
-        # Scale queue size with dp_size to avoid bottleneck with multiple replicas
-        self.to_scheduler: queue.Queue[bytes] = queue.Queue(maxsize=max(1, self.max_batch_size * 2 * self.dp_size))
-        self.sender_thread = threading.Thread(target=self._sender_loop, daemon=True)
-        self.sender_thread.start()
+        # initial_signals: in a full pipeline a preprocessor worker would
+        # convert raw files into GPU tensors and produce TensorPointerInfo
+        # entries here.  For now we leave it empty — the conductor receives
+        # the modality lists and can arrange preprocessing itself.
+        initial_signals: dict = {}
 
-        # Start background message processing thread
-        self.message_thread = threading.Thread(target=self._process_messages, daemon=True)
-        self.message_thread.start()
+        msg = ConductorMessage(
+            message_type=ConductorMessageType.NEW_REQUEST,
+            body=NewRequestConductor(
+                request_id=request_id,
+                initial_signals=initial_signals,
+                initial_input_modalities=input_modalities,
+                initial_output_modalities=output_modalities,
+            ),
+        )
+        self.communicator.send("conductor", msg)
+        logger.info(
+            "Request %s submitted  in=%s  out=%s",
+            request_id, input_modalities, output_modalities,
+        )
+        return request_id
 
-        # Register cleanup on exit
-        atexit.register(self.cleanup)
+    # ----------------------------------------------------------
+    # Result collection (background thread)
+    # ----------------------------------------------------------
 
-    def _start_schedulers(self):
-        """Start the scheduler process(es)."""
-        try:
-            import subprocess
-            import sys
+    def _prune_recently_completed(self) -> None:
+        now = time.time()
+        stale = [
+            rid
+            for rid, ts in self.recently_completed.items()
+            if now - ts > self._recently_completed_ttl
+        ]
+        for rid in stale:
+            self.recently_completed.pop(rid, None)
 
-            if self.dp_size > 1:
-                # Data parallel mode: use subprocess to set CUDA_VISIBLE_DEVICES before Python starts
-                self.scheduler_processes = []
-
-                # Parse existing CUDA_VISIBLE_DEVICES mask if present
-                import os
-
-                existing_cuda_mask = os.environ.get("CUDA_VISIBLE_DEVICES", None)
-                if existing_cuda_mask is not None:
-                    # User has pre-set a GPU mask, respect it
-                    available_gpus = [int(x.strip()) for x in existing_cuda_mask.split(",") if x.strip().isdigit()]
-                    if len(available_gpus) < self.dp_size:
-                        self.logger.error(
-                            f"CUDA_VISIBLE_DEVICES={existing_cuda_mask} provides {len(available_gpus)} GPUs, "
-                            f"but --dp-size={self.dp_size} requires {self.dp_size} GPUs"
-                        )
-                        raise ValueError(f"Insufficient GPUs in CUDA_VISIBLE_DEVICES mask for dp_size={self.dp_size}")
-                    self.logger.info(f"Using existing CUDA_VISIBLE_DEVICES mask: {existing_cuda_mask}")
-                    gpu_mapping = available_gpus[: self.dp_size]
-                else:
-                    # No mask set, use 0, 1, 2, ... dp_size-1
-                    gpu_mapping = list(range(self.dp_size))
-
-                for rank in range(self.dp_size):
-                    request_socket_path = f"{self.request_socket_path}_{rank}"
-                    # All schedulers connect to the same result socket (no rank suffix)
-                    result_socket_path = self.result_socket_path
-
-                    # Create environment with CUDA_VISIBLE_DEVICES set to the mapped GPU
-                    env = os.environ.copy()
-                    env["CUDA_VISIBLE_DEVICES"] = str(gpu_mapping[rank])
-
-                    # Build command to run the scheduler entry point
-                    cmd = [
-                        sys.executable,
-                        "-m",
-                        "vox_serve.scheduler_entry",
-                        "--dp-rank",
-                        str(rank),
-                        "--dp-size",
-                        str(self.dp_size),
-                        "--model-name",
-                        self.model_name,
-                        "--scheduler-type",
-                        self.scheduler_type,
-                        "--max-batch-size",
-                        str(self.max_batch_size),
-                        "--page-size",
-                        str(self.page_size),
-                        "--request-socket-path",
-                        request_socket_path,
-                        "--result-socket-path",
-                        result_socket_path,
-                        "--log-level",
-                        get_global_log_level(),
-                    ]
-
-                    # Add optional parameters
-                    if self.max_num_pages is not None:
-                        cmd.extend(["--max-num-pages", str(self.max_num_pages)])
-                    if self.top_p is not None:
-                        cmd.extend(["--top-p", str(self.top_p)])
-                    if self.top_k is not None:
-                        cmd.extend(["--top-k", str(self.top_k)])
-                    if self.min_p is not None:
-                        cmd.extend(["--min-p", str(self.min_p)])
-                    if self.temperature is not None:
-                        cmd.extend(["--temperature", str(self.temperature)])
-                    if self.max_tokens is not None:
-                        cmd.extend(["--max-tokens", str(self.max_tokens)])
-                    if self.repetition_penalty is not None:
-                        cmd.extend(["--repetition-penalty", str(self.repetition_penalty)])
-                    if self.repetition_window is not None:
-                        cmd.extend(["--repetition-window", str(self.repetition_window)])
-                    if self.cfg_scale is not None:
-                        cmd.extend(["--cfg-scale", str(self.cfg_scale)])
-                    if self.greedy:
-                        cmd.append("--greedy")
-                    if self.enable_cuda_graph:
-                        cmd.append("--enable-cuda-graph")
-                    if self.enable_disaggregation:
-                        cmd.append("--enable-disaggregation")
-                    if self.enable_nvtx:
-                        cmd.append("--enable-nvtx")
-                    if self.enable_torch_compile:
-                        cmd.append("--enable-torch-compile")
-                    if self.async_scheduling:
-                        cmd.append("--async-scheduling")
-                    if self.detokenize_interval is not None:
-                        cmd.extend(["--detokenize-interval", str(self.detokenize_interval)])
-
-                    self.logger.info(f"Starting DP rank {rank} with CUDA_VISIBLE_DEVICES={gpu_mapping[rank]}")
-                    process = subprocess.Popen(cmd, env=env)
-                    self.scheduler_processes.append(process)
-                    self.logger.info(
-                        f"Started scheduler process (DP rank {rank}/{self.dp_size}) with PID: {process.pid}"
-                    )
-            else:
-                # Single scheduler mode - use subprocess for consistency
-                self.scheduler_processes = None
-
-                # Use rank 0 with suffix for request, but no suffix for result
-                request_socket_path = f"{self.request_socket_path}_0"
-                result_socket_path = self.result_socket_path
-
-                # Build command to run the scheduler entry point
-                cmd = [
-                    sys.executable,
-                    "-m",
-                    "vox_serve.scheduler_entry",
-                    "--dp-rank",
-                    "0",
-                    "--dp-size",
-                    "1",
-                    "--model-name",
-                    self.model_name,
-                    "--scheduler-type",
-                    self.scheduler_type,
-                    "--max-batch-size",
-                    str(self.max_batch_size),
-                    "--page-size",
-                    str(self.page_size),
-                    "--request-socket-path",
-                    request_socket_path,
-                    "--result-socket-path",
-                    result_socket_path,
-                    "--log-level",
-                    get_global_log_level(),
-                ]
-
-                # Add optional parameters
-                if self.max_num_pages is not None:
-                    cmd.extend(["--max-num-pages", str(self.max_num_pages)])
-                if self.top_p is not None:
-                    cmd.extend(["--top-p", str(self.top_p)])
-                if self.top_k is not None:
-                    cmd.extend(["--top-k", str(self.top_k)])
-                if self.min_p is not None:
-                    cmd.extend(["--min-p", str(self.min_p)])
-                if self.temperature is not None:
-                    cmd.extend(["--temperature", str(self.temperature)])
-                if self.max_tokens is not None:
-                    cmd.extend(["--max-tokens", str(self.max_tokens)])
-                if self.repetition_penalty is not None:
-                    cmd.extend(["--repetition-penalty", str(self.repetition_penalty)])
-                if self.repetition_window is not None:
-                    cmd.extend(["--repetition-window", str(self.repetition_window)])
-                if self.cfg_scale is not None:
-                    cmd.extend(["--cfg-scale", str(self.cfg_scale)])
-                if self.greedy:
-                    cmd.append("--greedy")
-                if self.enable_cuda_graph:
-                    cmd.append("--enable-cuda-graph")
-                if self.enable_disaggregation:
-                    cmd.append("--enable-disaggregation")
-                if self.enable_nvtx:
-                    cmd.append("--enable-nvtx")
-                if self.enable_torch_compile:
-                    cmd.append("--enable-torch-compile")
-                if self.async_scheduling:
-                    cmd.append("--async-scheduling")
-                if self.detokenize_interval is not None:
-                    cmd.extend(["--detokenize-interval", str(self.detokenize_interval)])
-
-                process = subprocess.Popen(cmd)
-                self.scheduler_process = process
-                self.logger.info(f"Started scheduler process with PID: {process.pid}")
-
-        except Exception as e:
-            self.logger.error(f"Failed to start scheduler: {e}")
-            raise RuntimeError(f"Could not start scheduler process: {e}") from e
-
-    def _process_messages(self):
-        """Process incoming scheduler messages in a background thread."""
+    def _process_messages(self) -> None:
+        """Drain the ZMQ pull socket and route results to pending requests."""
         while self.running:
             try:
-                while True:
-                    # Use NOBLOCK to prevent message loss and add small sleep for efficiency
-                    message = self.result_socket.recv(flags=zmq.NOBLOCK)
-
-                    # Parse message format: request_id|TYPE|data
-                    parts = message.split(b"|", 2)
-                    if len(parts) >= 3:
-                        request_id = parts[0].decode("utf-8")
-                        message_type = parts[1].decode("utf-8")
-                        data = parts[2]
-                    else:
-                        self.logger.warning(f"Malformed message received: {message[:100]}...")
+                for message in self.communicator.get_all_new_messages():
+                    if not isinstance(message, APIServerMessage):
+                        logger.warning("Unexpected message type: %s", type(message))
                         continue
 
-                    # Route message to the appropriate request
+                    rid = message.body.request_id
+
                     with self.request_lock:
-                        # prune expired entries in recently_completed
-                        if self.recently_completed:
-                            now = time.time()
-                            # pop from left while expired
-                            to_pop = []
-                            for rid, ts in self.recently_completed.items():
-                                if now - ts > self.recently_completed_ttl_sec:
-                                    to_pop.append(rid)
-                                else:
-                                    break
-                            for rid in to_pop:
-                                self.recently_completed.pop(rid, None)
+                        self._prune_recently_completed()
 
-                        if request_id in self.pending_requests:
-                            if message_type == "AUDIO":
-                                # Handle audio chunk
-                                self.pending_requests[request_id]["chunks"].append(data)
-                            elif message_type == "COMPLETION":
-                                # Handle completion notification
-                                completion_info = json.loads(data.decode("utf-8"))
-                                self.logger.info(f"Request {request_id} completed: {completion_info}")
-                                self.pending_requests[request_id]["event"].set()
-                                # remember completion to suppress late messages
-                                self.recently_completed[request_id] = time.time()
-                        # If we've very recently completed this request, drop silently (debug only)
-                        elif request_id in self.recently_completed:
-                            self.logger.debug(
-                                f"Dropping late {message_type} for recently completed request {request_id}"
-                            )
+                        if rid in self.pending_requests:
+                            if message.message_type == "result_chunk":
+                                self.pending_requests[rid]["chunks"].append(
+                                    message.body
+                                )
+                            elif message.message_type == "request_complete":
+                                self.pending_requests[rid]["event"].set()
+                                self.recently_completed[rid] = time.time()
+                        elif rid in self.recently_completed:
+                            logger.debug("Late message for completed %s", rid)
                         else:
-                            # Log when we receive messages for unknown requests
-                            self.logger.warning(f"Received {message_type} message for unknown request {request_id}")
-
-            except zmq.Again:
-                # No message available, sleep briefly to avoid busy waiting
-                time.sleep(0.001)
-                continue
-            except Exception as e:
-                if self.running:  # Only log if we're still supposed to be running
-                    self.logger.error(f"Error in message processing: {e}")
-                continue
-
-    def _stop_scheduler(self):
-        """Stop scheduler process(es) if they are running."""
-        if self.dp_size > 1:
-            # Stop all scheduler processes in DP mode
-            if self.scheduler_processes:
-                self.logger.info(f"Stopping {self.dp_size} scheduler processes...")
-                for i, process in enumerate(self.scheduler_processes):
-                    if process.poll() is None:  # Process is still running
-                        try:
-                            process.terminate()
-                            try:
-                                process.wait(timeout=1)
-                            except subprocess.TimeoutExpired:
-                                self.logger.warning(f"Scheduler {i} didn't terminate gracefully, forcing kill...")
-                                process.kill()
-                                process.wait(timeout=1)
-                        except Exception as e:
-                            self.logger.error(f"Error stopping scheduler {i}: {e}")
-                self.logger.info("All scheduler processes stopped")
-        elif hasattr(self, "scheduler_process") and self.scheduler_process and self.scheduler_process.poll() is None:
-            self.logger.info("Stopping scheduler process...")
-            try:
-                self.scheduler_process.terminate()
-                try:
-                    self.scheduler_process.wait(timeout=1)
-                except subprocess.TimeoutExpired:
-                    self.logger.warning("Scheduler didn't terminate gracefully, forcing kill...")
-                    self.scheduler_process.kill()
-                    self.scheduler_process.wait(timeout=1)
-            except Exception as e:
-                self.logger.error(f"Error stopping scheduler: {e}")
-            self.logger.info("Scheduler process stopped")
-
-    def _enqueue_request(self, payload: bytes) -> None:
-        """Enqueue a request payload to be forwarded to the scheduler.
-
-        Refuses when saturated to keep latency bounded.
-        """
-        try:
-            self.to_scheduler.put_nowait(payload)
-        except queue.Full:
-            raise HTTPException(status_code=429, detail="Server busy; please retry shortly") from None
-
-    def _sender_loop(self) -> None:
-        """Dedicated thread that drains the in-process queue and sends to ZMQ without blocking the handler."""
-        backoff_initial = 0.001
-        backoff_max = 0.02
-        while self.running:
-            try:
-                try:
-                    payload = self.to_scheduler.get(timeout=0.1)
-                except queue.Empty:
-                    continue
-
-                # Select target socket for data parallel routing (round-robin)
-                # Pin this request to the selected rank even under backpressure
-                target_socket = self.request_sockets[self.dp_request_counter % self.dp_size]
-                self.dp_request_counter += 1
-
-                backoff = backoff_initial
-                while self.running:
-                    try:
-                        # Non-blocking send; back off briefly on ZMQ backpressure
-                        target_socket.send(payload, flags=zmq.DONTWAIT)
-                        break
-                    except zmq.Again:
-                        time.sleep(backoff)
-                        backoff = min(backoff * 2, backoff_max)
-                    except Exception as e:
-                        self.logger.error(f"Sender loop error during send: {e}")
-                        break
-            except Exception as e:
+                            logger.warning(
+                                "Message for unknown request %s", rid
+                            )
+            except Exception:
                 if self.running:
-                    self.logger.error(f"Sender loop error: {e}")
+                    logger.exception("Error in message processing loop")
+            time.sleep(0.001)
 
-    def start_streaming_request(
-        self,
-        text: str = None,
-        audio_path: str = None,
-        model_kwargs: Dict = None,
-    ) -> str:
-        """Create and enqueue a streaming request, returning its request ID.
+    # ----------------------------------------------------------
+    # Streaming helper
+    # ----------------------------------------------------------
 
-        Args:
-            text: Input text to synthesize.
-            audio_path: Optional path to input audio for STS-capable models.
-            model_kwargs: Optional model-specific parameters (e.g., language, speaker).
-
-        Returns:
-            The request ID used for subsequent streaming.
-        """
-        request_id = str(uuid.uuid4())
-        self.logger.info(f"Request {request_id} joined for streaming")
-
-        # Register this request for concurrent processing
-        completion_event = threading.Event()
-        with self.request_lock:
-            self.pending_requests[request_id] = {
-                "chunks": [],
-                "event": completion_event,
-                "streaming": True,
-                "consumed_chunks": 0,
-            }
-
-        # Serialize and send to scheduler
-        request_dict = {
-            "request_id": request_id,
-            "prompt": text,
-            "audio_path": audio_path,
-            "is_streaming": True,
-            "model_kwargs": model_kwargs or {},
-        }
-        request_json = json.dumps(request_dict)
-        message = f"{request_json}|audio_data_placeholder".encode("utf-8")
-        self._enqueue_request(message)
-
-        return request_id
-
-    def start_input_streaming_request(
-        self,
-        audio_path: str = None,
-        model_kwargs: Dict = None,
-    ) -> str:
-        """Create and enqueue an input streaming request (text will be sent incrementally).
-
-        Args:
-            audio_path: Optional path to input audio for voice cloning.
-            model_kwargs: Optional model-specific parameters (e.g., language, speaker).
-
-        Returns:
-            The request ID used for subsequent text chunks.
-        """
-        request_id = str(uuid.uuid4())
-        self.logger.info(f"Request {request_id} joined for input streaming")
-
-        # Register this request for concurrent processing
-        completion_event = threading.Event()
-        with self.request_lock:
-            self.pending_requests[request_id] = {
-                "chunks": [],
-                "event": completion_event,
-                "streaming": True,
-                "consumed_chunks": 0,
-                "input_streaming": True,  # Mark as input streaming
-            }
-
-        # Send TEXT_STREAM_START message to scheduler
-        # Format: request_id|TEXT_STREAM_START|{json_config}
-        config = {
-            "audio_path": audio_path,
-            "is_streaming": True,
-            "model_kwargs": model_kwargs or {},
-        }
-        message = f"{request_id}|TEXT_STREAM_START|{json.dumps(config)}".encode("utf-8")
-        self._enqueue_request(message)
-
-        return request_id
-
-    def send_text_chunk(self, request_id: str, text: str) -> bool:
-        """Send a text chunk for an input streaming request.
-
-        Args:
-            request_id: Request identifier returned by ``start_input_streaming_request``.
-            text: Text chunk to add to the generation.
-
-        Returns:
-            True if the text was sent successfully.
-
-        Raises:
-            HTTPException: If the request is not found or already completed.
-        """
-        with self.request_lock:
-            request_data = self.pending_requests.get(request_id)
-            if not request_data:
-                raise HTTPException(status_code=404, detail=f"Request {request_id} not found")
-            if request_data["event"].is_set():
-                raise HTTPException(status_code=400, detail=f"Request {request_id} already completed")
-
-        # Send TEXT_UPDATE message to scheduler
-        # Format: request_id|TEXT_UPDATE|text_chunk
-        message = f"{request_id}|TEXT_UPDATE|{text}".encode("utf-8")
-        self._enqueue_request(message)
-        self.logger.debug(f"Sent text chunk for request {request_id}: {len(text)} chars")
-        return True
-
-    def end_input_streaming(self, request_id: str) -> None:
-        """Signal end of text input for an input streaming request.
-
-        Args:
-            request_id: Request identifier returned by ``start_input_streaming_request``.
-
-        Raises:
-            HTTPException: If the request is not found.
-        """
-        with self.request_lock:
-            request_data = self.pending_requests.get(request_id)
-            if not request_data:
-                raise HTTPException(status_code=404, detail=f"Request {request_id} not found")
-
-        # Send TEXT_COMPLETE message to scheduler
-        # Format: request_id|TEXT_COMPLETE|
-        message = f"{request_id}|TEXT_COMPLETE|".encode("utf-8")
-        self._enqueue_request(message)
-        self.logger.info(f"Text input complete for request {request_id}")
-
-    async def async_stream_chunks(self, request_id: str):
-        """Yield audio chunks for an already enqueued streaming request.
-
-        Args:
-            request_id: Request identifier returned by ``start_streaming_request``.
-
-        Yields:
-            Raw audio chunks (bytes) as they arrive.
-
-        Raises:
-            HTTPException: If the request times out or fails.
-        """
-        start_time = time.time()
-        # Stream chunks until completion
+    async def async_stream_results(self, request_id: str):
+        """Yield NDJSON lines as result chunks arrive."""
+        start = time.time()
         while True:
-            # Timeout check
-            if time.time() - start_time > self.timeout_seconds:
-                # Cleanup on timeout
+            if time.time() - start > self.timeout_seconds:
                 with self.request_lock:
                     self.pending_requests.pop(request_id, None)
-                raise HTTPException(status_code=500, detail="Generation timed out")
+                raise HTTPException(status_code=500, detail="Request timed out")
 
-            new_chunks: list[bytes] = []
+            new_chunks: list[ResultChunk] = []
             done = False
             with self.request_lock:
-                request_data = self.pending_requests.get(request_id)
-                if request_data:
-                    available = len(request_data["chunks"])
-                    consumed = request_data.get("consumed_chunks", 0)
-                    new_chunks = request_data["chunks"][consumed:available]
-                    request_data["consumed_chunks"] = available
-                    done = request_data["event"].is_set()
+                req = self.pending_requests.get(request_id)
+                if req:
+                    avail = len(req["chunks"])
+                    consumed = req["consumed_chunks"]
+                    new_chunks = req["chunks"][consumed:avail]
+                    req["consumed_chunks"] = avail
+                    done = req["event"].is_set()
                 else:
-                    # No request found; treat as done
                     done = True
 
             for chunk in new_chunks:
-                yield chunk
+                yield self._chunk_to_ndjson(chunk)
 
             if done:
-                # Yield any remaining chunks and cleanup
-                remaining: list[bytes] = []
+                # flush remaining
+                remaining: list[ResultChunk] = []
                 with self.request_lock:
-                    request_data = self.pending_requests.get(request_id)
-                    if request_data:
-                        consumed = request_data.get("consumed_chunks", 0)
-                        remaining = request_data["chunks"][consumed:]
+                    req = self.pending_requests.get(request_id)
+                    if req:
+                        remaining = req["chunks"][req["consumed_chunks"]:]
                         self.pending_requests.pop(request_id, None)
                 for chunk in remaining:
-                    yield chunk
+                    yield self._chunk_to_ndjson(chunk)
                 break
 
-            # Small async sleep to avoid busy-waiting
             await asyncio.sleep(0.001)
 
-    def generate_audio(
-        self,
-        text: str = None,
-        audio_path: str = None,
-        model_kwargs: Dict = None,
-    ) -> str:
-        """
-        Generate audio from text and return path to the audio file.
+    @staticmethod
+    def _chunk_to_ndjson(chunk: ResultChunk) -> str:
+        return json.dumps({
+            "modality": chunk.modality,
+            "data": base64.b64encode(chunk.data).decode("ascii"),
+            "metadata": chunk.metadata,
+        }) + "\n"
 
-        Args:
-            text: Input text to synthesize (optional if audio_path provided)
-            audio_path: Path to input audio file (optional)
-            model_kwargs: Optional model-specific parameters (e.g., language, speaker).
+    # ----------------------------------------------------------
+    # Blocking helper (non-streaming)
+    # ----------------------------------------------------------
 
-        Returns:
-            Path to the generated audio file
-
-        Raises:
-            HTTPException: If generation fails or times out
-        """
-        request_id = str(uuid.uuid4())
-        self.logger.info(f"Request {request_id} joined for generation")
-
-        # Register this request for concurrent processing
-        completion_event = threading.Event()
+    def collect_results(self, request_id: str) -> list[ResultChunk]:
+        """Block until the request completes, then return all chunks."""
         with self.request_lock:
-            self.pending_requests[request_id] = {"chunks": [], "event": completion_event}
+            req = self.pending_requests.get(request_id)
+            if not req:
+                raise HTTPException(
+                    status_code=404, detail=f"Request {request_id} not found"
+                )
+            event = req["event"]
 
-        try:
-            # Serialize Request object to JSON
-            request_dict = {
-                "request_id": request_id,
-                "prompt": text,
-                "audio_path": audio_path,
-                "is_streaming": False,
-                "model_kwargs": model_kwargs or {},
-            }
-
-            request_json = json.dumps(request_dict)
-            message = f"{request_json}|audio_data_placeholder".encode("utf-8")
-
-            # Enqueue request to scheduler (non-blocking)
-            self._enqueue_request(message)
-
-            # Wait for completion or timeout
-            if not completion_event.wait(timeout=self.timeout_seconds):
-                raise HTTPException(status_code=500, detail="Generation timed out")
-
-            # Retrieve collected audio chunks
-            with self.request_lock:
-                audio_chunks = self.pending_requests[request_id]["chunks"][:]
-                del self.pending_requests[request_id]
-
-            if not audio_chunks:
-                raise HTTPException(status_code=500, detail="No audio generated")
-
-            # Save to WAV file
-            output_file = self.output_dir / f"{request_id}.wav"
-            with wave.open(str(output_file), "wb") as wf:
-                wf.setnchannels(1)  # Mono
-                wf.setsampwidth(2)  # 16-bit
-                wf.setframerate(24000)  # 24kHz as per SNAC
-                for chunk in audio_chunks:
-                    wf.writeframes(chunk)
-
-            return str(output_file)
-
-        except Exception as e:
-            # Clean up on error
+        if not event.wait(timeout=self.timeout_seconds):
             with self.request_lock:
                 self.pending_requests.pop(request_id, None)
-            if isinstance(e, HTTPException):
-                raise
-            raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}") from e
+            raise HTTPException(status_code=500, detail="Request timed out")
 
-    def cleanup(self):
-        """Clean up ZMQ resources, background threads, and scheduler processes."""
-        self.logger.info("Cleaning up API server...")
+        with self.request_lock:
+            chunks = self.pending_requests[request_id]["chunks"][:]
+            self.pending_requests.pop(request_id, None)
+        return chunks
 
-        # Stop background message processing
+    # ----------------------------------------------------------
+    # Cleanup
+    # ----------------------------------------------------------
+
+    def cleanup(self) -> None:
         self.running = False
-        if hasattr(self, "message_thread") and self.message_thread.is_alive():
-            self.message_thread.join(timeout=1)
-        if hasattr(self, "sender_thread") and self.sender_thread.is_alive():
-            self.sender_thread.join(timeout=1)
-
-        try:
-            # Close all request sockets
-            if hasattr(self, "request_sockets"):
-                for req_socket in self.request_sockets:
-                    req_socket.close()
-            if hasattr(self, "result_socket"):
-                self.result_socket.close()
-            if hasattr(self, "context"):
-                self.context.term()  # Terminate ZMQ context
-        except Exception as e:
-            self.logger.error(f"Error cleaning up ZMQ: {e}")
-
-        self._stop_scheduler()
+        if hasattr(self, "_msg_thread") and self._msg_thread.is_alive():
+            self._msg_thread.join(timeout=2)
 
 
-# Initialize FastAPI app
-app = FastAPI(title="Vox-Serve API", description="Text-to-Speech API using Orpheus model")
+# ------------------------------------------------------------------
+# FastAPI application
+# ------------------------------------------------------------------
 
-# Add CORS middleware to allow cross-origin requests
+app = FastAPI(
+    title="mminf API",
+    description="Multimodal Inference API",
+)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],  # Allow all HTTP methods
-    allow_headers=["*"],  # Allow all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# Global API server instance (will be initialized in main)
-api_server = None
+api_server: APIServer | None = None
 
 
 @app.post("/generate")
 async def generate(
-    text: str = Form(...),
-    audio: Optional[UploadFile] = File(None),
+    text: Optional[str] = Form(None),
+    files: Optional[list[UploadFile]] = File(None),
+    input_modalities: Optional[str] = Form(None),
+    output_modalities: str = Form("text"),
     streaming: bool = Form(True),
-    # Model-specific parameters (used by models like Qwen3-TTS)
-    language: Optional[str] = Form(None),
-    speaker: Optional[str] = Form(None),
-    ref_text: Optional[str] = Form(None),
-    instruct: Optional[str] = Form(None),
-    x_vector_only_mode: Optional[bool] = Form(None),
+    model_kwargs: Optional[str] = Form(None),
 ):
-    """
-    Generate speech from text and return audio file or streaming response.
+    """Submit a multimodal generation request.
 
     Args:
-        text: Input text to synthesize
-        audio: Optional input audio file
-        streaming: Whether to return streaming response (default: True)
-        language: Language code for synthesis (model-specific, e.g., "en", "zh", "auto")
-        speaker: Speaker ID for multi-speaker models (model-specific)
-        ref_text: Reference text for voice cloning (used with audio for ICL mode)
-        instruct: Instruction text for voice design/control (model-specific)
-        x_vector_only_mode: If True, use only speaker embedding without ICL (model-specific)
-
-    Returns:
-        Audio file as direct response (if streaming=False) or streaming audio response (if streaming=True)
+        text: Optional text input.
+        files: Optional media files (images, audio, video).  The modality of
+            each file is inferred from its extension.
+        input_modalities: Comma-separated list of input modalities.  When
+            omitted, modalities are auto-detected from the provided data.
+        output_modalities: Comma-separated list of desired output modalities
+            (default ``"text"``).
+        streaming: If ``True``, return an NDJSON stream of result chunks.
+        model_kwargs: Optional JSON string of model-specific parameters.
     """
     if api_server is None:
         raise HTTPException(status_code=503, detail="Server not ready")
 
-    audio_path = None
-    if audio:
-        # Save uploaded audio file
-        audio_filename = f"{uuid.uuid4()}_{audio.filename}"
-        audio_path = str(api_server.upload_dir / audio_filename)
+    out_mods = [m.strip() for m in output_modalities.split(",") if m.strip()]
 
-        # Move file write off the event loop to avoid blocking under load
-        content = await audio.read()
-        await run_in_threadpool(Path(audio_path).write_bytes, content)
+    # --- save uploaded files, grouped by modality ----------------
+    file_paths: dict[str, list[str]] = {}
+    if files:
+        for f in files:
+            modality = _detect_modality(f.filename or "")
+            if modality == "unknown":
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Cannot determine modality for file: {f.filename}",
+                )
+            save_name = f"{uuid.uuid4()}_{f.filename}"
+            save_path = api_server.upload_dir / save_name
+            content = await f.read()
+            await run_in_threadpool(save_path.write_bytes, content)
+            file_paths.setdefault(modality, []).append(str(save_path))
 
-    # Build model-specific kwargs (only include non-None values)
-    model_kwargs = {}
-    if language is not None:
-        model_kwargs["language"] = language
-    if speaker is not None:
-        model_kwargs["speaker"] = speaker
-    if ref_text is not None:
-        model_kwargs["ref_text"] = ref_text
-    if instruct is not None:
-        model_kwargs["instruct"] = instruct
-    if x_vector_only_mode is not None:
-        model_kwargs["x_vector_only_mode"] = x_vector_only_mode
+    # --- resolve input modalities --------------------------------
+    if input_modalities is not None:
+        in_mods = [m.strip() for m in input_modalities.split(",") if m.strip()]
+    else:
+        in_mods: list[str] = []
+        if text:
+            in_mods.append("text")
+        in_mods.extend(file_paths.keys())
+
+    parsed_kwargs = json.loads(model_kwargs) if model_kwargs else None
 
     try:
+        request_id = api_server.submit_request(
+            text=text,
+            file_paths=file_paths or None,
+            input_modalities=in_mods,
+            output_modalities=out_mods,
+            model_kwargs=parsed_kwargs,
+            streaming=streaming,
+        )
+
         if streaming:
-            # Streaming response: enqueue request immediately, then stream asynchronously
-            request_id = api_server.start_streaming_request(text, audio_path, model_kwargs)
-
-            async def audio_stream():
-                # WAV header for 24kHz mono 16-bit audio
-                wav_header = io.BytesIO()
-                with wave.open(wav_header, "wb") as wf:
-                    wf.setnchannels(1)  # Mono
-                    wf.setsampwidth(2)  # 16-bit
-                    wf.setframerate(24000)  # 24kHz
-                    wf.writeframes(b"")  # Empty data for header
-
-                # Get header bytes and correct the chunk size for streaming
-                wav_header.seek(0)
-                header_bytes = wav_header.read()
-
-                # Send WAV header first
-                yield header_bytes
-
-                # Stream audio chunks asynchronously
-                async for chunk in api_server.async_stream_chunks(request_id):
-                    yield chunk
-
             return StreamingResponse(
-                audio_stream(),
-                media_type="audio/wav",
-                headers={
-                    "Content-Disposition": f"attachment; filename=stream_{uuid.uuid4().hex[:8]}.wav",
-                    "Cache-Control": "no-cache",
-                },
+                api_server.async_stream_results(request_id),
+                media_type="application/x-ndjson",
+                headers={"Cache-Control": "no-cache"},
             )
-        else:
-            # Non-streaming response
-            audio_file = await run_in_threadpool(api_server.generate_audio, text, audio_path, model_kwargs)
-            request_id = Path(audio_file).stem
 
-            return FileResponse(path=audio_file, media_type="audio/wav", filename=f"{request_id}.wav")
+        chunks = await run_in_threadpool(
+            api_server.collect_results, request_id
+        )
+        outputs: dict[str, list[dict]] = {}
+        for chunk in chunks:
+            outputs.setdefault(chunk.modality, []).append({
+                "data": base64.b64encode(chunk.data).decode("ascii"),
+                "metadata": chunk.metadata,
+            })
+        return JSONResponse({
+            "request_id": request_id,
+            "outputs": outputs,
+        })
+
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
     finally:
-        # Schedule cleanup of uploaded file after a delay to ensure processing is complete
-        if audio_path and Path(audio_path).exists():
-
-            def delayed_cleanup():
-                import time
-
-                time.sleep(60)  # Wait 60 seconds before cleanup
-                if Path(audio_path).exists():
-                    Path(audio_path).unlink()
-
-            cleanup_thread = threading.Thread(target=delayed_cleanup, daemon=True)
-            cleanup_thread.start()
-
-
-# ============================================================================
-# Input Streaming Endpoints
-# ============================================================================
-
-
-@app.post("/generate/stream/start")
-async def start_input_streaming(
-    audio: Optional[UploadFile] = File(None),
-    # Model-specific parameters
-    language: Optional[str] = Form(None),
-    speaker: Optional[str] = Form(None),
-    ref_text: Optional[str] = Form(None),
-    instruct: Optional[str] = Form(None),
-    x_vector_only_mode: Optional[bool] = Form(None),
-):
-    """
-    Start an input streaming request. Text will be sent incrementally via subsequent calls.
-
-    Args:
-        audio: Optional input audio file for voice cloning
-        language: Language code for synthesis (model-specific)
-        speaker: Speaker ID for multi-speaker models
-        ref_text: Reference text for voice cloning
-        instruct: Instruction text for voice design/control
-        x_vector_only_mode: If True, use only speaker embedding without ICL
-
-    Returns:
-        JSON with request_id to use for subsequent text chunks
-    """
-    if api_server is None:
-        raise HTTPException(status_code=503, detail="Server not ready")
-
-    audio_path = None
-    if audio:
-        # Save uploaded audio file
-        audio_filename = f"{uuid.uuid4()}_{audio.filename}"
-        audio_path = str(api_server.upload_dir / audio_filename)
-        content = await audio.read()
-        await run_in_threadpool(Path(audio_path).write_bytes, content)
-
-    # Build model-specific kwargs
-    model_kwargs = {}
-    if language is not None:
-        model_kwargs["language"] = language
-    if speaker is not None:
-        model_kwargs["speaker"] = speaker
-    if ref_text is not None:
-        model_kwargs["ref_text"] = ref_text
-    if instruct is not None:
-        model_kwargs["instruct"] = instruct
-    if x_vector_only_mode is not None:
-        model_kwargs["x_vector_only_mode"] = x_vector_only_mode
-
-    try:
-        request_id = api_server.start_input_streaming_request(audio_path, model_kwargs)
-        return {"request_id": request_id}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
-
-
-@app.post("/generate/stream/{request_id}/text")
-async def send_text_chunk(
-    request_id: str,
-    text: str = Form(...),
-):
-    """
-    Send a text chunk for an ongoing input streaming request.
-
-    Args:
-        request_id: Request identifier from start_input_streaming
-        text: Text chunk to add to the generation
-
-    Returns:
-        JSON with status and request_id
-    """
-    if api_server is None:
-        raise HTTPException(status_code=503, detail="Server not ready")
-
-    try:
-        api_server.send_text_chunk(request_id, text)
-        return {"status": "accepted", "request_id": request_id}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
-
-
-@app.get("/generate/stream/{request_id}/audio")
-async def stream_audio(request_id: str):
-    """
-    Start streaming audio output for an input streaming request.
-
-    Call this immediately after /start to receive audio chunks as they are generated,
-    while continuing to send text via /text endpoint.
-
-    Args:
-        request_id: Request identifier from start_input_streaming
-
-    Returns:
-        Streaming audio response (WAV format)
-    """
-    if api_server is None:
-        raise HTTPException(status_code=503, detail="Server not ready")
-
-    # Validate request exists
-    with api_server.request_lock:
-        request_data = api_server.pending_requests.get(request_id)
-        if not request_data:
-            raise HTTPException(status_code=404, detail=f"Request {request_id} not found")
-        if not request_data.get("input_streaming"):
-            raise HTTPException(
-                status_code=400,
-                detail=f"Request {request_id} is not an input streaming request",
-            )
-
-    async def audio_stream():
-        # WAV header for 24kHz mono 16-bit audio
-        wav_header = io.BytesIO()
-        with wave.open(wav_header, "wb") as wf:
-            wf.setnchannels(1)  # Mono
-            wf.setsampwidth(2)  # 16-bit
-            wf.setframerate(24000)  # 24kHz
-            wf.writeframes(b"")  # Empty data for header
-
-        wav_header.seek(0)
-        header_bytes = wav_header.read()
-        yield header_bytes
-
-        # Stream audio chunks asynchronously
-        async for chunk in api_server.async_stream_chunks(request_id):
-            yield chunk
-
-    return StreamingResponse(
-        audio_stream(),
-        media_type="audio/wav",
-        headers={
-            "Content-Disposition": f"attachment; filename=stream_{request_id[:8]}.wav",
-            "Cache-Control": "no-cache",
-        },
-    )
-
-
-@app.post("/generate/stream/{request_id}/end")
-async def end_input_streaming(request_id: str):
-    """
-    Signal end of text input for an input streaming request.
-
-    This signals that no more text will be sent. If you're using the /audio endpoint
-    to stream audio, that stream will complete after this is called.
-
-    Args:
-        request_id: Request identifier from start_input_streaming
-
-    Returns:
-        JSON confirmation
-    """
-    if api_server is None:
-        raise HTTPException(status_code=503, detail="Server not ready")
-
-    try:
-        # Signal text completion
-        api_server.end_input_streaming(request_id)
-        return {"status": "completed", "request_id": request_id}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        # Deferred cleanup of uploaded files
+        if file_paths:
+            def _cleanup(paths: dict[str, list[str]]) -> None:
+                time.sleep(60)
+                for ps in paths.values():
+                    for p in ps:
+                        try:
+                            Path(p).unlink(missing_ok=True)
+                        except OSError:
+                            pass
+            threading.Thread(
+                target=_cleanup, args=(file_paths,), daemon=True
+            ).start()
 
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
     return {"status": "healthy"}
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """Cleanup on shutdown"""
     if api_server is not None:
         api_server.cleanup()
 
 
-def signal_handler(signum, frame):
-    """Handle shutdown signals"""
-    logger.info(f"\nReceived signal {signum}, shutting down...")
-    if api_server is not None:
-        api_server.cleanup()
-    import os
-
-    os._exit(0)  # Force immediate exit
-
+# ------------------------------------------------------------------
+# CLI entry point
+# ------------------------------------------------------------------
 
 def main():
-    """Run the VoxServe API server from the CLI.
-
-    The CLI maps to ``python -m vox_serve.launch`` or the ``vox-serve`` entrypoint.
-
-    Arguments are parsed via ``argparse`` and control model selection, scheduling
-    behavior, sampling parameters, and performance settings.
-    """
     import argparse
-    import multiprocessing as mp
 
-    import uvicorn
-
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description="Vox-Serve Text-to-Speech API Server")
+    parser = argparse.ArgumentParser(
+        description="mminf Multimodal Inference API Server"
+    )
+    parser.add_argument("--host", type=str, default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=8000)
     parser.add_argument(
-        "--model",
-        type=str,
-        default="canopylabs/orpheus-3b-0.1-ft",
-        help="Model name or path to use for text-to-speech synthesis (default: canopylabs/orpheus-3b-0.1-ft)",
+        "--socket-path-prefix", type=str, default="/tmp/mminf",
+        help="ZMQ IPC socket path prefix (shared with conductor/workers)",
     )
     parser.add_argument(
-        "--scheduler-type",
-        type=str,
-        default="base",
-        choices=["base", "online", "offline", "input_streaming"],
-        help="Type of scheduler to use (default: base). Use 'input_streaming' for incremental text input.",
-    )
-    parser.add_argument("--async-scheduling", action="store_true", help="Enable async scheduling mode (default: False)")
-    parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind the server to (default: 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=8000, help="Port to bind the server to (default: 8000)")
-    parser.add_argument("--max-batch-size", type=int, default=8, help="Maximum batch size for inference (default: 8)")
-    parser.add_argument(
-        "--max-num-pages", type=int, default=2048, help="Maximum number of KV cache pages (default: 1024)"
-    )
-    parser.add_argument("--page-size", type=int, default=128, help="Size of each KV cache page (default: 128)")
-    parser.add_argument("--top-p", type=float, default=None, help="Top-p sampling parameter (default: None)")
-    parser.add_argument("--top-k", type=int, default=None, help="Top-k sampling parameter (default: None)")
-    parser.add_argument("--min-p", type=float, default=None, help="Min-p sampling parameter (default: None)")
-    parser.add_argument("--temperature", type=float, default=None, help="Temperature for sampling (default: None)")
-    parser.add_argument(
-        "--max-tokens", type=int, default=None, help="Maximum number of tokens to generate (default: model-specific)"
-    )
-    parser.add_argument("--repetition-penalty", type=float, default=None, help="Repetition penalty (default: None)")
-    parser.add_argument("--repetition-window", type=int, default=None, help="Repetition window size (default: None)")
-    parser.add_argument("--cfg-scale", type=float, default=None, help="CFG scale for guidance (default: None)")
-    parser.add_argument(
-        "--greedy",
-        action="store_true",
-        help="Enable greedy sampling (ignores top-k, top-p, min-p, and temperature parameters)",
+        "--upload-dir", type=str, default="/tmp/mminf_uploads",
+        help="Directory for temporary uploaded files",
     )
     parser.add_argument(
-        "--enable-cuda-graph",
-        action="store_true",
-        default=True,
-        help="Enable CUDA graph optimization for decode phase (default: True)",
+        "--timeout", type=float, default=600.0,
+        help="Per-request timeout in seconds",
     )
     parser.add_argument(
-        "--disable-cuda-graph", action="store_true", help="Disable CUDA graph optimization for decode phase"
-    )
-    parser.add_argument(
-        "--enable-disaggregation",
-        action="store_true",
-        help=(
-            "Enable disaggregation mode (requires at least 2 GPUs): "
-            "LLM on GPU 0, detokenizer on GPU 1 (default: False)"
-        ),
-    )
-    parser.add_argument(
-        "--dp-size",
-        type=int,
-        default=1,
-        help=(
-            "Enable data parallel mode with N replicas (default: 1, disables DP). "
-            "Cannot be used with --enable-disaggregation. Requires N <= available GPUs."
-        ),
-    )
-    parser.add_argument(
-        "--log-level",
-        type=str,
-        default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-        help="Set the logging level (default: INFO)",
-    )
-    parser.add_argument(
-        "--enable-nvtx", action="store_true", help="Enable NVTX profiling for performance analysis (default: False)"
-    )
-    parser.add_argument(
-        "--enable-torch-compile",
-        action="store_true",
-        help="Enable torch.compile optimization for model inference (default: False)",
-    )
-    parser.add_argument(
-        "--socket-suffix",
-        type=str,
-        default="",
-        help="Suffix to append to IPC socket paths to avoid conflicts (default: empty)",
-    )
-    parser.add_argument(
-        "--detokenize-interval",
-        type=int,
-        default=None,
-        help="Interval for audio detokenization (default: None, model-specific). Only supported by qwen3-tts models.",
+        "--log-level", type=str, default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
     )
     args = parser.parse_args()
 
-    # Set global log level for the entire application
-    set_global_log_level(args.log_level)
-
-    # Set multiprocessing start method for CUDA compatibility
-    try:
-        mp.set_start_method("spawn")
-    except RuntimeError:
-        # Already set, ignore
-        pass
-
-    # Determine final CUDA graph setting
-    enable_cuda_graph = args.enable_cuda_graph and not args.disable_cuda_graph
-
-    # Validate data parallel mode
-    if args.dp_size < 1:
-        logger.error("--dp-size must be >= 1")
-        sys.exit(1)
-
-    # Check mutual exclusion between DP and disaggregation
-    if args.dp_size > 1 and args.enable_disaggregation:
-        logger.error(
-            "Cannot enable both data parallel mode (--dp-size > 1) and disaggregation mode (--enable-disaggregation)"
-        )
-        logger.error("Please use one or the other")
-        sys.exit(1)
-
-    # Check GPU availability for data parallel
-    if args.dp_size > 1:
-        available_gpus = torch.cuda.device_count()
-        if args.dp_size > available_gpus:
-            logger.error(f"--dp-size {args.dp_size} exceeds available GPU count {available_gpus}")
-            sys.exit(1)
-        logger.info(f"Data parallel mode enabled with {args.dp_size} replicas (using GPUs 0-{args.dp_size - 1})")
-
-    # Automatically select disaggregation scheduler if enable_disaggregation is set with CUDA graphs
-    scheduler_type = args.scheduler_type
-    if args.enable_disaggregation and enable_cuda_graph:
-        logger.info(
-            "Disaggregation mode enabled: using 'disaggregation' scheduler with parallel LM and detokenization loops"
-        )
-        scheduler_type = "disaggregation"
-
-    # Construct socket paths with optional suffix
-    request_socket_path = f"/tmp/vox_serve_request{args.socket_suffix}.ipc"
-    result_socket_path = f"/tmp/vox_serve_result{args.socket_suffix}.ipc"
-
-    # Initialize API server instance with specified model
-    global api_server
-    api_server = APIServer(
-        model_name=args.model,
-        scheduler_type=scheduler_type,
-        request_socket_path=request_socket_path,
-        result_socket_path=result_socket_path,
-        max_batch_size=args.max_batch_size,
-        max_num_pages=args.max_num_pages,
-        page_size=args.page_size,
-        top_p=args.top_p,
-        top_k=args.top_k,
-        min_p=args.min_p,
-        temperature=args.temperature,
-        max_tokens=args.max_tokens,
-        repetition_penalty=args.repetition_penalty,
-        repetition_window=args.repetition_window,
-        cfg_scale=args.cfg_scale,
-        greedy=args.greedy,
-        enable_cuda_graph=enable_cuda_graph,
-        enable_disaggregation=args.enable_disaggregation,
-        enable_nvtx=args.enable_nvtx,
-        enable_torch_compile=args.enable_torch_compile,
-        async_scheduling=args.async_scheduling,
-        dp_size=args.dp_size,
-        detokenize_interval=args.detokenize_interval,
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    # Register signal handlers for graceful shutdown
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    global api_server
+    api_server = APIServer(
+        socket_path_prefix=args.socket_path_prefix,
+        upload_dir=args.upload_dir,
+        timeout_seconds=args.timeout,
+    )
+
+    def _signal_handler(signum, _frame):
+        logger.info("Received signal %s, shutting down...", signum)
+        if api_server is not None:
+            api_server.cleanup()
+        import os
+        os._exit(0)
+
+    signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
 
     try:
-        logger.info(f"Starting vox-serve API server with model: {args.model}")
-        logger.info("Scheduler and API server will be available shortly...")
+        logger.info("Starting mminf API server on %s:%s", args.host, args.port)
         uvicorn.run(app, host=args.host, port=args.port, access_log=False)
     except KeyboardInterrupt:
-        logger.info("\nShutdown requested by user")
+        pass
     finally:
         if api_server is not None:
             api_server.cleanup()
