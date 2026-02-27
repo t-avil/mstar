@@ -213,7 +213,10 @@ class SubgraphsManager:
                 stage=ptr.next_stage, phase=self.get_phase(request_id)
             )
             if stage_phase not in self.per_request_info[request_id].stage_to_worker:
-                continue
+                raise ValueError(
+                    f"Output pointer targets unknown stage/phase: {stage_phase}. "
+                    f"Check graph construction."
+                )
             worker_id = self.per_request_info[request_id].stage_to_worker[stage_phase]
             if worker_id not in to_workers:
                 to_workers[worker_id] = []
