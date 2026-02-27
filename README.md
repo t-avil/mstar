@@ -418,13 +418,33 @@ This enables:
 
 ---
 
-<!-- TODO EDIT FROM HERE -->
 
 ## 7. Execution Strategy
 
-### 7.1 Design
+When defining a model, the user must define a computation graph for each phase of computation, as well as: logic for determining the computation phase at each full model forward pass, the "full model" inputs at each new forward pass, and code for actually executing each graph stage.
 
-The Execution Strategy is a self-contained recipe object returned by `request.model.get_execution_strategy()`. It is defined per model class and lives on the model object.
+**Note**: This is currently in the `Model` class, but it might make more sense to pull this logic out into an `ExecutionStrategy` class, which can be retrieved via `model.get_execution_strategy`.
+
+### 7.1 Computation Graph and Subgraphs
+For each phase of computation, the user must define a **computation** graph, which specifies the discrete computation stages, their execution order, and how their outputs are routed.
+
+To make graph definition more intuitive than, e.g., a generic DAG, stages can be organized in `Sequential`, `Parallel`, and `Loop` configurations.
+
+The user must define `self.get_phase_graphs()`, which returns a mapping of computation phase name (e.g., `prefill`, `decode`, `image_gen`) to computation graph.
+
+Once the graphs are defined, the `Model` class automatically parses it, along with the cluster config, to produce a list of **Subgraphs**, or groups of stages that will be assigned to a worker together.
+This is produced by `model.get_subgraphs(config_path)`, which calls `self.get_phase_graphs()` and performs the logic to break the graphs from each phase into subgraphs.
+See the **computation graph model** section for information.
+
+### 7.2 Input Wrangling and Stage Running
+
+In addition to the computation graph, the user must define the following functions for forward pass execution:
+
+<!-- get_initial_forward_metadata, get_forward_pass_inputs, update_for_next_forward, step in model/base.py-->
+
+<!-- @Irmak TODO EDIT FROM HERE -->
+
+
 
 ### 7.2 Three Outputs
 
