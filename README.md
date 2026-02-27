@@ -444,8 +444,15 @@ In addition to the computation graph, the user must define the following functio
 
 <!-- @Irmak TODO EDIT FROM HERE -->
 
+`get_initial_forward_metadata()` returns `CurrentForwardMetadata` object given input-output modalities (such as `image`, `text`, `audio`) with `prefill` phase and `is_prefill` flag set to `True`.
 
+`get_forward_pass_inputs()` returns a list of `GraphPointer`s with `next_stage` and `name` fields. It checks for persisting signals (outputs of the previous fwd pass) to be merged with new inputs. Called by the conductor. These are the external inputs that go from the conductor to the workers at the beginning of the current forward pass; all other signals are handled internally via IPC.
 
+`update_for_next_forward()` is called by the conductor after the full fwd pass. The metadata is updated (primarily checking for input-output modality changes to update the `phase`).
+
+**Note: these functions are subject to change, they are our best guess for what needs to be defined.**
+
+<!-- 
 ### 7.2 Three Outputs
 
 1. **Full Graph**: The complete computation graph using GraphSection primitives (GraphStage, Sequential, Parallel, Loop). Represents ALL possible stages for this model regardless of input/output modalities.
@@ -454,73 +461,155 @@ In addition to the computation graph, the user must define the following functio
    - Text-only input, text output → Only: text_tok → LLM prefill → LLM decode → STREAM
    - Text input, image output → Full pipeline including flow head and VAE
 
-3. **`run_stage(stage_id, inputs, state, flags) → {output_name: tensor}`**: Called by workers. Takes named input tensors, returns named output tensors. Flags include metadata like flow step number, prefill vs. decode, etc. Every time the active graph changes, a new `stage_id` is issued.
+3. **`run_stage(stage_id, inputs, state, flags) → {output_name: tensor}`**: Called by workers. Takes named input tensors, returns named output tensors. Flags include metadata like flow step number, prefill vs. decode, etc. Every time the active graph changes, a new `stage_id` is issued. -->
 
 ### 7.3 Full Graph Example (BAGEL)
 
+**AR Text Generation Phase**:
 ```python
-# Phase 1: Text generation (AR decode with STREAM_OUT + DONE_WITH_FWD)
-# Phase 2: Image generation (flow loop with frozen KV)
-# The active graph function selects which phase is active.
-
 full_graph = Sequential([
     Parallel([
         GraphStage(
             name="vit_encoder",
             input_ids=["image"],
-            outputs={"img_emb": [GraphPointer("LLM")]}
+            outputs=[
+                GraphPointer(next_stage="LLM", name="img_emb")
+            ]
         ),
         GraphStage(
             name="text_emb",
             input_ids=["text"],
-            outputs={"text_emb": [GraphPointer("LLM")]}
+            outputs=[
+                GraphPointer(next_stage="LLM", name="text_emb")
+            ]
         ),
     ]),
     GraphStage(
         name="LLM_text_gen",  # AR text generation phase
         input_ids=["text_emb", "img_emb"],
-        outputs={
-            "text_tokens": [GraphPointer("STREAM_OUT")],
-            "done_signal": [GraphPointer("DONE_WITH_FWD", back_to_conductor=True)]
-        }
-    ),
+        outputs=[
+            GraphPointer(next_stage="STREAM_OUT", name="text_tokens"),
+        ]
+    )
+])
+```
+
+**Image generation phase**: triggered when conductor detects `<BOI>`. Each flow step runs the full LLM backbone with frozen KV cache.
+```python
+full_graph = Sequential([
+    Parallel([
+        GraphStage(
+            name="vit_encoder",
+            input_ids=["image"],
+            outputs=[
+                GraphPointer(next_stage="LLM", name="img_emb")
+            ]
+        ),
+        GraphStage(
+            name="text_emb",
+            input_ids=["text"],
+            outputs=[
+                GraphPointer(next_stage="LLM", name="text_emb")
+            ]
+        ),
+    ]),
     # Image generation phase -- triggered when conductor detects <BOI>
     # Each flow step runs the full LLM backbone with frozen KV cache
     Loop(
         section=GraphStage(
             name="LLM_flow_step",  # Full LLM forward pass per step (frozen KV)
             input_ids=["text_emb", "img_emb", "latents"],
-            outputs={"latents": [GraphPointer("LLM_flow_step")]}  # loop-back
+            outputs=[
+                GraphPointer(
+                    next_stage="LLM_flow_step",
+                    name="latents"
+                )  # loop-back
+            ]
         ),
         n_iters=24,
-        outputs={
-            "latents": [GraphPointer("vae_decoder")]
-        }
+        outputs=[
+            GraphPointer(
+                next_stage="vae_decoder",
+                name="latents"
+            )
+        ]
     ),
     GraphStage(
         name="vae_decoder",
         input_ids=["latents"],
-        outputs={"image": [GraphPointer("STREAM_OUT")]}
+        outputs=[
+            GraphPointer(
+                next_stage="STREAM_OUT",
+                name="image",
+                back_to_conductor=True
+            )
+        ]
     )
 ])
 ```
 
+
 Note: BAGEL uses the same LLM backbone for both text generation and flow steps. During flow steps, the LLM reads frozen KV cache (`update_past_key_values=False`) and processes noised latents projected via `vae2llm`. Velocity is extracted via `llm2vae` (a linear layer), not a separate diffusion head. CFG requires 3x forward passes per step (conditional + text-CFG + image-CFG), handled at the worker level by tripling the batch size. The `text_emb` and `img_emb` inputs to the flow loop are external inputs that persist across iterations (handled by `Loop.external_inputs`).
 
 ### 7.4 Image Generation Graph (Show-o2 -- Interleaved)
-
+**AR Text Generation Phase**:
 ```python
-full_graph = Sequential([
+Sequential([
     Parallel([
         GraphStage(
             name="vit_encoder",
             input_ids=["image"],
-            outputs={"img_emb": [GraphPointer("LLM")]}
+            outputs=[
+                GraphPointer(
+                    next_stage="LLM",
+                    name="img_emb"
+                )
+            ]
         ),
         GraphStage(
             name="text_emb",
             input_ids=["text"],
-            outputs={"text_emb": [GraphPointer("LLM")]}
+            outputs=[
+                GraphPointer(
+                    next_stage="LLM",
+                    name="text_emb"
+                )
+            ]
+        ),
+    ]),
+    GraphStage(
+        name="LLM_text_gen",  # AR text generation phase
+        input_ids=["text_emb", "img_emb"],
+        outputs=[
+            GraphPointer(next_stage="STREAM_OUT", name="text_tokens"),
+        ]
+    )
+])
+```
+
+**Image generation (flow matching)**:
+```python
+Sequential([
+    Parallel([
+        GraphStage(
+            name="vit_encoder",
+            input_ids=["image"],
+            outputs=[
+                GraphPointer(
+                    next_stage="LLM",
+                    name="img_emb"
+                )
+            ]
+        ),
+        GraphStage(
+            name="text_emb",
+            input_ids=["text"],
+            outputs=[
+                GraphPointer(
+                    next_stage="LLM",
+                    name="text_emb"
+                )
+            ]
         ),
     ]),
     Loop(
@@ -528,34 +617,51 @@ full_graph = Sequential([
             GraphStage(
                 name="LLM",  # Full LLM forward pass at each flow step
                 input_ids=["text_emb", "img_emb", "latents"],
-                outputs={
-                    "hidden_states": [GraphPointer("diffusion_head")],
-                }
+                outputs=[
+                    GraphPointer(
+                        next_stage="diffusion_head",
+                        name="hidden_states"
+                    )
+                ]
             ),
             GraphStage(
                 name="diffusion_head",
                 input_ids=["hidden_states"],
-                outputs={
-                    "velocity": [GraphPointer("euler_step")]
-                }
+                outputs=[
+                    GraphPointer(
+                        next_stage="euler_step",
+                        name="velocity"
+                    )
+                ]
             ),
             GraphStage(
                 name="euler_step",
                 input_ids=["velocity", "latents"],
-                outputs={
-                    "latents": [GraphPointer("LLM")]  # loop-back
-                }
+                outputs=[
+                    GraphPointer(
+                        next_stage="LLM",
+                        name="latents"
+                    )  # loop-back
+                ]
             ),
         ]),
         n_iters=50,
-        outputs={
-            "latents": [GraphPointer("vae_decoder")]
-        }
+        outputs=[
+            GraphPointer(
+                next_stage="vae_decoder",
+                name="latents"
+            )
+        ]
     ),
     GraphStage(
         name="vae_decoder",
         input_ids=["latents"],
-        outputs={"image": [GraphPointer("STREAM_OUT")]}
+        outputs=[
+            GraphPointer(
+                next_stage="STREAM_OUT",
+                name="image"
+            )
+        ]
     )
 ])
 ```
@@ -570,17 +676,32 @@ full_graph = Sequential([
         GraphStage(
             name="text_emb",
             input_ids=["text"],
-            outputs={"text_emb": [GraphPointer("thinker")]}
+            outputs=[
+                GraphPointer(
+                    next_stage="thinker",
+                    name="text_emb"
+                )
+            ]
         ),
         GraphStage(
             name="vit_encoder",
             input_ids=["image"],
-            outputs={"img_emb": [GraphPointer("thinker")]}
+            outputs=[
+                GraphPointer(
+                    next_stage="thinker",
+                    name="img_emb"
+                )
+            ]
         ),
         GraphStage(
             name="audio_encoder",
             input_ids=["audio"],
-            outputs={"audio_emb": [GraphPointer("thinker")]}
+            outputs=[
+                GraphPointer(
+                    next_stage="thinker",
+                    name="audio_emb"
+                )
+            ]
         ),
     ]),
     Parallel([
@@ -588,13 +709,20 @@ full_graph = Sequential([
         GraphStage(
             name="thinker",
             input_ids=["text_emb", "img_emb", "audio_emb"],
-            outputs={
-                "text_tokens": [GraphPointer("STREAM_OUT")],
-                "hidden_states": [GraphPointer("talker", back_to_conductor=False)],
+            outputs=[
+                GraphPointer(
+                    next_stage="STREAM_OUT",
+                    name="text_tokens"
+                ),
+                GraphPointer(
+                    next_stage="talker",
+                    name="hidden_states",
+                    back_to_conductor=False
+                ),
                 # Note: in a producer-consumer stream, only the consumer needs to
                 # know that this is a streaming operation. The producer can just send
                 # outputs via IPC as normal.
-            }
+            ]
         ),
         # Talker branch (AR speech codec generation)
         # Note: The talker is an AR model that runs autoregressively (many forward passes),
@@ -606,32 +734,62 @@ full_graph = Sequential([
                 name="talker",
                 consumes_stream=True,
                 input_ids=["hidden_states"],  # from thinker via RELAY
-                outputs={
-                    "codec_tokens": [GraphPointer("mtp_module")]
-                }
+                outputs=[
+                    GraphPointer(
+                        next_stage="mtp_module",
+                        name="codec_tokens"
+                    )
+                ]
             ),
             GraphStage(
                 name="mtp_module",
                 input_ids=["codec_tokens"],
-                outputs={
-                    "full_codebook": [GraphPointer("code2wav")]
-                }
+                outputs=[
+                    GraphPointer(
+                        next_stage="code2wav",
+                        name="full_codebook"
+                    )
+                ]
             ),
             GraphStage(
                 name="code2wav",
                 input_ids=["full_codebook"],
-                outputs={
-                    "audio_chunk": [GraphPointer("STREAM_OUT")]
-                }
+                outputs=[
+                    GraphPointer(
+                        next_stage="STREAM_OUT",
+                        name="audio_chunk"
+                    )
+                ]
             ),
         ])
     ]),
 ])
 ```
 
-### 7.6 Note: needs/produces/ptr in Full Graph Construction
 
-The whiteboard raised: "Do we have needs/produces/ptr as part of the full graph in construction?" The answer from the evolved design: **Yes**. The `GraphStage.outputs` field merges the old `produces` and `ptr` concepts. Each output maps to a list of `(destination_stage, flags)` pairs. The `input_ids` field is the `needs`.
+### 7.6 Note: GraphPointers in Full Graph Construction
+
+The graph pointer info associated with each tensor triggers the onset of the `next_stage` as well as inter-worker or worker-to-conductor communication (tensor sharing).
+
+```python
+@dataclass
+class TensorPointerInfo:
+    dims: list[int]
+    dtype: str
+    nbytes: int
+    address: int
+    source_session_id: str # e.g., f"{HOSTNAME}:{client_engine.get_rpc_port()}"
+    source_entity: str # which {worker, api_server} the tensor is on
+
+@dataclass
+class GraphPointer:
+    next_stage: str
+    name: str
+    tensor_info: TensorPointerInfo | None = field(default=None)
+    # Flags
+    back_to_conductor: bool = field(default=False)
+    is_new_token: bool = field(default=False)
+```
 
 ---
 
@@ -745,6 +903,22 @@ Worker ──ZMQ PUSH──→ API Server result socket
 ```
 
 This avoids the conductor becoming a bottleneck for high-bandwidth data (audio waveforms, image tensors). The conductor only receives lightweight completion notifications.
+
+### 8.7 Worker Communication
+The new `BaseCommunicator` class handles tensor-level worker-worker (`next_stage` is a part of a subgraph that's in a different worker), worker-conductor (tensor has `back_to_conductor` flag set) or worker-api_server (streaming out) communication.
+
+High-level example:
+`Worker_0` has latents that are needed on the `Worker_1` subgraph. `Worker_0` sends `address` and `n_bytes` information (via ZMQ). `Worker_1` allocates the required memory for latents, uses `transfer_read_on_cuda` to pull the tensors from `Worker_0` and sends a feedback message for confirmation.
+
+```python
+self.engine.transfer_read_on_cuda(
+    info.source_session_id,
+    dst.data_ptr(),
+    info.address,
+    info.nbytes,
+    stream.cuda_stream,
+)
+```
 
 ---
 
