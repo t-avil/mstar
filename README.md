@@ -793,7 +793,7 @@ class GraphPointer:
 
 ---
 
-## 8. Workers
+## 8. Workers and Engines
 
 ### 8.1 Design
 
@@ -804,10 +804,11 @@ Workers are long-lived GPU processes. Each worker:
 4. Executes computation, manages internal batching
 5. Sends completion notifications back to the Conductor
 6. Streams output directly to the API Server (for STREAM_OUT)
-7. Communicates with other workers for inter-worker data transfer (RELAY, KV cache)
+7. Communicates with other workers for inter-worker data transfer (stage outputs and prefill→decode KV cache)
 
-### 8.2 Worker Types
+### 8.2 Engines
 
+<!-- TODO replace with engine documentation -->
 Three worker types handle different computation patterns:
 
 #### 8.2.1 vLLM Engine Worker
@@ -889,10 +890,14 @@ Workers handle their own batching. The conductor dispatches work items; the work
 
 ### 8.5 Worker State Management
 
-From the original whiteboard: "Update in worker, synchronization in conductor."
+State is mainly managed within workers (or between workers, via IPC), with some information passed from the conductor to workers at the beginning of each forward pass.
 
 - **Within-worker state** (worker manages): KV cache, noise schedule, step counter, latents, decoder cache
-- **Between-worker synchronization** (conductor manages): Which worker has which request's state, when to transfer KV cache, request lifecycle tracking
+- **Between-worker synchronization** (handled by IPC between workers): Which worker has which request's state, KV cache transfer, request lifecycle tracking.
+- **Conductor-to-worker synchronization**: At the beginning of each forward pass, the conductor sends inputs to the appropriate workers.
+With those inputs, it sends which computation phase the current forward pass is (e.g., prefill, decode, image generation).
+We may also want to send more information, such as input/output modalities, which token indices are which modality, etc.
+After the forward pass starts, this information passed on from earlier workers (e.g., LLM worker) to later workers (e.g., VAE decoder).
 
 ### 8.6 Streaming Output
 
@@ -903,22 +908,13 @@ Worker ──ZMQ PUSH──→ API Server result socket
 ```
 
 This avoids the conductor becoming a bottleneck for high-bandwidth data (audio waveforms, image tensors). The conductor only receives lightweight completion notifications.
+Tensors are transferred to the API server via the same methods is inter-worker communication, as described in **Worker Communication** below.
 
 ### 8.7 Worker Communication
-The new `BaseCommunicator` class handles tensor-level worker-worker (`next_stage` is a part of a subgraph that's in a different worker), worker-conductor (tensor has `back_to_conductor` flag set) or worker-api_server (streaming out) communication.
-
-High-level example:
-`Worker_0` has latents that are needed on the `Worker_1` subgraph. `Worker_0` sends `address` and `n_bytes` information (via ZMQ). `Worker_1` allocates the required memory for latents, uses `transfer_read_on_cuda` to pull the tensors from `Worker_0` and sends a feedback message for confirmation.
-
-```python
-self.engine.transfer_read_on_cuda(
-    info.source_session_id,
-    dst.data_ptr(),
-    info.address,
-    info.nbytes,
-    stream.cuda_stream,
-)
-```
+Worker communication includes two layers: (1) message-passing of JSON messages via ZMQ, and (2) tensor communication via Mooncake Transfer Engine.
+For tensor communication, we are using a read/pull-based paradigm: when tensors need to be transferred, the sender passes a ZMQ message with the information needed for the receiver to initiate a read.
+Then, the receiver reads the tensor via (2) and sends an ACK back to the sender.
+See the **11. Inter-Worker Communication** section for more information.
 
 ---
 
@@ -1277,22 +1273,76 @@ outputs = {
 ### 11.1 Design Philosophy
 
 **Design evolution note**: Note 14 of the design discussions stated: "Previously, the conductor handled what graph stages are ready to run and which are waiting for inputs. Now that everything passes between workers via inter-worker communication, this no longer fits in the conductor. The ready/waiting logic moves to the worker level."
+The conductor sends inputs and some state information (e.g., "we are currently in decode phase doing AR text generation") to the workers at the beginning of each forward pass, and the workers handle the rest via direct communication of signals and state (KV cache) to the appropriate destination worker. 
 
-**Current resolution**: The final design retains ready/waiting queue tracking at the **Conductor** level (via `RequestQueues`, Sections 6.2.3 and 9.8) for macro-level graph progression, while Note 14's insight is incorporated as a two-level split:
+<!-- **Current resolution**: The final design retains ready/waiting queue tracking at the **Worker** level (via `RequestQueues`, Sections 6.2.3 and 9.8) for macro-level graph progression, while Note 14's insight is incorporated as a two-level split:
 
 - The **Conductor** handles macro-level scheduling: which worker runs which stage, graph-level readiness (are all inputs for a stage available?), request lifecycle tracking, and worker assignment.
 - The **Workers** handle micro-level readiness: buffering partial inputs (e.g., the Talker buffering RELAY data until enough has arrived to start talking), managing continuous batching (when to actually execute a dispatch), and inter-worker data reception.
 
-This means the Conductor tracks "is this graph stage logically ready?" while the Worker tracks "do I have enough data in my buffers to actually run this computation?"
+This means the Conductor tracks "is this graph stage logically ready?" while the Worker tracks "do I have enough data in my buffers to actually run this computation?" -->
 
-### 11.2 Mooncake-Inspired Transfer Engine
+### 11.2 Current Implementation: Mooncake Transfer Engine + ZMQ
 
 From the Mooncake research, the inter-worker communication layer should:
 
-1. **Use a Mooncake-style Transfer Engine** with topology-aware, multi-path data transfer
+1. **Use the Mooncake Transfer Engine** with topology-aware, multi-path data transfer
 2. **Support multiple protocols**: RDMA (for production), TCP (fallback), NVLink (intra-node), shared memory (same-machine)
 3. **Stream layer-by-layer / chunk-by-chunk**: Do not wait for full computation to complete before beginning transfer
-4. **Use pull-based transfer**: The receiving worker initiates data pull to handle burstiness naturally
+4. **Use pull-based transfer**: The receiving worker initiates data pull to handle burstiness naturally.
+
+Mooncake includes a `mooncake-transfer-engine` package that we can use out-of-the box, along with ZMQ for passing of metadata.
+
+Specifically, there are two layers of inter-worker communication:
+- **(1) ZMQ**: For control messages, metadata, and notifications (e.g., "you can now read the latents from IP X at memory address Y", "I have completed this subgraph", "stop talking")
+- **(2) Mooncake Transfer Engine**: For the actual heavy lifting of tensor data transfer (e.g., KV cache blocks and tensors transferred between subgraphs/workers and from workers to the API server).
+
+**(1) Message-Passing Communication**:
+The `BaseCommunicator` abstract class handles message-level worker communication, with interfaces for `send` and `get_all_new_messages`, and is implemented by `ZMQCommunicator`.
+Each entity (worker, conductor, api server) has one `ZMQCommunicator` instance, and calls the `send` and `get_all_new_messages` methods when appropriate.
+
+**(2) Tensor Communicator**:
+The `TensorCommunicationManager` abstract class (a) holds all tensors used by a worker, and (b) handles tensor-level worker-worker (e.g., when `next_stage` is a part of a subgraph that's in a different worker) and worker-api_server (streaming out) communication.
+It is implemented by `MooncakeCommunicationManager`.
+
+To read in tensors, the receiver first calls `communication_manager.start_read_tensors(...)`, which allocates an appropriately-sized buffer and calls
+```python
+self.engine.transfer_read_on_cuda(
+    info.source_session_id,
+    dst.data_ptr(),
+    info.address,
+    info.nbytes,
+    stream.cuda_stream,
+)
+```
+from Mooncake transfer engine to start a read.
+The `start_read_tensors` returns immediately, but keeps track of a cuda Event for each `transfer_read_on_cuda`, which it can later query for completion.
+
+To see what currently-being-read tensors have finished transferring, the receiver calls `communication_manager.get_ready_tensors()`, which queries all stored cuda Events and return the names of all ready tensors.
+This also sends ACK messages back to the senders of those tensors, so that they can clean up any temporary buffers or state associated with those tensors.
+
+
+**Tensor transfer high-level example**:
+`Worker_0` has latents that are needed on the `Worker_1` subgraph. `Worker_0` sends `address` and `n_bytes` information (via ZMQ). `Worker_1` allocates the required memory for latents, uses `transfer_read_on_cuda` to pull the tensors from `Worker_0`.
+While the tensors are being transferred, `Worker_1` performs computation if applicable.
+When the tensors are fully read in, `Worker_1` and sends a feedback message to `Worker_0` for confirmation.
+
+**Example receiver workflow (pseudocode)**:
+```python
+while True
+    # (1) Read in new messages and start reads for any tensor transfer messages
+    new_messages = communication_manager.get_all_new_messages()
+    for msg in new_messages:
+        if msg.type == "INPUT_SIGNALS":
+            tensor_manager.start_read_tensors(msg.body.request_id, msg.body.pointers)
+        # ... handle other types of messages ...
+    
+    # (2) Check for any finished tensor transfers, and ingest those tensors as inputs
+    ready_tensors = tensor_manager.get_ready_tensors()
+    # ... ingest ready_tensors into the appropriate graph stages and update ready/waiting queues ...
+
+    # (3) Run computation for ready stages, and send outputs to next stages or API server as needed
+```
 
 ### 11.3 KV Cache Transfer
 
@@ -1301,7 +1351,7 @@ From Mooncake's architecture:
 - This enables **prefix-level deduplication** across the entire cluster
 - Transfers are **overlapped with computation**: as each LLM layer finishes, its KV cache is asynchronously streamed
 
-**For our system**: Take the IPC logic from Mooncake (Note 12). Start with ZMQ for initial implementation; migrate to RDMA if profiling shows it's the bottleneck.
+<!-- **For our system**: Take the IPC logic from Mooncake. Start with ZMQ for initial implementation; migrate to RDMA if profiling shows it's the bottleneck. -->
 
 ### 11.4 vLLM KV Connector Interface
 
@@ -1328,14 +1378,12 @@ class StageConnector:
 
 ### 11.5 Talker Worker Buffer Management
 
-For the Thinker-Talker pattern (Qwen-Omni), the Talker worker maintains:
+This can be handled directly by the `TensorCommunicationManager` implementation on the Thinker and Talker workers. The tensor manager on the Thinker maintains an output buffer of hidden states that it streams to the Talker, and the tensor manager on the Talker maintains an input buffer.
 
-```python
-talker_state = {
-    "buffer": {req_id: {"hidden_states": [...], "token_ids": [...]}},  # consumed from RELAY stream
-    "status": {req_id: "WAITING" | "TALKING"},
-}
-```
+The Thinker keeps adding outputs to the buffer, removing them upon receipt of read ACK from the Talker.
+The Talker reads inputs into its buffer, reading from the buffer once enough data is present.
+
+The Talker worker also maintains a status flag for the request (e.g., `"status": {req_id: "WAITING" | "TALKING"}`).
 
 **Talker loop**:
 1. If received STOP from Conductor, remove req_id
