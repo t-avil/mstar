@@ -203,16 +203,19 @@ class SubgraphsManager:
         # in different workers)
 
         # (3) get mapping of worker to external outputs
-        # Filter out back_to_conductor pointers (e.g., stream_out) — they
-        # don't route to any worker
+        # Skip pointers whose next_stage has no worker mapping (e.g.,
+        # stream_out is a virtual destination, not a real stage on any worker).
+        # Note: back_to_conductor pointers may ALSO route to a worker
+        # (e.g., concat_text outputs text_emb → LLM with back_to_conductor=True),
+        # so we do NOT filter on back_to_conductor here.
         to_workers: dict[str, list[GraphPointer]] = {}
         for ptr in outputs:
-            if ptr.back_to_conductor:
-                continue
             stage_phase = StageAndPhase(
                 stage=ptr.next_stage, phase=self.get_phase(request_id)
             )
             if stage_phase not in self.per_request_info[request_id].stage_to_worker:
+                if ptr.back_to_conductor:
+                    continue  # e.g., stream_out — already captured in to_conductor
                 raise ValueError(
                     f"Output pointer targets unknown stage/phase: {stage_phase}. "
                     f"Check graph construction."
@@ -306,6 +309,7 @@ class DummyWorker:
             communicator=self.communicator,
             protocol=tensor_comm_protocol,
         )
+        self.pending_persist_signals: dict[str, list[GraphPointer]] = {}
         
     def _add_new_request(
         self, body: NewRequest
@@ -372,7 +376,9 @@ class DummyWorker:
         outputs: StageOutputRouting
     ):
         """
-        Sends outputs to other workers and to the conductor
+        Sends outputs to other workers and to the conductor.
+        Persist signals are buffered and sent together with the
+        SUBGRAPHS_DONE message to avoid race conditions.
         """
         for worker in outputs.to_workers:
             message = WorkerMessage(
@@ -384,25 +390,20 @@ class DummyWorker:
                 )
             )
             self.communicator.send(worker, message)
-        
-        # to conductor
+
+        # Buffer persist signals for this request
         if outputs.to_conductor:
-            message = ConductorMessage(
-                message_type=ConductorMessageType.PERSIST_SIGNAL,
-                body=InputSignals(
-                    request_id=request_id,
-                    inputs=outputs.to_conductor,
-                    phase=self.subgraphs_manager.get_phase(request_id)
-                )
+            self.pending_persist_signals.setdefault(request_id, []).extend(
+                outputs.to_conductor
             )
-            self.communicator.send("conductor", message)
-        
+
         if outputs.completed_subgraphs:
             message = ConductorMessage(
                 message_type=ConductorMessageType.SUBGRAPHS_DONE,
                 body=SubgraphsDone(
                     request_id=request_id,
-                    subgraph_ids=outputs.completed_subgraphs
+                    subgraph_ids=outputs.completed_subgraphs,
+                    persist_signals=self.pending_persist_signals.pop(request_id, []),
                 )
             )
             self.communicator.send("conductor", message)
