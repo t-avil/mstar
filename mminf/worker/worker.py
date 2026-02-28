@@ -68,6 +68,7 @@ class Worker:
             communicator=self.communicator,
             protocol=tensor_comm_protocol,
         )
+        self.pending_persist_signals: dict[str, list[GraphPointer]] = {}
 
     # ------------------------------------------------------------------
     # Message handling
@@ -217,7 +218,11 @@ class Worker:
     def _send_outputs(
         self, request_id: str, outputs: StageOutputRouting
     ) -> None:
-        """Send outputs to other workers and to the conductor."""
+        """
+        Send outputs to other workers and to the conductor.
+        Persist signals are buffered and sent together with the
+        SUBGRAPHS_DONE message to avoid race conditions.
+        """
         for worker_id, pointers in outputs.to_workers.items():
             message = WorkerMessage(
                 message_type=WorkerMessageType.INPUT_SIGNALS,
@@ -229,16 +234,11 @@ class Worker:
             )
             self.communicator.send(worker_id, message)
 
+        # Buffer persist signals for this request
         if outputs.to_conductor:
-            message = ConductorMessage(
-                message_type=ConductorMessageType.PERSIST_SIGNALS,
-                body=InputSignals(
-                    request_id=request_id,
-                    inputs=outputs.to_conductor,
-                    phase=self.subgraphs_manager.get_phase(request_id),
-                ),
+            self.pending_persist_signals.setdefault(request_id, []).extend(
+                outputs.to_conductor
             )
-            self.communicator.send("conductor", message)
 
         if outputs.completed_subgraphs:
             message = ConductorMessage(
@@ -246,6 +246,7 @@ class Worker:
                 body=SubgraphsDone(
                     request_id=request_id,
                     subgraph_ids=outputs.completed_subgraphs,
+                    persist_signals=self.pending_persist_signals.pop(request_id, []),
                 ),
             )
             self.communicator.send("conductor", message)
