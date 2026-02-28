@@ -9,7 +9,7 @@ from mminf.ipc_formats import (
     NewRequest, RemoveRequest, SubgraphsDone, WorkerMessage, WorkerMessageType,
 )
 from mminf.model.base import Subgraph
-from mminf.worker.dummy_worker import (
+from mminf.worker.stage_manager_utils import (
     StageOutputRouting, SubgraphQueues, SubgraphsManager,
 )
 from mminf.worker.engine_manager import EngineManager
@@ -68,7 +68,6 @@ class Worker:
             communicator=self.communicator,
             protocol=tensor_comm_protocol,
         )
-        self.pending_persist_signals: dict[str, list[GraphPointer]] = {}
 
     # ------------------------------------------------------------------
     # Message handling
@@ -236,8 +235,8 @@ class Worker:
 
         # Buffer persist signals for this request
         if outputs.to_conductor:
-            self.pending_persist_signals.setdefault(request_id, []).extend(
-                outputs.to_conductor
+            self.subgraphs_manager.buffer_persist_signals(
+                request_id, outputs.to_conductor
             )
 
         if outputs.completed_subgraphs:
@@ -246,7 +245,7 @@ class Worker:
                 body=SubgraphsDone(
                     request_id=request_id,
                     subgraph_ids=outputs.completed_subgraphs,
-                    persist_signals=self.pending_persist_signals.pop(request_id, []),
+                    persist_signals=self.subgraphs_manager.flush_persist_signals(request_id),
                 ),
             )
             self.communicator.send("conductor", message)
