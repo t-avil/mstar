@@ -1443,16 +1443,14 @@ This supports:
 1. User sends: "Describe this image" + image.jpg
 2. API Server → Conductor: {text: "Describe...", image: image.jpg, model: "qwen3-vl"}
 3. Conductor:
-   a. strategy = qwen3_vl.get_execution_strategy()
-   b. active_graph = strategy.get_active_graph(inp=[TEXT, IMAGE], out=[TEXT])
-   c. Assign: vit_encoder → Worker 0, LLM → Worker 0 (co-located)
-   d. Ready: vit_encoder (has image), text_emb (has text)
-4. Dispatch vit_encoder and text_emb to Worker 0 (parallel)
-5. Worker 0 completes both → hidden states ready → LLM becomes ready
-6. Dispatch LLM to Worker 0
-7. Worker 0 runs LLM decode loop (continuous batching, AR token generation)
+   a. Instantiates a new `RequestData` object for this request.
+   b. For this request, assigns subgraphs for all computation phases to workers that can process that subgraph (e.g., vit_encoder → Worker 0, LLM → Worker 0 (co-located), etc.)
+      - Sends the worker to subgraph assignments to the workers that are active for this request. As part of this, the image and text inputs are sent to Worker 0 (i.e., information about their location is sent for Worker 0 to read through Mooncake transfer engine).
+4. Worker 0 completes vit_encoder, text_embedding. The LLM sends a SUBGRAPHS_DONE message to the conductor, with a flag that the produced embeddings will persist for the next forward pass.
+5. Then, the LLM becomes ready (via Worker 0's internal scheduling), and Worker 0 completes the LLM forward pass. It sends a SUBGRAPHS_DONE message to the conductor with the generated token.
+6. For every forward pass, the conductor sends inputs to Worker 0. Worker 0 runs LLM decode loop (continuous batching, AR token generation)
    - Streams text tokens → API Server (STREAM_OUT)
-   - At <EOS>: sends DONE_WITH_FWD → Conductor
+7. At <EOS>, the conductor sends a REMOVE_REQUEST message to Worker 0 and a DONE message to the API server
 8. Conductor finishes request
 ```
 
@@ -1464,16 +1462,16 @@ This supports:
 1. User sends: "Generate a sunset over mountains"
 2. API Server → Conductor: {text: "Generate...", model: "bagel"}
 3. Conductor:
-   a. active_graph = bagel.get_active_graph(inp=[TEXT], out=[IMAGE])
+   a. Instantiates a new `RequestData` object
    b. Assign: text_emb + LLM + flow_loop → Worker 0, vae → Worker 1
       (LLM must be co-located with flow loop since each flow step runs the LLM backbone)
    c. Ready: text_emb (has text input)
 4. Dispatch text_emb → Worker 0
 5. Worker 0: text_emb completes → LLM prefill + AR text decode
+   - Sends apropriate SUBGRAPHS_DONE messages back to the counductor
    - Streams text tokens → API Server (STREAM_OUT)
-   - At <BOI>: DONE_WITH_FWD → Conductor
-6. Conductor: flow loop phase begins. KV cache is now frozen on Worker 0.
-7. Worker 0: runs 24 flow steps internally:
+6. Conductor sees <BOI>. Flow loop phase begins.
+7. Worker 0: runs 24 flow steps internally. KV cache is now frozen on Worker 0.
    For each step:
      a. Project noised latents via vae2llm into LLM embedding space
      b. Run full LLM forward pass (reading frozen KV cache, update_past_key_values=False)
@@ -1481,10 +1479,10 @@ This supports:
      d. Euler step to update latents
    CFG: 3x forward passes per step (conditional + text-CFG + image-CFG)
    - Completion → Conductor: flow loop done, latents ready
-8. Transfer latents from Worker 0 to Worker 1
+8. Transfer latents from Worker 0 to Worker 1 via IPC
 9. vae_decoder becomes ready → Worker 1 runs VAE decode
 10. Worker 1 streams image → API Server (STREAM_OUT)
-11. Conductor finishes request
+11. After seeing <EOS>, conductor finishes request
 ```
 
 **Key**: The LLM is co-located with the flow loop because each of the 24 flow steps requires a full LLM forward pass. However, the KV cache is frozen after text generation, so it is reused (read-only) across all flow steps. The 3x CFG multiplier means each flow step actually runs 3 LLM forward passes (72 total). Only the final latents are transferred to Worker 1 for VAE decoding.
@@ -1495,11 +1493,12 @@ This supports:
 1. User sends: "Generate a sunset over mountains"
 2. API Server → Conductor: {text: "Generate...", model: "show-o2"}
 3. Conductor:
-   a. active_graph = showo2.get_active_graph(inp=[TEXT], out=[IMAGE])
+   a. Instantiates a new `RequestData` object
    b. Assign: ALL stages → Worker 0 (forced co-location: LLM + diffusion_head + euler_step)
    c. vae_decoder → Worker 1
    d. Ready: text_emb (has text input)
 4. Dispatch text_emb → Worker 0
+... Worker 0 runs decode (sending appropriate SUBGRAPH_DONE signals to coductor), produces <BOI>, which conductor sees and starts image generation phase ...
 5. Worker 0 starts Loop(50):
    For each of 50 iterations:
      a. LLM full forward pass (text_emb + img_emb + current latents)
@@ -1510,6 +1509,7 @@ This supports:
 6. Conductor: vae_decoder becomes ready
 7. Dispatch vae_decoder → Worker 1
 8. Worker 1: VAE decode → stream image → API Server
+... Conductor waits for <EOS> ...
 9. Conductor finishes request
 ```
 
@@ -1521,24 +1521,23 @@ This supports:
 1. User sends: audio recording + image
 2. API Server → Conductor: {audio: audio.wav, image: img.jpg, model: "qwen3-omni"}
 3. Conductor:
-   a. active_graph includes: encoders, thinker (AR text), talker (AR speech)
+   a. Instantiates a new `RequestData` object
    b. Assign: vit + audio_encoder + thinker → Worker 0 (30B MoE)
               talker + mtp + code2wav → Worker 1 (3B MoE)
    c. Ready: vit_encoder (has image), audio_encoder (has audio)
-4. Dispatch encoders → Worker 0 (parallel)
-5. Worker 0 completes encoders → thinker becomes ready
-6. Dispatch thinker → Worker 0
-7. Worker 0 runs thinker decode loop:
+4. Dispatch encoder inputs → Worker 0 (parallel). Send SUBGRAPH_DONE signal.
+Thinker becomes ready on Worker 0 (internal Worker scheduling).
+5. Worker 0 runs thinker decode loop:
    - Streams text tokens → API Server (STREAM_OUT)
    - Streams layer-0 embeddings + layer-24 hidden states (accept_hidden_layer) + token IDs → Worker 1 (RELAY)
-   - At <EOS>: sends DONE_WITH_FWD → Conductor
-8. Worker 1 (talker loop, running concurrently):
+6. Once SUBGRAPH_DONE for the thinker is sent to the conductor, the conductor immediately starts a new forward pass. 
+7. Worker 1 (talker loop, running concurrently):
    - Buffers incoming hidden states + token IDs from RELAY
    - When sufficient data: runs talker AR decode
    - Talker → MTP module (residual codebooks) → Code2Wav → audio chunks
    - Streams audio → API Server (STREAM_OUT)
    - On receiving STOP from Conductor: finishes current buffer, winds down
-9. Conductor finishes request when both thinker and talker complete
+8. Conductor finishes request when both thinker and talker complete
 ```
 
 **Key features**:
@@ -1553,16 +1552,15 @@ This supports:
 1. User sends: "Hello world" (text-to-speech)
 2. API Server → Conductor: {text: "Hello world", model: "orpheus"}
 3. Conductor:
-   a. active_graph = orpheus.get_active_graph(inp=[TEXT], out=[AUDIO])
+   a. Instantiates a new `RequestData` object
    b. Assign: preprocess + LLM + detokenizer → Worker 0
-4. Worker 0 runs VoxServe-style loop:
+4. Worker 0 runs VoxServe-style loop (with inputs passing in from the conductor at every forward pass, and SUBGRAPH_DONE messages passing from the worker to the condutor):
    a. Preprocess: tokenize text, allocate KV cache, init decoder cache
    b. LLM prefill
    c. LLM decode loop (continuous batching):
       - At model-specific intervals (e.g., 28 tokens for Orpheus, 10 for CSM, 25 for GLM): run detokenizer
       - Detokenizer produces audio chunk → stream to API Server (STREAM_OUT)
-      - At EOS: DONE_WITH_FWD → Conductor
-5. Conductor finishes request
+5. Conductor finishes request upon seeing <EOS>
 ```
 
 **Key**: This is the existing VoxServe pattern, preserved as-is within the new architecture. The model's `run_stage()` internally handles the prefill→decode→detokenize pipeline.
