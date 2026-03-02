@@ -47,6 +47,17 @@ class DummyModel(Model):
              )
         ])
 
+    def get_stage_engine_types(self) -> dict[str, str]:
+        return {
+            "text_emb": "enc_dec",
+            "concat_text": "enc_dec",
+            "image_emb": "enc_dec",
+            "concat_img": "enc_dec",
+            "LLM": "ar",
+            "flow": "flow",
+            "VAE_dec": "enc_dec",
+        }
+
     def get_phase_graphs(self):
         prefill = Sequential([
             Parallel([self._get_text_emb(), self._get_img_emb()]),

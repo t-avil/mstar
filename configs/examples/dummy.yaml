@@ -2,6 +2,9 @@
 # This is NOT the final design; it's just a placeholder until we have a more
 # detailed discussion about configs and subgraphs and colocation/disaggregation.
 
+model: "dummy"
+eos_token_id: 2
+
 stage_groups:
   - stage_names:
       - text_emb

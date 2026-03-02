@@ -1,18 +1,51 @@
-
+import atexit
+import multiprocessing as mp
+import os
+import time
+from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass, field
-import time
 
 import numpy as np
 
 from mminf.communication.communicator import ZMQCommunicator
 from mminf.graph.base import GraphPointer, TensorPointerInfo
 from mminf.ipc_formats import (
-    ConductorMessageType, InputSignals,
-    NewRequest, NewRequestConductor, RemoveRequest, SubgraphsDone, WorkerMessage,
-    WorkerMessageType
+    ConductorMessageType,
+    InputSignals,
+    NewRequest,
+    NewRequestConductor,
+    RemoveRequest,
+    SubgraphsDone,
+    WorkerMessage,
+    WorkerMessageType,
 )
-from mminf.model.base import CurrentForwardMetadata, Model
+from mminf.model.base import CurrentForwardMetadata, Model, Subgraph
+
+
+def _worker_process_target(
+    worker_id: str,
+    worker_ids: list[str],
+    my_subgraphs: list[Subgraph],
+    engine_configs: list[dict],
+    all_subgraph_ids_to_phases: dict[str, set[str]],
+    all_subgraph_ids_to_stages: dict[str, list[str]],
+    hostname: str,
+    socket_path_prefix: str,
+):
+    """Top-level target for spawned worker processes. Must be module-level for picklability."""
+    from mminf.worker.worker import Worker
+    worker = Worker(
+        worker_id=worker_id,
+        worker_ids=worker_ids,
+        my_subgraphs=my_subgraphs,
+        engine_configs=engine_configs,
+        all_subgraph_ids_to_phases=all_subgraph_ids_to_phases,
+        all_subgraph_ids_to_stages=all_subgraph_ids_to_stages,
+        hostname=hostname,
+        socket_path_prefix=socket_path_prefix,
+    )
+    worker.run()
 
 
 @dataclass
@@ -39,28 +72,108 @@ class DummyConductor:
     """
     def __init__(
         self,
-        worker_ids: list[str],
         model: Model,
         model_config_file: str,
         eos_token_id: int,
-        socket_path_prefix: str="/tmp/mminf"
+        socket_path_prefix: str = "/tmp/mminf",
+        hostname: str = "localhost",
     ):
         self.requests: dict[str, RequestData] = {}
-        self.worker_ids = worker_ids
         self.model = model
         self.eos_token_id = eos_token_id
+        self.hostname = hostname
+        self.socket_path_prefix = socket_path_prefix
+        self._worker_processes: list[mp.Process] = []
 
         self.subgraphs = {
-            subgraph.subgraph_id: subgraph \
-                for subgraph in model.get_subgraphs(model_config_file)
+            subgraph.subgraph_id: subgraph
+            for subgraph in model.get_subgraphs(model_config_file)
         }
-        # TODO: properly launch workers
+
+        os.makedirs(socket_path_prefix, exist_ok=True)
+        self._derive_worker_info()
+        self._launch_workers()
 
         self.communicator = ZMQCommunicator(
             my_id="conductor",
-            push_ids=worker_ids + ["api_server"],
-            ipc_socket_path_prefix=socket_path_prefix
+            push_ids=self.worker_ids + ["api_server"],
+            ipc_socket_path_prefix=socket_path_prefix,
         )
+
+    def _derive_worker_info(self):
+        """Derive per-rank worker info from subgraphs and model engine types."""
+        stage_engine_types = self.model.get_stage_engine_types()
+
+        # Collect unique ranks and per-rank subgraphs
+        rank_to_subgraphs: dict[int, list[Subgraph]] = defaultdict(list)
+        for subgraph in self.subgraphs.values():
+            for rank in subgraph.ranks:
+                rank_to_subgraphs[rank].append(subgraph)
+
+        sorted_ranks = sorted(rank_to_subgraphs.keys())
+        self.worker_ids = [f"worker_{rank}" for rank in sorted_ranks]
+
+        # Per-worker subgraphs, engine configs
+        self._per_worker_subgraphs: dict[str, list[Subgraph]] = {}
+        self._per_worker_engine_configs: dict[str, list[dict]] = {}
+
+        for rank in sorted_ranks:
+            worker_id = f"worker_{rank}"
+            subgraphs = rank_to_subgraphs[rank]
+            self._per_worker_subgraphs[worker_id] = subgraphs
+
+            # Collect engine configs: group stages by engine type
+            engine_type_to_stages: dict[str, list[str]] = defaultdict(list)
+            for sg in subgraphs:
+                for stage_name in sg.section.get_stage_names():
+                    etype = stage_engine_types[stage_name]
+                    if stage_name not in engine_type_to_stages[etype]:
+                        engine_type_to_stages[etype].append(stage_name)
+
+            self._per_worker_engine_configs[worker_id] = [
+                {"engine_type": etype, "stage_names": stages, "model_config": {}}
+                for etype, stages in engine_type_to_stages.items()
+            ]
+
+        # Global maps needed by all workers
+        self._all_subgraph_ids_to_phases: dict[str, set[str]] = {
+            sg_id: sg.phases for sg_id, sg in self.subgraphs.items()
+        }
+        self._all_subgraph_ids_to_stages: dict[str, list[str]] = {
+            sg_id: sg.section.get_stage_names() for sg_id, sg in self.subgraphs.items()
+        }
+
+    def _launch_workers(self):
+        """Spawn one process per worker rank using spawn context."""
+        ctx = mp.get_context("spawn")
+        for worker_id in self.worker_ids:
+            p = ctx.Process(
+                target=_worker_process_target,
+                kwargs={
+                    "worker_id": worker_id,
+                    "worker_ids": self.worker_ids,
+                    "my_subgraphs": self._per_worker_subgraphs[worker_id],
+                    "engine_configs": self._per_worker_engine_configs[worker_id],
+                    "all_subgraph_ids_to_phases": self._all_subgraph_ids_to_phases,
+                    "all_subgraph_ids_to_stages": self._all_subgraph_ids_to_stages,
+                    "hostname": self.hostname,
+                    "socket_path_prefix": self.socket_path_prefix,
+                },
+                daemon=True,
+            )
+            p.start()
+            self._worker_processes.append(p)
+
+        atexit.register(self.shutdown)
+
+    def shutdown(self):
+        """Terminate and join all worker processes."""
+        for p in self._worker_processes:
+            if p.is_alive():
+                p.terminate()
+        for p in self._worker_processes:
+            p.join(timeout=5)
+        self._worker_processes.clear()
 
     def _assign_subgraphs_to_workers(self) -> dict[str, str]:
         """
@@ -70,10 +183,10 @@ class DummyConductor:
         """
         # Do a random policy for now. TODO: refine this
         return {
-            subgraph_id: self.worker_ids[np.random.choice(subgraph.ranks)] \
-                for subgraph_id, subgraph in self.subgraphs.items()
+            subgraph_id: f"worker_{np.random.choice(subgraph.ranks)}"
+            for subgraph_id, subgraph in self.subgraphs.items()
         }
-    
+
     def _split_inputs_to_workers(
         self, subgraph_to_worker: dict[str, str],
         inputs: list[GraphPointer]
@@ -100,7 +213,7 @@ class DummyConductor:
         When a new request comes in from the API server, assign workers for each
         subgraph (for all possible execution phases, e.g., prefill, decode, image_gen),
         and notify the workers that the request has arrived + provide the appropriate
-        workers with the appropriate initial inputs for the forward pass 
+        workers with the appropriate initial inputs for the forward pass
         """
         subgraph_to_worker = self._assign_subgraphs_to_workers()
         request_data = RequestData(
@@ -151,7 +264,7 @@ class DummyConductor:
                     body=message
                 )
             )
-    
+
     def _set_current_subgraph_ids(
         self, request_id: str, phase: str
     ):
@@ -222,12 +335,12 @@ class DummyConductor:
                 )
             )
             self.communicator.send(worker, message)
-        
+
         request_data.fwd_inputs = fwd_inputs
         request_data.new_tokens = []
         request_data.completed_subgraph_ids = set()
         return False
-        
+
     def _process_subgraphs_done(
         self, body: SubgraphsDone
     ):
@@ -249,7 +362,7 @@ class DummyConductor:
         request_data.completed_subgraph_ids.update(
             body.subgraph_ids
         )
-        
+
         done_with_forward = request_data.current_subgraph_ids.issubset(
             request_data.completed_subgraph_ids
         )
@@ -269,15 +382,14 @@ class DummyConductor:
                         done_forward_passes.append(message.body.request_id)
                 else:
                     raise ValueError(f"Unknown message type: {message.message_type}")
-            
+
             eos_requests = []
             for request_id in done_forward_passes:
                 saw_eos = self._process_done_forward(request_id)
                 if saw_eos:
                     eos_requests.append(self.eos_token_id)
-            
+
             for request_id in eos_requests:
                 self._process_request_done(request_id)
-            
+
             time.sleep(0.1) # just for dummy conductor!
-            

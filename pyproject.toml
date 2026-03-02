@@ -12,6 +12,9 @@ requires-python = ">=3.12"
 
 dependencies = []
 
+[project.scripts]
+mminf-serve = "mminf.api_server.entrypoint:main"
+
 [project.optional-dependencies]
 dev = ["ruff>=0.4"]
 
