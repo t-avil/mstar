@@ -32,8 +32,11 @@ def _worker_process_target(
     all_subgraph_ids_to_stages: dict[str, list[str]],
     hostname: str,
     socket_path_prefix: str,
+    device: str = "cuda",
 ):
     """Top-level target for spawned worker processes. Must be module-level for picklability."""
+    import torch
+
     from mminf.worker.worker import Worker
     worker = Worker(
         worker_id=worker_id,
@@ -44,6 +47,7 @@ def _worker_process_target(
         all_subgraph_ids_to_stages=all_subgraph_ids_to_stages,
         hostname=hostname,
         socket_path_prefix=socket_path_prefix,
+        device=torch.device(device),
     )
     worker.run()
 
@@ -110,14 +114,14 @@ class DummyConductor:
             for rank in subgraph.ranks:
                 rank_to_subgraphs[rank].append(subgraph)
 
-        sorted_ranks = sorted(rank_to_subgraphs.keys())
-        self.worker_ids = [f"worker_{rank}" for rank in sorted_ranks]
+        self._sorted_ranks = sorted(rank_to_subgraphs.keys())
+        self.worker_ids = [f"worker_{rank}" for rank in self._sorted_ranks]
 
         # Per-worker subgraphs, engine configs
         self._per_worker_subgraphs: dict[str, list[Subgraph]] = {}
         self._per_worker_engine_configs: dict[str, list[dict]] = {}
 
-        for rank in sorted_ranks:
+        for rank in self._sorted_ranks:
             worker_id = f"worker_{rank}"
             subgraphs = rank_to_subgraphs[rank]
             self._per_worker_subgraphs[worker_id] = subgraphs
@@ -146,7 +150,7 @@ class DummyConductor:
     def _launch_workers(self):
         """Spawn one process per worker rank using spawn context."""
         ctx = mp.get_context("spawn")
-        for worker_id in self.worker_ids:
+        for rank, worker_id in zip(self._sorted_ranks, self.worker_ids, strict=True):
             p = ctx.Process(
                 target=_worker_process_target,
                 kwargs={
@@ -158,6 +162,7 @@ class DummyConductor:
                     "all_subgraph_ids_to_stages": self._all_subgraph_ids_to_stages,
                     "hostname": self.hostname,
                     "socket_path_prefix": self.socket_path_prefix,
+                    "device": f"cuda:{rank}",
                 },
                 daemon=True,
             )
