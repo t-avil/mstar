@@ -104,6 +104,14 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
         
     ):
         self.my_entity_id = my_entity_id
+
+        # NOTE: none of the designs for how to handle the values of self.tensors
+        # being a list are set in stone. This is a "reasonable initial
+        # implementation," but should change based on what makes sense for
+        # downstream changes (right now the code is "leaving breadcrumbs
+        # for a hypothetical thinker-talker", but we will have a better idea of
+        # what this should look like while implementing the actual thinker-
+        # talker relay)
         self.tensors: dict[NameAndRequestId, list[torch.Tensor]] = {}
         self.communicator = communicator
         self.protocol = protocol
@@ -234,7 +242,8 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
         # cleanup of tensors after they are used / batching of reads.
         ready: dict[str, list[GraphPtrAndLocalAddr]] = {}
         still_pending = []
-        # Collect ACKs to send: (source_entity, request_id) -> tensor_names and address
+        # Collect ACKs to send: (source_entity, request_id) -> tensor_names and
+        # **remote (not local) address**
         acks: dict[tuple[str, str], list[NameAndAddress]] = {}
 
         for ep in self.pending:
