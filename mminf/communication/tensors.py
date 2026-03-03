@@ -35,7 +35,7 @@ class TensorCommunicationManager(ABC):
     @abstractmethod
     def register_and_return_tensor_info(
         self, request_id: str, tensors: dict[str, list[torch.Tensor]],
-    ) -> dict[str, TensorPointerInfo]:
+    ) -> dict[str, list[TensorPointerInfo]]:
         """
         If relevant (e.g., mooncake rdma), registers buffers.
         Returns tensor name to TensorPointerInfo (contains addresses, datatypes,
@@ -118,7 +118,7 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
         # hold in all cases. We use the dict instead of a list because the index
         # of a list would change whenever tensors are removed from the list.
         # We can also, e.g., give each tensor a UUID.
-        self.tensors: dict[NameAndRequestId, dict[str, torch.Tensor]] = {}
+        self.tensors: dict[NameAndRequestId, dict[int, torch.Tensor]] = {}
 
         self.communicator = communicator
         self.protocol = protocol
@@ -146,9 +146,10 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
                 name, request_id=request_id
             )
             tensor_info[name] = []
+            self.tensors[key] = self.tensors.get(key, {})
 
             for tensor in tensors[name]:
-                self.tensors[key][tensor.data_ptr()] = tensors[name]
+                self.tensors[key][tensor.data_ptr()] = tensor
                 new_tensor_info = TensorPointerInfo(
                     dims=tensor.shape,
                     dtype=tensor.dtype,
@@ -183,23 +184,22 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
             request_id=request_id, tensors=tensors
         )
         for name in tensors:
-            for pointer, pointer_info in zip(name_to_pointers[name], pointer_info[name]):
-                pointer.tensor_info = pointer_info[name]
+            for pointer, pointer_info_elem in zip(name_to_pointers[name], pointer_info[name]):
+                pointer.tensor_info = pointer_info_elem
             
-    def cleanup(self, request_id: str, tensor_name: str, address: int | None=None):
+    def cleanup(self, request_id: str, tensor_name: str, addresses: list[int] | None=None):
         key = NameAndRequestId(tensor_name, request_id)
         if key not in self.tensors:
             return
         
         # By default, cleanup all tensors with the given key, unless the address
         # argument is provided
-        addresses = self.tensors[key].keys()
-        if address is not None:
-            if address not in addresses:
-                return
-            addresses = [address]
+        if addresses is None:
+            addresses = list(self.tensors[key].keys())
 
         for addr in addresses:
+            if addr not in self.tensors[key]:
+                continue
             if self.protocol == CommProtocol.RDMA and self.engine is not None:
                 ret_value = self.engine.unregister_memory(
                     self.tensors[key][addr].data_ptr()
@@ -213,10 +213,10 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
             key for key in self.tensors if key.request_id == request_id
         ]
         for key in keys_to_remove:
-            for addr, tensor in self.tensors[key].items():
+            for tensor in self.tensors[key].values():
                 if self.protocol == CommProtocol.RDMA and self.engine is not None:
                     self.engine.unregister_memory(tensor.data_ptr())
-                del self.tensors[key][addr]
+        self.tensors[key].clear()
         # Also remove any pending transfers for this request
         self.pending = [
             ep for ep in self.pending if ep.request_id != request_id
