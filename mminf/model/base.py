@@ -203,7 +203,7 @@ class Model(ABC):
     @abstractmethod
     def get_forward_pass_inputs(
         self, metadata: CurrentForwardMetadata,
-        persist_signals: dict[str, TensorPointerInfo],
+        persist_signals: dict[str, list[TensorPointerInfo]],
         prev_forward_metadata: CurrentForwardMetadata=None,
     ) -> list[GraphPointer]:
         """
@@ -233,10 +233,10 @@ class Model(ABC):
     def step(
         self, stage_name: str,
         phase: str,
-        input_tensors: dict[str, torch.Tensor],
+        input_tensors: dict[str, list[torch.Tensor]],
         state, # TODO: figure out state
         **kwargs
-    ) -> dict[str, torch.Tensor]:
+    ) -> dict[str, list[torch.Tensor]]:
         """
         Called by the worker to execute a stage
         """

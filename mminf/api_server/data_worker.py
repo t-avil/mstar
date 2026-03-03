@@ -98,23 +98,27 @@ class PreprocessWorkerThread:
     ):
         tensors = {}
         input_metadata = {}
+        # now everything is a list of tensors, even if there's only a single entry
         if input.text is not None:
             # Encode as UTF-8 bytes -> uint8 tensor
             byte_data = input.text.encode("utf-8")
-            tensors["text_input"] = torch.tensor(
+            tensors["text_input"] = [torch.tensor(
                 list(byte_data), dtype=torch.uint8, device=self.device
-            )
+            )]
 
         if input.file_paths is not None:
             for modality in input.file_paths:
-                for (i, filepath) in input.file_paths[modality]:
-                    key = f"{modality}_input_{i}"
+                key = f"{modality}_input"
+                tensors[key] = []
+                input_metadata[key] = [] # maybe make a class of tensors_and_metadata later (figure out how to use metadata)
 
+                for (i, filepath) in input.file_paths[modality]:
                     # ---- Image ----
                     if modality == "image":
                         img = torchvision.io.decode_image(filepath).to(self.device)  # uint8 CxHxW
                         img = img.float() / 255.0
-                        tensors[key] = img
+                        tensors[key].append(img)
+                        input_metadata[key].append({}) # cleanest, no metadata
 
                     # ---- Audio ----
                     elif modality == "audio":
@@ -123,22 +127,22 @@ class PreprocessWorkerThread:
                             channels_first=True
                         )
                         # waveform: (channels, time)
-                        tensors[key] = waveform
-                        input_metadata[key] = dict(
+                        tensors[key].append(waveform)
+                        input_metadata[key].append(dict(
                             sample_rate=sample_rate,
                             channels_first=True
-                        )
+                        ))
 
                     # ---- Video ----
                     elif modality == "video":
                         decoder = VideoDecoder(filepath, device=self.device)
                         video = torch.stack([frame for frame in decoder]).float() / 255.0
-                        tensors[key] = video
-                        input_metadata[key] = asdict(decoder.metadata)
+                        tensors[key].append(video)
+                        input_metadata[key].append(asdict(decoder.metadata))
         
         initial_signals = self.tensor_manager.register_and_return_tensor_info(
             request_id=input.request_id,
-            tensors={name: [tensor] for name, tensor in tensors.items()}
+            tensors=tensors # dict(modality_input: list[tensors])
         )
 
         msg = ConductorMessage(

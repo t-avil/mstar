@@ -54,16 +54,16 @@ class InputSignals(MessageBody):
 
 
 @dataclass
-class NameAndAddress:
+class NameAndUuid:
     tensor_id: str
-    address: int
+    uuid: str
 
 
 @dataclass
 class TensorReceived(MessageBody):
     request_id: str
-    successful_tensors: list[NameAndAddress]
-    failed_tensor_ids: list[str]
+    successful_tensors: list[NameAndUuid]
+    failed_tensor_ids: list[NameAndUuid]
 
 
 @dataclass
@@ -84,10 +84,10 @@ class ConductorMessageType(Enum):
 @dataclass
 class NewRequestConductor(MessageBody):
     request_id: str
-    initial_signals: dict[str, TensorPointerInfo]
+    initial_signals: dict[str, list[TensorPointerInfo]]
     initial_input_modalities: list[str]
     initial_output_modalities: list[str]
-    input_metadata: dict[str, dict]
+    input_metadata: dict[str, list[dict]]
     model_kwargs: dict
 
 

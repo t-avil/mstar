@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from copy import deepcopy
 from dataclasses import dataclass, field
-
+from enum import Enum
 
 def update_list_dicts(signals: dict[str, list], new_signals: dict[str, list]):
     for key in new_signals:
@@ -17,15 +17,23 @@ class TensorPointerInfo:
     dtype: str
     nbytes: int
     address: int
+    uuid: str # for all the cleanups, list[tensor] indexing
     source_session_id: str # e.g., f"{HOSTNAME}:{client_engine.get_rpc_port()}"
     source_entity: str # which {worker, api_server} the tensor is on
 
+# class ConnectionType(Enum):
+#     RELAY = "relay" # thinker-talker
+#     BLOCKING = "blocking" # we need to wait for all tensors in the list to finish
+    
+# assume blocking case for all stages for now.
 
 @dataclass
 class GraphPointer:
     next_stage: str
+    # connection_type: ConnectionType
+    # wait_for_next_tensor : bool = True
     name: str
-    tensor_info: TensorPointerInfo | None = field(default=None)
+    tensor_info: list[TensorPointerInfo] = field(default_factory=list)
 
     # Flags
     back_to_conductor: bool = field(default=False)

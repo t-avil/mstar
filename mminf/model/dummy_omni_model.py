@@ -79,11 +79,11 @@ class DummyOmniModel(Model):
 
     def get_forward_pass_inputs(
         self, metadata: CurrentForwardMetadata,
-        persist_signals: dict[str, TensorPointerInfo],
+        persist_signals: dict[str, list[TensorPointerInfo]],
         prev_forward_metadata: CurrentForwardMetadata = None,
     ) -> list[GraphPointer]:
         ptr = GraphPointer(next_stage="ThinkerLLM", name="input_ids")
-        ptr.tensor_info = persist_signals.get("input_ids", None)
+        ptr.tensor_info = persist_signals.get("input_ids", [])
         return [ptr]
 
     def update_for_next_forward(
@@ -98,7 +98,7 @@ class DummyOmniModel(Model):
     def step(
         self, stage_name: str,
         phase: str,
-        input_tensors: dict[str, torch.Tensor],
+        input_tensors: dict[str, list[torch.Tensor]],
         state,
         **kwargs,
     ):

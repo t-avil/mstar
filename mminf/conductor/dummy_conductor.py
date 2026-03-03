@@ -56,13 +56,15 @@ def _worker_process_target(
 class RequestData:
     current_forward_metadata: CurrentForwardMetadata
     fwd_inputs: list[GraphPointer]
-    persist_signals: dict[str, TensorPointerInfo] # signals passed back to conductor
+    # name -> list[TensorPointerInfo]
+    persist_signals: dict[str, list[TensorPointerInfo]] # signals passed back to conductor
     subgraph_to_worker: dict[str, str]
-    new_tokens: list[int]
+    new_tokens: list[int] # TODO: next PR (check for BOI EOS)
 
     # for tracking progress
     all_subgraph_ids: set[str]
     current_subgraph_ids: set[str]
+    # make sure to check all tensors in the list are completed (BLOCKING case)
     completed_subgraph_ids: set[str] = field(default_factory=set)
 
     # TODO: will need to add to this as we build things out
