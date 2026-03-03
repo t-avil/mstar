@@ -56,7 +56,7 @@ class TensorCommunicationManager(ABC):
         pass
 
     @abstractmethod
-    def get_tensor(self, request_id: str, tensor_name: str, index: int=0) -> torch.Tensor:
+    def get_tensor(self, request_id: str, tensor_name: str, local_addr: int=None) -> torch.Tensor:
         pass
 
     @abstractmethod
@@ -112,7 +112,14 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
         # for a hypothetical thinker-talker", but we will have a better idea of
         # what this should look like while implementing the actual thinker-
         # talker relay)
-        self.tensors: dict[NameAndRequestId, list[torch.Tensor]] = {}
+
+        # We store a mapping of tensor (local) address to tensors. We use this
+        # instead of a queue because we aren't sure if the FIFO property will
+        # hold in all cases. We use the dict instead of a list because the index
+        # of a list would change whenever tensors are removed from the list.
+        # We can also, e.g., give each tensor a UUID.
+        self.tensors: dict[NameAndRequestId, dict[str, torch.Tensor]] = {}
+
         self.communicator = communicator
         self.protocol = protocol
         self.my_session_id = communicator.get_session_id()
@@ -141,7 +148,7 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
             tensor_info[name] = []
 
             for tensor in tensors[name]:
-                self.tensors[key].append(tensor)
+                self.tensors[key][tensor.data_ptr()] = tensors[name]
                 new_tensor_info = TensorPointerInfo(
                     dims=tensor.shape,
                     dtype=tensor.dtype,
@@ -186,47 +193,48 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
         
         # By default, cleanup all tensors with the given key, unless the address
         # argument is provided
-        idxs = list(range(len(self.tensors[key])))
+        addresses = self.tensors[key].keys()
         if address is not None:
-            try:
-                idxs = [
-                    tensor.data_ptr() == address for tensor in self.tensors[key]
-                ].index(True)
-            except ValueError as e:
-                # address not found
+            if address not in addresses:
                 return
+            addresses = [address]
 
-        for idx in idxs:
+        for addr in addresses:
             if self.protocol == CommProtocol.RDMA and self.engine is not None:
                 ret_value = self.engine.unregister_memory(
-                    self.tensors[key][idx].data_ptr()
+                    self.tensors[key][addr].data_ptr()
                 )
                 if ret_value != 0:
                     raise RuntimeError("Mooncake memory unregistration failed.")
-            del self.tensors[key][idx]
+            del self.tensors[key][addr]
 
     def cleanup_request(self, request_id: str):
         keys_to_remove = [
             key for key in self.tensors if key.request_id == request_id
         ]
         for key in keys_to_remove:
-            for i, tensor in enumerate(self.tensors[key]):
+            for addr, tensor in self.tensors[key].items():
                 if self.protocol == CommProtocol.RDMA and self.engine is not None:
                     self.engine.unregister_memory(tensor.data_ptr())
-                del self.tensors[key][i]
+                del self.tensors[key][addr]
         # Also remove any pending transfers for this request
         self.pending = [
             ep for ep in self.pending if ep.request_id != request_id
         ]
 
-    def get_tensor(self, request_id: str, tensor_name: str, index: int=0) -> torch.Tensor:
-        # It is the burden of the worker to access the correct index. For now
-        # (in our default non-thinker-talker request flow), we assume that the
-        # element of self.tensors is a singleton list; e.g., this is ensured by
+    def get_tensor(self, request_id: str, tensor_name: str, local_addr: int=None) -> torch.Tensor:
+        # It is the burden of the worker to access the correct local_addr.
+        # For now (in our default non-thinker-talker request flow), we assume
+        #  that the element of self.tensors is a singleton; this is ensured by
         # worker.py -> _cleanup_consumed_inputs.
+
+        if local_addr is None:
+            local_addr = list(self.tensors[NameAndRequestId(
+                tensor_name, request_id
+            )].keys())[0] # in modern Python, this is the oldest element of the dict
         return self.tensors[NameAndRequestId(
             tensor_name, request_id
-        )][index]
+        )][local_addr]
 
     def get_ready_tensors(self) -> dict[str, list[GraphPtrAndLocalAddr]]:
         """
@@ -297,7 +305,9 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
             info = ptr.tensor_info
             dst = torch.empty(info.dims, dtype=info.dtype, device="cuda")
             addrs.append(dst.data_ptr())
-            self.tensors[NameAndRequestId(ptr.name, request_id)] = dst
+            self.tensors[NameAndRequestId(
+                ptr.name, request_id
+            )][dst.data_ptr()] = dst
 
             if self.protocol == CommProtocol.RDMA:
                 self.engine.register_memory(dst.data_ptr(), info.nbytes)

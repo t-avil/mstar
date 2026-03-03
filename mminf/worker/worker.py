@@ -188,7 +188,7 @@ class Worker:
             for input_name in stage.input_ids:
                 # By default, we are cleaning up all tensors with a given input_name,
                 # as we expect the corresponding element of self.tensor_manager.tensors
-                # to be a singleton list for now. This needs to be changed when
+                # to be a singleton dict for now. This needs to be changed when
                 # implementing, e.g., thinker -> talker relay
                 self.tensor_manager.cleanup(request_id, input_name)
 
