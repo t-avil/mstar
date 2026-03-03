@@ -89,8 +89,11 @@ class DummyWorker:
 
     def _handle_tensor_received(self, body: TensorReceived):
         """Sender-side cleanup: receiver confirmed RDMA read, free source buffers."""
-        for tensor_name in body.successful_tensor_ids:
-            self.tensor_manager.cleanup(body.request_id, tensor_name)
+        for name_addr in body.successful_tensors:
+            self.tensor_manager.cleanup(
+                body.request_id, name_addr.tensor_id,
+                name_addr.address
+            )
 
     def _process_new_inputs(
         self, body: InputSignals

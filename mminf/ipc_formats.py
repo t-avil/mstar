@@ -54,10 +54,15 @@ class InputSignals(MessageBody):
 
 
 @dataclass
+class NameAndAddress:
+    tensor_id: str
+    address: int
+
+
+@dataclass
 class TensorReceived(MessageBody):
     request_id: str
-    receiving_entity: str
-    successful_tensor_ids: list[str]
+    successful_tensors: list[NameAndAddress]
     failed_tensor_ids: list[str]
 
 
