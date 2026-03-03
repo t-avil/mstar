@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from mminf.api_server.data_worker import PreprocessInput, PreprocessWorker
 import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,11 +20,6 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from mminf.communication.communicator import ZMQCommunicator
-from mminf.ipc_formats import (
-    ConductorMessage,
-    ConductorMessageType,
-    NewRequestConductor,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -85,11 +81,17 @@ class APIServer:
         self,
         socket_path_prefix: str = "/tmp/mminf",
         upload_dir: str = "/tmp/mminf_uploads",
+        hostname: str="localhost",
         timeout_seconds: float = 600.0,
     ):
         self.upload_dir = Path(upload_dir)
         self.upload_dir.mkdir(parents=True, exist_ok=True)
         self.timeout_seconds = timeout_seconds
+
+        self.preprocess_worker = PreprocessWorker(
+            hostname=hostname,
+            socket_path_prefix=socket_path_prefix
+        )
 
         # Concurrent request tracking
         self.pending_requests: dict[str, dict] = {}
@@ -148,22 +150,15 @@ class APIServer:
                 "output_modalities": output_modalities,
             }
 
-        # initial_signals: in a full pipeline a preprocessor worker would
-        # convert raw files into GPU tensors and produce TensorPointerInfo
-        # entries here.  For now we leave it empty — the conductor receives
-        # the modality lists and can arrange preprocessing itself.
-        initial_signals: dict = {}
+        self.preprocess_worker.new_request(PreprocessInput(
+            request_id=request_id,
+            text=text,
+            file_paths=file_paths,
+            input_modalities=input_modalities,
+            output_modalities=output_modalities,
+            model_kwargs=model_kwargs
+        ))
 
-        msg = ConductorMessage(
-            message_type=ConductorMessageType.NEW_REQUEST,
-            body=NewRequestConductor(
-                request_id=request_id,
-                initial_signals=initial_signals,
-                initial_input_modalities=input_modalities,
-                initial_output_modalities=output_modalities,
-            ),
-        )
-        self.communicator.send("conductor", msg)
         logger.info(
             "Request %s submitted  in=%s  out=%s",
             request_id, input_modalities, output_modalities,
@@ -297,6 +292,7 @@ class APIServer:
     # ----------------------------------------------------------
 
     def cleanup(self) -> None:
+        self.preprocess_worker.shutdown()
         self.running = False
         if hasattr(self, "_msg_thread") and self._msg_thread.is_alive():
             self._msg_thread.join(timeout=2)

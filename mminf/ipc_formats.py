@@ -82,6 +82,8 @@ class NewRequestConductor(MessageBody):
     initial_signals: dict[str, TensorPointerInfo]
     initial_input_modalities: list[str]
     initial_output_modalities: list[str]
+    input_metadata: dict[str, dict]
+    model_kwargs: dict
 
 
 @dataclass

@@ -88,7 +88,8 @@ class Worker:
 
         # Start RDMA reads for tensors that have tensor_info
         self.tensor_manager.start_read_tensors(
-            body.request_id, body.initial_inputs
+            body.request_id, body.initial_inputs,
+            device=self.device
         )
 
         # Signal-only pointers (tensor_info is None) can be processed immediately
@@ -114,7 +115,10 @@ class Worker:
         self.subgraphs_manager.update_phase(body.request_id, body.phase)
 
         # Start RDMA reads for tensors with tensor_info
-        self.tensor_manager.start_read_tensors(body.request_id, body.inputs)
+        self.tensor_manager.start_read_tensors(
+            body.request_id, body.inputs,
+            device=self.device
+        )
 
         # Signal-only pointers can be processed immediately
         signal_only = [ptr for ptr in body.inputs if ptr.tensor_info is None]
@@ -226,7 +230,7 @@ class Worker:
                     if name in external_names
                 }
                 if external_tensors:
-                    self.tensor_manager.register_and_prepare_to_send(
+                    self.tensor_manager.register_and_populate_graph_edges(
                         request_id, external_tensors, external_pointers
                     )
 
