@@ -189,6 +189,11 @@ class Model(ABC):
         pass
 
     @abstractmethod
+    def get_stage_engine_types(self) -> dict[str, str]:
+        """Returns stage_name -> engine_type ("ar", "flow", "enc_dec")."""
+        pass
+
+    @abstractmethod
     def get_initial_forward_metadata(
         self, input_modalities: list[str],
         output_modalities: list[str]

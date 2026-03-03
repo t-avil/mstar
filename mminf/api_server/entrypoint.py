@@ -5,6 +5,7 @@ import base64
 import collections
 import json
 import logging
+import multiprocessing as mp
 import threading
 import time
 import uuid
@@ -68,6 +69,30 @@ class APIServerMessage:
     """Envelope for messages received by the API server."""
     message_type: str  # "result_chunk" | "request_complete"
     body: ResultChunk | RequestComplete
+
+
+# ------------------------------------------------------------------
+# Conductor process target (top-level for picklability with spawn)
+# ------------------------------------------------------------------
+
+def _conductor_process_target(
+    model_name: str,
+    config_path: str,
+    eos_token_id: int,
+    socket_path_prefix: str,
+):
+    """Runs DummyConductor.run() in a spawned process."""
+    from mminf.conductor.dummy_conductor import DummyConductor
+    from mminf.model.registry import get_model_class
+
+    model = get_model_class(model_name)()
+    conductor = DummyConductor(
+        model=model,
+        model_config_file=config_path,
+        eos_token_id=eos_token_id,
+        socket_path_prefix=socket_path_prefix,
+    )
+    conductor.run()
 
 
 # ------------------------------------------------------------------
@@ -440,9 +465,12 @@ async def shutdown_event():
 def main():
     import argparse
 
+    import yaml
+
     parser = argparse.ArgumentParser(
-        description="mminf Multimodal Inference API Server"
+        description="mminf — launch API server and conductor from a config file"
     )
+    parser.add_argument("--config", type=str, required=True, help="Path to YAML config file")
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument(
@@ -468,6 +496,22 @@ def main():
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
+    with open(args.config) as f:
+        config = yaml.safe_load(f)
+
+    model_name = config.get("model", "dummy")
+    eos_token_id = config.get("eos_token_id", 2)
+
+    # Spawn conductor in a separate process
+    ctx = mp.get_context("spawn")
+    conductor_proc = ctx.Process(
+        target=_conductor_process_target,
+        args=(model_name, args.config, eos_token_id, args.socket_path_prefix),
+        daemon=True,
+    )
+    conductor_proc.start()
+    logger.info("Conductor process started (pid=%d, model=%s)", conductor_proc.pid, model_name)
+
     global api_server
     api_server = APIServer(
         socket_path_prefix=args.socket_path_prefix,
@@ -483,6 +527,8 @@ def main():
     finally:
         if api_server is not None:
             api_server.cleanup()
+        conductor_proc.terminate()
+        conductor_proc.join(timeout=5)
 
 
 if __name__ == "__main__":
