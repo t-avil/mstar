@@ -238,7 +238,7 @@ class Worker:
                 }
                 if external_tensors:
                     self.tensor_manager.register_and_populate_graph_edges(
-                        request_id, external_tensors, external_pointers
+                        request_id, {name: [tensor] for name, tensor in external_tensors.items()}, external_pointers
                     )
 
             output_pointers[request_id] = stage.outputs

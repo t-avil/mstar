@@ -138,7 +138,7 @@ class PreprocessWorkerThread:
         
         initial_signals = self.tensor_manager.register_and_return_tensor_info(
             request_id=input.request_id,
-            tensors=tensors
+            tensors={name: [tensor] for name, tensor in tensors.items()}
         )
 
         msg = ConductorMessage(
