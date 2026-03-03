@@ -216,7 +216,7 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
             for tensor in self.tensors[key].values():
                 if self.protocol == CommProtocol.RDMA and self.engine is not None:
                     self.engine.unregister_memory(tensor.data_ptr())
-        self.tensors[key].clear()
+        del self.tensors[key]
         # Also remove any pending transfers for this request
         self.pending = [
             ep for ep in self.pending if ep.request_id != request_id
