@@ -108,8 +108,11 @@ class Worker:
 
     def _handle_tensor_received(self, body: TensorReceived) -> None:
         """Sender-side cleanup: receiver confirmed RDMA read, free source buffers."""
-        for tensor_name in body.successful_tensor_ids:
-            self.tensor_manager.cleanup(body.request_id, tensor_name)
+        for name_addr in body.successful_tensors:
+            self.tensor_manager.cleanup(
+                body.request_id, name_addr.tensor_id,
+                name_addr.address
+            )
 
     def _process_new_inputs(self, body: InputSignals) -> None:
         self.subgraphs_manager.update_phase(body.request_id, body.phase)
@@ -147,7 +150,7 @@ class Worker:
         ready = self.tensor_manager.get_ready_tensors()
         for request_id, pointers in ready.items():
             self.subgraphs_manager.process_new_inputs(
-                request_id=request_id, inputs=pointers
+                request_id=request_id, inputs=[p.graph_pointer for p in pointers]
             )
 
     # ------------------------------------------------------------------
@@ -183,6 +186,10 @@ class Worker:
         for i, request_id in enumerate(batch.request_ids):
             stage = batch.stages[i] if i < len(batch.stages) else batch.stages[0]
             for input_name in stage.input_ids:
+                # By default, we are cleaning up all tensors with a given input_name,
+                # as we expect the corresponding element of self.tensor_manager.tensors
+                # to be a singleton dict for now. This needs to be changed when
+                # implementing, e.g., thinker -> talker relay
                 self.tensor_manager.cleanup(request_id, input_name)
 
     # ------------------------------------------------------------------
@@ -218,7 +225,7 @@ class Worker:
             routing = routing_per_request[request_id]
 
             # For tensors going to other workers, register for RDMA send
-            external_pointers = []
+            external_pointers: list[GraphPointer] = []
             for worker_id, pointers in routing.to_workers.items():
                 external_pointers.extend(pointers)
 
@@ -231,7 +238,7 @@ class Worker:
                 }
                 if external_tensors:
                     self.tensor_manager.register_and_populate_graph_edges(
-                        request_id, external_tensors, external_pointers
+                        request_id, {name: [tensor] for name, tensor in external_tensors.items()}, external_pointers
                     )
 
             output_pointers[request_id] = stage.outputs
