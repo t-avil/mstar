@@ -44,8 +44,8 @@ class PerRequestStageQueues:
         return a dictionary of external output pointers (ones that are feeding
         to different subgraphs)
         """
-        for input in new_inputs:
-            input._persist_for_loop = False
+        # for input in new_inputs:
+        #     input._persist_for_loop = False
 
         if self.waiting is None:
             return ProcessedInputs(
@@ -61,7 +61,7 @@ class PerRequestStageQueues:
         
         self._update_ready_waiting()
         return ProcessedInputs(
-            for_other_subgraphs=external_outputs,
-            routed_to_this_subgraph=ingested,
+            for_other_subgraphs=external_outputs, # inputs **not** utilized for self.waiting
+            routed_to_this_subgraph=ingested, # inputs utilized for self.waiting
         )
 

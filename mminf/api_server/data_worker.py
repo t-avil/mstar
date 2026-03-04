@@ -140,10 +140,15 @@ class PreprocessWorkerThread:
                         tensors[key].append(video)
                         input_metadata[key].append(asdict(decoder.metadata))
         
-        initial_signals = self.tensor_manager.register_and_return_tensor_info(
+        initial_signals = self.tensor_manager.store_and_return_tensor_info(
             request_id=input.request_id,
             tensors=tensors # dict(modality_input: list[tensors])
         )
+        for name, tensor_infos in initial_signals.items():
+            self.tensor_manager.register_for_send(
+                request_id=input.request_id, name=name,
+                uuids=[info.uuid for info in tensor_infos]
+            )
 
         msg = ConductorMessage(
             message_type=ConductorMessageType.NEW_REQUEST,

@@ -184,15 +184,17 @@ class SubgraphsManager:
         subgraph_ids = self.per_request_info[request_id].phase_subgraph_ids
 
         completed_subgraphs = []
-        routed_to_this_subgraph = []
+        routed_to_this_worker = [] # list of graph edges
+        external_outputs = outputs
         for subgraph_id in subgraph_ids:
-            queue = self.queues[subgraph_id]
+            queue = self.queues[subgraph_id] # ready / waiting graph node queue
             # process_new_inputs consumes outputs that are used as
-            # stage inputs within `queue`, and returns the graph pointers that
-            # were not consumed
-            processed_inputs = queue.process_new_inputs(request_id, outputs)
-            outputs = processed_inputs.for_other_subgraphs
-            routed_to_this_subgraph += processed_inputs.routed_to_this_subgraph
+            # stage inputs within `queue`
+            processed_inputs = queue.process_new_inputs(request_id, external_outputs)
+
+            # keep updating outputs to be the edges that have not yet been utilized
+            external_outputs = processed_inputs.for_other_subgraphs
+            routed_to_this_worker += processed_inputs.routed_to_this_subgraph
             if queue.is_done(request_id):
                 completed_subgraphs.append(subgraph_id)
                 queue.reset(request_id)
@@ -206,7 +208,7 @@ class SubgraphsManager:
         # (e.g., concat_text outputs text_emb -> LLM with back_to_conductor=True),
         # so we do NOT filter on back_to_conductor here.
         to_workers: dict[str, list[GraphPointer]] = {}
-        for ptr in outputs:
+        for ptr in external_outputs:
             stage_phase = StageAndPhase(
                 stage=ptr.next_stage, phase=self.get_phase(request_id)
             )
@@ -223,7 +225,7 @@ class SubgraphsManager:
             to_workers[worker_id].append(ptr)
 
         return StageOutputRouting(
-            routed_to_this_subgraph=routed_to_this_subgraph,
+            routed_to_this_subgraph=routed_to_this_worker,
             to_conductor=to_conductor,
             to_workers=to_workers,
             completed_subgraphs=completed_subgraphs

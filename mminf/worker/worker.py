@@ -183,7 +183,7 @@ class Worker:
     # Input cleanup
     # ------------------------------------------------------------------
 
-    def _cleanup_consumed_inputs(self, batch: ScheduledBatch) -> None: ## TODO: fix for loop
+    def _cleanup_consumed_inputs(self, batch: ScheduledBatch) -> None:
         """Free input tensors that were consumed by the just-executed stage."""
         for request_id, stage in batch.stage_objects.items():
             for input in stage.ready_inputs.values():
@@ -215,21 +215,32 @@ class Worker:
             # output name to list of tensors
             request_output_tensors = output.per_request_output_tensors.get(
                 request_id, {}
-            )
+            ) # name -> list of tensors
             output_pointers[request_id] = stage.outputs
+
             if not request_output_tensors:
+                # TODO (error handling?): this should not happen
                 continue
 
-            # TODO: for internal outputs, we don't have to do the actual RDMA
-            # registration for these internal inputs
-            # TODO: this is maybe WRONG check tomorrow!
-            routing = routing_per_request[request_id]
-            self.tensor_manager.register_and_populate_graph_edges(
+            self.tensor_manager.store_and_populate_graph_edges(
                 request_id=request_id,
                 tensors=request_output_tensors,
-                graph_pointers=routing.routed_to_this_subgraph + \
-                    routing.to_workers
+                graph_pointers=stage.outputs
             )
+
+            routing = routing_per_request[request_id]
+            seen_uuids = set()
+            for ptr in routing.to_conductor + list(routing.to_workers.values()):
+                uuids = [
+                    info.uuid for info in ptr.tensor_info \
+                        if info.uuid not in seen_uuids
+                ] # all uuids that have not been seen yet
+                if not uuids:
+                    continue
+                seen_uuids.update(uuids)
+                self.tensor_manager.register_for_send(
+                    request_id=request_id, name=ptr.name, uuids=uuids
+                )
 
         return output_pointers
 
@@ -308,5 +319,5 @@ class Worker:
             self._store_outputs(batch, output, routing_per_request)
 
             # 8. Send outputs to other workers / conductor
-            for request_id in batch.request_ids:
+            for request_id in batch.stage_objects.keys():
                 self._send_outputs(request_id, routing_per_request[request_id])

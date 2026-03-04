@@ -73,24 +73,31 @@ class TensorStore:
 
 class TensorCommunicationManager(ABC):
     @abstractmethod
-    def register_and_return_tensor_info(
+    def store_and_return_tensor_info(
         self, request_id: str, tensors: dict[str, list[torch.Tensor]],
     ) -> dict[str, list[TensorPointerInfo]]:
         """
-        If relevant (e.g., mooncake rdma), registers buffers.
         Returns tensor name to TensorPointerInfo (contains addresses, datatypes,
         num bytes, etc.) for each tensor.
         """
         pass
 
     @abstractmethod
-    def register_and_populate_graph_edges(
+    def store_and_populate_graph_edges(
         self, request_id: str, tensors: dict[str, list[torch.Tensor]],
         graph_pointers: list[GraphPointer]
     ):
         """
         Updates graph_pointers with required tensor info (addresses, datatypes,
-        num bytes, etc.).
+        num bytes, etc.) and UUID.
+        """
+        pass
+
+    @abstractmethod
+    def register_for_send(
+        self, request_id: str, name: str, uuids: list[str]
+    ):
+        """
         If relevant (e.g., mooncake rdma), registers buffers.
         """
         pass
@@ -174,7 +181,7 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
         # Per-transfer pending list (allows partial tensor readiness)
         self.pending: list[EventAndPointers] = []
 
-    def register_and_return_tensor_info(
+    def store_and_return_tensor_info(
         self, request_id: str, tensors: dict[str, list[torch.Tensor]], # name to list of tensors
     ) -> dict[str, list[TensorPointerInfo]]: # name to list[tensorPointerInfo]
         tensor_info: dict[str, list[TensorPointerInfo]] = {}
@@ -198,17 +205,22 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
                     source_entity=self.my_entity_id
                 )
                 tensor_info[name].append(new_tensor_info)
-            
-                if self.protocol == CommProtocol.RDMA:
-                    ret_value = self.engine.register_memory(
-                        new_tensor_info.address, new_tensor_info.nbytes
-                    )
-                    if ret_value != 0:
-                        # TODO: error handling
-                        raise RuntimeError("Mooncake memory registration failed.")
         return tensor_info
+    
+    def register_for_send(self, request_id, name, uuids):
+        for uuid in uuids:
+            if self.protocol == CommProtocol.RDMA:
+                tensor = self.tensor_store.get_tensor(
+                    request_id=request_id, name=name, uuid=uuid
+                )
+                ret_value = self.engine.register_memory(
+                    tensor.data_ptr(), tensor.element_size() * tensor.nelement()
+                )
+                if ret_value != 0:
+                    # TODO: error handling
+                    raise RuntimeError("Mooncake memory registration failed.")
         
-    def register_and_populate_graph_edges(
+    def store_and_populate_graph_edges(
         self, request_id: str,
         tensors: dict[str, list[torch.Tensor]],
         graph_pointers: list[GraphPointer]
@@ -220,7 +232,7 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
                 name_to_pointers[pointer.name] = []
             name_to_pointers[pointer.name].append(pointer)
 
-        pointer_info = self.register_and_return_tensor_info(
+        pointer_info = self.store_and_return_tensor_info(
             request_id=request_id, tensors=tensors
         )
         for name in tensors:
