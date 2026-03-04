@@ -10,7 +10,6 @@ import yaml
 
 from mminf.graph.base import GraphPointer, GraphSection, GraphStage, Loop, Parallel, Sequential, TensorPointerInfo
 
-
 STREAM_OUT = "stream_out"
 SPECIAL_DESTINATIONS = {STREAM_OUT}  # add RELAY etc. later
 
@@ -18,7 +17,7 @@ SPECIAL_DESTINATIONS = {STREAM_OUT}  # add RELAY etc. later
 @dataclass
 class Subgraph:
     section: GraphSection
-    phases: set[str] # e.g., prefill, decode, image_gen 
+    phases: set[str] # e.g., prefill, decode, image_gen
     consumes_stream: bool = field(default=False)
     ranks: list[int] = field(default_factory=list)
     _group_id: int = field(default=-1) # used in going from config yaml to subgraphs
@@ -48,7 +47,7 @@ def _divide_into_subgraphs(
     stage_groups: list[dict]
 ) -> list[Subgraph]:
     """
-    Given a graph, break it into subgraphs 
+    Given a graph, break it into subgraphs
     """
     if isinstance(graph, GraphStage):
         return [Subgraph(
@@ -58,7 +57,7 @@ def _divide_into_subgraphs(
             _group_id=stage_to_group_idx[graph.name],
             ranks=stage_groups[stage_to_group_idx[graph.name]]["ranks"]
         )]
-    
+
     if isinstance(graph, Sequential):
         subgraphs = _divide_into_subgraphs(
             graph.sections[0],
@@ -84,7 +83,7 @@ def _divide_into_subgraphs(
                 )
             subgraphs.extend(new_subgraphs)
         return subgraphs
-    
+
     if isinstance(graph, Parallel):
         all_subgraphs = [
             _divide_into_subgraphs(
@@ -110,7 +109,7 @@ def _divide_into_subgraphs(
         return list(group_id_to_subgraph.values()) + sum([
             s for s in all_subgraphs if len(s) > 1 or s[0].consumes_stream
         ], start=[]) # remaining subgraphs
-    
+
     if isinstance(graph, Loop):
         loop_section_subgraphs = _divide_into_subgraphs(
             graph.section,
@@ -122,7 +121,7 @@ def _divide_into_subgraphs(
             # fully colocated case
             loop_section_subgraphs[0].section = graph
             return loop_section_subgraphs
-        
+
         # in the disaggregated case, we need to wrap all subgraphs in a loop
         # with the external signals and loop-back signals pre-computed
         for s in loop_section_subgraphs:
@@ -172,17 +171,17 @@ class Model(ABC):
             stage_to_group_idx=stage_to_group_idx,
             stage_groups=stage_groups
         )
-    
+
     def get_subgraphs(self, config_path: str) -> list[Subgraph]:
         with open(config_path, "r") as f:
             stage_groups = yaml.safe_load(f)["stage_groups"]
-        
+
         # TODO: merge identical subgraphs from different phases
         return sum([
             self._get_subgraphs_for_phase(phase, graph, stage_groups) \
                 for phase, graph in self.get_phase_graphs().items()
         ], start=[])
-        
+
 
     @abstractmethod
     def get_phase_graphs(self) -> dict[str, GraphSection]:

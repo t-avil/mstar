@@ -1,20 +1,28 @@
 import torch
 
 from mminf.communication.communicator import CommProtocol, ZMQCommunicator
-from mminf.communication.tensors import MooncakeCommunicationManager, NameAndRequestId
+from mminf.communication.tensors import MooncakeCommunicationManager
 from mminf.engine.base import StageBatch, StageOutput
-from mminf.graph.base import GraphPointer, TensorPointerInfo
+from mminf.graph.base import GraphPointer
 from mminf.ipc_formats import (
-    ConductorMessage, ConductorMessageType, InputSignals,
-    NewRequest, RemoveRequest, SubgraphsDone, TensorReceived,
-    WorkerMessage, WorkerMessageType,
+    ConductorMessage,
+    ConductorMessageType,
+    InputSignals,
+    NewRequest,
+    RemoveRequest,
+    SubgraphsDone,
+    TensorReceived,
+    WorkerMessage,
+    WorkerMessageType,
 )
 from mminf.model.base import Subgraph
-from mminf.worker.stage_manager_utils import (
-    StageOutputRouting, SubgraphQueues, SubgraphsManager,
-)
 from mminf.worker.engine_manager import EngineManager
 from mminf.worker.micro_scheduler import MicroScheduler, ScheduledBatch
+from mminf.worker.stage_manager_utils import (
+    StageOutputRouting,
+    SubgraphQueues,
+    SubgraphsManager,
+)
 
 
 class Worker:

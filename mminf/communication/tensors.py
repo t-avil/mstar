@@ -1,12 +1,12 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from uuid import uuid4
+
 try:
     from mooncake.engine import TransferEngine
 except ImportError:
     TransferEngine = None
 import torch
-
 
 from mminf.communication.communicator import BaseCommunicator, CommProtocol
 from mminf.graph.base import GraphPointer, TensorPointerInfo
@@ -31,17 +31,17 @@ UuidToTensor = dict[str, torch.Tensor]
 class TensorStore:
     def __init__(self):
         self.stored_tensors: dict[NameAndRequestId, UuidToTensor]
-    
+
     def get_first_tensor(self, request_id: str, name: str):
         return list(self.stored_tensors[NameAndRequestId(
             tensor_name=name, request_id=request_id
         )].values())[0]
-    
+
     def get_tensor(self, request_id: str, name: str, uuid: str):
         return self.stored_tensors[NameAndRequestId(
             tensor_name=name, request_id=request_id
         )][uuid]
-    
+
     def put_tensor(self, request_id: str, name: str, uuid: str, tensor: torch.Tensor):
         key = NameAndRequestId(
             tensor_name=name, request_id=request_id
@@ -49,22 +49,22 @@ class TensorStore:
         if key not in self.stored_tensors:
             self.stored_tensors[key] = {}
         self.stored_tensors[key][uuid] = tensor
-    
+
     def check_uuid_presence(self, request_id: str, name: str, uuid: str):
         return uuid in self.stored_tensors.get(NameAndRequestId(
             tensor_name=name, request_id=request_id
         ), {})
-    
+
     def check_name_presence(self, request_id: str, name: str):
         return NameAndRequestId(
             tensor_name=name, request_id=request_id
         ) in self.stored_tensors
-    
+
     def remove_tensor(self, request_id: str, name: str, uuid: str):
         del self.stored_tensors[NameAndRequestId(
             tensor_name=name, request_id=request_id
         )][uuid]
-    
+
     def get_all_uuids(self, request_id: str, name: str):
         return list(self.stored_tensors[NameAndRequestId(
             tensor_name=name, request_id=request_id
@@ -148,7 +148,7 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
         communicator: BaseCommunicator,
         protocol: CommProtocol=CommProtocol.RDMA,
         metadata_server: str="P2PHANDSHAKE" # [ETCD_SERVER_URL, P2PHANDSHAKE, ...]
-        
+
     ):
         self.my_entity_id = my_entity_id
 
@@ -185,9 +185,9 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
         self, request_id: str, tensors: dict[str, list[torch.Tensor]], # name to list of tensors
     ) -> dict[str, list[TensorPointerInfo]]: # name to list[tensorPointerInfo]
         tensor_info: dict[str, list[TensorPointerInfo]] = {}
-        for name in tensors:
+        for name, tensor_list in tensors.items():
             tensor_info[name] = []
-            for tensor in tensors[name]:
+            for tensor in tensor_list:
                 tensor_uuid = str(uuid4())
                 self.tensor_store.put_tensor(
                     request_id=request_id,
@@ -206,7 +206,7 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
                 )
                 tensor_info[name].append(new_tensor_info)
         return tensor_info
-    
+
     def register_for_send(self, request_id, name, uuids):
         for uuid in uuids:
             if self.protocol == CommProtocol.RDMA:
@@ -219,7 +219,7 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
                 if ret_value != 0:
                     # TODO: error handling
                     raise RuntimeError("Mooncake memory registration failed.")
-        
+
     def store_and_populate_graph_edges(
         self, request_id: str,
         tensors: dict[str, list[torch.Tensor]],
@@ -260,7 +260,7 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
             request_id=request_id, name=tensor_name
         ):
             return
-        
+
         # By default, cleanup all tensors with the given key, unless the address
         # argument is provided
         if uuids is None:
@@ -275,7 +275,7 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
             key.tensor_name for key in self.tensor_store.stored_tensors \
                 if key.request_id == request_id
         ]
-    
+
         for name in names_to_remove:
             for uuid in self.tensor_store.get_all_uuids(
                 request_id=request_id, name=name
@@ -312,7 +312,7 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
             if ep.event.query():
                 for ptr in ep.pointers:
                     ready.setdefault(ep.request_id, []).append(ptr)
-                    
+
                     for tensor_info in  ptr.tensor_info:
                         key = (tensor_info.source_entity, ep.request_id)
                         acks.setdefault(key, []).append(

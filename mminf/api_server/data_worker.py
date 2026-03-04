@@ -1,14 +1,14 @@
 
 
-from dataclasses import asdict, dataclass
 import queue
 import threading
 import time
+from dataclasses import asdict, dataclass
 
 import torch
-import torchvision
 import torchaudio
-from torchcodec.decoders import VideoDecoder, AudioDecoder
+import torchvision
+from torchcodec.decoders import VideoDecoder
 
 from mminf.communication.communicator import CommProtocol, ZMQCommunicator
 from mminf.communication.tensors import MooncakeCommunicationManager
@@ -54,10 +54,10 @@ class PreprocessWorker:
                 tensor_comm_protocol=tensor_comm_protocol,
             )
         )
-    
+
     def new_request(self, input: PreprocessInput):
         self.request_input_queue.put(input)
-    
+
     def shutdown(self):
         self.stop_event.set()
         self.thread.join()
@@ -65,7 +65,7 @@ class PreprocessWorker:
 
 class PreprocessWorkerThread:
     def __init__(
-        self, 
+        self,
         in_queue: queue.Queue, # for preprocessing
         out_queue: queue.Queue, # for output streaming
         stop_event: threading.Event,
@@ -83,7 +83,7 @@ class PreprocessWorkerThread:
             my_id="api_server_preprocess_worker",
             push_ids=["conductor"],
             ipc_socket_path_prefix=socket_path_prefix,
-        ) # only used to send 
+        ) # only used to send
 
         self.tensor_manager = MooncakeCommunicationManager(
             my_entity_id="api_server_preprocess_worker",
@@ -91,7 +91,7 @@ class PreprocessWorkerThread:
             communicator=self.communicator,
             protocol=tensor_comm_protocol,
         )
-    
+
 
     def process_input(
         self, input: PreprocessInput
@@ -110,9 +110,10 @@ class PreprocessWorkerThread:
             for modality in input.file_paths:
                 key = f"{modality}_input"
                 tensors[key] = []
-                input_metadata[key] = [] # maybe make a class of tensors_and_metadata later (figure out how to use metadata)
+                # TODO: maybe make a class of tensors_and_metadata later (figure out how to use metadata)
+                input_metadata[key] = []
 
-                for (i, filepath) in input.file_paths[modality]:
+                for filepath in input.file_paths[modality]:
                     # ---- Image ----
                     if modality == "image":
                         img = torchvision.io.decode_image(filepath).to(self.device)  # uint8 CxHxW
@@ -139,7 +140,7 @@ class PreprocessWorkerThread:
                         video = torch.stack([frame for frame in decoder]).float() / 255.0
                         tensors[key].append(video)
                         input_metadata[key].append(asdict(decoder.metadata))
-        
+
         initial_signals = self.tensor_manager.store_and_return_tensor_info(
             request_id=input.request_id,
             tensors=tensors # dict(modality_input: list[tensors])

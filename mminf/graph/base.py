@@ -1,14 +1,14 @@
 from abc import ABC, abstractmethod
 from copy import deepcopy
 from dataclasses import dataclass, field
-from enum import Enum
+
 
 def update_list_dicts(signals: dict[str, list], new_signals: dict[str, list]):
-    for key in new_signals:
+    for key, new_signals_elem in new_signals.items():
         if key in signals:
-            signals[key].extend(new_signals[key])
+            signals[key].extend(new_signals_elem)
         else:
-            signals[key] = new_signals[key]
+            signals[key] = new_signals_elem
 
 
 @dataclass
@@ -24,7 +24,7 @@ class TensorPointerInfo:
 # class ConnectionType(Enum):
 #     RELAY = "relay" # thinker-talker
 #     BLOCKING = "blocking" # we need to wait for all tensors in the list to finish
-    
+
 # assume blocking case for all stages for now.
 
 @dataclass
@@ -106,10 +106,10 @@ class GraphStage(GraphSection):
     def __post_init__(self):
         # if the user inputs, e.g., a list, turn it into a set
         self.input_ids = set(self.input_ids)
-    
+
     def is_ready(self):
         return self.input_ids.issubset(set(self.ready_inputs.keys()))
-    
+
     def get_stage_names(self) -> list[str]:
         return [self.name]
 
@@ -117,10 +117,10 @@ class GraphStage(GraphSection):
         return [
             GraphPointer(next_stage=self.name, name=id) for id in self.input_ids
         ]
-            
+
     def get_outputs(self) -> list[GraphPointer]:
         return self.outputs
-    
+
     def ingest_inputs(self, stage_to_inputs: DestToGraphPointers):
         if self.name not in stage_to_inputs:
             return set()
@@ -154,7 +154,7 @@ class Sequential(GraphSection):
         return sum([
             s.get_stage_names() for s in self.sections
         ], start=[])
-    
+
     def _get_inputs_outputs(self):
         # In the case that this section is part of a loop, "loop-back"
         # variables are included in the list of inputs and outputs
@@ -177,19 +177,19 @@ class Sequential(GraphSection):
             outputs += outputs_of_s
             output_names.update([ptr.name for ptr in outputs_of_s])
         return inputs, outputs
-    
+
     def get_inputs(self) -> list[GraphPointer]:
         return self._get_inputs_outputs()[0]
-    
+
     def get_outputs(self) -> list[GraphPointer]:
         return self._get_inputs_outputs()[1]
-    
+
     def ingest_inputs(self, stage_to_inputs: DestToGraphPointers):
         ingested = []
         for s in self.sections:
             ingested += s.ingest_inputs(stage_to_inputs)
         return ingested
-    
+
     def split_off_ready(self):
         first_ready, first_waiting = self.sections[0].split_off_ready()
 
@@ -201,7 +201,7 @@ class Sequential(GraphSection):
         if len(waiting) == 0:
             return first_ready, None
         return first_ready, Sequential(sections=waiting)
-        
+
 
 @dataclass
 class Parallel(GraphSection):
@@ -211,17 +211,17 @@ class Parallel(GraphSection):
         return sum([
             s.get_stage_names() for s in self.sections
         ], start=[])
-    
+
     def get_inputs(self):
         return sum(
             [s.get_inputs() for s in self.sections], start=[]
         )
-    
+
     def get_outputs(self):
         return sum(
             [s.get_outputs() for s in self.sections], start=[]
         )
-    
+
     def ingest_inputs(self, stage_to_inputs: DestToGraphPointers):
         ingested = []
         for s in self.sections:
@@ -236,7 +236,7 @@ class Parallel(GraphSection):
             ready += stage_ready
             if stage_waiting is not None:
                 waiting.append(stage_waiting)
-        
+
         if len(waiting) == 0:
             return ready, None
         return ready, Parallel(sections=waiting)
@@ -253,16 +253,16 @@ class Loop(GraphSection):
     loop_back_signals: list[GraphPointer] = field(default=None)
     curr_iter_section: GraphSection = field(default=None)
     nxt_iter_section: GraphSection = field(default=None)
-    
+
     def get_outputs(self):
         return self.outputs
-    
+
     def get_inputs(self):
         return self.section.get_inputs()
-    
+
     def get_stage_names(self):
         return self.section.get_stage_names()
-    
+
     def ingest_inputs(self, stage_to_inputs: DestToGraphPointers):
         # Populate the current iteration first, then populate the next iteration
         # if there are any leftover inputs (which would signal either inputs that
@@ -395,6 +395,6 @@ class Loop(GraphSection):
 
         if loop.n_iters == loop.curr_iter + 1: # last iteration
             return first_ready, first_waiting
-        
-        loop.curr_iter_section = first_waiting        
+
+        loop.curr_iter_section = first_waiting
         return first_ready, loop

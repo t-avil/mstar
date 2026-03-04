@@ -28,7 +28,7 @@ class DummyModel(Model):
                 ]
             )
         ])
-    
+
     def _get_img_emb(self):
         return Sequential([
             GraphStage(
@@ -116,7 +116,7 @@ class DummyModel(Model):
             decode=decode,
             image_gen=image_gen
         )
-    
+
     def get_initial_forward_metadata(
         self, input_modalities, output_modalities
     ):
@@ -126,7 +126,7 @@ class DummyModel(Model):
             phase="prefill",
             is_prefill=True
         )
-    
+
     def get_forward_pass_inputs(
         self, metadata: CurrentForwardMetadata,
         persist_signals: dict[str, list[TensorPointerInfo]],
@@ -162,7 +162,7 @@ class DummyModel(Model):
             if prev_forward_metadata.phase == "image_gen":
                 img_inp.tensor_info = persist_signals.get("image_output", [])
                 text_inp.tensor_info = persist_signals.get("new_token", [])
-        
+
             if metadata.phase == "image_gen":
                 pointers.append(
                     GraphPointer(
@@ -172,7 +172,7 @@ class DummyModel(Model):
                     )
                 )
         return pointers
-        
+
     def update_for_next_forward(
         self, metadata: CurrentForwardMetadata,
         new_tokens: list[int],

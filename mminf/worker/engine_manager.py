@@ -2,12 +2,11 @@ from dataclasses import dataclass, field
 
 import torch
 
-from mminf.engine.base import BaseEngine, EngineType
 from mminf.engine.ar_engine import AREngine
-from mminf.engine.flow_engine import FlowEngine
-from mminf.engine.enc_dec_engine import EncoderDecoderEngine
 from mminf.engine.audio_codec_engine import AudioCodecEngine
-
+from mminf.engine.base import BaseEngine
+from mminf.engine.enc_dec_engine import EncoderDecoderEngine
+from mminf.engine.flow_engine import FlowEngine
 
 ENGINE_TYPE_TO_CLASS: dict[str, type[BaseEngine]] = {
     "ar": AREngine,

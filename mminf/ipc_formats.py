@@ -1,4 +1,3 @@
-from abc import ABC
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 
@@ -13,10 +12,10 @@ class Status(Enum):
 
 
 @dataclass
-class MessageBody(ABC):
+class MessageBody:
     def to_dict(self):
         return asdict(self)
-    
+
     def from_dict(self, input: dict):
         return self(**input)
 

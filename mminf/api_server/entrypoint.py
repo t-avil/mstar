@@ -13,13 +13,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from mminf.api_server.data_worker import PreprocessInput, PreprocessWorker
 import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
+from mminf.api_server.data_worker import PreprocessInput, PreprocessWorker
 from mminf.communication.communicator import ZMQCommunicator
 
 logger = logging.getLogger(__name__)
