@@ -1,7 +1,7 @@
 import torch
 
 from mminf.communication.communicator import CommProtocol, ZMQCommunicator
-from mminf.communication.tensors import MooncakeCommunicationManager
+from mminf.communication.tensors import MooncakeCommunicationManager, NameToTensorList
 from mminf.engine.base import StageBatch, StageOutput
 from mminf.graph.base import GraphPointer
 from mminf.ipc_formats import (
@@ -167,7 +167,7 @@ class Worker:
 
     def _build_stage_batch(self, batch: ScheduledBatch) -> StageBatch:
         """Gather input tensors from tensor_manager for all requests in the batch."""
-        per_request_inputs: dict[str, dict[str, list[torch.Tensor]]] = {}
+        per_request_inputs: dict[str, NameToTensorList] = {}
 
         for request_id, stage in batch.stage_objects.items():
             tensors = {}

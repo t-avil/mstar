@@ -13,6 +13,9 @@ from mminf.graph.base import GraphPointer, TensorPointerInfo
 from mminf.ipc_formats import NameAndUuid, TensorReceived, WorkerMessage, WorkerMessageType
 
 
+NameToTensorList = dict[str, list[torch.Tensor]]
+
+
 @dataclass(frozen=True)
 class NameAndRequestId:
     tensor_name: str
@@ -74,7 +77,7 @@ class TensorStore:
 class TensorCommunicationManager(ABC):
     @abstractmethod
     def store_and_return_tensor_info(
-        self, request_id: str, tensors: dict[str, list[torch.Tensor]],
+        self, request_id: str, tensors: NameToTensorList,
     ) -> dict[str, list[TensorPointerInfo]]:
         """
         Returns tensor name to TensorPointerInfo (contains addresses, datatypes,
@@ -84,7 +87,7 @@ class TensorCommunicationManager(ABC):
 
     @abstractmethod
     def store_and_populate_graph_edges(
-        self, request_id: str, tensors: dict[str, list[torch.Tensor]],
+        self, request_id: str, tensors: NameToTensorList,
         graph_pointers: list[GraphPointer]
     ):
         """
@@ -182,7 +185,7 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
         self.pending: list[EventAndPointers] = []
 
     def store_and_return_tensor_info(
-        self, request_id: str, tensors: dict[str, list[torch.Tensor]], # name to list of tensors
+        self, request_id: str, tensors: NameToTensorList,
     ) -> dict[str, list[TensorPointerInfo]]: # name to list[tensorPointerInfo]
         tensor_info: dict[str, list[TensorPointerInfo]] = {}
         for name, tensor_list in tensors.items():
@@ -222,7 +225,7 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
 
     def store_and_populate_graph_edges(
         self, request_id: str,
-        tensors: dict[str, list[torch.Tensor]],
+        tensors: NameToTensorList,
         graph_pointers: list[GraphPointer]
     ):
         # get tensor name to graph pointers

@@ -3,6 +3,7 @@ from copy import deepcopy
 import numpy as np
 import torch
 
+from mminf.communication.tensors import NameToTensorList
 from mminf.graph.base import GraphPointer, GraphStage, Loop, Parallel, Sequential, TensorPointerInfo
 from mminf.model.base import STREAM_OUT, CurrentForwardMetadata, Model
 
@@ -189,7 +190,7 @@ class DummyModel(Model):
     def step(
         self, stage_name: str,
         phase: str,
-        input_tensors: dict[str, list[torch.Tensor]],
+        input_tensors: NameToTensorList,
         state, # TODO: figure out state
         **kwargs
     ):

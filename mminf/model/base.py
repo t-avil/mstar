@@ -8,6 +8,7 @@ from uuid import uuid4
 import torch
 import yaml
 
+from mminf.communication.tensors import NameToTensorList
 from mminf.graph.base import GraphPointer, GraphSection, GraphStage, Loop, Parallel, Sequential, TensorPointerInfo
 
 STREAM_OUT = "stream_out"
@@ -232,10 +233,10 @@ class Model(ABC):
     def step(
         self, stage_name: str,
         phase: str,
-        input_tensors: dict[str, list[torch.Tensor]],
+        input_tensors: NameToTensorList,
         state, # TODO: figure out state
         **kwargs
-    ) -> dict[str, list[torch.Tensor]]:
+    ) -> NameToTensorList:
         """
         Called by the worker to execute a stage
         """
