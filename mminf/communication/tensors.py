@@ -300,19 +300,20 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
             if ep.event.query():
                 for ptr in ep.pointers:
                     ready.setdefault(ep.request_id, []).append(ptr)
-                    if ptr.tensor_info is not None:
-                        key = (ptr.tensor_info.source_entity, ep.request_id)
-                        acks.setdefault(key, []).extend([
+                    
+                    for tensor_info in  ptr.tensor_info:
+                        key = (tensor_info.source_entity, ep.request_id)
+                        acks.setdefault(key, []).append(
                             NameAndUuid(
                                 tensor_id=ptr.name,
                                 uuid=tensor_info.uuid
-                            ) for tensor_info in ptr.tensor_info])
+                            ))
             else:
                 still_pending.append(ep)
         self.pending = still_pending
 
         # Send ACKs to senders
-        for (source_entity, request_id), tensor_name_addrs in acks.items():
+        for (source_entity, request_id), tensor_name_uuid in acks.items():
             if source_entity == self.my_entity_id:
                 continue  # local transfer, no ACK needed
             self.communicator.send(
@@ -321,7 +322,7 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
                     message_type=WorkerMessageType.TENSOR_RECEIVED,
                     body=TensorReceived(
                         request_id=request_id,
-                        successful_tensors=tensor_name_addrs,
+                        successful_tensors=tensor_name_uuid,
                         failed_tensor_ids=[], # TODO: handle failed transfers
                     ),
                 ),
@@ -362,7 +363,7 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
                     )
             # For now, have one cuda event for all tensors in this graph edge
             event = torch.cuda.Event()
-            event.record(stream)
+            event.record(stream) ##TODO @Atindra : should this be placed here or up? ##
             self.pending.append(
                 EventAndPointers(
                     event=event, pointers=[graph_ptr], request_id=request_id

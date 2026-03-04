@@ -185,7 +185,7 @@ class Worker:
     # Input cleanup
     # ------------------------------------------------------------------
 
-    def _cleanup_consumed_inputs(self, batch: ScheduledBatch) -> None:
+    def _cleanup_consumed_inputs(self, batch: ScheduledBatch) -> None: ## TODO: fix for loop
         """Free input tensors that were consumed by the just-executed stage."""
         for i, request_id in enumerate(batch.request_ids):
             stage = batch.stages[i] if i < len(batch.stages) else batch.stages[0]
@@ -221,10 +221,11 @@ class Worker:
             )
 
             # TODO: we don't have to do the actual RDMA registration for these internal inputs
+            # TODO: this is WRONg check tomorrow!
             self.tensor_manager.register_and_populate_graph_edges(
                 request_id=request_id,
                 tensors=request_output_tensors,
-                graph_pointers=stage.ready_inputs
+                graph_pointers=routing_per_request[request_id].routed_to_this_subgraph # need to check that the timing is correct (probably need to change for Loop)
             )
 
             routing = routing_per_request[request_id]
