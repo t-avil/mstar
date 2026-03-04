@@ -161,9 +161,7 @@ class Worker:
         """Gather input tensors from tensor_manager for all requests in the batch."""
         per_request_inputs: dict[str, dict[str, list[torch.Tensor]]] = {}
 
-        for i, request_id in enumerate(batch.request_ids):
-            stage = batch.stages[i] if i < len(batch.stages) else batch.stages[0]
-
+        for request_id, stage in batch.stage_objects.items():
             tensors = {}
             for input_name in stage.ready_inputs:
                 tensors[input_name] = [
@@ -177,7 +175,7 @@ class Worker:
         return StageBatch(
             stage_name=batch.stage_name,
             phase=batch.phase,
-            request_ids=batch.request_ids,
+            request_ids=list(batch.stage_objects.keys()),
             per_request_input_tensors=per_request_inputs,
         )
 
@@ -187,13 +185,13 @@ class Worker:
 
     def _cleanup_consumed_inputs(self, batch: ScheduledBatch) -> None: ## TODO: fix for loop
         """Free input tensors that were consumed by the just-executed stage."""
-        for i, request_id in enumerate(batch.request_ids):
-            stage = batch.stages[i] if i < len(batch.stages) else batch.stages[0]
+        for request_id, stage in batch.stage_objects.items():
             for input in stage.ready_inputs.values():
-                self.tensor_manager.cleanup(
-                    request_id, input.name,
-                    [info.uuid for info in input.tensor_info]
-                )
+                if not input._persist_for_loop:
+                    self.tensor_manager.cleanup(
+                        request_id, input.name,
+                        [info.uuid for info in input.tensor_info]
+                    )
 
     # ------------------------------------------------------------------
     # Output handling
@@ -213,43 +211,25 @@ class Worker:
         """
         output_pointers: dict[str, list[GraphPointer]] = {}
 
-        for i, request_id in enumerate(batch.request_ids):
-            stage = batch.stages[i] if i < len(batch.stages) else batch.stages[0]
+        for request_id, stage in batch.stage_objects.items():
             # output name to list of tensors
             request_output_tensors = output.per_request_output_tensors.get(
                 request_id, {}
             )
+            output_pointers[request_id] = stage.outputs
+            if not request_output_tensors:
+                continue
 
-            # TODO: we don't have to do the actual RDMA registration for these internal inputs
-            # TODO: this is WRONg check tomorrow!
+            # TODO: for internal outputs, we don't have to do the actual RDMA
+            # registration for these internal inputs
+            # TODO: this is maybe WRONG check tomorrow!
+            routing = routing_per_request[request_id]
             self.tensor_manager.register_and_populate_graph_edges(
                 request_id=request_id,
                 tensors=request_output_tensors,
-                graph_pointers=routing_per_request[request_id].routed_to_this_subgraph # need to check that the timing is correct (probably need to change for Loop)
+                graph_pointers=routing.routed_to_this_subgraph + \
+                    routing.to_workers
             )
-
-            routing = routing_per_request[request_id]
-
-            # For tensors going to other workers, register for RDMA send
-            external_pointers: list[GraphPointer] = []
-            for worker_id, pointers in routing.to_workers.items():
-                external_pointers.extend(pointers)
-
-            if external_pointers and request_output_tensors:
-                # Filter to only tensors that actually go external
-                external_names = {ptr.name for ptr in external_pointers}
-
-                # name -> list of tensors
-                external_tensors = {
-                    name: tensors for name, tensors in request_output_tensors.items()
-                    if name in external_names
-                }
-                if external_tensors:
-                    self.tensor_manager.register_and_populate_graph_edges(
-                        request_id, external_tensors, external_pointers
-                    )
-
-            output_pointers[request_id] = stage.outputs
 
         return output_pointers
 

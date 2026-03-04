@@ -38,7 +38,7 @@ class GraphPointer:
     # Flags
     back_to_conductor: bool = field(default=False)
     is_new_token: bool = field(default=False)
-
+    _persist_for_loop: bool = field(default=False)
 
 # Two different ways of defining graph edges
 DestToGraphPointers = dict[str, list[GraphPointer]]
@@ -80,8 +80,6 @@ class GraphSection(ABC):
         Adds inputs to the appropriate "ready_input_ids", and **mutates
         stage_to_inputs** to remove the inputs that were able to be added
         to the "ready_input_ids".
-
-        Returns the inputs that were added to ready_input_ids.
         """
         pass
 
@@ -269,19 +267,19 @@ class Loop(GraphSection):
         # Populate the current iteration first, then populate the next iteration
         # if there are any leftover inputs (which would signal either inputs that
         # are not for this section, or loop-back inputs)
-        ingested = []
+        ingested: list[GraphPointer] = []
         if self.curr_iter_section is not None:
             ingested += self.curr_iter_section.ingest_inputs(stage_to_inputs)
 
         # we should only be populating the nxt_iter_section with loop-back inputs,
         # so exclude external inputs from populating nxt_iter_section. This logic
         # is required to make nested loops work.
-        ext_inp_name_dest = [
-            (ptr.name, ptr.next_stage) for ptr in self.external_inputs
-        ]
+        my_external_inputs = {
+            (ptr.name, ptr.next_stage): ptr for ptr in self.external_inputs
+        }
         external_inputs = {
             dest: [
-                ptr for ptr in inputs if (ptr.name, dest) in ext_inp_name_dest
+                ptr for ptr in inputs if (ptr.name, dest) in my_external_inputs
             ] for dest, inputs in stage_to_inputs.items()
         }
         for dest in stage_to_inputs:
@@ -292,6 +290,14 @@ class Loop(GraphSection):
 
         ingested += self.nxt_iter_section.ingest_inputs(stage_to_inputs)
         update_list_dicts(stage_to_inputs, external_inputs)
+
+        if self.curr_iter != self.n_iters - 1:
+            for input in ingested:
+                if (input.name, input.next_stage) in my_external_inputs:
+                    my_external_inputs[(
+                        input.name, input.next_stage
+                    )].tensor_info = input.tensor_info
+                    input._persist_for_loop = True
         return ingested
 
     def _get_external_inputs(self):

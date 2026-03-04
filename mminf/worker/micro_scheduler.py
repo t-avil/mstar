@@ -19,8 +19,7 @@ class ScheduledBatch:
     """A batch of stages ready to be executed."""
     stage_name: str
     phase: str
-    request_ids: list[str]
-    stages: list[GraphStage]  # the popped GraphStage objects
+    stage_objects: dict[str,GraphStage]
 
 
 # Priority: lower value = higher priority
@@ -83,24 +82,22 @@ class MicroScheduler:
 
         # Pop ready stages for all requests of this stage name
         entries = stage_name_to_requests[best_stage_name]
-        request_ids = []
-        all_stages = []
+        stage_objects = {}
         phase = entries[0].phase
 
         for entry in entries:
             queue = subgraphs_manager.queues[entry.subgraph_id]
             popped = queue.pop_ready_stages(entry.request_id, [best_stage_name])
             if popped:
-                request_ids.append(entry.request_id)
-                all_stages.extend(popped)
+                assert len(popped) == 1
+                stage_objects[entry.request_id] = popped[0]
                 phase = entry.phase
 
-        if not request_ids:
+        if not stage_objects:
             return None
 
         return ScheduledBatch(
             stage_name=best_stage_name,
             phase=phase,
-            request_ids=request_ids,
-            stages=all_stages,
+            stage_objects=stage_objects
         )
