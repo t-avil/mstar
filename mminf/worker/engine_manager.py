@@ -7,6 +7,7 @@ from mminf.engine.audio_codec_engine import AudioCodecEngine
 from mminf.engine.base import BaseEngine
 from mminf.engine.enc_dec_engine import EncoderDecoderEngine
 from mminf.engine.flow_engine import FlowEngine
+from mminf.model.base import Model
 
 ENGINE_TYPE_TO_CLASS: dict[str, type[BaseEngine]] = {
     "ar": AREngine,
@@ -23,10 +24,18 @@ class EngineManager:
 
     @classmethod
     def from_config(
-        cls, engine_configs: list[dict], device: torch.device
+        cls,
+        engine_configs: list[dict],
+        device: torch.device,
+        model: Model | None = None,
     ) -> "EngineManager":
         """
         Build an EngineManager from a list of engine configs.
+
+        The Model object (if provided) supplies nn.Module submodules for
+        each stage via model.get_submodule(stage_name). In dummy mode
+        (model=None or get_submodule returns None), engines run without
+        real computation.
 
         engine_configs example:
         [
@@ -41,19 +50,25 @@ class EngineManager:
             engine_type_str = cfg["engine_type"]
             stage_names = cfg["stage_names"]
             model_config = cfg.get("model_config", {})
-            model = cfg.get("model", None)
 
             engine_cls = ENGINE_TYPE_TO_CLASS[engine_type_str]
 
             if engine_type_str == "ar":
                 engine = engine_cls(
-                    model=model,
                     kv_cache_config=model_config.get("kv_cache", {}),
                 )
             else:
-                engine = engine_cls(model=model)
+                engine = engine_cls()
 
-            engine.load_model(model_config, device)
+            # Extract submodules from the Model for this engine's stages
+            submodules: dict[str, torch.nn.Module] = {}
+            if model is not None:
+                for name in stage_names:
+                    submodule = model.get_submodule(name)
+                    if submodule is not None:
+                        submodules[name] = submodule
+
+            engine.load_model(submodules, model_config, device)
 
             for name in stage_names:
                 stage_to_engine[name] = engine
