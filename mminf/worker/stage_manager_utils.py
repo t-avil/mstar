@@ -20,7 +20,7 @@ class StageOutputRouting:
     routed_to_this_subgraph:list[GraphPointer]
     to_conductor: list[GraphPointer] # outputs that are going back to the conductor
     to_workers: dict[str, list[GraphPointer]] # worker id to signals
-    completed_subgraphs: list[str] = field(default_factory=[])  # list of subgraph IDs
+    completed_subgraphs: list[str] = field(default_factory=list)  # list of subgraph IDs
 
 
 @dataclass
