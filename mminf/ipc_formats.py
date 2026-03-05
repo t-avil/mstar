@@ -94,7 +94,7 @@ class NewRequestConductor(MessageBody):
 class SubgraphsDone(MessageBody):
     request_id: str
     subgraph_ids: list[str]
-    persist_signals: dict[str, TensorPointerInfo] = field(default_factory=dict)
+    persist_signals: dict[str, list[TensorPointerInfo]] = field(default_factory=dict)
     new_tokens: list[int] = field(default_factory=list)
 
 
