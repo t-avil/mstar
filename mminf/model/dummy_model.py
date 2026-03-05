@@ -187,11 +187,5 @@ class DummyModel(Model):
             metadata.output_modalities = ["image"]
         return metadata
 
-    def step(
-        self, stage_name: str,
-        phase: str,
-        input_tensors: NameToTensorList,
-        state, # TODO: figure out state
-        **kwargs
-    ):
-        return # do nothing
+    def get_submodule(self, stage_name: str) -> torch.nn.Module | None:
+        return None  # dummy mode — no real computation
