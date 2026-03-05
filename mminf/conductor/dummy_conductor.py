@@ -257,7 +257,7 @@ class DummyConductor:
                 worker_to_subgraph_ids[worker_id] = []
             worker_to_subgraph_ids[worker_id].append(subgraph_id)
 
-        for worker, subgraph_ids in worker_to_subgraph_ids:
+        for worker, subgraph_ids in worker_to_subgraph_ids.items():
             message = NewRequest(
                 request_id=body.request_id,
                 subgraph_ids=subgraph_ids,
@@ -394,7 +394,7 @@ class DummyConductor:
             for request_id in done_forward_passes:
                 saw_eos = self._process_done_forward(request_id)
                 if saw_eos:
-                    eos_requests.append(self.eos_token_id)
+                    eos_requests.append(request_id)
 
             for request_id in eos_requests:
                 self._process_request_done(request_id)
