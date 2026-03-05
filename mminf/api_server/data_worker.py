@@ -166,6 +166,6 @@ class PreprocessWorkerThread:
 
     def run(self):
         while not self.stop_event.is_set():
-            if self.in_queue.not_empty:
+            if not self.in_queue.empty():
                 self.process_input(self.in_queue.get())
             time.sleep(0.001)
