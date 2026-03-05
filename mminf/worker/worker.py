@@ -15,7 +15,7 @@ from mminf.ipc_formats import (
     WorkerMessage,
     WorkerMessageType,
 )
-from mminf.model.base import Subgraph
+from mminf.model.base import Model, Subgraph
 from mminf.worker.engine_manager import EngineManager
 from mminf.worker.micro_scheduler import MicroScheduler, ScheduledBatch
 from mminf.worker.stage_manager_utils import (
@@ -44,6 +44,7 @@ class Worker:
         socket_path_prefix: str = "/tmp/mminf",
         tensor_comm_protocol: CommProtocol = CommProtocol.RDMA,
         device: torch.device = torch.device("cuda"),
+        model: Model | None = None,
     ):
         self.worker_id = worker_id
         self.device = device
@@ -63,7 +64,9 @@ class Worker:
             all_subgraph_ids_to_stages=all_subgraph_ids_to_stages,
         )
 
-        self.engine_manager = EngineManager.from_config(engine_configs, device)
+        self.engine_manager = EngineManager.from_config(
+            engine_configs, device, model=model
+        )
         self.scheduler = MicroScheduler(self.engine_manager)
 
         self.communicator = ZMQCommunicator(
