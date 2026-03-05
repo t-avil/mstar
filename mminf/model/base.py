@@ -230,14 +230,27 @@ class Model(ABC):
         pass
 
     @abstractmethod
+    def get_submodule(self, stage_name: str) -> torch.nn.Module | None:
+        """
+        Return the nn.Module for this stage, or None for dummy mode.
+        The engine calls this (via EngineManager) to get the submodule it
+        will execute directly with engine-specific wrapping (KV cache,
+        FlashInfer, etc.).
+        """
+        pass
+
     def step(
         self, stage_name: str,
         phase: str,
         input_tensors: NameToTensorList,
-        state, # TODO: figure out state
+        engine,  # BaseEngine — untyped to avoid circular import
         **kwargs
     ) -> NameToTensorList:
         """
-        Called by the worker to execute a stage
+        Thin wrapper that dispatches to the engine. The engine handles all
+        engine-specific logic (KV cache, FlashInfer, etc.).
+        Models can override this for model-specific dispatch logic.
         """
-        pass
+        return engine.execute_single_request(
+            self.get_submodule(stage_name), input_tensors, **kwargs
+        )
