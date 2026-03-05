@@ -15,6 +15,38 @@ STREAM_OUT = "stream_out"
 SPECIAL_DESTINATIONS = {STREAM_OUT}  # add RELAY etc. later
 
 
+class StageSubmodule(torch.nn.Module):
+    """
+    Base class for stage wrapper submodules.
+
+    Separates preprocessing (variable-length list[Tensor] → fixed Tensor)
+    from computation (Tensor → NameToTensorList), enabling torch.compile
+    and CUDA graphs on the forward() path.
+
+    Engine call pattern:
+        preprocessed = submodule.preprocess(**inputs)   # list → tensors
+        result = submodule(**preprocessed)              # tensor → tensor (compilable)
+    """
+
+    def preprocess(self, **inputs: list[torch.Tensor]) -> dict[str, torch.Tensor]:
+        """
+        Convert variable-length list[Tensor] inputs to fixed tensors.
+        NOT compiled — handles Python-level variability.
+
+        Default: assert each input has exactly 1 tensor and unwrap it.
+        Override for stages that handle multiple tensors (e.g., stacking images).
+        """
+        return {k: v[0] for k, v in inputs.items()}
+
+    @abstractmethod
+    def forward(self, **kwargs) -> NameToTensorList:
+        """
+        Pure tensor → NameToTensorList computation.
+        Compilable + CUDA-graphable.
+        """
+        ...
+
+
 @dataclass
 class Subgraph:
     section: GraphSection
