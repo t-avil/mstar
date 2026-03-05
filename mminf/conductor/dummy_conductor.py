@@ -32,6 +32,7 @@ def _worker_process_target(
     all_subgraph_ids_to_stages: dict[str, list[str]],
     hostname: str,
     socket_path_prefix: str,
+    model: Model | None = None,
     device: str = "cuda",
 ):
     """Top-level target for spawned worker processes. Must be module-level for picklability."""
@@ -48,6 +49,7 @@ def _worker_process_target(
         hostname=hostname,
         socket_path_prefix=socket_path_prefix,
         device=torch.device(device),
+        model=model,
     )
     worker.run()
 
@@ -164,6 +166,7 @@ class DummyConductor:
                     "all_subgraph_ids_to_stages": self._all_subgraph_ids_to_stages,
                     "hostname": self.hostname,
                     "socket_path_prefix": self.socket_path_prefix,
+                    "model": self.model,
                     "device": f"cuda:{rank}",
                 },
                 daemon=True,
