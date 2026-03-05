@@ -101,7 +101,7 @@ class GraphStage(GraphSection):
 
     # Populated as previous stages complete
     # This will also include, e.g., tensor UUIDs associated with these inputs
-    ready_inputs: dict[str, GraphPointer] # name -> graph edge
+    ready_inputs: dict[str, GraphPointer] = field(default_factory=dict) # name -> graph edge
 
     def __post_init__(self):
         # if the user inputs, e.g., a list, turn it into a set
@@ -123,7 +123,7 @@ class GraphStage(GraphSection):
 
     def ingest_inputs(self, stage_to_inputs: DestToGraphPointers):
         if self.name not in stage_to_inputs:
-            return set()
+            return []
 
         ingested = {
             ptr.name: ptr for ptr in stage_to_inputs[self.name] \
