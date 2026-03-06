@@ -14,6 +14,7 @@ from mminf.api_server.entrypoint import ResultChunk, ResultTensors
 from mminf.communication.communicator import CommProtocol, ZMQCommunicator
 from mminf.communication.tensors import MooncakeCommunicationManager, NameToTensorList
 from mminf.ipc_formats import ConductorMessage, ConductorMessageType, NewRequestConductor
+from mminf.model.base import Model
 
 
 @dataclass
@@ -36,6 +37,7 @@ def _preprocess_loop(**kwargs):
 class PreprocessWorker:
     def __init__(
         self,
+        model: Model | None = None,
         hostname: str = "localhost",
         socket_path_prefix: str = "/tmp/mminf",
         tensor_comm_protocol: CommProtocol = CommProtocol.RDMA,
@@ -57,6 +59,7 @@ class PreprocessWorker:
                 hostname=hostname,
                 socket_path_prefix=socket_path_prefix,
                 tensor_comm_protocol=tensor_comm_protocol,
+                model=model,
             )
         )
 
@@ -92,6 +95,7 @@ class PreprocessWorkerThread:
         socket_path_prefix: str = "/tmp/mminf",
         tensor_comm_protocol: CommProtocol = CommProtocol.RDMA,
         device: str = "cpu",
+        model: Model | None = None,
     ):
         self.in_queue = in_queue
         self.result_tensor_queue = result_tensor_queue
@@ -100,6 +104,7 @@ class PreprocessWorkerThread:
 
         self.stop_event = stop_event
         self.device = device
+        self.model = model
 
         self.tensor_uuid_to_metadata_per_request = {}
 
@@ -121,11 +126,20 @@ class PreprocessWorkerThread:
     ):
         tensors: NameToTensorList = {}
         input_metadata = {}
-        # now everything is a list of tensors, even if there's only a single entry
-        if input.text is not None:
-            # Encode as UTF-8 bytes -> uint8 tensor
+
+        # Tokenize prompt via model (model-specific tokenization + system prompt)
+        if self.model is not None:
+            prompt_tensors = self.model.process_prompt(
+                input.text,
+                input.input_modalities,
+                input.output_modalities,
+                **(input.model_kwargs or {}),
+            )
+            tensors.update(prompt_tensors)
+        elif input.text is not None:
+            # Fallback: encode as UTF-8 bytes -> uint8 tensor
             byte_data = input.text.encode("utf-8")
-            tensors["text_input"] = [torch.tensor(
+            tensors["text_inputs"] = [torch.tensor(
                 list(byte_data), dtype=torch.uint8, device=self.device
             )]
 
