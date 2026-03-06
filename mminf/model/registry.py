@@ -1,8 +1,10 @@
+from mminf.model.bagel_model import BagelModel
 from mminf.model.base import Model
 from mminf.model.dummy_model import DummyModel
 
 MODEL_REGISTRY: dict[str, type[Model]] = {
     "dummy": DummyModel,
+    "bagel": BagelModel,
 }
 
 
