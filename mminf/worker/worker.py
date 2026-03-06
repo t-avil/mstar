@@ -82,6 +82,9 @@ class Worker:
             protocol=tensor_comm_protocol,
         )
 
+        # Per-request metadata from conductor (e.g., cache_labels, snapshot_after)
+        self._per_request_metadata: dict[str, dict] = {}
+
     # ------------------------------------------------------------------
     # Message handling
     # ------------------------------------------------------------------
@@ -97,6 +100,10 @@ class Worker:
         self.subgraphs_manager.update_phase(
             body.request_id, body.initial_phase
         )
+
+        # Store per-request metadata from conductor
+        if body.per_request_metadata:
+            self._per_request_metadata[body.request_id] = body.per_request_metadata
 
         # Start RDMA reads for tensors that have tensor_info
         self.tensor_manager.start_read_tensors(
@@ -117,6 +124,7 @@ class Worker:
         self.engine_manager.remove_request(body.request_id)
         self.subgraphs_manager.remove_request(body.request_id)
         self.tensor_manager.cleanup_request(body.request_id)
+        self._per_request_metadata.pop(body.request_id, None)
 
     def _handle_tensor_received(self, body: TensorReceived) -> None:
         """Sender-side cleanup: receiver confirmed RDMA read, free source buffers."""
@@ -128,6 +136,10 @@ class Worker:
 
     def _process_new_inputs(self, body: InputSignals) -> None:
         self.subgraphs_manager.update_phase(body.request_id, body.phase)
+
+        # Update per-request metadata from conductor
+        if body.per_request_metadata:
+            self._per_request_metadata[body.request_id] = body.per_request_metadata
 
         # Start RDMA reads for tensors with tensor_info
         self.tensor_manager.start_read_tensors(
@@ -172,6 +184,7 @@ class Worker:
     def _build_stage_batch(self, batch: ScheduledBatch) -> StageBatch:
         """Gather input tensors from tensor_manager for all requests in the batch."""
         per_request_inputs: dict[str, NameToTensorList] = {}
+        per_request_metadata: dict[str, dict] = {}
 
         for request_id, stage in batch.stage_objects.items():
             tensors = {}
@@ -184,11 +197,16 @@ class Worker:
                 ]
             per_request_inputs[request_id] = tensors
 
+            # Include per-request metadata (e.g., cache_labels, snapshot_after)
+            if request_id in self._per_request_metadata:
+                per_request_metadata[request_id] = self._per_request_metadata[request_id]
+
         return StageBatch(
             stage_name=batch.stage_name,
             phase=batch.phase,
             request_ids=list(batch.stage_objects.keys()),
             per_request_input_tensors=per_request_inputs,
+            per_request_metadata=per_request_metadata,
         )
 
     # ------------------------------------------------------------------
