@@ -134,13 +134,13 @@ VoxServe's existing pattern. Detokenizer runs at intervals (every 10-50 tokens) 
                                                  ▼
 ┌──────────────┐                     ┌──────────────────────────────────────────┐
 │  API Server  │ ──── ZMQ ────────→  │                 Conductor                │
-│  (from       │                     │                                          │
-│   VoxServe)  │                     │  ┌─────────────┐  ┌──────────────────┐   │
-│              │                     │  │   Worker    │  │   Scheduler      │   │
-│  • FastAPI   │                     │  │   Registry  │  │   • req mgmt     │   │
-│  • HTTP      │                     │  │   (static + │  │     (steps a-f)  │   │
-│  • Streaming │                     │  │    dynamic) │  │   • stage mgmt   │   │
-│              │                     │  └─────────────┘  │     (steps g-i)  │   │
+│              │                     │                                          │
+│  • FastAPI   │                     │  ┌─────────────┐  ┌──────────────────┐   │
+│  • HTTP      │                     │  │   Worker    │  │   Scheduler      │   │
+│  • Streaming │                     │  │   Registry  │  │   • req mgmt     │   │
+│  • Preprocess│                     │  │   (static + │  │     (steps a-f)  │   │
+│    Worker    │                     │  │    dynamic) │  │   • stage mgmt   │   │
+│  • Tokenize  │                     │  └─────────────┘  │     (steps g-i)  │   │
 └──────────────┘                     │                   └──────────────────┘   │
        ▲                             │  ┌──────────────────────────────────┐    │
        │                             │  │ Dispatching of stages/subgraphs  │    │
@@ -154,20 +154,21 @@ VoxServe's existing pattern. Detokenizer runs at intervals (every 10-50 tokens) 
        │                             ┌──────▼──────┐       ┌──────▼──────┐
        │                             │  Worker 0   │       │  Worker 1   │
        │                             │  (GPU 0)    │  IPC  │  (GPU 1)    │
-       └──────────────────────────── │  • LLM      │◄─────►│  • Flow     │
-                                     │  • Encoder  │       │  • VAE      │
-                                     │  • AR Head  │       │  • Talker   │
+       └──────────────────────────── │  • LLM(AR)  │◄─────►│  • ViT(E/D)│
+                                     │  • Engines  │ RDMA  │  • VAE(E/D)│
+                                     │  • Scheduler│  +ZMQ │  • Engines │
                                      └─────────────┘       └─────────────┘
 
                      ┌─────────────────────────────────────┐
-                     │        Execution Strategy           │
-                     │  (per model, part of model obj)     │
+                     │        Model (ABC)                  │
+                     │  (per model, defines all phases)    │
                      │                                     │
-                     │  • Full Graph (all possible stages) │
-                     │  • f(inp_modalities, out_modalities │
-                     │      flags/meta) → Active Graph     │
-                     │  • run_stage(stage_id, inputs,      │
-                     │      state, flags) → {out: tensor}  │
+                     │  • get_phase_graphs() → {phase: G}  │
+                     │  • get_stage_engine_types()          │
+                     │  • get_forward_pass_inputs(meta)     │
+                     │  • update_for_next_forward(meta)     │
+                     │  • process_prompt(text) → tensors    │
+                     │  • get_submodule(stage) → nn.Module  │
                      └─────────────────────────────────────┘
 ```
 
@@ -175,11 +176,11 @@ VoxServe's existing pattern. Detokenizer runs at intervals (every 10-50 tokens) 
 
 | Component | Responsibility | What It Does NOT Do |
 |-----------|---------------|---------------------|
-| **API Server** | HTTP endpoints, streaming responses, ZMQ communication with Conductor | Touch GPU tensors, manage batching |
+| **API Server** | HTTP endpoints, streaming responses, ZMQ communication with Conductor, **tokenization** via `model.process_prompt()` (in the PreprocessWorker thread), media loading (images, audio, video) | GPU computation, batching |
 | **Cluster Manager** | Deployment-time GPU allocation, autoscaling policy, config loading | Runtime request routing (deployment-time only) |
-| **Conductor** | Request lifecycle, worker selection, subgraph dispatching (i.e., dispatches contiguous graph sections to each worker), routing of inputs to the graph (e.g., input text, image, embeddings from the prev forward pass), determining computation path (prefill vs. decode vs. image gen, e.g.) | GPU computation, batching, tensor operations |
-| **Execution Strategy** | Defines a list of computation graphs for every "execution phase" of the model, where an execution phase is, e.g., prefill, autoregressive decode, image generation (for models that have different inference paths for image generation), map modalities to active phase, provide `run_stage()` or `step()` function. This is currently _not_ a separate class but lives on the `Model` class. | Scheduling, worker selection, communication. |
-| **Workers** | GPU computation, internal batching, continuous batching, KV cache management, streaming output, inter-worker communication. Handles input/output queues for its own subgraphs, and sends outputs to other workers when computation finishes. | Request lifecycle (e.g., checking for BOI or EOS tokens), cross-worker scheduling / batching. |
+| **Conductor** | Request lifecycle, worker selection, subgraph dispatching (contiguous graph sections to each worker), routing of inputs to the graph (e.g., text, image, embeddings from prev forward pass), determining computation phase (prefill_text → prefill_vit → decode → image_gen), passing per-request metadata (e.g., cache_labels for CFG) | GPU computation, batching, tensor operations |
+| **Model** (replaces "Execution Strategy") | Defines computation graphs for each phase via `get_phase_graphs()`, engine types via `get_stage_engine_types()`, forward pass orchestration (`get_forward_pass_inputs`, `update_for_next_forward`), tokenization (`process_prompt`), and `StageSubmodule` wrappers (preprocess + forward for each stage). Lives on the `Model` ABC. | Scheduling, worker selection, communication. |
+| **Workers** | GPU computation via engines, internal batching (MicroScheduler), KV cache management (via CacheHandle in AREngine), streaming output (STREAM_OUT), inter-worker communication (Mooncake RDMA + ZMQ), subgraph queue management (SubgraphsManager). | Request lifecycle (e.g., checking for EOS tokens), cross-worker scheduling. |
 
 ---
 
@@ -205,14 +206,24 @@ Workers ──ZMQ PUSH──→ API Server (result socket) ──HTTP stream─�
 - Request: `json_metadata | binary_payload` (metadata includes request_id, modalities, model_kwargs)
 - Response: `request_id | CHUNK_TYPE | data` where CHUNK_TYPE is `AUDIO`, `IMAGE`, `TEXT`, `VIDEO`, or `COMPLETION`
 
-### 4.3 Adaptations from VoxServe
+### 4.3 Data Worker and Tokenization
+
+The API server includes a `PreprocessWorker` (running in a separate thread) that handles:
+1. **Tokenization** via `model.process_prompt(prompt, input_modalities, output_modalities, **model_kwargs)` — each model defines its own tokenization logic, system prompt insertion (e.g., BAGEL's think mode), and output key naming.
+2. **Media loading** — images (torchvision), audio (torchaudio), video (torchcodec) are loaded and tensor-encoded.
+3. **Tensor registration** — all input tensors are stored in the `MooncakeCommunicationManager` and registered for RDMA send.
+4. **Conductor notification** — a `NewRequestConductor` message is sent with `initial_signals` (tensor pointer info), `input_modalities`, `output_modalities`, `input_metadata`, and `model_kwargs`.
+
+If no model is provided (lightweight mode), the data worker falls back to UTF-8 byte encoding.
+
+### 4.4 Adaptations from VoxServe
 
 - Generalize message format from audio-only to arbitrary modality chunks
 - Support multiple output streams per request (e.g., text + audio simultaneously for Omni models)
 - ~Add input streaming support for incremental inputs (text chunks, video frames)~ (already implemented in VoxServe)
 - Result socket receives from Workers directly (not through Conductor) for streaming data
 
-### 4.4 What to Reuse
+### 4.5 What to Reuse
 
 | From VoxServe | Reuse Strategy |
 |---------------|----------------|
@@ -234,39 +245,37 @@ A small, deployment-time-only component that reads `cluster_config.yaml` and ini
 
 ### 5.2 Config YAML Structure
 
+The config uses `stage_groups` — each group lists the graph stage names it handles and which GPU ranks can execute it. The conductor uses this to break phase graphs into subgraphs and assign them to workers.
+
 ```yaml
-cluster:
-  workers:
-    - rank: 0
-      gpu: "cuda:0"
-      components:
-        - model: "show-o2"
-          submodel: "llm"
-          capabilities: ["llm_prefill", "llm_decode", "flow_step"]
-        - model: "show-o2"
-          submodel: "vit"
-          capabilities: ["encode_image"]
-    - rank: 1
-      gpu: "cuda:1"
-      components:
-        - model: "show-o2"
-          submodel: "vae"
-          capabilities: ["vae_encode", "vae_decode"]
-
-  try_to_colocate:
-    - ["llm", "flow_head"]  # for Show-o2 interleaved pattern
-
-  autoscaling:
-    enabled: false
-    min_workers: 2
-    max_workers: 8
-
-  gpu_preferences:
-    llm: "H100"
-    vae: "A100"
+# BAGEL example: LLM on GPU 0, encoders/decoders on GPU 1
+stage_groups:
+  - stage_names: ["LLM"]
+    ranks: [0]
+  - stage_names: ["vit_encoder", "vae_encoder", "vae_decoder"]
+    ranks: [1]
 ```
 
-Capability names are defined by the system in per-model basis. In other words, users can't use custom modules (i.e., something finer than what the system defines) in a computation graph.
+```yaml
+# BAGEL colocated (single GPU): everything on rank 0
+stage_groups:
+  - stage_names: ["LLM", "vit_encoder", "vae_encoder", "vae_decoder"]
+    ranks: [0]
+```
+
+```yaml
+# Show-o2 example: LLM + flow co-located (required), VAE separate
+# Optional 'phases' field restricts a group to specific computation phases
+stage_groups:
+  - stage_names: ["LLM", "diffusion_head", "euler_step", "vit_encoder", "text_emb"]
+    ranks: [0]
+  - stage_names: ["vae_decoder"]
+    ranks: [1]
+```
+
+Stage names in the YAML must match the `name` fields in the model's `get_phase_graphs()` output.
+When `ranks` has multiple entries, the subgraph is replicated for data parallelism and the conductor randomly assigns requests to one rank per subgraph.
+The optional `phases` field restricts a stage group to specific computation phases (e.g., `phases: ["image_gen"]`); if omitted, the group is active for all phases.
 
 ### 5.3 Responsibilities
 
@@ -381,9 +390,9 @@ class Subgraph:
 class RequestData:
     current_forward_metadata: CurrentForwardMetadata
     fwd_inputs: list[GraphPointer] # inputs that the conductor has sent to the current fwd pass
-    persist_signals: dict[str, TensorPointerInfo] # signals passed back to conductor
+    persist_signals: dict[str, list[TensorPointerInfo]] # signals passed back to conductor
     subgraph_to_worker: dict[str, str] # subgraph id to worker id
-    new_tokens: list[int] # for this fwd pass, used to check for BOI, EOS, etc.
+    new_tokens: dict[str, list[int]] # name -> tokens, for this fwd pass (e.g., {"new_token": [42, 17]})
 
     # for tracking progress
     all_subgraph_ids: set[str] # across all phases
@@ -398,6 +407,7 @@ class CurrentForwardMetadata:
     output_modalities: list[str]
     phase: str
     is_prefill: bool
+    kwargs: dict  # model-specific metadata (e.g., prefill_schedule, cfg scales)
 ```
 See the [computation graph model section](#9-computation-graph-model) for information about `GraphPointer` and `TensorPointerMetadata`.
 
@@ -436,123 +446,131 @@ Once the graphs are defined, the `Model` class automatically parses it, along wi
 This is produced by `model.get_subgraphs(config_path)`, which calls `self.get_phase_graphs()` and performs the logic to break the graphs from each phase into subgraphs.
 See the [computation graph model section](#9-computation-graph-model) for information.
 
-### 7.2 Input Wrangling and Stage Running
+### 7.2 Model ABC Methods
 
-In addition to the computation graph, the user must define the following functions for forward pass execution:
+In addition to the computation graph, each model implements the following abstract methods from the `Model` base class (`model/base.py`):
 
-<!-- get_initial_forward_metadata, get_forward_pass_inputs, update_for_next_forward, step in model/base.py-->
+**Tokenization (called by API server data worker):**
 
-<!-- @Irmak TODO EDIT FROM HERE -->
+- `process_prompt(prompt, input_modalities, output_modalities, **kwargs) → NameToTensorList` — Tokenizes the user prompt and produces initial text tensors (e.g., tokenized input, system prompt). Called by the API server's `PreprocessWorker` to convert raw text to model-specific tensor format. Output keys (e.g., `"text_inputs"`, `"system_prompt"`) are referenced by `get_forward_pass_inputs` via `persist_signals`.
 
-- `get_initial_forward_metadata()` returns `CurrentForwardMetadata` object given input-output modalities (such as `image`, `text`, `audio`) with `prefill` phase and `is_prefill` flag set to `True`.
+**Forward pass orchestration (called by conductor):**
 
-- `get_forward_pass_inputs()` returns a list of `GraphPointer`s with `next_stage` and `name` fields. It checks for persisting signals (outputs of the previous fwd pass) to be merged with new inputs. Called by the conductor. These are the external inputs that go from the conductor to the workers at the beginning of the current forward pass; all other signals are handled internally via IPC.
+- `get_initial_forward_metadata(input_modalities, output_modalities) → CurrentForwardMetadata` — Determines the starting phase and constructs model-specific metadata (e.g., BAGEL's prefill schedule with multi-cache annotations for CFG).
 
-- `update_for_next_forward()` is called by the conductor after the full fwd pass. The metadata is updated (primarily checking for input-output modality changes to update the `phase`).
+- `get_forward_pass_inputs(metadata, persist_signals, prev_forward_metadata) → list[GraphPointer]` — Returns the external inputs to send to workers at the start of each forward pass. Uses `persist_signals` (tensors that persisted from previous forward passes) and the current phase to construct `GraphPointer`s with `next_stage`, `name`, and `tensor_info` fields.
 
-- `step(stage_name, phase, input_tensors, engine, state, **kwargs)` runs a single graph stage.
-See  [the Worker section](#8-workers-and-engines) for more information on graph stage execution.
+- `update_for_next_forward(metadata, new_tokens) → CurrentForwardMetadata` — Called after each full model forward pass to advance phase transitions (e.g., prefill_text → prefill_vit → decode → image_gen). Phase transitions are schedule-driven for models like BAGEL; `new_tokens` is checked for EOS.
 
-**Note: these functions are subject to change, they are our best guess for what needs to be defined.**
+**Stage engine types:**
 
-<!-- 
-### 7.2 Three Outputs
+- `get_stage_engine_types() → dict[str, EngineType]` — Returns the engine type (`EngineType.AR`, `EngineType.ENC_DEC`, `EngineType.FLOW`, `EngineType.AUDIO_CODEC`) for each stage name. Used by the conductor to build engine configs for workers.
 
-1. **Full Graph**: The complete computation graph using GraphSection primitives (GraphStage, Sequential, Parallel, Loop). Represents ALL possible stages for this model regardless of input/output modalities.
+**Submodule access (called by engine manager on workers):**
 
-2. **Active Graph Function**: `f(input_modalities, output_modalities, flags/meta) → active graph`. Selects which stages are active for a given request. Example:
-   - Text-only input, text output → Only: text_tok → LLM prefill → LLM decode → STREAM
-   - Text input, image output → Full pipeline including flow head and VAE
+- `get_submodule(stage_name) → nn.Module | None` — Returns the `StageSubmodule` wrapper for a stage, or `None` for dummy mode. Workers call this to get the actual PyTorch module to execute. Submodule creation is lazy (created on first access).
 
-3. **`run_stage(stage_id, inputs, state, flags) → {output_name: tensor}`**: Called by workers. Takes named input tensors, returns named output tensors. Flags include metadata like flow step number, prefill vs. decode, etc. Every time the active graph changes, a new `stage_id` is issued. -->
+**Stage execution:**
+
+- `step(stage_name, phase, input_tensors, engine, **kwargs) → NameToTensorList` — Default dispatcher that calls `engine.execute_single_request()`. Models can override for custom dispatch logic.
 
 ### 7.3 Full Graph Example (BAGEL)
 
-**AR Text Generation Phase**:
-```python
-full_graph = Sequential([
-    Parallel([
-        GraphStage(
-            name="vit_encoder",
-            input_ids=["image"],
-            outputs=[
-                GraphPointer(next_stage="LLM", name="img_emb")
-            ]
-        ),
-        GraphStage(
-            name="text_emb",
-            input_ids=["text"],
-            outputs=[
-                GraphPointer(next_stage="LLM", name="text_emb")
-            ]
-        ),
-    ]),
-    GraphStage(
-        name="LLM_text_gen",  # AR text generation phase
-        input_ids=["text_emb", "img_emb"],
-        outputs=[
-            GraphPointer(next_stage="STREAM_OUT", name="text_tokens"),
-        ]
-    )
-])
-```
+BAGEL has **5 separate phase graphs** rather than one monolithic graph, because: (1) the output mode is known upfront from the API request (no BOI token detection), and (2) the LLM is a "fat stage" that absorbs text_emb, lm_head, and flow_proj to avoid unnecessary IPC. Phase transitions are schedule-driven via `update_for_next_forward()`.
 
-**Image generation phase**: triggered when conductor detects `<BOI>`. Each flow step runs the full LLM backbone with frozen KV cache.
+The 4 stages are: `vit_encoder` (enc_dec), `vae_encoder` (enc_dec), `LLM` (ar), `vae_decoder` (enc_dec).
+
 ```python
-full_graph = Sequential([
-    Parallel([
+def get_phase_graphs(self) -> dict[str, GraphSection]:
+    # -- prefill_text: just the LLM stage (text embedding is internal) --
+    prefill_text = GraphStage(
+        name="LLM",
+        input_ids=["text_inputs"],
+        outputs=[],   # No output — conductor notified via SUBGRAPHS_DONE
+    )
+
+    # -- prefill_vit: ViT encoder -> LLM (bidirectional attention) --
+    prefill_vit = Sequential([
         GraphStage(
             name="vit_encoder",
-            input_ids=["image"],
-            outputs=[
-                GraphPointer(next_stage="LLM", name="img_emb")
-            ]
+            input_ids=["image_inputs"],
+            outputs=[GraphPointer(next_stage="LLM", name="vit_emb")],
+        ),
+        GraphStage(name="LLM", input_ids=["vit_emb"], outputs=[]),
+    ])
+
+    # -- prefill_vae: VAE encoder -> LLM (bidirectional attention) --
+    prefill_vae = Sequential([
+        GraphStage(
+            name="vae_encoder",
+            input_ids=["image_inputs"],
+            outputs=[GraphPointer(next_stage="LLM", name="vae_emb")],
+        ),
+        GraphStage(name="LLM", input_ids=["vae_emb"], outputs=[]),
+    ])
+
+    # -- decode: single LLM stage (embed + transformer + lm_head) --
+    decode = GraphStage(
+        name="LLM",
+        input_ids=["text_inputs"],
+        outputs=[
+            GraphPointer(
+                next_stage=STREAM_OUT, name="new_token",
+                output_modality="text", is_new_token=True,
+                back_to_conductor=True,
+            ),
+        ],
+    )
+
+    # -- image_gen: denoising loop (LLM does 3-pass CFG + Euler) -> VAE decode --
+    image_gen = Sequential([
+        Loop(
+            section=GraphStage(
+                name="LLM",
+                input_ids=["latents"],
+                outputs=[GraphPointer(next_stage="LLM", name="latents")],
+            ),
+            n_iters=self.num_timesteps - 1,  # N-1 Euler steps for N timesteps
+            outputs=[GraphPointer(next_stage="vae_decoder", name="latents")],
         ),
         GraphStage(
-            name="text_emb",
-            input_ids=["text"],
-            outputs=[
-                GraphPointer(next_stage="LLM", name="text_emb")
-            ]
-        ),
-    ]),
-    # Image generation phase -- triggered when conductor detects <BOI>
-    # Each flow step runs the full LLM backbone with frozen KV cache
-    Loop(
-        section=GraphStage(
-            name="LLM_flow_step",  # Full LLM forward pass per step (frozen KV)
-            input_ids=["text_emb", "img_emb", "latents"],
+            name="vae_decoder",
+            input_ids=["latents"],
             outputs=[
                 GraphPointer(
-                    next_stage="LLM_flow_step",
-                    name="latents"
-                )  # loop-back
-            ]
+                    next_stage=STREAM_OUT, name="image_output",
+                    output_modality="image", back_to_conductor=True,
+                ),
+            ],
         ),
-        n_iters=24,
-        outputs=[
-            GraphPointer(
-                next_stage="vae_decoder",
-                name="latents"
-            )
-        ]
-    ),
-    GraphStage(
-        name="vae_decoder",
-        input_ids=["latents"],
-        outputs=[
-            GraphPointer(
-                next_stage="STREAM_OUT",
-                name="image",
-                back_to_conductor=True
-            )
-        ]
+    ])
+
+    return dict(
+        prefill_text=prefill_text,
+        prefill_vit=prefill_vit,
+        prefill_vae=prefill_vae,
+        decode=decode,
+        image_gen=image_gen,
     )
-])
 ```
 
+**Prefill schedule and multi-cache orchestration (CFG)**:
 
-Note: BAGEL uses the same LLM backbone for both text generation and flow steps. During flow steps, the LLM reads frozen KV cache (`update_past_key_values=False`) and processes noised latents projected via `vae2llm`. Velocity is extracted via `llm2vae` (a linear layer), not a separate diffusion head. CFG requires 3x forward passes per step (conditional + text-CFG + image-CFG), handled at the worker level by tripling the batch size. The `text_emb` and `img_emb` inputs to the flow loop are external inputs that persist across iterations (handled by `Loop.external_inputs`).
+For image generation, BAGEL uses 3 KV caches (main, cfg_text, cfg_img) for classifier-free guidance. The prefill schedule annotates each step with `cache_labels` (which caches to update) and optional `snapshot_after` (to deepcopy a cache):
+
+| Prefill step | `cache_labels` | `snapshot_after` |
+|---|---|---|
+| system text | `["main", "cfg_img"]` | — |
+| image (VAE) | `["main"]` | `("main", "cfg_text")` after last image |
+| user text | `["main", "cfg_img"]` | — |
+
+After prefill: `main` = full, `cfg_img` = text-only, `cfg_text` = system+image only.
+
+During `image_gen`, all 3 caches are frozen (read-only, `write_cache=False`). Each denoising step runs the LLM 3x against different caches, combines velocities via the CFG formula, and performs an Euler step.
+
+The `LLMSubmodule` dispatches based on the `phase` argument (passed through `StageBatch.phase`), handling prefill_text/vit/vae/decode/image_gen with phase-specific logic. Cache labels and snapshot metadata flow from `metadata.kwargs["prefill_schedule"]` through the conductor → `InputSignals.per_request_metadata` → worker → `StageBatch.per_request_metadata` → engine → `submodule.forward(**metadata)`.
+
+**Note**: BAGEL uses the same LLM backbone for both text generation and flow steps. During flow steps, the LLM reads frozen KV cache (`write_cache=False`, `is_causal=False`) and processes noised latents. Velocity is extracted via `llm2vae` (a linear layer), not a separate diffusion head.
 
 ### 7.4 Image Generation Graph (Show-o2 -- Interleaved)
 **AR Text Generation Phase**:
@@ -781,6 +799,7 @@ class TensorPointerInfo:
     dtype: str
     nbytes: int
     address: int
+    uuid: str  # for tensor cleanup and list[tensor] indexing
     source_session_id: str # e.g., f"{HOSTNAME}:{client_engine.get_rpc_port()}"
     source_entity: str # which {worker, api_server} the tensor is on
 
@@ -788,10 +807,11 @@ class TensorPointerInfo:
 class GraphPointer:
     next_stage: str
     name: str
-    tensor_info: TensorPointerInfo | None = field(default=None)
+    tensor_info: list[TensorPointerInfo] = field(default_factory=list)
     # Flags
     back_to_conductor: bool = field(default=False)
     is_new_token: bool = field(default=False)
+    output_modality: str = field(default="")  # text | image | video | audio (for STREAM_OUT)
 ```
 
 ---
@@ -811,13 +831,23 @@ Workers are long-lived GPU processes. Each worker:
 
 ### 8.2 Engines
 
-Each worker has one or more **engines** that wrap their model components for efficient execution (for instance, for an LLM stage, this includes `flash_infer` wrappers, Mooncake KV cache management, etc.).
-Each engine loads in the respective model component weights, and is passed into `model.step(...)` function, which provides any necessary input/output processing and calls `engine.execute_stage`
+Each worker has one or more **engines** that wrap their model components for efficient execution. An `EngineManager` (on each worker) maps stage names to engine instances, loads submodules via `model.get_submodule(stage_name)`, and dispatches execution.
 
-We define an engine class for each type of work (AR generation, flow, encoder/decoder work, etc.), all of which inherit the `BaseEngine` base class, and have the following functionality:
-- `load_model(model_config, device)`: loads a module based on `model_config`
--  `execute_batch(self, batch)`: runs the model on a batch of data and returns a dictionary of `{tensor_name: tensor}`.
-The `batch` is of type `StageBatch`, and provides the following information:
+Engine types are defined by the `EngineType` enum:
+```python
+class EngineType(Enum):
+    AR = "ar"           # Autoregressive (LLM with KV cache)
+    FLOW = "flow"       # Flow matching / diffusion
+    ENC_DEC = "enc_dec" # Stateless encoder/decoder (ViT, VAE)
+    AUDIO_CODEC = "audio_codec"
+```
+
+All engines inherit `BaseEngine` and implement:
+- `load_model(submodules, model_config, device)`: receives `dict[str, nn.Module]` keyed by stage name (from `model.get_submodule()`) and performs engine-specific initialization.
+- `execute_batch(batch: StageBatch) → StageOutput`: runs computation for a batch of requests.
+- `add_request(request_id)` / `remove_request(request_id)`: per-request lifecycle (e.g., KV cache allocation/deallocation).
+- `warmup()`: optional CUDA graph capture.
+
 ```python
 @dataclass
 class StageBatch:
@@ -825,93 +855,98 @@ class StageBatch:
     stage_name: str
     phase: str
     request_ids: list[str]
-    # {request_id: {input_name: tensor}}
-    per_request_input_tensors: dict[str, dict[str, torch.Tensor]]
+    per_request_input_tensors: dict[str, NameToTensorList]  # {rid: {name: list[tensor]}}
     metadata: dict = field(default_factory=dict)
+    per_request_metadata: dict[str, dict] = field(default_factory=dict)  # {rid: {key: value}}
 ```
-- `add_request(req_id)`: set up the appropriate data structures for processing a new request (e.g., for AR, instantiates an empty list of page indices for paged attention).
-- `remove_request(req_id)`: post-request cleanup, e.g., releasing KV cache pages
-- `warmup()`: optional CUDA graph capture.
-- `shutdown()`: final cleanup.
 
-**Key insight from VoxServe**: The `CudaGraphWorker` pattern captures CUDA graphs for different batch size and sequence length buckets, providing predictable execution times and reduced kernel launch overhead.
+The `per_request_metadata` field carries model-specific metadata from the conductor (e.g., `cache_labels`, `snapshot_after` for BAGEL's multi-cache CFG). It flows: conductor → `InputSignals.per_request_metadata` → worker → `StageBatch.per_request_metadata` → engine → `submodule.forward(**metadata)`.
 
+#### 8.2.1 StageSubmodule (preprocess/forward pattern)
 
-#### 8.2.1 Autoregressive Engine
+Model stages are wrapped in `StageSubmodule` subclasses (`model/base.py`), which separate preprocessing from computation:
 
-For transformer-based stages (LLM prefill, LLM decode, encoder forward passes).
+```python
+class StageSubmodule(torch.nn.Module):
+    def preprocess(self, **inputs: list[torch.Tensor]) -> dict[str, torch.Tensor]:
+        """Convert variable-length list[Tensor] inputs to fixed tensors.
+        NOT compiled — handles Python-level variability (cu_seqlens, .item()).
+        Default: assert each input has exactly 1 tensor and unwrap it."""
+
+    def forward(self, **kwargs) -> NameToTensorList:
+        """Pure tensor → NameToTensorList computation. Compilable + CUDA-graphable."""
+```
+
+Engines call `submodule.preprocess(**inputs)` then `submodule(**preprocessed, **metadata)`. The preprocess step extracts Python scalars (`.item()`) and computes cu_seqlens so that `forward()` operates only on fixed tensors (CUDA graph compatible).
+
+#### 8.2.2 Autoregressive Engine (AREngine)
+
+For transformer-based stages (LLM). Manages paged KV cache with FlashInfer attention.
+
+**Key feature: CacheHandle** — Per-request cache handle created by the engine and passed to `submodule.forward()`. The engine provides cache infrastructure; the submodule decides cache semantics:
+
+```python
+class CacheHandle:
+    def run_attention(self, q, k, v, layer_idx, is_causal=True, write_cache=True) -> Tensor
+    def set_active_label(self, label: str)    # Switch active KV cache (e.g., "main" → "cfg_text")
+    def snapshot(self, from_label, to_label)  # Deepcopy KV cache between labels
+    def save_seq_position(self) -> int        # Save position for flow matching rewind
+    def restore_seq_position(self, pos: int)  # Rewind to saved position
+```
+
+This separation enables BAGEL's 3-cache CFG without the engine knowing about CFG semantics. The AR engine's `execute_batch` creates a `CacheHandle` per request and passes it alongside `phase` and metadata to the submodule.
+
+KV cache state is keyed by `(request_id, cache_label)` to support multiple caches per request. `add_request()` accepts optional `cache_labels` to initialize multiple caches (default: `["main"]`).
 
 **Features**:
-- Paged KV cache with block-based management
-    - KV Cache management via Mooncake store
-- Prefix caching (hash-based block deduplication)
-- Speculative decoding support
-- `FlashInfer` prefill and decode wrappers
+- Paged KV cache with block-based `PageAllocator`
+- FlashInfer prefill and decode wrappers (with naive fallback when FlashInfer is unavailable)
+- Pause/resume for interleaved loops (LLM ↔ flow)
 
-### 8.2.2 Encoder/Decoder and Flow Engines
+#### 8.2.3 Encoder/Decoder Engine (EncoderDecoderEngine)
 
-For diffusion/flow-based stages (rectified flow, ODE solvers, VAE encode/decode).
+For stateless stages (ViT encoder, VAE encoder/decoder). No KV cache — straightforward `preprocess` → `forward` per request.
+
+Passes `per_request_metadata` to `submodule.forward()` alongside preprocessed inputs.
 
 **Characteristics**:
-- No KV cache (stateless per step)
-- Fixed-shape computation per step (batch × channels × height × width)
-- CUDA-graph-friendly (fixed shapes)
-- CFG parallelism (2x or 3x batch for classifier-free guidance)
+- Stateless per request (no `add_request` / `remove_request` overhead)
+- CUDA-graph-friendly (fixed shapes per request)
 
-
-<!-- - Executor abstraction (`collective_rpc` for distributed execution) -->
 
 #### 8.3 Scheduler
 
-Each worker handles its own batch scheduling, abstracted into a `MicroScheduler` class; at every worker loop, the worker calls `worker.get_next_batch(subgraphs_manager)` to get the next stage name and batch of inputs that should be run.
-The conductor and workers from previous workers dispatch work items; the worker accumulates and batches them.
+Each worker handles its own batch scheduling via a `MicroScheduler` class; at every worker loop, the worker calls `scheduler.get_next_batch(subgraphs_manager)` to get the next stage name and batch of inputs that should be run.
+The conductor and other workers dispatch work items; the worker accumulates and batches them.
 
-
-**For AR decode stages** (vLLM Engine Worker):
+**For AR decode stages**:
 - Continuous batching: requests join/leave batch dynamically
 - Batch selection based on: prefill priority, KV cache availability, SLO urgency
-- Chunked prefill: process prompt in chunks to avoid blocking decode requests
+- Chunked prefill: process prompt in chunks to avoid blocking decode requests (handled at worker level, not conductor)
 
-**For flow/diffusion stages** (DiT Worker):
+**For flow/diffusion stages**:
 - Batch multiple requests' flow steps together
-- CFG parallelism: double/triple batch for guidance
+- CFG parallelism: handled within the submodule (e.g., BAGEL's LLMSubmodule runs 3 forward passes per step internally)
 
 **For encoder stages**:
 - Simple batching: accumulate images/audio, process in batch
-- Stateless: no need for KV cache management
+- Stateless: no KV cache management needed
 
-**Key insight from vLLM**: The `SchedulerOutput` data structure is computation-agnostic. It describes *what* to schedule (request IDs, token counts, encoder inputs) without knowing *how* computation works. This makes it reusable for arbitrary transformer stages.
+### 8.4 Worker Internal Architecture
 
-### 8.4 Worker Capabilities
-
-Workers declare capabilities as tuples: `(model_name, submodel_name, capability_type)`, based on the cluster config.
-This allows the conductor to assign subgraphs to workers appropriately.
-
-Examples:
-```python
-worker_0_capabilities = [
-    ("show-o2", "LLM", "llm_prefill"),
-    ("show-o2", "LLM", "llm_decode"),
-    ("show-o2", "diffusion_head", "flow_step"),  # co-located with LLM
-    ("show-o2", "vit", "encode_image"),
-]
-worker_1_capabilities = [
-    ("show-o2", "vae", "vae_encode"),
-    ("show-o2", "vae", "vae_decode"),
-]
-```
-
+The worker (`worker/worker.py`) integrates four components:
+1. **SubgraphsManager** — Tracks per-request graph state: which subgraphs are assigned, ready/waiting queues, phase tracking, output routing.
+2. **EngineManager** — Maps stage names to engine instances, handles `load_model()`, `add_request()`, `remove_request()`.
+3. **MicroScheduler** — Selects the next batch to run based on ready stages across all requests.
+4. **MooncakeCommunicationManager** — Handles RDMA tensor transfers (start_read, get_ready, register_for_send).
 
 ### 8.5 Worker State Management
 
 State is mainly managed within workers (or between workers, via IPC), with some information passed from the conductor to workers at the beginning of each forward pass.
 
-- **Within-worker state** (worker manages): KV cache, noise schedule, step counter, latents, decoder cache
-- **Between-worker synchronization** (handled by IPC between workers): Which worker has which request's state, KV cache transfer, request lifecycle tracking.
-- **Conductor-to-worker synchronization**: At the beginning of each forward pass, the conductor sends inputs to the appropriate workers.
-With those inputs, it sends which computation phase the current forward pass is (e.g., prefill, decode, image generation).
-We may also want to send more information, such as input/output modalities, which token indices are which modality, etc.
-After the forward pass starts, this information passed on from earlier workers (e.g., LLM worker) to later workers (e.g., VAE decoder).
+- **Within-worker state** (worker manages): KV cache (via CacheHandle), per-request graph queues, engine state.
+- **Between-worker synchronization** (handled by IPC between workers): tensor transfers, stage output routing.
+- **Conductor-to-worker synchronization**: At the beginning of each forward pass, the conductor sends `InputSignals` with: inputs (`list[GraphPointer]`), phase, and `per_request_metadata` (e.g., `cache_labels`, `snapshot_after` for CFG). After the forward pass starts, subsequent signals pass between workers directly via IPC.
 
 ### 8.6 Streaming Output
 
@@ -985,17 +1020,21 @@ class GraphStage(GraphSection):
     name: str
     input_ids: set[str]              # Named inputs this stage needs (coerced from list in __post_init__)
     outputs: list[GraphPointer]
-    ready_input_ids: set[str] = field(default_factory=set)  # Populated as predecessors complete
+    consumes_stream: bool = False     # For RELAY consumer stages (e.g., Talker)
+
+    # Populated as predecessors complete — maps input name to the GraphPointer
+    # carrying the tensor info (address, uuid, etc.)
+    ready_inputs: dict[str, GraphPointer] = field(default_factory=dict)
 
     def is_ready(self) -> bool:
-        return self.input_ids.issubset(self.ready_input_ids)
+        return self.input_ids.issubset(set(self.ready_inputs.keys()))
 ```
 
 **Key methods**:
-- `ingest_inputs(stage_to_inputs)`: If this stage's name is in `stage_to_inputs`, ingest any input IDs that this stage needs and hasn't already received. Remove consumed entries from `stage_to_inputs` (mutation).
+- `ingest_inputs(stage_to_inputs)`: If this stage's name is in `stage_to_inputs`, ingest any input IDs that this stage needs and hasn't already received. Remove consumed entries from `stage_to_inputs` (mutation). Returns the list of ingested `GraphPointer`s.
 - `split_off_ready()`: Returns `([self], None)` if ready, or `([], self)` if still waiting.
-- `get_inputs()`: Returns `{inp: [self.name] for inp in self.input_ids}` -- maps each input to this stage name.
-- `get_outputs()`: Returns `remove_flags(self.outputs)` -- strips GraphPointers to plain names.
+- `get_inputs()`: Returns `[GraphPointer(next_stage=self.name, name=id) for id in self.input_ids]`.
+- `get_outputs()`: Returns `self.outputs`.
 
 Visual:
 ```
@@ -1107,13 +1146,15 @@ Helper: `update_list_dicts(signals, new_signals)` merges two `dict[str, list]` b
 class GraphPointer:
     next_stage: str
     name: str # name of the signal that is being passed (e.g., text_emb, latents, etc.)
-    tensor_info: TensorPointerInfo | None = field(default=None)
+    tensor_info: list[TensorPointerInfo] = field(default_factory=list)
     # Flags
     back_to_conductor: bool = field(default=False)
     is_new_token: bool = field(default=False)
+    output_modality: str = field(default="")  # text | image | video | audio (only for STREAM_OUT)
+    _persist_for_loop: bool = field(default=False)  # internal: don't cleanup between loop iters
 ```
 
-`tensor_info` holds data required for for inter-worker tensor communication (see [Inter-Process Communication Section](#10-inter-process-communication)).
+`tensor_info` is a **list** of `TensorPointerInfo` objects holding data required for inter-worker tensor communication (see [Inter-Process Communication Section](#10-inter-process-communication)). A list allows a single graph edge to carry multiple tensors (e.g., multiple images for one input).
 
 The `back_to_conductor` flag is used for signals that **persist between forward passes** and need to be sent back to the conductor to be passed as inputs into the next forward pass.
 
@@ -1235,30 +1276,30 @@ The key insight: `ingest_inputs` consumes entries from its argument. After the c
 
 Here, we detail the messages that can be sent to the conductor, worker, and API server via IPC.
 
-**Communication to conductor**:
+**Communication to conductor** (`ConductorMessageType`):
 
 | Flow | Direction | Purpose | Message Content |
 |------|-----------|---------|-----------------|
-**New Request** | API server → Conductor | Notify conductor of new work | `req_id`, `initial_signals` (`TensorPointerInfo` type), `init_in_modalities`, `init_out_modalities` |
-**Subgraphs Done** | Worker → Conductor | Notify subgraph completion | `req_id`, `subgraph_ids`, `perist_signals` (`TensorPointerInfo` type; signals that will be used in future forward passes), `new_tokens` |
+**New Request** | API server → Conductor | Notify conductor of new work | `req_id`, `initial_signals: dict[str, list[TensorPointerInfo]]`, `initial_input_modalities`, `initial_output_modalities`, `input_metadata`, `model_kwargs` |
+**Subgraphs Done** | Worker → Conductor | Notify subgraph completion | `req_id`, `subgraph_ids`, `persist_signals: dict[str, list[TensorPointerInfo]]`, `new_tokens: dict[str, list[int]]` |
 
-We may also have a more granular **Stage completion** message, if it would be helpful for assigning requests to workers.
-
-**Communication to workers**
+**Communication to workers** (`WorkerMessageType`):
 
 | Flow | Direction | Purpose | Message Content |
 |------|-----------|---------|-----------------|
-**New Request** | Conductor → Worker | Notify worker will be handling subgraphs this request; called once per request unless rescheduling occurs | `req_id`, `subgraph_ids`, `{subgraph_id: worker_id}` (for subgraphs that are on other workers), `initial_phase` (e.g., prefill, image_gen, ...), `initial_inputs` (`list[GraphPointer]`) |
-**Remove Request** | Conductor → Worker | Remove / reassign request, e.g., removing a request upon `<EOS>` or dynamic rescheduling |`req_id` |
-**Input Signals** | Conductor → Worker or Worker → Worker | Send information about new inputs to graph stages | `req_id`, `phase`, `inputs` (`list[GraphPointer]`) |
-**Tensor Received** | Worker → Worker or Worker → API server or API server → Worker | ACK that tensor read has finished | `req_id`, `receiving_entity`, `successful_tensor_ids`, `failed_tensor_ids` |
+**New Request** | Conductor → Worker | Notify worker will be handling subgraphs this request | `req_id`, `subgraph_ids`, `subgraph_to_worker: dict[str, str]`, `initial_phase`, `initial_inputs: list[GraphPointer]`, `per_request_metadata: dict` |
+**Remove Request** | Conductor → Worker | Remove request upon `<EOS>` or rescheduling | `req_id` |
+**Input Signals** | Conductor → Worker or Worker → Worker | Send inputs to graph stages | `req_id`, `phase`, `inputs: list[GraphPointer]`, `per_request_metadata: dict` |
+**Tensor Received** | Worker → Worker or Worker → API server | ACK that RDMA tensor read has finished | `req_id`, `successful_tensors: list[NameAndUuid]`, `failed_tensor_ids: list[NameAndUuid]` |
 
-**Communication to API server**
+The `per_request_metadata` field on `NewRequest` and `InputSignals` carries model-specific metadata from the conductor to workers (e.g., `cache_labels`, `snapshot_after` for BAGEL's multi-cache CFG orchestration).
+
+**Communication to API server**:
 
 | Flow | Direction | Purpose | Message Content |
 |------|-----------|---------|-----------------|
-**Result Chunk** | Worker → API server | Stream output | `req_id`, `modality`, `data`, `metadata` dict |
-**Request Complete** | Conductor → API server | Request has finished processing | `req_id
+**Result Chunk** | Worker → API server | Stream output | `req_id`, `modality`, `graph_edge: GraphPointer`, `metadata` dict |
+**Request Complete** | Conductor → API server | Request has finished processing | `req_id`
 
 
 **Design evolution note**: Note 14 of the design discussions stated: "Previously, the conductor handled what graph stages are ready to run and which are waiting for inputs. Now that everything passes between workers via inter-worker communication, this no longer fits in the conductor. The ready/waiting logic moves to the worker level."
@@ -1315,21 +1356,43 @@ This also sends ACK messages back to the senders of those tensors, so that they 
 While the tensors are being transferred, `Worker_1` performs computation if applicable.
 When the tensors are fully read in, `Worker_1` and sends a feedback message to `Worker_0` for confirmation.
 
-**Example receiver workflow (pseudocode)**:
+**Actual worker main loop** (from `worker/worker.py`):
 ```python
-while True
-    # (1) Read in new messages and start reads for any tensor transfer messages
-    new_messages = communication_manager.get_all_new_messages()
-    for msg in new_messages:
-        if msg.type == "INPUT_SIGNALS":
-            tensor_manager.start_read_tensors(msg.body.request_id, msg.body.pointers)
-        # ... handle other types of messages ...
-    
-    # (2) Check for any finished tensor transfers, and ingest those tensors as inputs
-    ready_tensors = tensor_manager.get_ready_tensors()
-    # ... ingest ready_tensors into the appropriate graph stages and update ready/waiting queues ...
+def run(self) -> None:
+    while True:
+        # 1. Process ZMQ messages (new requests, input signals, removals)
+        self._process_messages()
 
-    # (3) Run computation for ready stages, and send outputs to next stages or API server as needed
+        # 2. Check for completed RDMA transfers, feed ready pointers to subgraph queues
+        self._check_ready_tensors()
+
+        # 3. Pick next batch via MicroScheduler (selects stage + requests)
+        batch = self.scheduler.get_next_batch(self.subgraphs_manager)
+        if batch is None:
+            continue
+
+        # 4. Gather input tensors for the batch
+        stage_batch = self._build_stage_batch(batch)
+
+        # 5. Execute via engine (AR, enc_dec, etc.)
+        engine = self.engine_manager.get_engine(batch.stage_name)
+        output = engine.execute_batch(stage_batch)
+
+        # 5b. Free consumed input tensors
+        self._cleanup_consumed_inputs(batch)
+
+        # 6. Route outputs through SubgraphsManager (determines destinations)
+        routing_per_request = {
+            rid: self.subgraphs_manager.process_stage_outputs(rid, stage.outputs)
+            for rid, stage in batch.stage_objects.items()
+        }
+
+        # 7. Store output tensors, register RDMA if needed
+        self._store_outputs(batch, output, routing_per_request)
+
+        # 8. Send outputs to other workers / conductor / API server
+        for request_id in batch.stage_objects:
+            self._send_outputs(request_id, routing_per_request[request_id])
 ```
 
 ### 10.3 KV Cache Transfer
@@ -1437,55 +1500,93 @@ This supports:
 
 ## 12. Concrete Request Flows
 
-### 12.1 Text-Only VLM (e.g., Qwen3-VL)
+### 12.1 Text + Image Understanding (e.g., BAGEL, Qwen3-VL)
 
 ```
 1. User sends: "Describe this image" + image.jpg
-2. API Server → Conductor: {text: "Describe...", image: image.jpg, model: "qwen3-vl"}
+2. API Server data worker:
+   a. Calls model.process_prompt("Describe this image") → tokenized text tensor
+   b. Loads image.jpg → image tensor
+   c. Registers tensors for RDMA, sends NewRequestConductor to Conductor
 3. Conductor:
-   a. Instantiates a new `RequestData` object for this request.
-   b. For this request, assigns subgraphs for all computation phases to workers that can process that subgraph (e.g., vit_encoder → Worker 0, LLM → Worker 0 (co-located), etc.)
-      - Sends the worker to subgraph assignments to the workers that are active for this request. As part of this, the image and text inputs are sent to Worker 0 (i.e., information about their location is sent for Worker 0 to read through Mooncake transfer engine).
-4. Worker 0 completes vit_encoder, text_embedding. The LLM sends a SUBGRAPHS_DONE message to the conductor, with a flag that the produced embeddings will persist for the next forward pass.
-5. Then, the LLM becomes ready (via Worker 0's internal scheduling), and Worker 0 completes the LLM forward pass. It sends a SUBGRAPHS_DONE message to the conductor with the generated token.
-6. For every forward pass, the conductor sends inputs to Worker 0. Worker 0 runs LLM decode loop (continuous batching, AR token generation)
-   - Streams text tokens → API Server (STREAM_OUT)
-7. At <EOS>, the conductor sends a REMOVE_REQUEST message to Worker 0 and a DONE message to the API server
+   a. Calls model.get_initial_forward_metadata(["text", "image"], ["text"])
+      → Builds prefill schedule (e.g., for BAGEL: prefill_text, prefill_vit)
+   b. Assigns subgraphs to workers (e.g., LLM → Worker 0, vit_encoder → Worker 1)
+   c. Sends NewRequest to each worker with subgraph assignments
+4. Prefill phase (schedule-driven):
+   Step 0: prefill_text — Conductor sends text_inputs to Worker 0 (LLM)
+   Step 1: prefill_vit — Conductor sends image_inputs to Worker 1 (vit_encoder)
+     → Worker 1 runs ViT, sends vit_emb to Worker 0 via IPC
+     → Worker 0 runs LLM forward (bidirectional for image tokens)
+   Each step ends with SUBGRAPHS_DONE → Conductor
+5. Conductor transitions to decode phase
+6. Decode loop: For every forward pass, conductor sends previous token to Worker 0
+   - Worker 0 runs LLM decode, streams new_token → API Server (STREAM_OUT)
+   - Worker 0 sends SUBGRAPHS_DONE with new_token to Conductor
+7. At <EOS>, conductor sends REMOVE_REQUEST to all workers
 8. Conductor finishes request
 ```
 
 **Special: DeepStack multi-level feature injection** for Qwen3-VL requires ViT features from 3 intermediate layers to be injected at LLM layers 1, 2, 3. This is handled internally by the worker since ViT and LLM are co-located.
 
-### 12.2 Image Generation -- BAGEL Pattern (Frozen-KV Flow)
+### 12.2 Image Generation -- BAGEL Pattern (Schedule-Driven, Frozen-KV Flow)
+
+Output mode is known **upfront** from the API request's `output_modalities` (no BOI token detection). Prefill is schedule-driven: a sequential list of `(phase_name, step_kwargs)` entries that walk through interleaved text and image inputs with multi-cache annotations for CFG.
 
 ```
-1. User sends: "Generate a sunset over mountains"
-2. API Server → Conductor: {text: "Generate...", model: "bagel"}
+1. User sends: "Generate a sunset over mountains" + reference_image.jpg
+2. API Server data worker:
+   a. Calls model.process_prompt("Generate...") → tokenized text tensor
+   b. Loads reference_image.jpg → image tensor
+   c. Registers tensors for RDMA send
+   d. Sends NewRequestConductor to Conductor with initial_signals, modalities
+
 3. Conductor:
-   a. Instantiates a new `RequestData` object
-   b. Assign: text_emb + LLM + flow_loop → Worker 0, vae → Worker 1
-      (LLM must be co-located with flow loop since each flow step runs the LLM backbone)
-   c. Ready: text_emb (has text input)
-4. Dispatch text_emb → Worker 0
-5. Worker 0: text_emb completes → LLM prefill + AR text decode
-   - Sends apropriate SUBGRAPHS_DONE messages back to the counductor
-   - Streams text tokens → API Server (STREAM_OUT)
-6. Conductor sees <BOI>. Flow loop phase begins.
-7. Worker 0: runs 24 flow steps internally. KV cache is now frozen on Worker 0.
+   a. Calls model.get_initial_forward_metadata(["text", "image"], ["image"])
+      → Builds prefill schedule with CFG annotations:
+        [("prefill_text", {cache_labels: ["main", "cfg_img"]}),
+         ("prefill_vae",  {cache_labels: ["main"], snapshot_after: ("main", "cfg_text")})]
+   b. Assigns subgraphs to workers:
+      LLM → Worker 0, vit_encoder + vae_encoder + vae_decoder → Worker 1
+   c. Sends NewRequest to workers with subgraph assignments
+
+4. Prefill phase (multiple forward passes, schedule-driven):
+   Step 0: prefill_text
+     - Conductor sends text_inputs to Worker 0 (LLM stage)
+     - Worker 0: LLMSubmodule._forward_prefill_text()
+       → embed_tokens → LLM forward (causal) writing to "main" and "cfg_img" caches
+     - Worker 0 sends SUBGRAPHS_DONE → Conductor
+   Step 1: prefill_vae
+     - Conductor sends image_inputs to Worker 1 (vae_encoder stage)
+     - Worker 1: VAE encode → sends vae_emb to Worker 0 (via IPC)
+     - Worker 0: LLMSubmodule._forward_prefill_vae()
+       → BOI + vae_emb + EOI → LLM forward (bidirectional) writing to "main" only
+       → snapshot("main", "cfg_text") — creates text-only CFG cache
+     - Worker 0 sends SUBGRAPHS_DONE → Conductor
+
+5. Conductor: all prefill steps done → transitions to image_gen phase
+   (no BOI token, direct transition from schedule)
+
+6. Image generation (49 flow matching steps on Worker 0):
    For each step:
-     a. Project noised latents via vae2llm into LLM embedding space
-     b. Run full LLM forward pass (reading frozen KV cache, update_past_key_values=False)
-     c. Extract velocity via llm2vae linear layer
-     d. Euler step to update latents
-   CFG: 3x forward passes per step (conditional + text-CFG + image-CFG)
-   - Completion → Conductor: flow loop done, latents ready
-8. Transfer latents from Worker 0 to Worker 1 via IPC
-9. vae_decoder becomes ready → Worker 1 runs VAE decode
-10. Worker 1 streams image → API Server (STREAM_OUT)
-11. After seeing <EOS>, conductor finishes request
+     a. LLMSubmodule._forward_image_gen() runs 3 LLM forward passes:
+        - set_active_label("main") → LLM forward (read-only KV, write_cache=False)
+        - set_active_label("cfg_text") → LLM forward (read-only KV)
+        - set_active_label("cfg_img") → LLM forward (read-only KV)
+     b. llm2vae projection on all 3 outputs
+     c. CFG velocity combination:
+        v_final = v_cfg_img + img_scale * (v_cfg_text + text_scale * (v_main - v_cfg_text) - v_cfg_img)
+     d. Euler step: x_{t+1} = x_t + v_final * dt
+   Loop completion → latents ready
+
+7. Transfer latents from Worker 0 to Worker 1 via RDMA
+8. Worker 1 runs VAE decode → streams image → API Server (STREAM_OUT)
+9. Conductor marks request done (image_gen phase complete = one image per request)
 ```
 
-**Key**: The LLM is co-located with the flow loop because each of the 24 flow steps requires a full LLM forward pass. However, the KV cache is frozen after text generation, so it is reused (read-only) across all flow steps. The 3x CFG multiplier means each flow step actually runs 3 LLM forward passes (72 total). Only the final latents are transferred to Worker 1 for VAE decoding.
+**Key differences from previous design**: No BOI token detection — output mode known upfront. 5 separate phase graphs instead of one monolithic graph. Multi-cache CFG (3 caches: main, cfg_img, cfg_text) orchestrated via CacheHandle with `set_active_label()` and `snapshot()`, not by tripling the batch size. Schedule annotations (`cache_labels`, `snapshot_after`) flow from model → conductor → worker → engine → submodule.
+
+**With think_mode**: After prefill, first enters `decode` phase to generate reasoning text. When EOS is detected, transitions to `image_gen` phase (thinking done, now generate).
 
 ### 12.3 Image Generation -- Show-o2 Pattern (Interleaved Flow)
 
@@ -1677,9 +1778,9 @@ Not an expanded view of the same thing.
 
 ### 14.8 Old Design Problem: Interleaved vs. Independent Flow Heads
 
-**Resolution**: The computation graph expresses this directly.
-- **BAGEL**: Each flow step runs the full LLM backbone with frozen KV cache. The LLM and flow loop MUST be co-located (flow is not a separate model -- it reuses the same LLM). Only the final latents → VAE can be disaggregated.
-- **Show-o2**: LLM + diffusion_head + euler_step are all inside a `Loop` in `Sequential`. Config YAML `try_to_colocate` forces them onto the same worker.
+**Resolution**: The computation graph and stage design express this directly.
+- **BAGEL**: Flow matching is absorbed into the LLM stage as a "fat stage" (`LLMSubmodule`). The LLM does 3-pass CFG + llm2vae + Euler step internally via `_forward_image_gen()`. The `image_gen` phase graph is `Loop(LLM) → vae_decoder`. CacheHandle enables multi-cache CFG without the engine knowing about CFG. Only the final latents → VAE can be disaggregated.
+- **Show-o2**: LLM + diffusion_head + euler_step are all inside a `Loop` in `Sequential`. Config YAML stage_groups forces them onto the same worker.
 
 | Architecture | Flow Separate from LLM? | Cross-GPU Transfers if Separated | Config |
 |---|---|---|---|
@@ -1696,11 +1797,11 @@ Not an expanded view of the same thing.
 
 ### 15.1 Designed but Not Yet Implemented
 
-1. **Worker selection policy**: How the conductor chooses among capable workers (load balancing, KV affinity, SLO-awareness). Currently unspecified beyond "use Worker Registry dynamic properties."
+1. **Worker selection policy**: How the conductor chooses among capable workers (load balancing, KV affinity, SLO-awareness). Currently random selection for data-parallel ranks.
 
 2. **Batching at the conductor level**: Whether the conductor should batch-select which requests' stages to dispatch together, or leave all batching to workers.
 
-3. ~~**Model hierarchy / interface**: The concrete Python class hierarchy for models. The Execution Strategy is defined conceptually but the exact class interface (`BaseMultimodalModel.get_execution_strategy()`) needs implementation.~~
+3. ~~**Model hierarchy / interface**: Resolved — `Model` ABC in `model/base.py` with `get_phase_graphs()`, `get_stage_engine_types()`, `get_submodule()`, `process_prompt()`, etc. `BagelModel` and `DummyModel` are concrete implementations.~~
 
 4. **Streaming across disaggregated stages**: How streaming chunks (audio, partial images) work when stages are on different GPUs. Currently: workers stream directly to API Server.
 
@@ -1715,6 +1816,8 @@ Not an expanded view of the same thing.
 9. **Partial output routing**: The current routing maps `{enabled_stage: [outputs feeding to the stage]}`, routing whole named outputs. But some stages produce a single tensor where different *slices* need to go to different destinations (e.g., LLM hidden states at image positions → flow_head, hidden states at text positions → text decoder). Either stages must produce separately-named outputs for each slice, or the routing must support index-based sub-selection.
 
 10. **Loop breakup policy**: When the conductor breaks `Loop(50)` into `Loop(10) × 5` for HoL blocking avoidance, round-robin scheduling, or checkpointing -- is this static (from config YAML) or dynamic (based on queue depth, worker load)? The motivations are listed but the policy is undefined.
+
+11. **Batched cross-request FlashInfer**: Current AR engine executes per-request (one CacheHandle per request). Batching FlashInfer calls across requests (single `plan()` + `run()` for multiple requests' attention) is a future optimization.
 
 ### 15.2 Explicitly Deferred
 
