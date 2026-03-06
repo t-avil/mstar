@@ -24,6 +24,8 @@ class StageBatch:
     # {request_id: {input_name: list[tensor]}}
     per_request_input_tensors: dict[str, NameToTensorList]
     metadata: dict = field(default_factory=dict)
+    # {request_id: {key: value}} — per-request metadata (e.g., cache_label)
+    per_request_metadata: dict[str, dict] = field(default_factory=dict)
 
 
 @dataclass
