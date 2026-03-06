@@ -2,14 +2,12 @@
 
 from dataclasses import dataclass, field
 
-from mminf.graph.base import (
-    DestToGraphPointers, GraphPointer, GraphSection, GraphStage,
-    get_stage_to_inputs_mapping
-)
+from mminf.graph.base import DestToGraphPointers, GraphPointer, GraphSection, GraphStage, get_stage_to_inputs_mapping
+
 
 @dataclass
 class ProcessedInputs:
-    routed_to_this_subgraph: set[str]
+    routed_to_this_subgraph: list[GraphPointer]
     for_other_subgraphs: list[GraphPointer]
 
 
@@ -23,7 +21,7 @@ class PerRequestStageQueues:
     waiting: GraphSection | None
     ready: list[GraphStage] = field(default_factory=list)
     subgraph_id: str = field(default="")
-    
+
     def _update_ready_waiting(self):
         """
         Moves sections from the waiting section to the ready queue,
@@ -34,7 +32,7 @@ class PerRequestStageQueues:
         new_ready, new_waiting = self.waiting.split_off_ready()
         self.ready += new_ready
         self.waiting = new_waiting
-    
+
     def process_new_inputs(
         self,
         new_inputs: list[GraphPointer]
@@ -44,9 +42,12 @@ class PerRequestStageQueues:
         return a dictionary of external output pointers (ones that are feeding
         to different subgraphs)
         """
+        # for input in new_inputs:
+        #     input._persist_for_loop = False
+
         if self.waiting is None:
             return ProcessedInputs(
-                routed_to_this_subgraph=set(),
+                routed_to_this_subgraph=[],
                 for_other_subgraphs=new_inputs,
             )
 
@@ -55,10 +56,10 @@ class PerRequestStageQueues:
         external_outputs = sum(
             new_inputs.values(), start=[]
         )
-        
+
         self._update_ready_waiting()
         return ProcessedInputs(
-            for_other_subgraphs=external_outputs,
-            routed_to_this_subgraph=ingested
+            for_other_subgraphs=external_outputs, # inputs **not** utilized for self.waiting
+            routed_to_this_subgraph=ingested, # inputs utilized for self.waiting
         )
 

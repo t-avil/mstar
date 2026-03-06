@@ -4,27 +4,26 @@ Tests engines in dummy mode (model=None, no GPU required) and verifies
 the interleaved LLM<->flow loop fires stages in the correct order.
 """
 import sys
+
 sys.path.insert(0, ".")
 
+
 import pytest
-from copy import deepcopy
 
+from mminf.engine.ar_engine import AREngine, PageAllocator
 from mminf.engine.base import EngineType, StageBatch, StageOutput
-from mminf.engine.ar_engine import AREngine, PageAllocator, KVRequestState
-from mminf.engine.flow_engine import FlowEngine
 from mminf.engine.enc_dec_engine import EncoderDecoderEngine
-from mminf.engine.base import BaseEngine
-
-from mminf.graph.base import GraphPointer, GraphStage, Loop, Parallel, Sequential
+from mminf.engine.flow_engine import FlowEngine
+from mminf.graph.base import GraphPointer
 from mminf.graph.request_queues import PerRequestStageQueues
-from mminf.model.dummy_model import DummyModel
 from mminf.model.base import Subgraph
-from mminf.worker.stage_manager_utils import (
-    SubgraphQueues, SubgraphsManager, StageOutputRouting,
-)
+from mminf.model.dummy_model import DummyModel
 from mminf.worker.engine_manager import EngineManager
-from mminf.worker.micro_scheduler import MicroScheduler, ScheduledBatch
-
+from mminf.worker.micro_scheduler import MicroScheduler
+from mminf.worker.stage_manager_utils import (
+    SubgraphQueues,
+    SubgraphsManager,
+)
 
 # ======================================================================
 # PageAllocator tests
@@ -258,7 +257,7 @@ class TestImageGenLoop:
         # Verify LLM always fires before flow within each iteration
         llm_indices = [i for i, s in enumerate(fired_stages) if s == "LLM"]
         flow_indices = [i for i, s in enumerate(fired_stages) if s == "flow"]
-        for llm_idx, flow_idx in zip(llm_indices, flow_indices):
+        for llm_idx, flow_idx in zip(llm_indices, flow_indices, strict=True):
             assert llm_idx < flow_idx, (
                 f"LLM (index {llm_idx}) should fire before flow (index {flow_idx})"
             )

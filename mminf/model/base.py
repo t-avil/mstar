@@ -8,17 +8,49 @@ from uuid import uuid4
 import torch
 import yaml
 
+from mminf.communication.tensors import NameToTensorList
 from mminf.graph.base import GraphPointer, GraphSection, GraphStage, Loop, Parallel, Sequential, TensorPointerInfo
-
 
 STREAM_OUT = "stream_out"
 SPECIAL_DESTINATIONS = {STREAM_OUT}  # add RELAY etc. later
 
 
+class StageSubmodule(torch.nn.Module):
+    """
+    Base class for stage wrapper submodules.
+
+    Separates preprocessing (variable-length list[Tensor] → fixed Tensor)
+    from computation (Tensor → NameToTensorList), enabling torch.compile
+    and CUDA graphs on the forward() path.
+
+    Engine call pattern:
+        preprocessed = submodule.preprocess(**inputs)   # list → tensors
+        result = submodule(**preprocessed)              # tensor → tensor (compilable)
+    """
+
+    def preprocess(self, **inputs: list[torch.Tensor]) -> dict[str, torch.Tensor]:
+        """
+        Convert variable-length list[Tensor] inputs to fixed tensors.
+        NOT compiled — handles Python-level variability.
+
+        Default: assert each input has exactly 1 tensor and unwrap it.
+        Override for stages that handle multiple tensors (e.g., stacking images).
+        """
+        return {k: v[0] for k, v in inputs.items()}
+
+    @abstractmethod
+    def forward(self, **kwargs) -> NameToTensorList:
+        """
+        Pure tensor → NameToTensorList computation.
+        Compilable + CUDA-graphable.
+        """
+        ...
+
+
 @dataclass
 class Subgraph:
     section: GraphSection
-    phases: set[str] # e.g., prefill, decode, image_gen 
+    phases: set[str] # e.g., prefill, decode, image_gen
     consumes_stream: bool = field(default=False)
     ranks: list[int] = field(default_factory=list)
     _group_id: int = field(default=-1) # used in going from config yaml to subgraphs
@@ -48,7 +80,7 @@ def _divide_into_subgraphs(
     stage_groups: list[dict]
 ) -> list[Subgraph]:
     """
-    Given a graph, break it into subgraphs 
+    Given a graph, break it into subgraphs
     """
     if isinstance(graph, GraphStage):
         return [Subgraph(
@@ -58,7 +90,7 @@ def _divide_into_subgraphs(
             _group_id=stage_to_group_idx[graph.name],
             ranks=stage_groups[stage_to_group_idx[graph.name]]["ranks"]
         )]
-    
+
     if isinstance(graph, Sequential):
         subgraphs = _divide_into_subgraphs(
             graph.sections[0],
@@ -84,7 +116,7 @@ def _divide_into_subgraphs(
                 )
             subgraphs.extend(new_subgraphs)
         return subgraphs
-    
+
     if isinstance(graph, Parallel):
         all_subgraphs = [
             _divide_into_subgraphs(
@@ -110,7 +142,7 @@ def _divide_into_subgraphs(
         return list(group_id_to_subgraph.values()) + sum([
             s for s in all_subgraphs if len(s) > 1 or s[0].consumes_stream
         ], start=[]) # remaining subgraphs
-    
+
     if isinstance(graph, Loop):
         loop_section_subgraphs = _divide_into_subgraphs(
             graph.section,
@@ -122,7 +154,7 @@ def _divide_into_subgraphs(
             # fully colocated case
             loop_section_subgraphs[0].section = graph
             return loop_section_subgraphs
-        
+
         # in the disaggregated case, we need to wrap all subgraphs in a loop
         # with the external signals and loop-back signals pre-computed
         for s in loop_section_subgraphs:
@@ -172,17 +204,17 @@ class Model(ABC):
             stage_to_group_idx=stage_to_group_idx,
             stage_groups=stage_groups
         )
-    
+
     def get_subgraphs(self, config_path: str) -> list[Subgraph]:
         with open(config_path, "r") as f:
             stage_groups = yaml.safe_load(f)["stage_groups"]
-        
+
         # TODO: merge identical subgraphs from different phases
         return sum([
             self._get_subgraphs_for_phase(phase, graph, stage_groups) \
                 for phase, graph in self.get_phase_graphs().items()
         ], start=[])
-        
+
 
     @abstractmethod
     def get_phase_graphs(self) -> dict[str, GraphSection]:
@@ -203,7 +235,7 @@ class Model(ABC):
     @abstractmethod
     def get_forward_pass_inputs(
         self, metadata: CurrentForwardMetadata,
-        persist_signals: dict[str, TensorPointerInfo],
+        persist_signals: dict[str, list[TensorPointerInfo]],
         prev_forward_metadata: CurrentForwardMetadata=None,
     ) -> list[GraphPointer]:
         """
@@ -218,7 +250,7 @@ class Model(ABC):
     @abstractmethod
     def update_for_next_forward(
         self, metadata: CurrentForwardMetadata,
-        new_tokens: list[int],
+        new_tokens: dict[str, list[int]],
     ) -> CurrentForwardMetadata:
         """
         Called by the conductor at the end of a full model fwd pass.
@@ -230,14 +262,27 @@ class Model(ABC):
         pass
 
     @abstractmethod
+    def get_submodule(self, stage_name: str) -> torch.nn.Module | None:
+        """
+        Return the nn.Module for this stage, or None for dummy mode.
+        The engine calls this (via EngineManager) to get the submodule it
+        will execute directly with engine-specific wrapping (KV cache,
+        FlashInfer, etc.).
+        """
+        pass
+
     def step(
         self, stage_name: str,
         phase: str,
-        input_tensors: dict[str, torch.Tensor],
-        state, # TODO: figure out state
+        input_tensors: NameToTensorList,
+        engine,  # BaseEngine — untyped to avoid circular import
         **kwargs
-    ) -> dict[str, torch.Tensor]:
+    ) -> NameToTensorList:
         """
-        Called by the worker to execute a stage
+        Thin wrapper that dispatches to the engine. The engine handles all
+        engine-specific logic (KV cache, FlashInfer, etc.).
+        Models can override this for model-specific dispatch logic.
         """
-        pass
+        return engine.execute_single_request(
+            self.get_submodule(stage_name), input_tensors, **kwargs
+        )

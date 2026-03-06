@@ -49,7 +49,7 @@ class ZMQCommunicator(BaseCommunicator):
             self.pull_socket.setsockopt(zmq.LINGER, 0)
         else:
             raise NotImplementedError(f"Protocol {protocol} not yet supported yet")
-            
+
         for id in push_ids:
             if id == my_id:
                 continue
@@ -58,26 +58,25 @@ class ZMQCommunicator(BaseCommunicator):
                 f"ipc://{ipc_socket_path_prefix}/{id}.ipc"
             )
             self.push_sockets[id].setsockopt(zmq.LINGER, 0)
-    
+
     def get_session_id(self) -> str:
         return self.session_id
 
     def send(self, entity_id: str, msg):
         # TODO: maybe serialize to JSON instead if more efficient
         self.push_sockets[entity_id].send_pyobj(msg)
-    
+
     def get_all_new_messages(self) -> list:
         messages = []
         while True:
             try:
                 # zmq.NOBLOCK means zmq doesn't wait for a new message to be
-                # available, it returns a message if it exists or raises an error 
+                # available, it returns a message if it exists or raises an error
                 # if no messages are available (error is caught below)
                 messages.append(self.pull_socket.recv_pyobj(
                     flags=zmq.NOBLOCK
                 ))
             except zmq.Again:
                 # zmq.Again actually means no messages left to read
-                break 
+                break
         return messages
-        

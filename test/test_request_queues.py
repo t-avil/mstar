@@ -2,10 +2,11 @@ import sys
 import time
 
 from mminf.graph.request_queues import PerRequestStageQueues
+
 sys.path.insert(0, ".")
-from mminf.graph.base import GraphPointer, GraphStage, Loop, Parallel, Sequential
 import numpy as np
 
+from mminf.graph.base import GraphPointer, GraphStage, Loop, Parallel, Sequential
 
 if __name__ == "__main__":
     # show-o2-style graph with weird stuff added to stress-test
@@ -224,4 +225,3 @@ if __name__ == "__main__":
     toc = time.perf_counter()
     print(toc - tic)
 
-    

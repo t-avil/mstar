@@ -1,4 +1,3 @@
-from abc import ABC
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 
@@ -13,10 +12,10 @@ class Status(Enum):
 
 
 @dataclass
-class MessageBody(ABC):
+class MessageBody:
     def to_dict(self):
         return asdict(self)
-    
+
     def from_dict(self, input: dict):
         return self(**input)
 
@@ -54,16 +53,16 @@ class InputSignals(MessageBody):
 
 
 @dataclass
-class NameAndAddress:
+class NameAndUuid:
     tensor_id: str
-    address: int
+    uuid: str
 
 
 @dataclass
 class TensorReceived(MessageBody):
     request_id: str
-    successful_tensors: list[NameAndAddress]
-    failed_tensor_ids: list[str]
+    successful_tensors: list[NameAndUuid]
+    failed_tensor_ids: list[NameAndUuid]
 
 
 @dataclass
@@ -84,10 +83,10 @@ class ConductorMessageType(Enum):
 @dataclass
 class NewRequestConductor(MessageBody):
     request_id: str
-    initial_signals: dict[str, TensorPointerInfo]
+    initial_signals: dict[str, list[TensorPointerInfo]]
     initial_input_modalities: list[str]
     initial_output_modalities: list[str]
-    input_metadata: dict[str, dict]
+    input_metadata: dict[str, list[dict]]
     model_kwargs: dict
 
 
@@ -95,8 +94,8 @@ class NewRequestConductor(MessageBody):
 class SubgraphsDone(MessageBody):
     request_id: str
     subgraph_ids: list[str]
-    persist_signals: dict[str, TensorPointerInfo] = field(default_factory=dict)
-    new_tokens: list[int] = field(default_factory=list)
+    persist_signals: dict[str, list[TensorPointerInfo]] = field(default_factory=dict)
+    new_tokens: dict[str, list[int]] = field(default_factory=dict) # name to tokens
 
 
 @dataclass

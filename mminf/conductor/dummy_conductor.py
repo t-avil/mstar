@@ -32,6 +32,7 @@ def _worker_process_target(
     all_subgraph_ids_to_stages: dict[str, list[str]],
     hostname: str,
     socket_path_prefix: str,
+    model: Model | None = None,
     device: str = "cuda",
 ):
     """Top-level target for spawned worker processes. Must be module-level for picklability."""
@@ -48,6 +49,7 @@ def _worker_process_target(
         hostname=hostname,
         socket_path_prefix=socket_path_prefix,
         device=torch.device(device),
+        model=model,
     )
     worker.run()
 
@@ -56,13 +58,15 @@ def _worker_process_target(
 class RequestData:
     current_forward_metadata: CurrentForwardMetadata
     fwd_inputs: list[GraphPointer]
-    persist_signals: dict[str, TensorPointerInfo] # signals passed back to conductor
+    # name -> list[TensorPointerInfo]
+    persist_signals: dict[str, list[TensorPointerInfo]] # signals passed back to conductor
     subgraph_to_worker: dict[str, str]
-    new_tokens: list[int]
+    new_tokens: dict[str, list[int]]
 
     # for tracking progress
     all_subgraph_ids: set[str]
     current_subgraph_ids: set[str]
+    # make sure to check all tensors in the list are completed (BLOCKING case)
     completed_subgraph_ids: set[str] = field(default_factory=set)
 
     # TODO: will need to add to this as we build things out
@@ -162,6 +166,7 @@ class DummyConductor:
                     "all_subgraph_ids_to_stages": self._all_subgraph_ids_to_stages,
                     "hostname": self.hostname,
                     "socket_path_prefix": self.socket_path_prefix,
+                    "model": self.model,
                     "device": f"cuda:{rank}",
                 },
                 daemon=True,
@@ -231,7 +236,7 @@ class DummyConductor:
             subgraph_to_worker=subgraph_to_worker,
             all_subgraph_ids=set(subgraph_to_worker.keys()),
             current_subgraph_ids=set(),
-            new_tokens=[],
+            new_tokens={},
         )
         self.requests[body.request_id] = request_data
 
@@ -255,7 +260,7 @@ class DummyConductor:
                 worker_to_subgraph_ids[worker_id] = []
             worker_to_subgraph_ids[worker_id].append(subgraph_id)
 
-        for worker, subgraph_ids in worker_to_subgraph_ids:
+        for worker, subgraph_ids in worker_to_subgraph_ids.items():
             message = NewRequest(
                 request_id=body.request_id,
                 subgraph_ids=subgraph_ids,
@@ -305,7 +310,9 @@ class DummyConductor:
         """
         request_data = self.requests[request_id]
 
-        if self.eos_token_id in self.requests[request_id].new_tokens:
+        if any([
+            self.eos_token_id in tokens for tokens in request_data.new_tokens.values()
+        ]):
             return True
 
         prev_forward_meta = deepcopy(request_data.current_forward_metadata)
@@ -342,7 +349,7 @@ class DummyConductor:
             self.communicator.send(worker, message)
 
         request_data.fwd_inputs = fwd_inputs
-        request_data.new_tokens = []
+        request_data.new_tokens = {}
         request_data.completed_subgraph_ids = set()
         return False
 
@@ -362,7 +369,10 @@ class DummyConductor:
         if body.persist_signals:
             request_data.persist_signals.update(body.persist_signals)
         if body.new_tokens:
-            request_data.new_tokens.extend(body.new_tokens)
+            for name in body.new_tokens:
+                if name not in request_data.new_tokens:
+                    request_data.new_tokens[name] = []
+                request_data.new_tokens[name] += body.new_tokens[name]
 
         request_data.completed_subgraph_ids.update(
             body.subgraph_ids
@@ -392,7 +402,7 @@ class DummyConductor:
             for request_id in done_forward_passes:
                 saw_eos = self._process_done_forward(request_id)
                 if saw_eos:
-                    eos_requests.append(self.eos_token_id)
+                    eos_requests.append(request_id)
 
             for request_id in eos_requests:
                 self._process_request_done(request_id)

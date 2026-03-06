@@ -3,6 +3,7 @@ from copy import deepcopy
 import numpy as np
 import torch
 
+from mminf.communication.tensors import NameToTensorList
 from mminf.graph.base import GraphPointer, GraphStage, Loop, Parallel, Sequential, TensorPointerInfo
 from mminf.model.base import STREAM_OUT, CurrentForwardMetadata, Model
 
@@ -15,7 +16,7 @@ class DummyModel(Model):
         return Sequential([
             GraphStage(
                 name="text_emb",
-                input_ids=["text"],
+                input_ids=["text_inputs"],
                 outputs=[
                     GraphPointer(next_stage="concat_text", name="new_text_emb")
                 ]
@@ -28,12 +29,12 @@ class DummyModel(Model):
                 ]
             )
         ])
-    
+
     def _get_img_emb(self):
         return Sequential([
             GraphStage(
                 name="image_emb",
-                input_ids=["images"],
+                input_ids=["image_inputs"],
                 outputs=[
                     GraphPointer(next_stage="concat_img", name="new_image_emb")
                 ]
@@ -67,6 +68,7 @@ class DummyModel(Model):
                 outputs=[
                     GraphPointer(
                         next_stage=STREAM_OUT,
+                        output_modality="text",
                         name="new_token",
                         is_new_token=True
                     )
@@ -104,6 +106,7 @@ class DummyModel(Model):
                 outputs=[
                     GraphPointer(
                         next_stage=STREAM_OUT,
+                        output_modality="image",
                         name="image_output",
                         back_to_conductor=True
                     )
@@ -116,7 +119,7 @@ class DummyModel(Model):
             decode=decode,
             image_gen=image_gen
         )
-    
+
     def get_initial_forward_metadata(
         self, input_modalities, output_modalities
     ):
@@ -126,19 +129,19 @@ class DummyModel(Model):
             phase="prefill",
             is_prefill=True
         )
-    
+
     def get_forward_pass_inputs(
         self, metadata: CurrentForwardMetadata,
-        persist_signals: dict[str, TensorPointerInfo],
+        persist_signals: dict[str, list[TensorPointerInfo]],
         prev_forward_metadata: CurrentForwardMetadata=None,
     ) -> list[GraphPointer]:
         text_inp = GraphPointer(
             next_stage="text_emb",
-            name="text",
+            name="text_inputs",
         )
         img_inp = GraphPointer(
             next_stage="image_emb",
-            name="images",
+            name="image_inputs",
         )
         existing_text = GraphPointer(
             next_stage="concat_text",
@@ -154,28 +157,28 @@ class DummyModel(Model):
         ]
 
         if metadata.is_prefill: # first forward
-            text_inp.tensor_info = persist_signals.get("text", None)
-            img_inp.tensor_info = persist_signals.get("images", None)
+            text_inp.tensor_info = persist_signals.get("text_inputs", [])
+            img_inp.tensor_info = persist_signals.get("image_inputs", [])
         else:
-            existing_text.tensor_info = persist_signals.get("text_emb", None)
-            existing_img.tensor_info = persist_signals.get("img_emb", None)
+            existing_text.tensor_info = persist_signals.get("text_emb", [])
+            existing_img.tensor_info = persist_signals.get("img_emb", [])
             if prev_forward_metadata.phase == "image_gen":
-                img_inp.tensor_info = persist_signals.get("image_output", None)
-                text_inp.tensor_info = persist_signals.get("new_token", None)
-        
+                img_inp.tensor_info = persist_signals.get("image_output", [])
+                text_inp.tensor_info = persist_signals.get("new_token", [])
+
             if metadata.phase == "image_gen":
                 pointers.append(
                     GraphPointer(
                         next_stage="LLM",
                         name="latents",
-                        tensor_info=persist_signals.get("latents", None)
+                        tensor_info=persist_signals.get("latents", [])
                     )
                 )
         return pointers
-        
+
     def update_for_next_forward(
         self, metadata: CurrentForwardMetadata,
-        new_tokens: list[int],
+        new_tokens: dict[str, list[int]],
     ) -> CurrentForwardMetadata:
         # dummy model doesn't actually do anything, so this function will just
         # randomly select a phase
@@ -186,11 +189,5 @@ class DummyModel(Model):
             metadata.output_modalities = ["image"]
         return metadata
 
-    def step(
-        self, stage_name: str,
-        phase: str,
-        input_tensors: dict[str, torch.Tensor],
-        state, # TODO: figure out state
-        **kwargs
-    ):
-        return # do nothing
+    def get_submodule(self, stage_name: str) -> torch.nn.Module | None:
+        return None  # dummy mode — no real computation

@@ -2,14 +2,22 @@ import time
 
 from mminf.communication.communicator import CommProtocol, ZMQCommunicator
 from mminf.communication.tensors import MooncakeCommunicationManager
-from mminf.model.base import Subgraph
 from mminf.ipc_formats import (
-    ConductorMessage, ConductorMessageType, InputSignals,
-    NewRequest, RemoveRequest, SubgraphsDone, TensorReceived,
-    WorkerMessage, WorkerMessageType,
+    ConductorMessage,
+    ConductorMessageType,
+    InputSignals,
+    NewRequest,
+    RemoveRequest,
+    SubgraphsDone,
+    TensorReceived,
+    WorkerMessage,
+    WorkerMessageType,
 )
+from mminf.model.base import Subgraph
 from mminf.worker.stage_manager_utils import (
-    StageOutputRouting, SubgraphQueues, SubgraphsManager,
+    StageOutputRouting,
+    SubgraphQueues,
+    SubgraphsManager,
 )
 
 

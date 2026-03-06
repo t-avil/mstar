@@ -1,20 +1,29 @@
 import torch
 
+from mminf.api_server.entrypoint import APIServerMessage, ResultTensors
 from mminf.communication.communicator import CommProtocol, ZMQCommunicator
-from mminf.communication.tensors import MooncakeCommunicationManager, NameAndRequestId
+from mminf.communication.tensors import MooncakeCommunicationManager, NameToTensorList
 from mminf.engine.base import StageBatch, StageOutput
-from mminf.graph.base import GraphPointer, TensorPointerInfo
+from mminf.graph.base import GraphPointer
 from mminf.ipc_formats import (
-    ConductorMessage, ConductorMessageType, InputSignals,
-    NewRequest, RemoveRequest, SubgraphsDone, TensorReceived,
-    WorkerMessage, WorkerMessageType,
+    ConductorMessage,
+    ConductorMessageType,
+    InputSignals,
+    NewRequest,
+    RemoveRequest,
+    SubgraphsDone,
+    TensorReceived,
+    WorkerMessage,
+    WorkerMessageType,
 )
-from mminf.model.base import Subgraph
-from mminf.worker.stage_manager_utils import (
-    StageOutputRouting, SubgraphQueues, SubgraphsManager,
-)
+from mminf.model.base import Model, Subgraph
 from mminf.worker.engine_manager import EngineManager
 from mminf.worker.micro_scheduler import MicroScheduler, ScheduledBatch
+from mminf.worker.stage_manager_utils import (
+    StageOutputRouting,
+    SubgraphQueues,
+    SubgraphsManager,
+)
 
 
 class Worker:
@@ -36,6 +45,7 @@ class Worker:
         socket_path_prefix: str = "/tmp/mminf",
         tensor_comm_protocol: CommProtocol = CommProtocol.RDMA,
         device: torch.device = torch.device("cuda"),
+        model: Model | None = None,
     ):
         self.worker_id = worker_id
         self.device = device
@@ -55,7 +65,9 @@ class Worker:
             all_subgraph_ids_to_stages=all_subgraph_ids_to_stages,
         )
 
-        self.engine_manager = EngineManager.from_config(engine_configs, device)
+        self.engine_manager = EngineManager.from_config(
+            engine_configs, device, model=model
+        )
         self.scheduler = MicroScheduler(self.engine_manager)
 
         self.communicator = ZMQCommunicator(
@@ -94,7 +106,7 @@ class Worker:
 
         # Signal-only pointers (tensor_info is None) can be processed immediately
         signal_only = [
-            ptr for ptr in body.initial_inputs if ptr.tensor_info is None
+            ptr for ptr in body.initial_inputs if len(ptr.tensor_info) == 0
         ]
         if signal_only:
             self.subgraphs_manager.process_new_inputs(
@@ -108,10 +120,10 @@ class Worker:
 
     def _handle_tensor_received(self, body: TensorReceived) -> None:
         """Sender-side cleanup: receiver confirmed RDMA read, free source buffers."""
-        for name_addr in body.successful_tensors:
+        for name_uuid in body.successful_tensors:
             self.tensor_manager.cleanup(
-                body.request_id, name_addr.tensor_id,
-                name_addr.address
+                body.request_id, name_uuid.tensor_id,
+                [name_uuid.uuid]
             )
 
     def _process_new_inputs(self, body: InputSignals) -> None:
@@ -124,7 +136,7 @@ class Worker:
         )
 
         # Signal-only pointers can be processed immediately
-        signal_only = [ptr for ptr in body.inputs if ptr.tensor_info is None]
+        signal_only = [ptr for ptr in body.inputs if len(ptr.tensor_info) == 0]
         if signal_only:
             self.subgraphs_manager.process_new_inputs(
                 request_id=body.request_id, inputs=signal_only
@@ -150,7 +162,7 @@ class Worker:
         ready = self.tensor_manager.get_ready_tensors()
         for request_id, pointers in ready.items():
             self.subgraphs_manager.process_new_inputs(
-                request_id=request_id, inputs=[p.graph_pointer for p in pointers]
+                request_id=request_id, inputs=pointers
             )
 
     # ------------------------------------------------------------------
@@ -159,21 +171,23 @@ class Worker:
 
     def _build_stage_batch(self, batch: ScheduledBatch) -> StageBatch:
         """Gather input tensors from tensor_manager for all requests in the batch."""
-        per_request_inputs: dict[str, dict[str, torch.Tensor]] = {}
+        per_request_inputs: dict[str, NameToTensorList] = {}
 
-        for i, request_id in enumerate(batch.request_ids):
-            stage = batch.stages[i] if i < len(batch.stages) else batch.stages[0]
+        for request_id, stage in batch.stage_objects.items():
             tensors = {}
-            for input_name in stage.input_ids:
-                key = NameAndRequestId(input_name, request_id)
-                if key in self.tensor_manager.tensors:
-                    tensors[input_name] = self.tensor_manager.tensors[key]
+            for input_name in stage.ready_inputs:
+                tensors[input_name] = [
+                    self.tensor_manager.get_tensor(
+                        request_id=request_id, tensor_name=input_name,
+                        uuid=info.uuid
+                    ) for info in stage.ready_inputs[input_name].tensor_info
+                ]
             per_request_inputs[request_id] = tensors
 
         return StageBatch(
             stage_name=batch.stage_name,
             phase=batch.phase,
-            request_ids=batch.request_ids,
+            request_ids=list(batch.stage_objects.keys()),
             per_request_input_tensors=per_request_inputs,
         )
 
@@ -183,14 +197,13 @@ class Worker:
 
     def _cleanup_consumed_inputs(self, batch: ScheduledBatch) -> None:
         """Free input tensors that were consumed by the just-executed stage."""
-        for i, request_id in enumerate(batch.request_ids):
-            stage = batch.stages[i] if i < len(batch.stages) else batch.stages[0]
-            for input_name in stage.input_ids:
-                # By default, we are cleaning up all tensors with a given input_name,
-                # as we expect the corresponding element of self.tensor_manager.tensors
-                # to be a singleton dict for now. This needs to be changed when
-                # implementing, e.g., thinker -> talker relay
-                self.tensor_manager.cleanup(request_id, input_name)
+        for request_id, stage in batch.stage_objects.items():
+            for input in stage.ready_inputs.values():
+                if not (input._persist_for_loop or input.back_to_conductor):
+                    self.tensor_manager.cleanup(
+                        request_id, input.name,
+                        [info.uuid for info in input.tensor_info]
+                    )
 
     # ------------------------------------------------------------------
     # Output handling
@@ -210,38 +223,40 @@ class Worker:
         """
         output_pointers: dict[str, list[GraphPointer]] = {}
 
-        for i, request_id in enumerate(batch.request_ids):
-            stage = batch.stages[i] if i < len(batch.stages) else batch.stages[0]
+        for request_id, stage in batch.stage_objects.items():
+            # output name to list of tensors
             request_output_tensors = output.per_request_output_tensors.get(
                 request_id, {}
+            ) # name -> list of tensors
+            output_pointers[request_id] = stage.outputs
+
+            if not request_output_tensors:
+                # TODO (error handling?): this should not happen
+                continue
+
+            self.tensor_manager.store_and_populate_graph_edges(
+                request_id=request_id,
+                tensors=request_output_tensors,
+                graph_pointers=stage.outputs
             )
 
-            # Store all output tensors locally
-            for tensor_name, tensor in request_output_tensors.items():
-                self.tensor_manager.tensors[
-                    NameAndRequestId(tensor_name, request_id)
-                ] = tensor
-
             routing = routing_per_request[request_id]
-
-            # For tensors going to other workers, register for RDMA send
-            external_pointers: list[GraphPointer] = []
-            for worker_id, pointers in routing.to_workers.items():
-                external_pointers.extend(pointers)
-
-            if external_pointers and request_output_tensors:
-                # Filter to only tensors that actually go external
-                external_names = {ptr.name for ptr in external_pointers}
-                external_tensors = {
-                    name: t for name, t in request_output_tensors.items()
-                    if name in external_names
-                }
-                if external_tensors:
-                    self.tensor_manager.register_and_populate_graph_edges(
-                        request_id, {name: [tensor] for name, tensor in external_tensors.items()}, external_pointers
-                    )
-
-            output_pointers[request_id] = stage.outputs
+            seen_uuids = set()
+            for ptr in (
+                routing.to_conductor + \
+                sum(routing.to_workers.values(), start=[]) + \
+                routing.stream_out
+            ):
+                uuids = [
+                    info.uuid for info in ptr.tensor_info \
+                        if info.uuid not in seen_uuids
+                ] # all uuids that have not been seen yet
+                if not uuids:
+                    continue
+                seen_uuids.update(uuids)
+                self.tensor_manager.register_for_send(
+                    request_id=request_id, name=ptr.name, uuids=uuids
+                )
 
         return output_pointers
 
@@ -270,6 +285,38 @@ class Worker:
                 request_id, outputs.to_conductor
             )
 
+        if outputs.new_token_outputs:
+            name_to_new_token: dict = {}
+            for signal in outputs.new_token_outputs:
+                if signal.name in name_to_new_token:
+                    continue # don't double-count new tokens
+                new_tokens = [] # list[int]
+                for tensor_info in signal.tensor_info:
+                    tensor = self.tensor_manager.get_tensor(
+                        request_id=request_id,
+                        tensor_name=signal.name,
+                        uuid=tensor_info.uuid
+                    )
+                    new_tokens.extend(tensor.cpu().numpy().tolist())
+                name_to_new_token[signal.name] = new_tokens
+
+            self.subgraphs_manager.buffer_new_tokens(
+                request_id, name_to_new_token
+            )
+
+        if outputs.stream_out:
+            for graph_edge in outputs.stream_out:
+                message = APIServerMessage(
+                    message_type="result_chunk",
+                    body=ResultTensors(
+                        request_id=request_id,
+                        modality=graph_edge.output_modality,
+                        graph_edge=graph_edge,
+                        metadata={}
+                    )
+                )
+                self.communicator.send("api_server", message)
+
         if outputs.completed_subgraphs:
             message = ConductorMessage(
                 message_type=ConductorMessageType.SUBGRAPHS_DONE,
@@ -277,6 +324,7 @@ class Worker:
                     request_id=request_id,
                     subgraph_ids=outputs.completed_subgraphs,
                     persist_signals=self.subgraphs_manager.flush_persist_signals(request_id),
+                    new_tokens=self.subgraphs_manager.flush_new_tokens(request_id),
                 ),
             )
             self.communicator.send("conductor", message)
@@ -310,8 +358,7 @@ class Worker:
 
             # 6. Route outputs through SubgraphsManager first to determine routing
             routing_per_request: dict[str, StageOutputRouting] = {}
-            for i, request_id in enumerate(batch.request_ids):
-                stage = batch.stages[i] if i < len(batch.stages) else batch.stages[0]
+            for request_id,stage in batch.stage_objects.items():
                 routing = self.subgraphs_manager.process_stage_outputs(
                     request_id, stage.outputs
                 )
@@ -321,5 +368,5 @@ class Worker:
             self._store_outputs(batch, output, routing_per_request)
 
             # 8. Send outputs to other workers / conductor
-            for request_id in batch.request_ids:
+            for request_id in batch.stage_objects.keys():
                 self._send_outputs(request_id, routing_per_request[request_id])
