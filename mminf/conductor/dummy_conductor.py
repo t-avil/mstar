@@ -134,7 +134,7 @@ class DummyConductor:
             engine_type_to_stages: dict[str, list[str]] = defaultdict(list)
             for sg in subgraphs:
                 for stage_name in sg.section.get_stage_names():
-                    etype = stage_engine_types[stage_name]
+                    etype = stage_engine_types[stage_name].value
                     if stage_name not in engine_type_to_stages[etype]:
                         engine_type_to_stages[etype].append(stage_name)
 
