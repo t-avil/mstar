@@ -264,6 +264,33 @@ class Model(ABC):
         pass
 
     @abstractmethod
+    def process_prompt(
+        self,
+        prompt: str | None,
+        input_modalities: list[str],
+        output_modalities: list[str],
+        **kwargs,
+    ) -> NameToTensorList:
+        """Tokenize prompt and produce initial text tensors.
+
+        Called by the API server data worker to convert raw text input
+        into model-specific tensor format (e.g., tokenization). The
+        output dict keys are model-specific and will be referenced by
+        get_forward_pass_inputs via persist_signals.
+
+        Args:
+            prompt: Raw text input from the user, or None if no text.
+            input_modalities: List of input modality types for this request.
+            output_modalities: List of desired output modality types.
+            **kwargs: Model-specific parameters (e.g., from model_kwargs).
+
+        Returns:
+            NameToTensorList with model-specific keys, e.g.:
+            {"text_inputs": [tokenized_tensor], "system_prompt": [sys_tensor]}
+        """
+        pass
+
+    @abstractmethod
     def get_submodule(self, stage_name: str) -> torch.nn.Module | None:
         """
         Return the nn.Module for this stage, or None for dummy mode.
