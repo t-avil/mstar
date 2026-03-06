@@ -9,6 +9,7 @@ import torch
 import yaml
 
 from mminf.communication.tensors import NameToTensorList
+from mminf.engine.base import EngineType
 from mminf.graph.base import GraphPointer, GraphSection, GraphStage, Loop, Parallel, Sequential, TensorPointerInfo
 
 STREAM_OUT = "stream_out"
@@ -222,8 +223,8 @@ class Model(ABC):
         pass
 
     @abstractmethod
-    def get_stage_engine_types(self) -> dict[str, str]:
-        """Returns stage_name -> engine_type ("ar", "flow", "enc_dec")."""
+    def get_stage_engine_types(self) -> dict[str, EngineType]:
+        """Returns stage_name -> EngineType enum."""
         pass
 
     @abstractmethod
