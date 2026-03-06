@@ -216,6 +216,30 @@ class DummyConductor:
         return inputs_per_worker
 
 
+    def _get_schedule_step_metadata(
+        self, metadata: CurrentForwardMetadata,
+    ) -> dict:
+        """Extract per-request metadata from the current schedule step.
+
+        During prefill, the schedule step may contain cache_labels and
+        snapshot_after annotations (used by BAGEL's multi-cache CFG).
+        These are passed through to workers so the submodule can use them.
+        """
+        if not metadata.is_prefill:
+            return {}
+        schedule = metadata.kwargs.get("prefill_schedule", [])
+        step = metadata.kwargs.get("prefill_step", 0)
+        if step >= len(schedule):
+            return {}
+        _, step_kwargs = schedule[step]
+        # Extract only cache-related metadata keys
+        result = {}
+        if "cache_labels" in step_kwargs:
+            result["cache_labels"] = step_kwargs["cache_labels"]
+        if "snapshot_after" in step_kwargs:
+            result["snapshot_after"] = step_kwargs["snapshot_after"]
+        return result
+
     def _ingest_request(
         self, body: NewRequestConductor
     ):
@@ -249,6 +273,11 @@ class DummyConductor:
             request_data.current_forward_metadata.phase
         )
 
+        # Extract schedule step metadata for per-request cache orchestration
+        step_metadata = self._get_schedule_step_metadata(
+            request_data.current_forward_metadata
+        )
+
         # send data to appropriate workers
         worker_to_subgraph_ids: dict[str, list[str]] = {}
         inputs_per_worker = self._split_inputs_to_workers(
@@ -267,6 +296,7 @@ class DummyConductor:
                 subgraph_to_worker=subgraph_to_worker,
                 initial_phase=request_data.current_forward_metadata.phase,
                 initial_inputs=inputs_per_worker[worker],
+                per_request_metadata=step_metadata,
             )
             self.communicator.send(
                 worker, WorkerMessage(
@@ -332,6 +362,11 @@ class DummyConductor:
             prev_forward_metadata=prev_forward_meta
         )
 
+        # Extract schedule step metadata for per-request cache orchestration
+        step_metadata = self._get_schedule_step_metadata(
+            request_data.current_forward_metadata
+        )
+
         inputs_per_worker = self._split_inputs_to_workers(
             subgraph_to_worker=request_data.subgraph_to_worker,
             inputs=fwd_inputs
@@ -344,6 +379,7 @@ class DummyConductor:
                     request_id=request_id,
                     phase=request_data.current_forward_metadata.phase,
                     inputs=inputs,
+                    per_request_metadata=step_metadata,
                 )
             )
             self.communicator.send(worker, message)
