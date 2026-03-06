@@ -625,6 +625,48 @@ class BagelModel(Model):
     # Model ABC implementation
     # -----------------------------------------------------------------------
 
+    def process_prompt(
+        self,
+        prompt: str | None,
+        input_modalities: list[str],
+        output_modalities: list[str],
+        **kwargs,
+    ) -> NameToTensorList:
+        """Tokenize user prompt and system prompt (if think_mode).
+
+        Returns model-specific keys matching get_forward_pass_inputs:
+            "text_inputs"    - tokenized user prompt
+            "system_prompt"  - tokenized system prompt (think_mode only)
+        """
+        result: NameToTensorList = {}
+
+        if prompt is not None:
+            if self.tokenizer is not None:
+                tokens = self.tokenizer.encode(prompt)
+                result["text_inputs"] = [
+                    torch.tensor(tokens, dtype=torch.long)
+                ]
+            else:
+                # Fallback for testing without a tokenizer
+                byte_data = prompt.encode("utf-8")
+                result["text_inputs"] = [
+                    torch.tensor(list(byte_data), dtype=torch.uint8)
+                ]
+
+        if self.think_mode and self.tokenizer is not None:
+            target_output = output_modalities[0] if output_modalities else "text"
+            is_understanding = (target_output == "text")
+            sys_prompt = (
+                VLM_THINK_SYSTEM_PROMPT if is_understanding
+                else GEN_THINK_SYSTEM_PROMPT
+            )
+            sys_tokens = self.tokenizer.encode(sys_prompt)
+            result["system_prompt"] = [
+                torch.tensor(sys_tokens, dtype=torch.long)
+            ]
+
+        return result
+
     def get_submodule(self, stage_name: str) -> torch.nn.Module | None:
         if stage_name in self._submodule_cache:
             return self._submodule_cache[stage_name]
@@ -834,7 +876,7 @@ class BagelModel(Model):
             if phase == "prefill_text":
                 ptr = GraphPointer(next_stage="LLM", name="text_inputs")
                 if "prompt" in step_kwargs:
-                    # System prompt -- conductor tokenizes and stores it
+                    # System prompt -- tokenized by process_prompt() in data worker
                     ptr.tensor_info = persist_signals.get("system_prompt", [])
                 else:
                     idx = step_kwargs["input_idx"]
