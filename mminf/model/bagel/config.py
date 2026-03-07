@@ -116,3 +116,31 @@ class BagelModelConfig:
         )
         self.qk_norm = True
         self.tie_word_embeddings = False
+
+
+def load_bagel_config(config_hf: dict) -> BagelModelConfig:
+    # --- Sub configs ---
+    vae_config = BagelAutoEncoderConfig.from_dict(config_hf.get("vae_config", {}))
+    vit_config = BagelViTConfig.from_dict(config_hf.get("vit_config", {}))
+
+    # --- Flatten LLM config ---
+    llm_config = config_hf.get("llm_config", {})
+
+    # --- Collect remaining top-level fields ---
+    excluded_keys = {"vae_config", "vit_config", "llm_config"}
+
+    top_level_fields = {
+        k: v for k, v in config_hf.items() if k not in excluded_keys
+    }
+
+    # Merge (llm_config takes precedence if duplicate keys exist)
+    model_config_dict = {**top_level_fields, **llm_config}
+
+    # --- Instantiate model config ---
+    model_config = BagelModelConfig.from_dict(
+        vae_config=vae_config,
+        vit_config=vit_config,
+        config_dict=model_config_dict,
+    )
+
+    return model_config

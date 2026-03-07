@@ -93,7 +93,6 @@ class APIServerMessage:
 def _conductor_process_target(
     model_name: str,
     config_path: str,
-    model_config_dir: str,
     socket_path_prefix: str,
 ):
     """Runs DummyConductor.run() in a spawned process."""
@@ -101,7 +100,6 @@ def _conductor_process_target(
     from mminf.model.registry import get_model_class
 
     model = get_model_class(model_name)(
-        config_dir=model_config_dir,
         model_path_hf=HF_MODELS.get(model_name, {}).get("model_path_hf", ""),
     )
     conductor = DummyConductor(
@@ -495,8 +493,6 @@ def main():
         description="mminf — launch API server and conductor from a config file"
     )
     parser.add_argument("--config", type=str, required=True, help="Path to YAML config file")
-    parser.add_argument("--model_config_dir", type=str, default="configs",
-                        help="Directory for model configs (if not specified in --config)")
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument(
@@ -532,7 +528,6 @@ def main():
     conductor_proc = ctx.Process(
         target=_conductor_process_target,
         args=(model_name, args.config, 
-              args.model_config_dir,
               args.socket_path_prefix),
         daemon=True,
     )
@@ -543,7 +538,6 @@ def main():
     # (tokenization only — no GPU weights needed)
     from mminf.model.registry import get_model_class
     model = get_model_class(model_name)(
-        config_dir=args.model_config_dir,
         model_path_hf=HF_MODELS.get(model_name, {}).get("model_path_hf", ""),
     )
 

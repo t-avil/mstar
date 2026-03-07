@@ -29,10 +29,11 @@ field (no BOI token detection). Prefill is sequential: text tokens are
 processed causally, then each image is processed bidirectionally.
 """
 
+import json
 from pathlib import Path
 from safetensors.torch import load_file
 
-from huggingface_hub import snapshot_download
+from huggingface_hub import hf_hub_download, snapshot_download
 import torch
 import torch.nn as nn
 import yaml
@@ -52,7 +53,7 @@ from mminf.model.bagel.components.modeling_utils import BagelMLPconnector, Posit
 from mminf.model.bagel.components.language_model import BagelForCausalLM
 from mminf.model.bagel.components.tokenization import BagelTokenizer, add_special_tokens
 from mminf.model.bagel.components.vit_encoder import BagelVisionModel
-from mminf.model.bagel.config import BagelAutoEncoderConfig, BagelModelConfig, BagelViTConfig
+from mminf.model.bagel.config import BagelAutoEncoderConfig, BagelModelConfig, BagelViTConfig, load_bagel_config, load_bagel_configs
 from mminf.model.bagel.submodules import LLMSubmodule, VAEDecoderSubmodule, VAEEncoderSubmodule, ViTEncoderSubmodule
 from mminf.model.base import STREAM_OUT, CurrentForwardMetadata, Model, StageSubmodule
 
@@ -75,10 +76,6 @@ GEN_THINK_SYSTEM_PROMPT = (
 # ---------------------------------------------------------------------------
 # BagelModel
 # ---------------------------------------------------------------------------
-
-VAE_CONFIG_PATH = "vae_config.yaml"
-VIT_CONFIG_PATH = "vit_config.yaml"
-MODEL_CONFIG_PATH = "model_config.yaml"
 
 class BagelModel(Model):
     """
@@ -109,33 +106,11 @@ class BagelModel(Model):
 
     def __init__(
         self,
-        config_dir: str,
         model_path_hf: str,
         **kwargs
     ):
-        # Load configs
-        vae_config_file = Path(config_dir) / VAE_CONFIG_PATH
-        vit_config_file = Path(config_dir) / VIT_CONFIG_PATH
-        model_config_file = Path(config_dir) / MODEL_CONFIG_PATH
-
-        if vae_config_file.exists():
-            with open(vae_config_file) as f:
-                vae_config = BagelAutoEncoderConfig.from_dict(yaml.safe_load(f))
-        else:
-            vae_config = BagelAutoEncoderConfig()
-        
-        if vit_config_file.exists():
-            with open(vit_config_file) as f:
-                vit_config = BagelViTConfig.from_dict(yaml.safe_load(f))
-        else:
-            vit_config = BagelViTConfig()
-
-        with open(model_config_file) as f:
-            self.config = BagelModelConfig.from_dict(
-                vae_config=vae_config,
-                vit_config=vit_config,
-                config_dict=yaml.safe_load(f)
-            )
+        config_path = hf_hub_download(repo_id=model_path_hf, filename="config.json", revision=None)
+        self.config = load_bagel_config(json.load(open(config_path)))
 
         self.model_path_hf = model_path_hf
 
