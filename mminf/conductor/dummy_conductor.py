@@ -82,13 +82,11 @@ class DummyConductor:
         self,
         model: Model,
         model_config_file: str,
-        eos_token_id: int,
         socket_path_prefix: str = "/tmp/mminf",
         hostname: str = "localhost",
     ):
         self.requests: dict[str, RequestData] = {}
         self.model = model
-        self.eos_token_id = eos_token_id
         self.hostname = hostname
         self.socket_path_prefix = socket_path_prefix
         self._worker_processes: list[mp.Process] = []
@@ -317,7 +315,7 @@ class DummyConductor:
         self, request_id: str
     ):
         """
-        Called when we see an EOS token
+        Called when we see an EOS token, e.g.
         """
         for worker_id in self.requests[request_id].subgraph_to_worker.values():
             msg = WorkerMessage(
@@ -332,18 +330,13 @@ class DummyConductor:
         self, request_id: str
     ) -> bool:
         """
-        If we didn't see EOS, start a new forward pass (determine the input and
+        If the request isn't over, start a new forward pass (determine the input and
         output modalities for the new forward pass, wrangle input tensors and send
         them to the appropriate workers)
 
-        Returns a boolean for whether we saw a EOS token
+        Returns a boolean for whether the request is done
         """
         request_data = self.requests[request_id]
-
-        if any([
-            self.eos_token_id in tokens for tokens in request_data.new_tokens.values()
-        ]):
-            return True
 
         prev_forward_meta = deepcopy(request_data.current_forward_metadata)
         request_data.current_forward_metadata = \
@@ -351,6 +344,9 @@ class DummyConductor:
                 metadata=request_data.current_forward_metadata,
                 new_tokens=request_data.new_tokens,
             )
+        if request_data.current_forward_metadata.request_done:
+            return True # stop the request
+
         self._set_current_subgraph_ids(
             request_id,
             request_data.current_forward_metadata.phase
@@ -434,13 +430,13 @@ class DummyConductor:
                 else:
                     raise ValueError(f"Unknown message type: {message.message_type}")
 
-            eos_requests = []
+            completed_requests = []
             for request_id in done_forward_passes:
                 saw_eos = self._process_done_forward(request_id)
                 if saw_eos:
-                    eos_requests.append(request_id)
+                    completed_requests.append(request_id)
 
-            for request_id in eos_requests:
+            for request_id in completed_requests:
                 self._process_request_done(request_id)
 
             time.sleep(0.1) # just for dummy conductor!

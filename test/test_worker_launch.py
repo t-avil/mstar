@@ -49,7 +49,6 @@ class TestDeriveWorkerInfo:
             conductor = DummyConductor(
                 model=model,
                 model_config_file=CONFIG_PATH,
-                eos_token_id=-1,
                 socket_path_prefix=os.path.join(tmpdir, "ipc_derive"),
             )
             # dummy.yaml has ranks 0, 1, 2, 3, 4
@@ -67,7 +66,6 @@ class TestDeriveWorkerInfo:
             conductor = DummyConductor(
                 model=model,
                 model_config_file=CONFIG_PATH,
-                eos_token_id=-1,
                 socket_path_prefix=os.path.join(tmpdir, "ipc_subgraphs"),
             )
             # Every worker should have at least one subgraph
@@ -86,7 +84,6 @@ class TestDeriveWorkerInfo:
             conductor = DummyConductor(
                 model=model,
                 model_config_file=CONFIG_PATH,
-                eos_token_id=-1,
                 socket_path_prefix=os.path.join(tmpdir, "ipc_engines"),
             )
             for worker_id in conductor.worker_ids:
@@ -107,7 +104,6 @@ class TestDeriveWorkerInfo:
             conductor = DummyConductor(
                 model=model,
                 model_config_file=CONFIG_PATH,
-                eos_token_id=-1,
                 socket_path_prefix=os.path.join(tmpdir, "ipc_global"),
             )
             assert len(conductor._all_subgraph_ids_to_phases) == len(conductor.subgraphs)
@@ -131,7 +127,6 @@ class TestWorkerSpawning:
             conductor = DummyConductor(
                 model=model,
                 model_config_file=CONFIG_PATH,
-                eos_token_id=-1,
                 socket_path_prefix=os.path.join(tmpdir, "ipc_spawn"),
             )
 

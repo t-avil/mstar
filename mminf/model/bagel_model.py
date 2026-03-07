@@ -934,8 +934,6 @@ class BagelModel(Model):
             (thinking is done, now generate the image).
 
         After image_gen, marks request complete (one image per request).
-
-        Sets metadata.kwargs["done"] = True when the request is complete.
         """
         if metadata.is_prefill:
             step = metadata.kwargs["prefill_step"] + 1
@@ -968,13 +966,13 @@ class BagelModel(Model):
                     # Thinking phase complete — transition to image generation.
                     metadata.phase = "image_gen"
                 else:
-                    metadata.kwargs["done"] = True
+                    metadata.request_done = True
             # Otherwise stay in decode phase
             return metadata
 
         if metadata.phase == "image_gen":
             # Image generation complete (one image per request)
-            metadata.kwargs["done"] = True
+            metadata.request_done = True
             return metadata
 
         return metadata

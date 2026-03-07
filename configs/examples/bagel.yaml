@@ -1,0 +1,18 @@
+model: "BAGEL"
+
+stage_groups:
+  - stage_names:
+      - vit_encoder
+    ranks:
+      - 0
+  
+  - stage_names:
+      - vae_encoder
+      - vae_decoder
+    ranks:
+      - 1
+  
+  - stage_names:
+      - LLM
+    ranks:
+      - 2

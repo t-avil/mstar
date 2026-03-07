@@ -92,7 +92,6 @@ class APIServerMessage:
 def _conductor_process_target(
     model_name: str,
     config_path: str,
-    eos_token_id: int,
     socket_path_prefix: str,
 ):
     """Runs DummyConductor.run() in a spawned process."""
@@ -103,7 +102,6 @@ def _conductor_process_target(
     conductor = DummyConductor(
         model=model,
         model_config_file=config_path,
-        eos_token_id=eos_token_id,
         socket_path_prefix=socket_path_prefix,
     )
     conductor.run()
@@ -521,13 +519,12 @@ def main():
         config = yaml.safe_load(f)
 
     model_name = config.get("model", "dummy")
-    eos_token_id = config.get("eos_token_id", 2)
 
     # Spawn conductor in a separate process
     ctx = mp.get_context("spawn")
     conductor_proc = ctx.Process(
         target=_conductor_process_target,
-        args=(model_name, args.config, eos_token_id, args.socket_path_prefix),
+        args=(model_name, args.config, args.socket_path_prefix),
         daemon=True,
     )
     conductor_proc.start()

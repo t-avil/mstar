@@ -181,6 +181,7 @@ class CurrentForwardMetadata:
     output_modalities: list[str]
     phase: str
     is_prefill: bool
+    request_done: bool = field(default=False)
     kwargs: dict = field(default_factory=dict)
 
 
@@ -256,6 +257,9 @@ class Model(ABC):
     ) -> CurrentForwardMetadata:
         """
         Called by the conductor at the end of a full model fwd pass.
+
+        **Important**: this sets metadata.request_done, which is used to end
+        the request.
         """
         # e.g., check for BOI token, check if image was generated and should
         # be added to the input modalities and input tensors, adds new token

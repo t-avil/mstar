@@ -183,6 +183,9 @@ class DummyModel(Model):
     ) -> CurrentForwardMetadata:
         # dummy model doesn't actually do anything, so this function will just
         # randomly select a phase
+        if metadata.phase == "image_gen":
+            metadata.request_done = True
+            return
         metadata.phase = str(np.random.choice(["decode", "image_gen"]))
         if metadata.phase == "decode":
             metadata.output_modalities = ["text"]
