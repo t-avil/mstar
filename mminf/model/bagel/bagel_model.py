@@ -29,9 +29,7 @@ field (no BOI token detection). Prefill is sequential: text tokens are
 processed causally, then each image is processed bidirectionally.
 """
 
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 from safetensors.torch import load_file
 
 from huggingface_hub import snapshot_download
@@ -144,8 +142,8 @@ class BagelModel(Model):
         self.tokenizer, new_token_ids, _ = add_special_tokens(self.tokenizer)
 
         # Special token IDs
-        self.boi_token_id = new_token_ids.get("boi_token_id")   # <|vision_start|>
-        self.eoi_token_id = new_token_ids.get("eoi_token_id")   # <|vision_end|>
+        self.boi_token_id = new_token_ids.get("start_of_image")   # <|vision_start|>
+        self.eoi_token_id = new_token_ids.get("end_of_image")   # <|vision_end|>
         self.eos_token_id = new_token_ids.get("eos_token_id")
         self.bos_token_id = new_token_ids.get("bos_token_id")
 
@@ -192,10 +190,10 @@ class BagelModel(Model):
         )
         self.time_embedder = TimestepEmbedder(self.config.hidden_size)
         self.vae2llm = nn.Linear(self.config.patch_latent_dim, self.config.hidden_size)
+        ae_params = self.config.vae_config
         self.vae_model = BagelAutoEncoder(ae_params)
 
         # Load in weights: VAE
-        ae_params = self.config.vae_config
         vae_path = self.repo / "ae.safetensors"
         state_dict = load_file(vae_path)
         self.vae_model.load_state_dict(state_dict, strict=False)
@@ -265,7 +263,7 @@ class BagelModel(Model):
                 latent_downsample=self.config.latent_downsample,
             )
         elif stage_name == "vae_decoder":
-            self._init_vit_components()
+            self._init_vae_components()
             return VAEDecoderSubmodule(
                 vae_model=self.vae_model,
                 latent_patch_size=self.config.latent_patch_size,
@@ -350,12 +348,12 @@ class BagelModel(Model):
                 name="vit_encoder",
                 input_ids=["image_inputs"],
                 outputs=[
-                    GraphPointer(next_stage="LLM", name="vit_emb"),
+                    GraphPointer(next_stage="LLM", name="img_emb"),
                 ],
             ),
             GraphStage(
                 name="LLM",
-                input_ids=["vit_emb"],
+                input_ids=["img_emb"],
                 outputs=[],
             ),
         ])
@@ -366,12 +364,12 @@ class BagelModel(Model):
                 name="vae_encoder",
                 input_ids=["image_inputs"],
                 outputs=[
-                    GraphPointer(next_stage="LLM", name="vae_emb"),
+                    GraphPointer(next_stage="LLM", name="img_emb"),
                 ],
             ),
             GraphStage(
                 name="LLM",
-                input_ids=["vae_emb"],
+                input_ids=["img_emb"],
                 outputs=[],
             ),
         ])

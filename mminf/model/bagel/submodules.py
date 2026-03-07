@@ -7,6 +7,8 @@ import torch
 import torch.nn as nn
 
 from mminf.communication.tensors import NameToTensorList
+from mminf.engine.ar_engine import CacheHandle
+from mminf.model.bagel.components.language_model import BagelForCausalLM
 from mminf.model.base import StageSubmodule
 
 
@@ -83,7 +85,7 @@ class ViTEncoderSubmodule(StageSubmodule):
         features = self.connector(features)
         pos_emb = self.vit_pos_embed(packed_position_ids)
         features = features + pos_emb
-        return {"vit_emb": [features]}
+        return {"img_emb": [features]}
 
 
 class VAEEncoderSubmodule(StageSubmodule):
@@ -176,7 +178,7 @@ class VAEEncoderSubmodule(StageSubmodule):
         packed_timestep_embeds = self.time_embedder(packed_timesteps)
         packed_pos_embed = self.latent_pos_embed(packed_vae_position_ids)
         packed_latent = self.vae2llm(packed_latent) + packed_timestep_embeds + packed_pos_embed
-        return {"vae_emb": [packed_latent]}
+        return {"img_emb": [packed_latent]}
 
 
 class LLMSubmodule(StageSubmodule):
@@ -213,7 +215,7 @@ class LLMSubmodule(StageSubmodule):
 
     def __init__(
         self,
-        language_model: nn.Module,
+        language_model: BagelForCausalLM,
         llm2vae: nn.Linear,
         boi_token_id: int | None = None,
         eoi_token_id: int | None = None,
@@ -259,7 +261,7 @@ class LLMSubmodule(StageSubmodule):
         else:
             raise ValueError(f"Unknown LLM phase: {phase!r}")
 
-    def _forward_prefill_text(self, text_inputs: torch.Tensor, cache_handle=None, **kwargs) -> NameToTensorList:
+    def _forward_prefill_text(self, text_inputs: torch.Tensor, cache_handle: CacheHandle, **kwargs) -> NameToTensorList:
         """embed_tokens -> LLM forward (causal, mode='und') -> KV cache update.
 
         For generation mode, cache_labels specifies which caches to update
@@ -307,7 +309,7 @@ class LLMSubmodule(StageSubmodule):
             cache_handle.set_active_label("main")
         hidden = self.language_model(emb, is_causal=True, mode="und",
                                      cache_handle=cache_handle, **kwargs)
-        logits = self.lm_head(hidden[:, -1:])
+        logits = self.lm_head(hidden[-1:])
         token = torch.argmax(logits, dim=-1)
         return {"new_token": [token]}
 

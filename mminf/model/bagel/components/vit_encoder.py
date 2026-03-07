@@ -319,7 +319,7 @@ class BagelVisionTransformer(nn.Module):
 
 class BagelVisionModel(nn.Module):
     def __init__(self, config: BagelViTConfig):
-        super().__init__(config)
+        super().__init__()
         self.vision_model = BagelVisionTransformer(config)
     
     def get_input_embeddings(self) -> nn.Module:
