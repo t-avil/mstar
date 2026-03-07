@@ -228,7 +228,7 @@ class LLMSubmodule(StageSubmodule):
         self.boi_token_id = boi_token_id
         self.eoi_token_id = eoi_token_id
 
-    def preprocess(self, **inputs: list[torch.Tensor]) -> dict[str, torch.Tensor]:
+    def preprocess(self, phase: str, **inputs: list[torch.Tensor]) -> dict[str, torch.Tensor]:
         """Unwrap single-element tensor lists and handle latent initialization.
 
         For image_gen phase: if "latents" input is empty (first flow matching
@@ -239,6 +239,19 @@ class LLMSubmodule(StageSubmodule):
         For all other phases: standard unwrapping of list[Tensor] -> Tensor.
         """
         result = {}
+        if phase in ["prefill_text", "decode"]:
+            result["text_inputs"] = inputs.get("text_inputs", [None])[0]
+            result["empty_position_ids"] = None
+            result["empty_position_ids"] = torch.zeros_like(
+                result["text_inputs"], dtype=torch.long,
+                device=result["text_inputs"].device
+            )
+            return result
+        
+        # TODO: have this logic for other phases
+        
+        
+
         for k, v in inputs.items():
             if k == "latents" and (not v or v[0].numel() == 0):
                 # First flow matching iteration: no latents yet.
@@ -261,7 +274,11 @@ class LLMSubmodule(StageSubmodule):
         else:
             raise ValueError(f"Unknown LLM phase: {phase!r}")
 
-    def _forward_prefill_text(self, text_inputs: torch.Tensor, cache_handle: CacheHandle, **kwargs) -> NameToTensorList:
+    def _forward_prefill_text(
+        self, text_inputs: torch.Tensor,
+        empty_position_ids: torch.Tensor,
+        cache_handle: CacheHandle, **kwargs
+    ) -> NameToTensorList:
         """embed_tokens -> LLM forward (causal, mode='und') -> KV cache update.
 
         For generation mode, cache_labels specifies which caches to update
@@ -273,8 +290,15 @@ class LLMSubmodule(StageSubmodule):
         for label in cache_labels:
             if cache_handle is not None:
                 cache_handle.set_active_label(label)
-            self.language_model(emb, is_causal=True, mode="und",
-                                cache_handle=cache_handle, **kwargs)
+                empty_position_ids = range(
+                    cache_handle._get_state().seq_len,
+                    cache_handle._get_state().seq_len + text_inputs.shape[0]
+                )
+            self.language_model(
+                emb, empty_position_ids,
+                is_causal=True, mode="und",
+                cache_handle=cache_handle, **kwargs
+            )
         if snapshot_after and cache_handle is not None:
             from_label, to_label = snapshot_after
             cache_handle.snapshot(from_label, to_label)
@@ -299,7 +323,11 @@ class LLMSubmodule(StageSubmodule):
             cache_handle.snapshot(from_label, to_label)
         return {}
 
-    def _forward_decode(self, text_inputs: torch.Tensor, cache_handle=None, **kwargs) -> NameToTensorList:
+    def _forward_decode(
+        self, text_inputs: torch.Tensor,
+        empty_position_ids: torch.Tensor,
+        cache_handle: CacheHandle, **kwargs
+    ) -> NameToTensorList:
         """embed_tokens -> LLM forward -> lm_head -> argmax."""
         # Remove metadata keys not needed for language_model
         kwargs.pop("cache_labels", None)
@@ -307,8 +335,16 @@ class LLMSubmodule(StageSubmodule):
         emb = self.embed_tokens(text_inputs)
         if cache_handle is not None:
             cache_handle.set_active_label("main")
-        hidden = self.language_model(emb, is_causal=True, mode="und",
-                                     cache_handle=cache_handle, **kwargs)
+            empty_position_ids = range(
+                cache_handle._get_state().seq_len,
+                cache_handle._get_state().seq_len + text_inputs.shape[0]
+            )
+
+        hidden = self.language_model(
+            emb, empty_position_ids,
+            is_causal=True, mode="und",
+            cache_handle=cache_handle, **kwargs
+        )
         logits = self.lm_head(hidden[-1:])
         token = torch.argmax(logits, dim=-1)
         return {"new_token": [token]}

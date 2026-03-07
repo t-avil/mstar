@@ -69,6 +69,16 @@ class CacheHandle:
         self.kv_cache_config = kv_cache_config
         self.active_label = "main"
 
+        # for RoPE, may be moved!
+        self.indptr = torch.zeros(
+            2, dtype=torch.int32,
+            device=kv_cache.device if kv_cache is not None else "cpu"
+        )
+        self.offsets = torch.zeros(
+            1, dtype=torch.int32,
+            device=kv_cache.device if kv_cache is not None else "cpu"
+        )
+
     def _get_state(self, label: str | None = None) -> KVRequestState:
         label = label or self.active_label
         key = (self.request_id, label)
@@ -209,21 +219,13 @@ class CacheHandle:
     ):
         # TODO: this only works for a single sequence for now
         seq_len = query_postion_ids.shape[0]
-        indptr = torch.tensor(
-            [0, seq_len],
-            dtype=torch.int32,
-            device=q.device,
-        )
-
-        offsets = torch.tensor(
-            [self._get_state().seq_len],
-            dtype=torch.int32,
-            device=q.device,
-        )
+        self.indptr[1] = seq_len
+        self.offsets[0] = self._get_state().seq_len
+    
         import flashinfer
         return flashinfer.rope.apply_rope(
-            q, k, indptr,
-            offsets=offsets,
+            q, k, self.indptr,
+            offsets=self.offsets,
             rotary_dim=rotary_dim,
             interleave=interleave,
             rope_scale=rope_scale,
@@ -375,7 +377,7 @@ class AREngine(BaseEngine):
             inputs = batch.per_request_input_tensors.get(rid, {})
             metadata = batch.per_request_metadata.get(rid, {})
 
-            preprocessed = submodule.preprocess(**inputs)
+            preprocessed = submodule.preprocess(batch.phase, **inputs)
             with torch.no_grad():
                 output = submodule(
                     phase=batch.phase,

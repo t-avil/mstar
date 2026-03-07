@@ -307,18 +307,3 @@ class Model(ABC):
         """
         pass
 
-    def step(
-        self, stage_name: str,
-        phase: str,
-        input_tensors: NameToTensorList,
-        engine,  # BaseEngine — untyped to avoid circular import
-        **kwargs
-    ) -> NameToTensorList:
-        """
-        Thin wrapper that dispatches to the engine. The engine handles all
-        engine-specific logic (KV cache, FlashInfer, etc.).
-        Models can override this for model-specific dispatch logic.
-        """
-        return engine.execute_single_request(
-            self.get_submodule(stage_name), input_tensors, **kwargs
-        )

@@ -98,12 +98,3 @@ class DummyOmniModel(Model):
             metadata.is_prefill = False
             metadata.phase = "decode"
         return metadata
-
-    def step(
-        self, stage_name: str,
-        phase: str,
-        input_tensors: NameToTensorList,
-        state,
-        **kwargs,
-    ):
-        return  # do nothing
