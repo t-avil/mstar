@@ -9,13 +9,13 @@
 #
 # This modified file is released under the same license.
 
+from typing import Optional, Tuple
+
 import torch
 from torch import nn
 
 from transformers.activations import ACT2FN
 from mminf.model.bagel.bagel_model import BagelViTConfig
-from modeling.siglip.modeling_siglip import SiglipAttention, SiglipPreTrainedModel
-from flash_attn import flash_attn_varlen_func
 
 
 class RotaryEmbedding2D(torch.nn.Module):
@@ -61,7 +61,7 @@ def apply_rotary_pos_emb(q, k, cos, sin):
     return q_embed, k_embed
 
 
-class SiglipVisionEmbeddings(nn.Module):
+class BagelVisionEmbeddings(nn.Module):
     def __init__(self, config: BagelViTConfig):
         super().__init__()
         self.config = config
@@ -83,7 +83,7 @@ class SiglipVisionEmbeddings(nn.Module):
         if not config.rope:
             self.position_embedding = nn.Embedding(self.num_positions, self.embed_dim)
 
-    def convert_conv2d_to_linear(self, config, meta=False):
+    def convert_conv2d_to_linear(self, config: BagelViTConfig, meta=False):
         if meta:
             linear_patch_embedding = nn.Linear(
                 config.num_channels * self.patch_size ** 2, self.embed_dim, bias=True, device='meta'
@@ -114,57 +114,84 @@ class SiglipVisionEmbeddings(nn.Module):
         return embeddings
 
 
-class SiglipFlashAttention2(SiglipAttention):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+class BagelViTAttention(nn.Module):
+    """Multi-headed attention from 'Attention Is All You Need' paper"""
+
+    # Copied from transformers.models.clip.modeling_clip.CLIPAttention.__init__
+    def __init__(self, config: BagelViTConfig):
+        super().__init__()
+        self.config = config
+        self.embed_dim = config.hidden_size
+        self.num_heads = config.num_attention_heads
+        self.head_dim = self.embed_dim // self.num_heads
+        if self.head_dim * self.num_heads != self.embed_dim:
+            raise ValueError(
+                f"embed_dim must be divisible by num_heads (got `embed_dim`: {self.embed_dim} and `num_heads`:"
+                f" {self.num_heads})."
+            )
+        self.scale = self.head_dim**-0.5
+        self.dropout = config.attention_dropout
+
+        self.k_proj = nn.Linear(self.embed_dim, self.embed_dim)
+        self.v_proj = nn.Linear(self.embed_dim, self.embed_dim)
+        self.q_proj = nn.Linear(self.embed_dim, self.embed_dim)
+        self.out_proj = nn.Linear(self.embed_dim, self.embed_dim)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
-        cu_seqlens: torch.IntTensor,
-        max_seqlen: int,
-        cos_h: torch.Tensor = None,
-        sin_h: torch.Tensor = None,
-        cos_w: torch.Tensor = None,
-        sin_w: torch.Tensor = None,
-        **kwargs,
-    ) -> torch.Tensor:
+        attention_mask: Optional[torch.Tensor] = None,
+        output_attentions: Optional[bool] = False,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Input shape: Batch x Time x Channel"""
 
-        total_q_len, _ = hidden_states.size()
+        batch_size, q_len, _ = hidden_states.size()
 
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
 
-        query_states = query_states.view(total_q_len, self.num_heads, self.head_dim)
-        key_states = key_states.view(total_q_len, self.num_heads, self.head_dim)
-        value_states = value_states.view(total_q_len, self.num_heads, self.head_dim)
+        query_states = query_states.view(batch_size, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        key_states = key_states.view(batch_size, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        value_states = value_states.view(batch_size, q_len, self.num_heads, self.head_dim).transpose(1, 2)
 
-        if self.config.rope:
-            qh, qw = query_states[:, :, :self.head_dim // 2], query_states[:, :, self.head_dim // 2:] 
-            kh, kw = key_states[:, :, :self.head_dim // 2], key_states[:, :, self.head_dim // 2:]
-            qh, kh = apply_rotary_pos_emb(qh, kh, cos_h, sin_h)
-            qw, kw = apply_rotary_pos_emb(qw, kw, cos_w, sin_w)
-            query_states = torch.cat([qh, qw], dim=-1)
-            key_states = torch.cat([kh, kw], dim=-1)
+        k_v_seq_len = key_states.shape[-2]
+        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) * self.scale
 
-        attn_output = flash_attn_varlen_func(
-            query_states.to(torch.bfloat16),
-            key_states.to(torch.bfloat16),
-            value_states.to(torch.bfloat16),
-            cu_seqlens_q=cu_seqlens,
-            cu_seqlens_k=cu_seqlens,
-            max_seqlen_q=max_seqlen,
-            max_seqlen_k=max_seqlen,
-            causal=False,
-        )
+        if attn_weights.size() != (batch_size, self.num_heads, q_len, k_v_seq_len):
+            raise ValueError(
+                f"Attention weights should be of size {(batch_size, self.num_heads, q_len, k_v_seq_len)}, but is"
+                f" {attn_weights.size()}"
+            )
 
-        attn_output = self.out_proj(attn_output.reshape(total_q_len, -1))
-        return attn_output
+        if attention_mask is not None:
+            if attention_mask.size() != (batch_size, 1, q_len, k_v_seq_len):
+                raise ValueError(
+                    f"Attention mask should be of size {(batch_size, 1, q_len, k_v_seq_len)}, but is {attention_mask.size()}"
+                )
+            attn_weights = attn_weights + attention_mask
+
+        # upcast attention to fp32
+        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        attn_weights = nn.functional.dropout(attn_weights, p=self.dropout, training=self.training)
+        attn_output = torch.matmul(attn_weights, value_states)
+
+        if attn_output.size() != (batch_size, self.num_heads, q_len, self.head_dim):
+            raise ValueError(
+                f"`attn_output` should be of size {(batch_size, self.num_heads, q_len, self.head_dim)}, but is"
+                f" {attn_output.size()}"
+            )
+
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.reshape(batch_size, q_len, self.embed_dim)
+
+        attn_output = self.out_proj(attn_output)
+
+        return attn_output, attn_weights
 
 
-class SiglipMLP(nn.Module):
-    def __init__(self, config):
+class BagelViTMLP(nn.Module):
+    def __init__(self, config: BagelViTConfig):
         super().__init__()
         self.config = config
         self.activation_fn = ACT2FN[config.hidden_act]
@@ -178,13 +205,13 @@ class SiglipMLP(nn.Module):
         return hidden_states
 
 
-class SiglipEncoderLayer(nn.Module):
+class BagelViTEncoderLayer(nn.Module):
     def __init__(self, config: BagelViTConfig):
         super().__init__()
         self.embed_dim = config.hidden_size
-        self.self_attn = SiglipFlashAttention2(config)
+        self.self_attn = BagelViTAttention(config)
         self.layer_norm1 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
-        self.mlp = SiglipMLP(config)
+        self.mlp = BagelViTMLP(config)
         self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
 
     def forward(
@@ -219,12 +246,12 @@ class SiglipEncoderLayer(nn.Module):
         return hidden_states
 
 
-class SiglipEncoder(nn.Module):
+class BagelViTEncoder(nn.Module):
     def __init__(self, config: BagelViTConfig):
         super().__init__()
         self.config = config
         self.layers = nn.ModuleList(
-            [SiglipEncoderLayer(config) for _ in range(config.num_hidden_layers)]
+            [BagelViTEncoderLayer(config) for _ in range(config.num_hidden_layers)]
         )
 
     def forward(
@@ -246,19 +273,19 @@ class SiglipEncoder(nn.Module):
         return hidden_states
 
 
-class SiglipVisionTransformer(nn.Module):
+class BagelVisionTransformer(nn.Module):
     def __init__(self, config: BagelViTConfig):
         super().__init__()
         self.config = config
         embed_dim = config.hidden_size
 
-        self.embeddings = SiglipVisionEmbeddings(config)
+        self.embeddings = BagelVisionEmbeddings(config)
         if config.rope:
             max_size = config.image_size // config.patch_size
             dim_head = config.hidden_size // config.num_attention_heads
             self.rope = RotaryEmbedding2D(dim_head // 2, max_size, max_size)
 
-        self.encoder = SiglipEncoder(config)
+        self.encoder = BagelViTEncoder(config)
         self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
 
     def forward(
@@ -290,18 +317,11 @@ class SiglipVisionTransformer(nn.Module):
         return last_hidden_state
 
 
-class BagelViTVisionModel(SiglipPreTrainedModel):
-    config_class = BagelViTConfig
-    main_input_name = "packed_pixel_values"
-
+class BagelVisionModel(nn.Module):
     def __init__(self, config: BagelViTConfig):
         super().__init__(config)
-
-        self.vision_model = SiglipVisionTransformer(config)
-
-        # Initialize weights and apply final processing
-        self.post_init()
-
+        self.vision_model = BagelVisionTransformer(config)
+    
     def get_input_embeddings(self) -> nn.Module:
         return self.vision_model.embeddings.patch_embedding
 

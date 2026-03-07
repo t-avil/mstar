@@ -53,7 +53,7 @@ from mminf.model.bagel.components.autoencoder import BagelAutoEncoder, BagelAuto
 from mminf.model.bagel.components.modeling_utils import BagelMLPconnector, PositionEmbedding, TimestepEmbedder
 from mminf.model.bagel.components.qwen2_navit import Qwen2ForCausalLM
 from mminf.model.bagel.components.tokenization import Qwen2Tokenizer
-from mminf.model.bagel.components.vit_encoder import BagelViTVisionModel
+from mminf.model.bagel.components.vit_encoder import BagelVisionModel
 from mminf.model.bagel.submodules import LLMSubmodule, VAEDecoderSubmodule, VAEEncoderSubmodule, ViTEncoderSubmodule
 from mminf.model.bagel.utils import add_special_tokens
 from mminf.model.base import STREAM_OUT, CurrentForwardMetadata, Model, StageSubmodule
@@ -113,7 +113,7 @@ class BagelViTConfig:
     patch_size=16
     hidden_act="gelu_pytorch_tanh"
     layer_norm_eps=1e-6
-    attention_dropout_vit=0.0
+    attention_dropout=0.0
 
     def __post_init__(self):
         self.rope = False
@@ -311,7 +311,7 @@ class BagelModel(Model):
 
     def _init_vit_components(self):
         self._download_hf()
-        self.vit_model = BagelViTVisionModel(self.config.vit_config)
+        self.vit_model = BagelVisionModel(self.config.vit_config)
         self.connector = BagelMLPconnector(
             self.config.vit_config.hidden_size,
             self.config.hidden_size,
