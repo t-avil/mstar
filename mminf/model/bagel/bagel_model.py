@@ -111,6 +111,7 @@ class BagelModel(Model):
         self,
         config_dir: str,
         model_path_hf: str,
+        **kwargs
     ):
         # Load configs
         vae_config_file = Path(config_dir) / VAE_CONFIG_PATH
