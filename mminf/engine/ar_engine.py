@@ -60,6 +60,7 @@ class CacheHandle:
         request_states: dict[tuple[str, str], KVRequestState],
         workspace_buffer: torch.Tensor | None,
         kv_cache_config: dict,
+        device,
     ):
         self.request_id = request_id
         self.kv_cache = kv_cache
@@ -72,12 +73,13 @@ class CacheHandle:
         # for RoPE, may be moved!
         self.indptr = torch.zeros(
             2, dtype=torch.int32,
-            device=kv_cache.device if kv_cache is not None else "cpu"
+            device=device
         )
         self.offsets = torch.zeros(
             1, dtype=torch.int32,
-            device=kv_cache.device if kv_cache is not None else "cpu"
+            device=device
         )
+        self.device = device
 
     def _get_state(self, label: str | None = None) -> KVRequestState:
         label = label or self.active_label
@@ -192,22 +194,9 @@ class CacheHandle:
             state.seq_len += seq_len
 
         return output
-    
-    def run_rms_norm(
-        self,
-        input: torch.Tensor,
-        weight: torch.Tensor,
-        eps: float = 1e-06
-    ):
-        # TODO: this should maybe not be in CacheHandle, but it might make
-        # sense to still be defined on the engine level so that we can easily
-        # swap out flashinfer for anything else
-        import flashinfer
-        return flashinfer.norm.rmsnorm(
-            input, weight, eps=eps
-        )
 
-    def run_rope(
+
+    def apply_rope(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
@@ -358,6 +347,7 @@ class AREngine(BaseEngine):
             request_states=self.request_states,
             workspace_buffer=self.workspace_buffer,
             kv_cache_config=self.kv_cache_config,
+            device=self.device
         )
 
     def execute_batch(self, batch: StageBatch) -> StageOutput:

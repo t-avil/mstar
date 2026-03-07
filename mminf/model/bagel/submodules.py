@@ -240,33 +240,49 @@ class LLMSubmodule(StageSubmodule):
         """
         result = {}
         if phase in ["prefill_text", "decode"]:
-            result["text_inputs"] = inputs.get("text_inputs", [None])[0]
+            result["text_inputs"] = inputs["text_inputs"][0]
             result["empty_position_ids"] = None
             result["empty_position_ids"] = torch.zeros_like(
                 result["text_inputs"], dtype=torch.long,
                 device=result["text_inputs"].device
             )
-            return result
-        
-        # TODO: have this logic for other phases
-        
-        
 
-        for k, v in inputs.items():
-            if k == "latents" and (not v or v[0].numel() == 0):
-                # First flow matching iteration: no latents yet.
-                # Latent noise will be initialized in forward using shape
-                # info from per-request metadata (latent_seq_len, latent_dim).
-                result[k] = None
-            elif v:
-                result[k] = v[0]
+        if phase in ["prefill_vit", "prefill_vae"]:
+            img_emb = inputs.get("img_emb")
+            result["combined_emb"] = self._wrap_with_boi_eoi(img_emb)
+            result["empty_position_ids"] = None
+            result["empty_position_ids"] = torch.zeros(
+                result["combined_emb"].shape[0], dtype=torch.long,
+                device=result["combined_emb"].device
+            )
+        
+        if phase == "prefill_vae":
+            result["text_indexes"] = torch.Tensor(
+                [0, result["combined_emb"].shape[0] - 1], dtype=torch.long,
+                device=result["combined_emb"].device
+            )
+            result["vae_token_indexes"] = torch.arange(
+                1, result["combined_emb"].shape[0]-1,
+                dtype=torch.long,
+            )
+        
+        if phase == "image_gen":
+            # First flow matching iteration: no latents yet.
+            # Latent noise will be initialized in forward using shape
+            # info from per-request metadata (latent_seq_len, latent_dim).
+            result["latents"] = inputs.get("latents", [None])[0]
+            # TODO finish this
+
+                
         return result
 
     def forward(self, phase: str, cache_handle=None, **kwargs) -> NameToTensorList:
         if phase == "prefill_text":
             return self._forward_prefill_text(cache_handle=cache_handle, **kwargs)
-        elif phase in ["prefill_vit", "prefill_vae"]:
-            return self._forward_prefill_image(cache_handle=cache_handle, **kwargs)
+        elif phase == "prefill_vit":
+            return self._forward_prefill_vit(cache_handle=cache_handle, **kwargs)
+        elif phase == "prefill_vae":
+            return self._forward_prefill_vae(cache_handle=cache_handle, **kwargs)
         elif phase == "decode":
             return self._forward_decode(cache_handle=cache_handle, **kwargs)
         elif phase == "image_gen":
@@ -304,20 +320,60 @@ class LLMSubmodule(StageSubmodule):
             cache_handle.snapshot(from_label, to_label)
         return {}
 
-    def _forward_prefill_image(self, img_emb: torch.Tensor, cache_handle=None, **kwargs) -> NameToTensorList:
+    def _forward_prefill_vit(
+        self, combined_emb: torch.Tensor,
+        empty_position_ids: torch.Tensor,
+        cache_handle: CacheHandle,**kwargs
+    ) -> NameToTensorList:
         """Wrap img_emb with BOI/EOI tokens -> LLM forward (bidirectional).
 
         For generation mode, cache_labels specifies which caches to update.
         snapshot_after triggers a KV cache deepcopy after processing.
         """
-        combined = self._wrap_with_boi_eoi(img_emb)
         cache_labels = kwargs.pop("cache_labels", ["main"])
         snapshot_after = kwargs.pop("snapshot_after", None)
         for label in cache_labels:
             if cache_handle is not None:
                 cache_handle.set_active_label(label)
-            self.language_model(combined, is_causal=False, mode="und",
-                                cache_handle=cache_handle, **kwargs)
+                empty_position_ids = range(
+                    cache_handle._get_state().seq_len,
+                    cache_handle._get_state().seq_len + combined_emb.shape[0]
+                )
+            self.language_model(
+                combined_emb, empty_position_ids,
+                is_causal=False, mode="und",
+                cache_handle=cache_handle, **kwargs
+            )
+        if snapshot_after and cache_handle is not None:
+            from_label, to_label = snapshot_after
+            cache_handle.snapshot(from_label, to_label)
+        return {}
+    
+    def _forward_prefill_vae(
+        self, combined_emb: torch.Tensor,
+        empty_position_ids: torch.Tensor,
+        vae_token_indexes: torch.Tensor,
+        text_indexes: torch.Tensor,
+        cache_handle: CacheHandle, **kwargs
+    ) -> NameToTensorList:
+        """Wrap img_emb with BOI/EOI tokens -> LLM forward (bidirectional).
+
+        For generation mode, cache_labels specifies which caches to update.
+        snapshot_after triggers a KV cache deepcopy after processing.
+        """
+        cache_labels = kwargs.pop("cache_labels", ["main"])
+        snapshot_after = kwargs.pop("snapshot_after", None)
+        for label in cache_labels:
+            if cache_handle is not None:
+                cache_handle.set_active_label(label)
+            self.language_model(
+                combined_emb, empty_position_ids,
+                is_causal=False, mode="und",
+                cache_handle=cache_handle,
+                vae_token_indexes=vae_token_indexes,
+                text_indexes=text_indexes,
+                **kwargs
+            )
         if snapshot_after and cache_handle is not None:
             from_label, to_label = snapshot_after
             cache_handle.snapshot(from_label, to_label)
@@ -351,10 +407,9 @@ class LLMSubmodule(StageSubmodule):
 
     def _forward_image_gen(
         self,
-        latents: torch.Tensor | None = None,
-        cache_handle=None,
-        timestep: torch.Tensor = None,
-        next_timestep: torch.Tensor = None,
+        latents: torch.Tensor | None,
+        dt: float,
+        cache_handle: CacheHandle,
         cfg_text_scale: float = 4.0,
         cfg_img_scale: float = 1.5,
         latent_seq_len: int | None = None,
@@ -404,7 +459,6 @@ class LLMSubmodule(StageSubmodule):
         )
 
         # Euler step: x_{t+1} = x_t + v * dt
-        dt = next_timestep - timestep
         latents = latents + v_final * dt
         return {"latents": [latents]}
 
