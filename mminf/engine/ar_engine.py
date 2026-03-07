@@ -182,6 +182,53 @@ class CacheHandle:
             state.seq_len += seq_len
 
         return output
+    
+    def run_rms_norm(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        eps: float = 1e-06
+    ):
+        # TODO: this should maybe not be in CacheHandle, but it might make
+        # sense to still be defined on the engine level so that we can easily
+        # swap out flashinfer for anything else
+        import flashinfer
+        return flashinfer.norm.rmsnorm(
+            input, weight, eps=eps
+        )
+
+    def run_rope(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        query_postion_ids: torch.Tensor,
+        rotary_dim: int | None = None,
+        interleave: bool = False,
+        rope_scale: float = 1,
+        rope_theta: float = 10000.0,
+    ):
+        # TODO: this only works for a single sequence for now
+        seq_len = query_postion_ids.shape[0]
+        indptr = torch.tensor(
+            [0, seq_len],
+            dtype=torch.int32,
+            device=q.device,
+        )
+
+        offsets = torch.tensor(
+            [self._get_state().seq_len],
+            dtype=torch.int32,
+            device=q.device,
+        )
+        import flashinfer
+        return flashinfer.rope.apply_rope(
+            q, k, indptr,
+            offsets=offsets,
+            rotary_dim=rotary_dim,
+            interleave=interleave,
+            rope_scale=rope_scale,
+            rope_theta=rope_theta,
+        )
 
     def snapshot(self, from_label: str, to_label: str) -> None:
         """Deepcopy KV cache state (all layers, all pages) from one label to another.

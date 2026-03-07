@@ -29,125 +29,6 @@ def pad_sequence(tensor, pad_size):
     return torch.cat([tensor, pad_tensor], dim=1)
 
 
-# Copied from transformers.models.llama.modeling_llama.rotate_half
-def rotate_half(x):
-    """Rotates half the hidden dims of the input."""
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
-    return torch.cat((-x2, x1), dim=-1)
-
-
-# Copied from transformers.models.llama.modeling_llama.apply_rotary_pos_emb
-def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
-    """Applies Rotary Position Embedding to the query and key tensors.
-
-    Args:
-        q (`torch.Tensor`): The query tensor.
-        k (`torch.Tensor`): The key tensor.
-        cos (`torch.Tensor`): The cosine part of the rotary embedding.
-        sin (`torch.Tensor`): The sine part of the rotary embedding.
-        position_ids (`torch.Tensor`, *optional*):
-            Deprecated and unused.
-        unsqueeze_dim (`int`, *optional*, defaults to 1):
-            The 'unsqueeze_dim' argument specifies the dimension along which to unsqueeze cos[position_ids] and
-            sin[position_ids] so that they can be properly broadcasted to the dimensions of q and k. For example, note
-            that cos[position_ids] and sin[position_ids] have the shape [batch_size, seq_len, head_dim]. Then, if q and
-            k have the shape [batch_size, heads, seq_len, head_dim], then setting unsqueeze_dim=1 makes
-            cos[position_ids] and sin[position_ids] broadcastable to the shapes of q and k. Similarly, if q and k have
-            the shape [batch_size, seq_len, heads, head_dim], then set unsqueeze_dim=2.
-    Returns:
-        `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
-    """
-    cos = cos.unsqueeze(unsqueeze_dim)
-    sin = sin.unsqueeze(unsqueeze_dim)
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
-    return q_embed, k_embed
-
-
-class BagelRotaryEmbedding(nn.Module):
-    def __init__(
-        self,
-        dim=None,
-        max_position_embeddings=2048,
-        base=10000,
-        device=None,
-        scaling_factor=1.0,
-        rope_type="default",
-        config: Optional[BagelModelConfig] = None,
-    ):
-        super().__init__()
-        # TODO (joao): remove the `if` below, only used for BC
-        self.rope_kwargs = {}
-        if config is None:
-            self.rope_kwargs = {
-                "rope_type": rope_type,
-                "factor": scaling_factor,
-                "dim": dim,
-                "base": base,
-                "max_position_embeddings": max_position_embeddings,
-            }
-            self.rope_type = rope_type
-            self.max_seq_len_cached = max_position_embeddings
-            self.original_max_seq_len = max_position_embeddings
-        else:
-            # BC: "rope_type" was originally "type"
-            if config.rope_scaling is not None:
-                self.rope_type = config.rope_scaling.get("rope_type", config.rope_scaling.get("type"))
-            else:
-                self.rope_type = "default"
-            self.max_seq_len_cached = config.max_position_embeddings
-            self.original_max_seq_len = config.max_position_embeddings
-
-        self.config = config
-        self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
-
-        inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device, **self.rope_kwargs)
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
-        self.original_inv_freq = self.inv_freq
-
-    def _dynamic_frequency_update(self, position_ids, device):
-        """
-        dynamic RoPE layers should recompute `inv_freq` in the following situations:
-        1 - growing beyond the cached sequence length (allow scaling)
-        2 - the current sequence length is in the original scale (avoid losing precision with small sequences)
-        """
-        seq_len = torch.max(position_ids) + 1
-        if seq_len > self.max_seq_len_cached:  # growth
-            inv_freq, self.attention_scaling = self.rope_init_fn(
-                self.config, device, seq_len=seq_len, **self.rope_kwargs
-            )
-            self.register_buffer("inv_freq", inv_freq, persistent=False)  # TODO joao: may break with compilation
-            self.max_seq_len_cached = seq_len
-
-        if seq_len < self.original_max_seq_len and self.max_seq_len_cached > self.original_max_seq_len:  # reset
-            self.register_buffer("inv_freq", self.original_inv_freq, persistent=False)
-            self.max_seq_len_cached = self.original_max_seq_len
-
-    @torch.no_grad()
-    def forward(self, x, position_ids):
-        if "dynamic" in self.rope_type:
-            self._dynamic_frequency_update(position_ids, device=x.device)
-
-        # Core RoPE block
-        inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
-        position_ids_expanded = position_ids[:, None, :].float()
-        # Force float32 (see https://github.com/huggingface/transformers/pull/29285)
-        device_type = x.device.type
-        device_type = device_type if isinstance(device_type, str) and device_type != "mps" else "cpu"
-        with torch.autocast(device_type=device_type, enabled=False):
-            freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
-            emb = torch.cat((freqs, freqs), dim=-1)
-            cos = emb.cos()
-            sin = emb.sin()
-
-        # Advanced RoPE types (e.g. yarn) apply a post-processing scaling factor, equivalent to scaling attention
-        cos = cos * self.attention_scaling
-        sin = sin * self.attention_scaling
-
-        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
-
-
 class BagelRMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-6):
         """
@@ -157,15 +38,16 @@ class BagelRMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(hidden_size))
         self.variance_epsilon = eps
 
-    def forward(self, hidden_states):
-        input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.to(torch.float32)
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        return self.weight * hidden_states.to(input_dtype)
+    # NOTE: this is replaced by flashinfer rmsnorm
+    # def forward(self, hidden_states):
+    #     input_dtype = hidden_states.dtype
+    #     hidden_states = hidden_states.to(torch.float32)
+    #     variance = hidden_states.pow(2).mean(-1, keepdim=True)
+    #     hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+    #     return self.weight * hidden_states.to(input_dtype)
 
-    def extra_repr(self):
-        return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
+    # def extra_repr(self):
+    #     return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
 
 
 class BagelMLP(nn.Module):
@@ -218,7 +100,7 @@ class BagelAttention(nn.Module):
     def forward(
         self,
         query_sequence: torch.Tensor,
-        query_position_embeddings: torch.Tensor,
+        query_position_ids: torch.Tensor,
         cache_handle: CacheHandle,
         write_cache=True,
         is_causal=True,
@@ -233,16 +115,15 @@ class BagelAttention(nn.Module):
             -1, self.num_key_value_heads, self.head_dim
         )
 
-        query_states = self.q_norm(query_states)
-        key_states = self.k_norm(key_states)
+        query_states = cache_handle.run_rms_norm(
+            query_states, self.q_norm.weight, eps=self.q_norm.variance_epsilon
+        )
+        key_states = cache_handle.run_rms_norm(
+            key_states, self.k_norm.weight, eps=self.k_norm.variance_epsilon
+        )
 
-        cos, sin = query_position_embeddings
-        query_states, key_states = apply_rotary_pos_emb(
-            query_states,
-            key_states,
-            cos,
-            sin,
-            unsqueeze_dim=1,
+        query_states, key_states = cache_handle.run_rope(
+            query_states, key_states, query_position_ids,
         )
 
         query_states = query_states.to(torch.bfloat16)
@@ -310,7 +191,7 @@ class BagelAttentionMoT(nn.Module):
     def forward(
         self,
         query_sequence: torch.Tensor,
-        query_position_embeddings: torch.Tensor,
+        query_position_ids: torch.Tensor,
         cache_handle: CacheHandle,
         write_cache=True,
         is_causal=True,
@@ -329,8 +210,12 @@ class BagelAttentionMoT(nn.Module):
                 -1, self.num_key_value_heads, self.head_dim
             )
 
-            query_states = self.q_norm(query_states)
-            key_states = self.k_norm(key_states)
+            query_states = cache_handle.run_rms_norm(
+                query_states, self.q_norm.weight, eps=self.q_norm.variance_epsilon
+            )
+            key_states = cache_handle.run_rms_norm(
+                key_states, self.k_norm.weight, eps=self.k_norm.variance_epsilon
+            )
 
         elif mode == "gen":
             query_sequence = query_sequence.to(torch.bfloat16)
@@ -380,27 +265,31 @@ class BagelAttentionMoT(nn.Module):
             )
 
             query_states = query_states.to(torch.float32)
-            query_states[text_indexes] = self.q_norm(
-                query_states[text_indexes]
+            key_states = key_states.to(torch.float32)
+
+            query_states[vae_token_indexes] = cache_handle.run_rms_norm(
+                query_states[vae_token_indexes],
+                self.q_norm_moe_gen.weight,
+                eps=self.q_norm_moe_gen.variance_epsilon
             )
-            query_states[vae_token_indexes] = self.q_norm_moe_gen(
-                query_states[vae_token_indexes]
+            key_states[vae_token_indexes] = cache_handle.run_rms_norm(
+                key_states[vae_token_indexes],
+                self.k_norm_moe_gen.weight,
+                eps=self.k_norm_moe_gen.variance_epsilon
             )
 
-            key_states = key_states.to(torch.float32)
-            key_states[text_indexes] = self.k_norm(
-                key_states[text_indexes]
+            query_states[text_indexes] = cache_handle.run_rms_norm(
+                query_states[text_indexes], self.q_norm.weight, eps=self.q_norm.variance_epsilon
             )
-            key_states[vae_token_indexes] = self.k_norm_moe_gen(
-                key_states[vae_token_indexes]
+            key_states[text_indexes] = cache_handle.run_rms_norm(
+                key_states[text_indexes], self.k_norm.weight, eps=self.k_norm.variance_epsilon
             )
 
         # rotary embeddings
-        cos, sin = query_position_embeddings
-        query_states, key_states = apply_rotary_pos_emb(
-            query_states, key_states, cos, sin, unsqueeze_dim=1
+        query_states, key_states = cache_handle.run_rope(
+            query_states, key_states, query_position_ids,
         )
-
+        
         query_states = query_states.to(torch.bfloat16)
         key_states = key_states.to(torch.bfloat16)
         value_states = value_states.to(torch.bfloat16)
@@ -506,11 +395,19 @@ class BagelMoTDecoderLayer(nn.Module):
     ):
         residual = query_sequence
         if mode == "und":
-            query_sequence = self.input_layernorm(query_sequence)
+            query_sequence = cache_handle.run_rms_norm(
+                query_sequence, self.input_layernorm.weight, eps=self.input_layernorm.variance_epsilon
+            )
         elif mode == "gen":
             query_sequence_ = torch.zeros_like(query_sequence)
-            query_sequence_[text_indexes] = self.input_layernorm(query_sequence[text_indexes])
-            query_sequence_[vae_token_indexes] = self.input_layernorm_moe_gen(query_sequence[vae_token_indexes])
+            query_sequence_[text_indexes] = cache_handle.run_rms_norm(
+                query_sequence[text_indexes], self.input_layernorm.weight, eps=self.input_layernorm.variance_epsilon
+            )
+            query_sequence_[vae_token_indexes] = cache_handle.run_rms_norm(
+                query_sequence[vae_token_indexes], self.input_layernorm_moe_gen.weight,
+                eps=self.input_layernorm_moe_gen.variance_epsilon
+            )
+            
             query_sequence = query_sequence_
 
         # Self Attention
@@ -529,13 +426,22 @@ class BagelMoTDecoderLayer(nn.Module):
         # Fully Connected
         residual = query_sequence
         if mode == "und":
-            query_sequence = self.post_attention_layernorm(query_sequence)
+            query_sequence = cache_handle.run_rms_norm(
+                query_sequence, self.post_attention_layernorm.weight,
+                eps=self.post_attention_layernorm.variance_epsilon
+            )
             query_sequence = self.mlp(query_sequence)
         elif mode == "gen":
             text_query_sequence = query_sequence[text_indexes]
             vae_query_sequence = query_sequence[vae_token_indexes]
-            text_query_sequence = self.post_attention_layernorm(text_query_sequence).to(torch.bfloat16)
-            vae_query_sequence = self.post_attention_layernorm_moe_gen(vae_query_sequence).to(torch.bfloat16)
+            text_query_sequence = cache_handle.run_rms_norm(
+                text_query_sequence, self.post_attention_layernorm.weight,
+                eps=self.post_attention_layernorm.variance_epsilon
+            )
+            vae_query_sequence = cache_handle.run_rms_norm(
+                vae_query_sequence, self.post_attention_layernorm_moe_gen.weight,
+                eps=self.post_attention_layernorm_moe_gen.variance_epsilon
+            )
 
             query_sequence_ = torch.zeros_like(query_sequence).to(torch.bfloat16)
             query_sequence_[text_indexes] = self.mlp(text_query_sequence)
@@ -563,12 +469,11 @@ class BagelLanguageModel(nn.Module):
         self.norm = BagelRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         if self.use_moe:
             self.norm_moe_gen = BagelRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.rotary_emb = BagelRotaryEmbedding(config=config)
 
     def forward(
         self,
         query_sequence: torch.Tensor,
-        packed_query_position_ids: torch.Tensor,
+        query_position_ids: torch.Tensor,
         cache_handle: CacheHandle,
         write_cache=True,
         is_causal=True,
@@ -576,13 +481,6 @@ class BagelLanguageModel(nn.Module):
         vae_token_indexes=None,
         text_indexes=None,
     ):
-
-        # create position embeddings to be shared across the decoder layers
-        cos, sin = self.rotary_emb(query_sequence, packed_query_position_ids.unsqueeze(0))
-        cos = cos.squeeze(0)
-        sin = sin.squeeze(0)
-        query_position_embeddings = (cos, sin)
-
         extra_inputs = {}
         if self.use_moe:
             extra_inputs.update(mode=mode)
@@ -597,7 +495,7 @@ class BagelLanguageModel(nn.Module):
         for layer_idx, decoder_layer in enumerate(self.layers):
             query_sequence = decoder_layer(
                 query_sequence=query_sequence,
-                query_position_embeddings=query_position_embeddings,
+                query_position_ids=query_position_ids,
                 cache_handle=cache_handle,
                 write_cache=write_cache,
                 is_causal=is_causal,
@@ -606,14 +504,22 @@ class BagelLanguageModel(nn.Module):
 
         if self.use_moe:
             if mode == "und":
-                query_sequence = self.norm(query_sequence)
+                query_sequence = cache_handle.run_rms_norm(
+                    query_sequence, self.norm.weight, eps=self.norm.variance_epsilon
+                )
             elif mode == "gen":
-                packed_query_sequence_ = torch.zeros_like(query_sequence)
-                packed_query_sequence_[text_indexes] = self.norm(query_sequence[text_indexes])
-                packed_query_sequence_[vae_token_indexes] = self.norm_moe_gen(query_sequence[vae_token_indexes])
-                query_sequence = packed_query_sequence_
+                query_sequence_ = torch.zeros_like(query_sequence)
+                query_sequence_[text_indexes] = cache_handle.run_rms_norm(
+                    query_sequence[text_indexes], self.norm.weight, eps=self.norm.variance_epsilon
+                )
+                query_sequence_[vae_token_indexes] = cache_handle.run_rms_norm(
+                    query_sequence[vae_token_indexes], self.norm_moe_gen.weight, eps=self.norm_moe_gen.variance_epsilon
+                )
+                query_sequence = query_sequence_
         else:
-            query_sequence = self.norm(query_sequence)
+            query_sequence = cache_handle.run_rms_norm(
+                query_sequence, self.norm.weight, eps=self.norm.variance_epsilon
+            )
 
 
 class BagelForCausalLM(nn.Module):
