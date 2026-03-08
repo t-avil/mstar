@@ -173,6 +173,7 @@ class BagelModel(Model):
                 self.config.max_latent_size, self.config.hidden_size
             )
             self.time_embedder = TimestepEmbedder(self.config.hidden_size)
+            self.vae2llm = nn.Linear(self.config.patch_latent_dim, self.config.hidden_size)
 
             load_weights(
                 state_dict=state_dict,
@@ -183,6 +184,12 @@ class BagelModel(Model):
                 state_dict=state_dict,
                 module=self.latent_pos_embed,
                 prefix="latent_pos_embed"
+            )
+
+            load_weights(
+                state_dict=state_dict,
+                module=self.vae2llm,
+                prefix="vae2llm"
             )
 
     def _init_vae_components(self):
@@ -210,15 +217,14 @@ class BagelModel(Model):
         ema_path = self.repo / "ema.safetensors"
         state_dict = load_file(ema_path)
 
-        load_weights(
-            state_dict=state_dict,
-            module=self.vae2llm,
-            prefix="vae2llm"
-        )
-
         if not self.llm_initialized:
             # LLM components also need these for image gen, so these
-            # might already be initialized by _init_language_model_components().
+            # might already be initialized by _init_language_model_components()
+            load_weights(
+                state_dict=state_dict,
+                module=self.vae2llm,
+                prefix="vae2llm"
+            )
             load_weights(
                 state_dict=state_dict,
                 module=self.time_embedder,
@@ -279,6 +285,7 @@ class BagelModel(Model):
             return LLMSubmodule(
                 language_model=self.language_model,
                 llm2vae=self.llm2vae,
+                vae2llm=self.vae2llm,
                 time_embedder=self.time_embedder,
                 latent_pos_embed=self.latent_pos_embed,
                 config=self.config,

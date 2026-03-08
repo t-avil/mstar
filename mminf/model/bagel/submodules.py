@@ -223,6 +223,7 @@ class LLMSubmodule(StageSubmodule):
         self,
         language_model: BagelForCausalLM,
         llm2vae: nn.Linear,
+        vae2llm: nn.Linear,
         time_embedder: TimestepEmbedder,
         latent_pos_embed: PositionEmbedding,
         config: BagelModelConfig,
@@ -234,6 +235,7 @@ class LLMSubmodule(StageSubmodule):
         self.embed_tokens = language_model.model.embed_tokens
         self.lm_head = language_model.lm_head
         self.llm2vae = llm2vae
+        self.vae2llm = vae2llm
         self.time_embedder = time_embedder
         self.latent_pos_embed = latent_pos_embed
         self.config = config
@@ -467,7 +469,7 @@ class LLMSubmodule(StageSubmodule):
 
         pos_embed = self.latent_pos_embed(vae_position_ids)
         timestep_embeds = self.time_embedder(timestep)
-        empty_combined_emb[1:-1] = self.llm2vae(latents) + timestep_embeds \
+        empty_combined_emb[1:-1] = self.vae2llm(latents) + timestep_embeds \
             + pos_embed
 
         velocities = {}
