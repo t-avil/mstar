@@ -10,9 +10,11 @@ from mminf.communication.tensors import NameToTensorList
 from mminf.engine.ar_engine import CacheHandle
 from mminf.model.bagel.components.language_model import BagelForCausalLM
 from mminf.model.bagel.components.modeling_utils import (
+    ImageTransform,
     PositionEmbedding,
     TimestepEmbedder,
     get_flattened_position_ids_extrapolate,
+    patchify,
 )
 from mminf.model.bagel.config import BagelModelConfig
 from mminf.model.base import StageSubmodule
@@ -32,11 +34,17 @@ class ViTEncoderSubmodule(StageSubmodule):
         vit_model: nn.Module,
         connector: nn.Module,
         vit_pos_embed: nn.Module,
+        vit_patch_size: int,
+        vit_max_num_patch_per_side: int,
     ):
         super().__init__()
         self.vit_model = vit_model
         self.connector = connector
         self.vit_pos_embed = vit_pos_embed
+    
+        self.vit_patch_size = vit_patch_size
+        self.vit_max_num_patch_per_side = vit_max_num_patch_per_side
+        self.transform = ImageTransform(980, 224, 14)
 
     def preprocess(self, image_inputs: list[torch.Tensor]) -> dict:
         """Convert raw images to packed ViT input format.
@@ -46,14 +54,17 @@ class ViTEncoderSubmodule(StageSubmodule):
         - Patch splitting and flattening
         - Position ID computation from image grid
         - Packing multiple images with cu_seqlens for FlashAttention
-
-        Currently assumes single pre-processed image tensor where
-        image_inputs[0] has shape [num_tokens, patch_dim].
         """
-        # TODO: Full prepare_vit_images integration (SigLIP2 preprocessing)
-        pixel_values = image_inputs[0]
-        num_tokens = pixel_values.shape[0]
-        device = pixel_values.device
+        image_tensor = self.transform(image_inputs[0])
+        num_tokens = image_tensor.shape[0]
+        device = image_tensor.device
+
+        position_ids = get_flattened_position_ids_extrapolate(
+            image_tensor.size(1), image_tensor.size(2), 
+            self.vit_patch_size, 
+            max_num_patches_per_side=self.vit_max_num_patch_per_side
+        )
+        pixel_values = patchify(image_tensor)
 
         # Compute cu_seqlens for FlashAttention
         vit_token_seqlens = torch.tensor(
@@ -63,9 +74,6 @@ class ViTEncoderSubmodule(StageSubmodule):
             torch.cumsum(vit_token_seqlens, dim=0), (1, 0)
         ).to(torch.int32)
         max_seqlen = int(num_tokens)
-
-        # TODO: compute position_ids from image grid structure
-        position_ids = torch.arange(num_tokens, dtype=torch.long, device=device)
 
         return {
             "packed_pixel_values": pixel_values,
@@ -110,6 +118,7 @@ class VAEEncoderSubmodule(StageSubmodule):
         latent_patch_size: int,
         latent_channel: int,
         latent_downsample: int,
+        max_latent_size: int,
     ):
         super().__init__()
         self.vae_model = vae_model
@@ -119,6 +128,8 @@ class VAEEncoderSubmodule(StageSubmodule):
         self.latent_patch_size = latent_patch_size
         self.latent_channel = latent_channel
         self.latent_downsample = latent_downsample
+        self.max_latent_size = max_latent_size
+        self.transform = ImageTransform(1024, 512, 16)
 
     def preprocess(self, image_inputs: list[torch.Tensor]) -> dict:
         """Convert raw images to VAE encoder input format.
@@ -131,27 +142,26 @@ class VAEEncoderSubmodule(StageSubmodule):
         - VAE position ID computation from latent grid
         - Timestep preparation
         """
-        padded_images = image_inputs[0]  # [B, C, H, W]
-        device = padded_images.device
+        image_tensor: torch.Tensor = self.transform(image_inputs[0])  # [C, H, W]
+        device = image_tensor.device
 
         # Compute patchified dimensions as ints (CUDA graph compatible)
         p = self.latent_patch_size
         ds = self.latent_downsample
-        _, _, img_h, img_w = padded_images.shape
+        _, img_h, img_w = image_tensor.shape
         h = (img_h // ds) // p
         w = (img_w // ds) // p
 
-        # TODO: proper VAE position IDs based on latent grid structure
-        num_patches = h * w
-        packed_vae_position_ids = torch.arange(num_patches, device=device)
-
-        # t=0 for initial VAE encoding step
-        packed_timesteps = torch.zeros(num_patches, device=device)
+        packed_vae_position_ids = get_flattened_position_ids_extrapolate(
+            img_h, img_w,
+            self.latent_downsample, 
+            max_num_patches_per_side=self.max_latent_size
+        )
 
         return {
-            "padded_images": padded_images,
+            "padded_images": image_tensor.unsqueeze(0),
             "packed_vae_position_ids": packed_vae_position_ids,
-            "packed_timesteps": packed_timesteps,
+            "packed_timesteps": torch.tensor([0], device=device),
             "h": h,
             "w": w,
         }

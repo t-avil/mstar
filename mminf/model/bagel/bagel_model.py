@@ -298,6 +298,8 @@ class BagelModel(Model):
                 vit_model=self.vit_model,
                 connector=self.connector,
                 vit_pos_embed=self.vit_pos_embed,
+                vit_patch_size=self.config.vit_config.patch_size,
+                vit_max_num_patch_per_side=self.config.vit_max_num_patch_per_side
             )
         elif stage_name == "vae_encoder":
             self._init_vae_components()
@@ -309,6 +311,7 @@ class BagelModel(Model):
                 latent_patch_size=self.config.latent_patch_size,
                 latent_channel=self.config.vae_config.z_channels,
                 latent_downsample=self.config.latent_downsample,
+                max_latent_size=self.config.max_latent_size,
             )
         elif stage_name == "vae_decoder":
             self._init_vae_components()
