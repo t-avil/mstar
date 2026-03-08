@@ -302,6 +302,21 @@ class Model(ABC):
         pass
 
     @abstractmethod
+    def postprocess(
+        self, output: torch.Tensor,
+        modality: str # text | image | video | audio
+    ) -> bytes:
+        """
+        Given an output of a certain modality, encode and return as bytes.
+        This will likely need to overridden with model-specific behavior.
+
+        Modality to expected encoding type:
+        - text: utf-8
+        - image: png
+        """
+        return output.cpu().numpy().tobytes()
+
+    @abstractmethod
     def get_submodule(self, stage_name: str) -> torch.nn.Module | None:
         """
         Return the nn.Module for this stage, or None for dummy mode.

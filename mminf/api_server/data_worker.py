@@ -215,7 +215,6 @@ class PreprocessWorkerThread:
             self.tensor_uuid_to_metadata_per_request[result.request_id][
                 tensor_info.uuid] = result.metadata
 
-
     def _process_read_tensors(self):
         for request_id, graph_edges in self.tensor_manager.get_ready_tensors().items():
             assert len(graph_edges) == 1
@@ -229,11 +228,15 @@ class PreprocessWorkerThread:
                     tensor_name=graph_edge.name,
                     uuid=tensor_info.uuid
                 )
+                postprocessed = self.model.postprocess(
+                    tensor, modality
+                )
+
                 uuids.append(tensor_info.uuid)
                 self.out_queue.put(ResultChunk(
                     request_id=request_id,
                     modality=modality,
-                    data=tensor.numpy().tobytes(),
+                    data=postprocessed,
                     metadata=self.tensor_uuid_to_metadata_per_request[request_id][
                         tensor_info.uuid]
                 ))

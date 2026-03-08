@@ -29,11 +29,13 @@ field (no BOI token detection). Prefill is sequential: text tokens are
 processed causally, then each image is processed bidirectionally.
 """
 
+import io
 import json
 from pathlib import Path
 
 import torch
 from huggingface_hub import hf_hub_download, snapshot_download
+from PIL import Image
 from safetensors.torch import load_file
 from torch import nn
 
@@ -368,6 +370,19 @@ class BagelModel(Model):
             ]
 
         return result
+
+    def postprocess(
+        self, output: torch.Tensor,
+        modality: str # text | image | video | audio
+    ) -> bytes:
+        if modality == "text":
+            return self.tokenizer.decode(output).encode("utf-8")
+        if modality == "image":
+            output = output[0].permute(1, 2, 0) * 255
+            img = Image.fromarray((output).to(torch.uint8).cpu().numpy())
+            img_byte_arr = io.BytesIO()
+            img.save(img_byte_arr, format='PNG')
+            return img_byte_arr.getvalue()
 
     def get_kv_cache_config(self) -> KVCacheConfig:
         return KVCacheConfig(
