@@ -280,10 +280,12 @@ class LLMSubmodule(StageSubmodule):
             )
         
         if phase == "prefill_vae":
-            result["text_indexes"] = torch.tensor(
-                [0, result["combined_emb"].shape[0] - 1], dtype=torch.long,
-                device=result["combined_emb"].device
+            text_len = result["combined_emb"].shape[0]
+            result["text_indexes"] = torch.zeros(
+                text_len, dtype=torch.bool, device=result["combined_emb"].device
             )
+            result["text_indexes"][0] = True
+            result["text_indexes"][text_len - 1] = True
             result["vae_token_indexes"] = torch.arange(
                 1, result["combined_emb"].shape[0]-1,
                 dtype=torch.long, device=result["combined_emb"].device
@@ -312,10 +314,12 @@ class LLMSubmodule(StageSubmodule):
                     device=result["latents"].device
                 )
             )
-            result["text_indexes"] = torch.tensor(
-                [0, result["empty_combined_emb"].shape[0] - 1], dtype=torch.long,
-                device=result["latents"].device
+            text_len = result["empty_combined_emb"].shape[0]
+            result["text_indexes"] = torch.zeros(
+                text_len, dtype=torch.bool, device=result["latents"].device
             )
+            result["text_indexes"][0] = True
+            result["text_indexes"][text_len - 1] = True
             result["vae_token_indexes"] = torch.arange(
                 1, result["empty_combined_emb"].shape[0]-1,
                 dtype=torch.long,
