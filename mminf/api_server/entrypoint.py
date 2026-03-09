@@ -50,6 +50,7 @@ def _conductor_process_target(
     model_name: str,
     config_path: str,
     socket_path_prefix: str,
+    mooncake_base_port: int = 13000,
 ):
     """Runs DummyConductor.run() in a spawned process."""
     from mminf.conductor.conductor import Conductor
@@ -62,6 +63,7 @@ def _conductor_process_target(
         model=model,
         model_config_file=config_path,
         socket_path_prefix=socket_path_prefix,
+        mooncake_base_port=mooncake_base_port,
     )
     conductor.run()
 
@@ -80,6 +82,7 @@ class APIServer:
         hostname: str="localhost",
         timeout_seconds: float = 600.0,
         model=None,
+        mooncake_port: int = 13000,
     ):
         self.upload_dir = Path(upload_dir)
         self.upload_dir.mkdir(parents=True, exist_ok=True)
@@ -89,6 +92,7 @@ class APIServer:
             model=model,
             hostname=hostname,
             socket_path_prefix=socket_path_prefix,
+            mooncake_port=mooncake_port,
         )
 
         # Concurrent request tracking
@@ -474,6 +478,10 @@ def main():
         help="Per-request timeout in seconds",
     )
     parser.add_argument(
+        "--mooncake-base-port", type=int, default=13000,
+        help="Base port for Mooncake RDMA tensor transfers (each entity gets base + offset)",
+    )
+    parser.add_argument(
         "--log-level", type=str, default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
     )
@@ -494,7 +502,7 @@ def main():
     conductor_proc = ctx.Process(
         target=_conductor_process_target,
         args=(model_name, args.config,
-              args.socket_path_prefix),
+              args.socket_path_prefix, args.mooncake_base_port),
     )
     conductor_proc.start()
     logger.info("Conductor process started (pid=%d, model=%s)", conductor_proc.pid, model_name)
@@ -512,6 +520,7 @@ def main():
         upload_dir=args.upload_dir,
         timeout_seconds=args.timeout,
         model=model,
+        mooncake_port=args.mooncake_base_port,
     )
 
     try:
