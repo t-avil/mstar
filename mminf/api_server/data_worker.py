@@ -52,6 +52,7 @@ class PreprocessWorker:
                 model=model,
             )
         )
+        self.thread.start()
 
     def new_request(self, input: PreprocessInput):
         self.per_request_reading_tensors[input.request_id] = 0
@@ -77,7 +78,8 @@ class PreprocessWorker:
 
     def shutdown(self):
         self.stop_event.set()
-        self.thread.join()
+        if self.thread.is_alive():
+            self.thread.join()
 
 
 class PreprocessWorkerThread:
