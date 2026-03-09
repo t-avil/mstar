@@ -14,6 +14,7 @@ dependencies = [
     "numpy",
     "PyYAML",
     "pyzmq",
+    "python-multipart",
     "torch",
     "uvicorn",
 ]
