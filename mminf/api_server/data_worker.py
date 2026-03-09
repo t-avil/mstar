@@ -10,23 +10,11 @@ import torchaudio
 import torchvision
 from torchcodec.decoders import VideoDecoder
 
-from mminf.api_server.entrypoint import ResultChunk, ResultTensors
+from mminf.api_server.types import PreprocessInput, ResultChunk, ResultTensors
 from mminf.communication.communicator import CommProtocol, ZMQCommunicator
 from mminf.communication.tensors import MooncakeCommunicationManager, NameToTensorList
 from mminf.ipc_formats import ConductorMessage, ConductorMessageType, NewRequestConductor
 from mminf.model.base import Model
-
-
-@dataclass
-class PreprocessInput:
-    request_id: str
-    text: str | None
-
-    # file_paths is modality: list of filenames
-    file_paths: dict[str, list[str]] | None
-    input_modalities: list[str]
-    output_modalities: list[str]
-    model_kwargs: dict
 
 
 def _preprocess_loop(**kwargs):

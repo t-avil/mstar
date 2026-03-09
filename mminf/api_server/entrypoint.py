@@ -9,7 +9,6 @@ import multiprocessing as mp
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -19,9 +18,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
-from mminf.api_server.data_worker import PreprocessInput, PreprocessWorker
+from mminf.api_server.data_worker import PreprocessWorker
+from mminf.api_server.types import APIServerMessage, PreprocessInput, ResultChunk
 from mminf.communication.communicator import ZMQCommunicator
-from mminf.graph.base import GraphPointer
 from mminf.model.registry import HF_MODELS
 
 logger = logging.getLogger(__name__)
@@ -41,44 +40,6 @@ for _mod, _exts in {
 
 def _detect_modality(filename: str) -> str:
     return _EXT_TO_MODALITY.get(Path(filename).suffix.lower(), "unknown")
-
-
-# ------------------------------------------------------------------
-# Result messages: conductor -> API server
-#
-# The conductor sends these back via ZMQCommunicator.send("api_server", msg).
-# They are defined here (close to the consumer) rather than in ipc_formats
-# because the conductor->api_server protocol is still evolving.
-# ------------------------------------------------------------------
-
-@dataclass
-class ResultChunk:
-    """One chunk of generated output for a request."""
-    request_id: str
-    modality: str          # "text" | "image" | "audio" | "video"
-    data: bytes            # raw payload (text encoded as utf-8)
-    metadata: dict = field(default_factory=dict)
-
-
-@dataclass
-class ResultTensors:
-    request_id: str
-    modality: str
-    graph_edge: GraphPointer
-    metadata: dict = field(default_factory=dict)
-
-
-@dataclass
-class RequestComplete:
-    """Signals that a request has finished processing."""
-    request_id: str
-
-
-@dataclass
-class APIServerMessage:
-    """Envelope for messages received by the API server."""
-    message_type: str  # "result_tensors" | "request_complete"
-    body: ResultTensors | RequestComplete
 
 
 # ------------------------------------------------------------------
