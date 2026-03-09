@@ -181,7 +181,7 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
             self.engine.initialize(
                 hostname,
                 metadata_server,
-                protocol,
+                protocol.value,
                 ""
             )
         else:
@@ -380,7 +380,8 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
         return ready
 
     def start_read_tensors(
-        self, request_id: str, graph_pointers: list[GraphPointer]
+        self, request_id: str, graph_pointers: list[GraphPointer],
+        device: str="cuda"
     ):
         """
         For each pointer with tensor_info (RDMA source): allocate dst tensor,
@@ -398,7 +399,7 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
             )
 
             for info in graph_ptr.tensor_info:
-                buffer = torch.empty(info.dims, dtype=info.dtype, device="cuda")
+                buffer = torch.empty(info.dims, dtype=info.dtype, device=device)
                 self.tensor_store.put_tensor(
                     request_id=request_id, name=graph_ptr.name,
                     uuid=info.uuid, tensor=buffer

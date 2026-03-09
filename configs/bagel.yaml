@@ -11,9 +11,9 @@ stage_groups:
       - vae_encoder
       - vae_decoder
     ranks:
-      - 1
+      - 0
   
   - stage_names:
       - LLM
     ranks:
-      - 2
+      - 1

@@ -440,6 +440,7 @@ class BagelModel(Model):
         if stage_name in self._submodule_cache:
             return self._submodule_cache[stage_name]
         submodule = self._create_submodule(stage_name)
+        logger.info(f"Successfully loaded in BAGEL submodule for {stage_name}")
         self._submodule_cache[stage_name] = submodule
         return submodule
 
