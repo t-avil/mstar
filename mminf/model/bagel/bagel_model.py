@@ -31,6 +31,7 @@ processed causally, then each image is processed bidirectionally.
 
 import io
 import json
+import logging
 from pathlib import Path
 
 import torch
@@ -59,6 +60,8 @@ from mminf.model.bagel.config import load_bagel_config
 from mminf.model.bagel.submodules import LLMSubmodule, VAEDecoderSubmodule, VAEEncoderSubmodule, ViTEncoderSubmodule
 from mminf.model.base import STREAM_OUT, CurrentForwardMetadata, Model, StageSubmodule
 from mminf.model.utils import load_weights
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # System prompts (used when think_mode=True)
@@ -281,7 +284,7 @@ class BagelModel(Model):
 
     def _create_submodule(self, stage_name: str) -> StageSubmodule | None:
         """Create a submodule wrapper on first access."""
-
+        logger.debug("Creating submodule for BAGEL model stage %s", stage_name)
         if stage_name == "LLM":
             self._init_language_model_components()
             return LLMSubmodule(

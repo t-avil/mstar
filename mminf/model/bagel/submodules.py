@@ -3,6 +3,8 @@
 # ---------------------------------------------------------------------------
 
 
+import logging
+
 import torch
 from torch import nn
 
@@ -18,6 +20,8 @@ from mminf.model.bagel.components.modeling_utils import (
 )
 from mminf.model.bagel.config import BagelModelConfig
 from mminf.model.base import StageSubmodule
+
+logger = logging.getLogger(__name__)
 
 
 class ViTEncoderSubmodule(StageSubmodule):
@@ -90,6 +94,10 @@ class ViTEncoderSubmodule(StageSubmodule):
         max_seqlen: int,
         **kwargs,
     ) -> NameToTensorList:
+        logger.debug(
+            "Running BAGEL ViT with packed_pixel_values shape=%s, packed_position_ids shape=%s",
+            packed_pixel_values.shape, packed_position_ids.shape
+        )
         features = self.vit_model(
             packed_pixel_values=packed_pixel_values,
             packed_flattened_position_ids=packed_position_ids,
@@ -175,6 +183,14 @@ class VAEEncoderSubmodule(StageSubmodule):
         w: int,
         **kwargs,
     ) -> NameToTensorList:
+        logger.debug(
+            ("Running BAGEL VAE enc with padded_images shape=%s, "
+             "packed_vae_position_ids shape=%s, packed_timesteps shape=%s, "
+             "h=%d, w=%d"),
+            padded_images.shape, packed_vae_position_ids.shape,
+            packed_timesteps.shape, h, w
+        )
+
         latent = self.vae_model.encode(padded_images)
 
         p = self.latent_patch_size
@@ -335,6 +351,12 @@ class LLMSubmodule(StageSubmodule):
         return result
 
     def forward(self, phase: str, cache_handle=None, **kwargs) -> NameToTensorList:
+        inputs_and_shapes = ", ".join([
+            (f"{key} (shape={val.shape})" if isinstance(val, torch.Tensor) else key) \
+                for key, val in kwargs.items()
+        ])
+        logger.debug("Running BAGEL LLM for phase %s and inputs %s", phase, inputs_and_shapes)
+
         if phase == "prefill_text":
             return self._forward_prefill_text(cache_handle=cache_handle, **kwargs)
         elif phase == "prefill_vit":
@@ -576,6 +598,10 @@ class VAEDecoderSubmodule(StageSubmodule):
         image_w: int | torch.Tensor = 0,
         **kwargs,
     ) -> NameToTensorList:
+        logger.debug(
+            "Running BAGEL VAE dec with latents shape %s, h %d, w %d",
+            str(latents.shape), image_h, image_w
+        )
         # Convert to int if tensor (CUDA graph compatible when passed as int
         # from metadata; tensor fallback for backwards compatibility)
         H = image_h.item() if isinstance(image_h, torch.Tensor) else int(image_h)

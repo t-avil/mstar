@@ -33,7 +33,6 @@ class EventAndPointers:
     request_id: str = ""
 
 
-
 class TensorStore:
     def __init__(self):
         self.stored_tensors: dict[NameAndRequestId, UuidToTensor] = {}
@@ -243,6 +242,11 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
             request_id=request_id, tensors=tensors
         )
         for name in tensors:
+            logger.debug(
+                "Storing tensor %s (uuids %s) for stages %s",
+                name, str([info.uuid for info in pointer_info[name]]),
+                str([edge.name for edge in name_to_pointers.get(name, [])])
+            )
             for pointer in name_to_pointers.get(name, []):
                 pointer.tensor_info = pointer_info[name]
 
