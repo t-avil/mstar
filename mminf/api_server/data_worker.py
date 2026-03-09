@@ -8,7 +8,10 @@ from dataclasses import asdict, dataclass
 import torch
 import torchaudio
 import torchvision
-from torchcodec.decoders import VideoDecoder
+try:
+    from torchcodec.decoders import VideoDecoder
+except (ImportError, RuntimeError):
+    VideoDecoder = None
 
 from mminf.api_server.types import PreprocessInput, ResultChunk, ResultTensors
 from mminf.communication.communicator import CommProtocol, ZMQCommunicator
