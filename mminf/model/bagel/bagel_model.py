@@ -438,6 +438,7 @@ class BagelModel(Model):
             num_kv_heads=self.config.num_key_value_heads,
             head_dim=self.config.hidden_size // self.config.num_attention_heads,
             max_seq_len=self.config.max_position_embeddings,
+            num_qo_heads=self.config.num_attention_heads,
         )
 
     def get_submodule(self, stage_name: str) -> torch.nn.Module | None:
