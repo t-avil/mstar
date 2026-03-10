@@ -220,9 +220,6 @@ class CacheHandle:
             raise e 
             output = torch.zeros_like(q)
 
-        if write_cache:
-            state.seq_len += seq_len
-
         return output
 
 
@@ -275,6 +272,15 @@ class CacheHandle:
                 page_indices=list(from_state.page_indices),
                 seq_len=from_state.seq_len,
             )
+
+    def advance_seq_len(self, n: int) -> None:
+        """Advance the active label's seq_len by n tokens.
+
+        Must be called once after a full forward pass (all layers), not
+        per-layer. This keeps seq_len consistent across layers for KV
+        cache writes, RoPE offsets, and page allocation.
+        """
+        self._get_state().seq_len += n
 
     def save_seq_position(self) -> int:
         """Return current seq_len for the active label (for flow matching rewind)."""
