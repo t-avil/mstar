@@ -379,7 +379,7 @@ class LLMSubmodule(StageSubmodule):
         For generation mode, cache_labels specifies which caches to update
         (e.g., ["main", "cfg_img"] for text prefill).
         """
-        emb = self.embed_tokens(text_inputs).to(torch.bfloat16)
+        emb = self.embed_tokens(text_inputs)
         cache_labels = kwargs.pop("cache_labels", ["main"])
         snapshot_after = kwargs.pop("snapshot_after", None)
         for label in cache_labels:
@@ -455,7 +455,7 @@ class LLMSubmodule(StageSubmodule):
         # Remove metadata keys not needed for language_model
         kwargs.pop("cache_labels", None)
         kwargs.pop("snapshot_after", None)
-        emb = self.embed_tokens(text_inputs).to(torch.bfloat16)
+        emb = self.embed_tokens(text_inputs)
         if cache_handle is not None:
             cache_handle.set_active_label("main")
 
