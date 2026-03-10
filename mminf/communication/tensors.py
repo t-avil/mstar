@@ -203,6 +203,10 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
             self.engine = None
         # Per-transfer pending list (allows partial tensor readiness)
         self.pending: list[EventAndPointers] = []
+        # Track UUIDs registered for remote send, awaiting TENSOR_RECEIVED ACK.
+        # cleanup_request() skips these so buffers stay alive until the
+        # receiver confirms it finished reading.
+        self.registered_for_send: dict[str, set[str]] = {}  # request_id -> set of UUIDs
 
     def store_and_return_tensor_info(
         self, request_id: str, tensors: NameToTensorList,
@@ -247,6 +251,7 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
                 if ret_value != 0:
                     # TODO: error handling
                     raise RuntimeError("Mooncake memory registration failed.")
+            self.registered_for_send.setdefault(request_id, set()).add(uuid)
 
     def store_and_populate_graph_edges(
         self, request_id: str,
@@ -289,6 +294,11 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
             if ret_value != 0:
                 raise RuntimeError("Mooncake memory unregistration failed.")
         self.tensor_store.remove_tensor(**req_id_name_uuid)
+        # Remove from send-tracking so cleanup_request() knows this UUID is done
+        if request_id in self.registered_for_send:
+            self.registered_for_send[request_id].discard(uuid)
+            if not self.registered_for_send[request_id]:
+                del self.registered_for_send[request_id]
 
     def cleanup(self, request_id: str, tensor_name: str, uuids: list[str] | None=None):
         if not self.tensor_store.check_name_presence(
@@ -307,6 +317,7 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
             self._cleanup_by_uuid(request_id, tensor_name, uuid)
 
     def cleanup_request(self, request_id: str):
+        pending_send_uuids = self.registered_for_send.get(request_id, set())
         names_to_remove = [
             key.tensor_name for key in self.tensor_store.stored_tensors \
                 if key.request_id == request_id
@@ -316,6 +327,13 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
             for uuid in self.tensor_store.get_all_uuids(
                 request_id=request_id, name=name
             ):
+                if uuid in pending_send_uuids:
+                    logger.debug(
+                        "Deferring cleanup of tensor %s uuid %s "
+                        "(awaiting TENSOR_RECEIVED ACK)",
+                        name, uuid
+                    )
+                    continue
                 self._cleanup_by_uuid(request_id, name, uuid)
         # Also remove any pending transfers for this request
         self.pending = [
