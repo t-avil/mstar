@@ -252,14 +252,18 @@ class PreprocessWorkerThread:
 
     def run(self):
         while not self.stop_event.is_set():
-            if not self.in_queue.empty():
-                self._process_input(self.in_queue.get())
-            if not self.result_tensor_queue.empty():
-                self._read_result_tensor(self.result_tensor_queue.get())
-            if not self.cleanup_request_queue.empty():
-                req_id = self.cleanup_request_queue.get()
-                self.tensor_manager.cleanup_request(req_id)
-                del self.tensor_uuid_to_metadata_per_request[req_id]
-            self._process_read_tensors()
+            try:
+                if not self.in_queue.empty():
+                    self._process_input(self.in_queue.get())
+                if not self.result_tensor_queue.empty():
+                    self._read_result_tensor(self.result_tensor_queue.get())
+                if not self.cleanup_request_queue.empty():
+                    req_id = self.cleanup_request_queue.get()
+                    self.tensor_manager.cleanup_request(req_id)
+                    if req_id in self.tensor_uuid_to_metadata_per_request:
+                        del self.tensor_uuid_to_metadata_per_request[req_id]
+                self._process_read_tensors()
+            except Exception:
+                logger.exception("PreprocessWorkerThread error")
 
             time.sleep(0.001)
