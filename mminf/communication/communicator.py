@@ -47,8 +47,8 @@ class ZMQCommunicator(BaseCommunicator):
         # TODO: maybe only open sockets as we need them, and close sockets
         # when we no longer need them
         self.push_sockets: dict[str, zmq.SyncSocket] = {}
-        # self.session_id = f"ipc://{ipc_socket_path_prefix}/{my_id}.ipc"
         self.my_id = my_id
+        self.ipc_socket_path_prefix = ipc_socket_path_prefix
 
         if protocol == CommProtocol.IPC:
             self.pull_socket.bind(f"ipc://{ipc_socket_path_prefix}/{my_id}.ipc")
@@ -74,6 +74,11 @@ class ZMQCommunicator(BaseCommunicator):
             "%s to send a message %s to entity %s",
             self.my_id, str(msg), entity_id
         )
+        if entity_id not in self.push_sockets:
+            sock = self.context.socket(zmq.PUSH)
+            sock.connect(f"ipc://{self.ipc_socket_path_prefix}/{entity_id}.ipc")
+            sock.setsockopt(zmq.LINGER, 0)
+            self.push_sockets[entity_id] = sock
         self.push_sockets[entity_id].send_pyobj(msg)
 
     def get_all_new_messages(self) -> list:
