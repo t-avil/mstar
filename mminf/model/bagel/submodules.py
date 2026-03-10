@@ -490,6 +490,15 @@ class LLMSubmodule(StageSubmodule):
             "text_out": [token.clone()] # TODO: this is a hack, and not compatible with cuda graphs
         }
 
+    @staticmethod
+    def _apply_timestep_shift(t: torch.Tensor, shift: float) -> torch.Tensor:
+        """Apply BAGEL's non-linear timestep remapping.
+
+        Maps uniform t in [0,1] to shifted t that spends more time
+        at higher noise levels (shift > 1).  shift=1 is identity.
+        """
+        return shift * t / (1 + (shift - 1) * t)
+
     def _forward_image_gen(
         self,
         latents: torch.Tensor,
@@ -517,14 +526,29 @@ class LLMSubmodule(StageSubmodule):
         kwargs.pop("cache_labels", None)
         kwargs.pop("snapshot_after", None)
 
-        # TODO: support for timestep shift (non-uniform timesteps)
-        dt = 1 / self.config.num_timesteps
-        timestep = 1 - time_index * dt
+        N = self.config.num_timesteps
+        shift = self.config.timestep_shift
+
+        # Compute shifted timestep and step size for this iteration.
+        # Reference: timesteps = linspace(1,0,N) then shift-remap, dts = t[i]-t[i+1].
+        # time_index goes from 0 to N-2 (N-1 total Euler steps).
+        t_uniform = 1.0 - time_index.float() / (N - 1)
+        t_uniform_next = 1.0 - (time_index.float() + 1) / (N - 1)
+        timestep = self._apply_timestep_shift(t_uniform, shift)
+        timestep_next = self._apply_timestep_shift(t_uniform_next, shift)
+        dt = timestep - timestep_next  # positive step size
 
         pos_embed = self.latent_pos_embed(vae_position_ids)
         timestep_embeds = self.time_embedder(timestep, device=latents.device)
         empty_combined_emb[1:-1] = self.vae2llm(latents) + timestep_embeds \
             + pos_embed
+
+        # CFG interval: only apply guidance when timestep is within interval
+        cfg_lo, cfg_hi = self.config.cfg_interval
+        t_val = timestep.item() if isinstance(timestep, torch.Tensor) else float(timestep)
+        in_cfg_interval = (t_val > cfg_lo) and (t_val <= cfg_hi)
+        effective_text_scale = cfg_text_scale if in_cfg_interval else 1.0
+        effective_img_scale = cfg_img_scale if in_cfg_interval else 1.0
 
         velocities = {}
         for label in ["main", "cfg_text", "cfg_img"]:
@@ -546,18 +570,22 @@ class LLMSubmodule(StageSubmodule):
         v_cfg_text = self.llm2vae(velocities["cfg_text"])[1:-1]
         v_cfg_img = self.llm2vae(velocities["cfg_img"])[1:-1]
 
-        # CFG velocity combination
-        # TODO: non-CFG case
-        v_t_ = v_cfg_img + cfg_img_scale * (
-            v_cfg_text + cfg_text_scale * (v_main - v_cfg_text) - v_cfg_img
-        )
-        norm_v_t_ = torch.norm(v_t_)
-        norm_v_t = torch.norm(v_main)
-        scale = (norm_v_t / (norm_v_t_ + 1e-8)).clamp(min=cfg_renorm_min, max=1.0)
-        v_final = v_t_ * scale
+        # Two-stage CFG velocity combination + global renormalization
+        if effective_text_scale > 1.0 or effective_img_scale > 1.0:
+            v_text_guided = v_cfg_text + effective_text_scale * (v_main - v_cfg_text)
+            v_t_ = v_cfg_img + effective_img_scale * (v_text_guided - v_cfg_img)
 
-        # Euler step: x_{t+1} = x_t + v * dt
-        latents = latents + v_final * dt
+            norm_v_t_ = torch.norm(v_t_)
+            norm_v_main = torch.norm(v_main)
+            scale = (norm_v_main / (norm_v_t_ + 1e-8)).clamp(
+                min=cfg_renorm_min, max=1.0
+            )
+            v_final = v_t_ * scale
+        else:
+            v_final = v_main
+
+        # Euler step: x_{t-dt} = x_t - v * dt  (velocity points data -> noise)
+        latents = latents - v_final * dt
         return {
             "latents": [latents],
             "time_index": [time_index + 1]
