@@ -193,6 +193,7 @@ class CacheHandle:
                 qo_indptr, kv_indptr, kv_indices, kv_last_page_len,
                 num_qo_heads, num_kv_heads, head_dim, page_size,
                 causal=is_causal,
+                q_data_type=q.dtype,
             )
 
             # q shape for FlashInfer: [total_tokens, num_heads, head_dim]
