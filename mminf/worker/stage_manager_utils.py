@@ -281,7 +281,7 @@ class SubgraphsManager:
 
     def remove_request(self, request_id: str):
         if request_id in self.per_request_info:
-            for queue_id in self.per_request_info[request_id].phase_subgraph_ids:
+            for queue_id in self.per_request_info[request_id].subgraph_ids:
                 self.queues[queue_id].remove_request(request_id)
             del self.per_request_info[request_id]
 
