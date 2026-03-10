@@ -32,7 +32,6 @@ class DummyWorker:
         hostname: str="localhost", # TODO: figure this out
         socket_path_prefix: str="/tmp/mminf",
         tensor_comm_protocol=CommProtocol.RDMA,
-        mooncake_port: int = 13001,
     ):
         """
         Initial in-progress worker implementation. This worker cannnot actually
@@ -56,7 +55,7 @@ class DummyWorker:
 
         self.communicator = ZMQCommunicator(
             my_id=worker_id,
-            push_ids=worker_ids + ["conductor", "api_server"],
+            push_ids=worker_ids + ["conductor", "api_server", "api_server_preprocess_worker"],
             ipc_socket_path_prefix=socket_path_prefix
         )
         self.tensor_manager = MooncakeCommunicationManager(
@@ -64,7 +63,6 @@ class DummyWorker:
             hostname=hostname,
             communicator=self.communicator,
             protocol=tensor_comm_protocol,
-            mooncake_port=mooncake_port,
         )
 
     def _add_new_request(

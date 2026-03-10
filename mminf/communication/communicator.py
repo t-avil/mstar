@@ -20,9 +20,9 @@ class BaseCommunicator(ABC):
     def get_all_new_messages(self) -> list:
         pass
 
-    @abstractmethod
-    def get_session_id(self) -> str:
-        pass
+    # @abstractmethod
+    # def get_session_id(self) -> str:
+    #     pass
 
 
 class CommProtocol(Enum):
@@ -47,7 +47,7 @@ class ZMQCommunicator(BaseCommunicator):
         # TODO: maybe only open sockets as we need them, and close sockets
         # when we no longer need them
         self.push_sockets: dict[str, zmq.SyncSocket] = {}
-        self.session_id = f"ipc://{ipc_socket_path_prefix}/{my_id}.ipc"
+        # self.session_id = f"ipc://{ipc_socket_path_prefix}/{my_id}.ipc"
         self.my_id = my_id
 
         if protocol == CommProtocol.IPC:
@@ -65,8 +65,8 @@ class ZMQCommunicator(BaseCommunicator):
             )
             self.push_sockets[id].setsockopt(zmq.LINGER, 0)
 
-    def get_session_id(self) -> str:
-        return self.session_id
+    # def get_session_id(self) -> str:
+    #     return self.session_id
 
     def send(self, entity_id: str, msg):
         # TODO: maybe serialize to JSON instead if more efficient

@@ -49,7 +49,6 @@ class Worker:
         hostname: str = "localhost",
         socket_path_prefix: str = "/tmp/mminf",
         tensor_comm_protocol: CommProtocol = CommProtocol.RDMA,
-        mooncake_port: int = 13001,
         device: torch.device = torch.device("cuda"),
         model: Model | None = None,
     ):
@@ -78,7 +77,7 @@ class Worker:
 
         self.communicator = ZMQCommunicator(
             my_id=worker_id,
-            push_ids=worker_ids + ["conductor", "api_server"],
+            push_ids=worker_ids + ["conductor", "api_server", "api_server_preprocess_worker"],
             ipc_socket_path_prefix=socket_path_prefix,
         )
         self.tensor_manager = MooncakeCommunicationManager(
@@ -86,7 +85,6 @@ class Worker:
             hostname=hostname,
             communicator=self.communicator,
             protocol=tensor_comm_protocol,
-            mooncake_port=mooncake_port,
         )
 
         # Per-request metadata from conductor (e.g., cache_labels, snapshot_after)
