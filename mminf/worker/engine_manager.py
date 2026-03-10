@@ -76,7 +76,7 @@ class EngineManager:
 
             for name in stage_names:
                 stage_to_engine[name] = engine
-        logger.info("All engines loaded for device %s", cfg["engine_type"], str(device))
+        logger.info("All engines loaded on device %s", str(device))
 
         return cls(stage_to_engine=stage_to_engine)
 
