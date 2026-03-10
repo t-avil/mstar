@@ -200,8 +200,14 @@ class CacheHandle:
                 [0, seq_len], dtype=torch.int32, device=device
             )
             wrapper.plan(
-                qo_indptr, kv_indptr, kv_indices, kv_last_page_len,
-                num_qo_heads, num_kv_heads, head_dim, page_size,
+                qo_indptr=qo_indptr,
+                paged_kv_indptr=kv_indptr,
+                paged_kv_indices=kv_indices,
+                paged_kv_last_page_len=kv_last_page_len,
+                num_qo_heads=num_qo_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim_qk=head_dim,
+                page_size=page_size,
                 causal=is_causal,
                 q_data_type=q.dtype,
             )
