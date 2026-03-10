@@ -50,8 +50,14 @@ def _conductor_process_target(
     model_name: str,
     config_path: str,
     socket_path_prefix: str,
+    log_level: str = "INFO",
 ):
     """Runs DummyConductor.run() in a spawned process."""
+    logging.basicConfig(
+        level=getattr(logging, log_level),
+        format="%(asctime)s %(levelname)s [conductor] %(name)s: %(message)s",
+        force=True,
+    )
     from mminf.conductor.conductor import Conductor
     from mminf.model.registry import get_model_class
 
@@ -62,6 +68,7 @@ def _conductor_process_target(
         model=model,
         model_config_file=config_path,
         socket_path_prefix=socket_path_prefix,
+        log_level=log_level,
     )
     conductor.run()
 
@@ -481,7 +488,7 @@ def main():
 
     logging.basicConfig(
         level=getattr(logging, args.log_level),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        format="%(asctime)s %(levelname)s [api_server] %(name)s: %(message)s",
     )
 
     with open(args.config) as f:
@@ -494,7 +501,7 @@ def main():
     conductor_proc = ctx.Process(
         target=_conductor_process_target,
         args=(model_name, args.config,
-              args.socket_path_prefix),
+              args.socket_path_prefix, args.log_level),
     )
     conductor_proc.start()
     logger.info("Conductor process started (pid=%d, model=%s)", conductor_proc.pid, model_name)
