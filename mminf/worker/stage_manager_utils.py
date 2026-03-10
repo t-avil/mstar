@@ -2,7 +2,7 @@ import logging
 from copy import deepcopy
 from dataclasses import dataclass, field
 
-from mminf.graph.base import GraphPointer, GraphStage
+from mminf.graph.base import GraphPointer, GraphStage, TensorPointerInfo
 from mminf.graph.request_queues import PerRequestStageQueues, ProcessedInputs, format_graph_edge_list
 from mminf.model.base import SPECIAL_DESTINATIONS, STREAM_OUT, Subgraph
 
@@ -302,12 +302,19 @@ class SubgraphsManager:
                 self.per_request_info[request_id].pending_new_tokens[name] = []
             self.per_request_info[request_id].pending_new_tokens[name].extend(tokens)
 
-    def flush_persist_signals(self, request_id: str) -> list[GraphPointer]:
-        """Pop and return all buffered persist signals for a request."""
+    def flush_persist_signals(self, request_id: str) -> dict[str, list[TensorPointerInfo]]:
+        """Pop and return all buffered persist signals for a request.
+
+        Converts from internal list[GraphPointer] to the dict format
+        expected by the conductor (name -> list[TensorPointerInfo]).
+        """
         info = self.per_request_info[request_id]
         signals = info.pending_persist_signals
         info.pending_persist_signals = []
-        return signals
+        result: dict[str, list[TensorPointerInfo]] = {}
+        for gp in signals:
+            result[gp.name] = gp.tensor_info
+        return result
 
     def flush_new_tokens(self, request_id: str) -> dict[str, list[int]]:
         """Pop and return all buffered new tokens for a request."""
