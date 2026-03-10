@@ -256,6 +256,7 @@ class LLMSubmodule(StageSubmodule):
         boi_token_id: int | None = None,
         eoi_token_id: int | None = None,
         bos_token_id: int | None = None,
+        eos_token_id: int | None = None,
     ):
         super().__init__()
         self.language_model = language_model
@@ -269,6 +270,7 @@ class LLMSubmodule(StageSubmodule):
         self.boi_token_id = boi_token_id
         self.eoi_token_id = eoi_token_id
         self.bos_token_id = bos_token_id
+        self.eos_token_id = eos_token_id
 
     def _init_latents(
         self,
@@ -297,7 +299,13 @@ class LLMSubmodule(StageSubmodule):
         """
         device = next(self.parameters()).device
         result = {}
-        if phase == "prefill_text" or (phase == "decode" and len(inputs["text_inputs"]) > 0):
+        if phase == "prefill_text":
+            # Wrap with BOS EOS
+            result["text_inputs"] = inputs["text_inputs"][0].new_zeros(inputs["text_inputs"][0].shape[0] + 2)
+            result["text_inputs"][0] = self.bos_token_id
+            result["text_inputs"][-1] = self.eos_token_id
+            result["text_inputs"][1:-1] = inputs["text_inputs"][0]
+        elif phase == "decode" and len(inputs["text_inputs"]) > 0:
             result["text_inputs"] = inputs["text_inputs"][0]
         elif phase == "decode":
             result["text_inputs"] = torch.tensor([self.bos_token_id], device=device)

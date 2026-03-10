@@ -337,6 +337,7 @@ class BagelModel(Model):
                 boi_token_id=self.boi_token_id,
                 eoi_token_id=self.eoi_token_id,
                 bos_token_id=self.bos_token_id,
+                eos_token_id=self.eos_token_id
             )
         elif stage_name == "vit_encoder":
             self._init_vit_components()
