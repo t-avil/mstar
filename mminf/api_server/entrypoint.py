@@ -192,6 +192,10 @@ class APIServer:
         """Drain the ZMQ pull socket and route results to pending requests."""
         while self.running:
             try:
+                with self.request_lock:
+                    if len(self.recently_completed) > 0:
+                        self._prune_recently_completed()
+
                 for message in self.communicator.get_all_new_messages():
                     if not isinstance(message, APIServerMessage):
                         logger.warning("Unexpected message type: %s", type(message))
@@ -200,7 +204,6 @@ class APIServer:
                     rid = message.body.request_id
 
                     with self.request_lock:
-                        self._prune_recently_completed()
                         if rid in self.pending_requests:
                             if message.message_type == "result_tensors":
                                 logger.debug(
@@ -211,6 +214,7 @@ class APIServer:
                                     message.body
                                 )
                             elif message.message_type == "request_complete":
+                                logger.info("API server received %s done", rid)
                                 self.recently_completed[rid] = time.time()
                         elif rid in self.recently_completed:
                             logger.debug("Late message for completed %s", rid)
@@ -262,6 +266,7 @@ class APIServer:
                 yield self._chunk_to_ndjson(chunk)
 
             if done:
+                logger.info("Async stream results received finish for %s", request_id)
                 # flush remaining
                 remaining: list[ResultChunk] = []
                 with self.request_lock:

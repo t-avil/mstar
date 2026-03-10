@@ -470,7 +470,10 @@ class LLMSubmodule(StageSubmodule):
         )
         logits = self.lm_head(hidden[-1:])
         token = torch.argmax(logits, dim=-1)
-        return {"new_token": [token]}
+        return {
+            "new_token": [token],
+            "text_out": [token.clone()] # TODO: this is a hack, and not compatible with cuda graphs
+        }
 
     def _forward_image_gen(
         self,

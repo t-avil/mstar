@@ -221,7 +221,7 @@ class SubgraphsManager:
                 stage=ptr.next_stage, phase=self.get_phase(request_id)
             )
             if stage_phase not in self.per_request_info[request_id].stage_to_worker:
-                if ptr.next_stage in SPECIAL_DESTINATIONS:
+                if ptr.next_stage in SPECIAL_DESTINATIONS or ptr.back_to_conductor:
                     if ptr.next_stage == STREAM_OUT:
                         stream_out.append(ptr)
                     continue  # e.g., stream_out — already captured in to_conductor

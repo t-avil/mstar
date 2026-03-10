@@ -420,7 +420,9 @@ class BagelModel(Model):
         modality: str # text | image | video | audio
     ) -> bytes:
         if modality == "text":
-            return self.tokenizer.decode(output).encode("utf-8")
+            detok = self.tokenizer.decode(output)
+            logger.debug("OUTPUT TEXT %s", detok)
+            return detok.encode("utf-8")
         if modality == "image":
             output = output[0].permute(1, 2, 0) * 255
             img = Image.fromarray((output).to(torch.uint8).cpu().numpy())
@@ -500,11 +502,17 @@ class BagelModel(Model):
             input_ids=["text_inputs"],
             outputs=[
                 GraphPointer(
-                    next_stage=STREAM_OUT,
+                    next_stage="",
                     name="new_token",
                     output_modality="text",
                     is_new_token=True,
                     back_to_conductor=True,
+                ),
+                # TODO: the following is a hack to avoid a tensor cleanup race condition
+                GraphPointer(
+                    next_stage=STREAM_OUT,
+                    name="text_out",
+                    output_modality="text",
                 ),
             ],
         )

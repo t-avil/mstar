@@ -230,7 +230,8 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
                     address=tensor.data_ptr(),
                     uuid=tensor_uuid,
                     source_session_id=self.my_session_id,
-                    source_entity=self.my_entity_id
+                    source_entity=self.my_entity_id,
+                    source_tensor_name=name
                 )
                 tensor_info[name].append(new_tensor_info)
         return tensor_info
@@ -375,7 +376,7 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
                         key = (tensor_info.source_entity, ep.request_id)
                         acks.setdefault(key, []).append(
                             NameAndUuid(
-                                tensor_id=ptr.name,
+                                tensor_id=tensor_info.source_tensor_name,
                                 uuid=tensor_info.uuid
                             ))
             else:

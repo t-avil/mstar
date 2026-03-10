@@ -1,5 +1,6 @@
 
 
+import logging
 import queue
 import threading
 import time
@@ -18,6 +19,9 @@ from mminf.communication.communicator import CommProtocol, ZMQCommunicator
 from mminf.communication.tensors import MooncakeCommunicationManager, NameToTensorList
 from mminf.ipc_formats import ConductorMessage, ConductorMessageType, NewRequestConductor
 from mminf.model.base import Model
+
+
+logger = logging.getLogger(__name__)
 
 
 def _preprocess_loop(**kwargs):
@@ -63,9 +67,13 @@ class PreprocessWorker:
 
     def new_result_tensors(self, input: ResultTensors):
         self.per_request_reading_tensors[input.request_id] += len(input.graph_edge.tensor_info)
+        logger.debug(
+                "Data worker reading queue for request %s increased to length %d",
+                input.request_id,  self.per_request_reading_tensors[input.request_id]
+            )
         self.result_tensor_input_queue.put(input)
 
-    def has_pending_tensors(self, request_id: str):
+    def has_pending_tensors(self, request_id: str):            
         return self.per_request_reading_tensors.get(request_id, 0) > 0
 
     def get_result_chunks(self)-> list[ResultChunk]:
@@ -73,6 +81,10 @@ class PreprocessWorker:
         while not self.output_queue.empty():
             result: ResultChunk = self.output_queue.get()
             self.per_request_reading_tensors[result.request_id] -= 1
+            logger.debug(
+                "Data worker reading queue for request %s decreased to length %d",
+                result.request_id,  self.per_request_reading_tensors[result.request_id]
+            )
             results.append(result)
         return results
 
@@ -225,6 +237,7 @@ class PreprocessWorkerThread:
 
             uuids = []
             for tensor_info in graph_edge.tensor_info:
+                logger.debug("Reading in OUTPUT tensor %s with uuid %s", graph_edge.name, tensor_info.uuid)
                 tensor = self.tensor_manager.get_tensor(
                     request_id=request_id,
                     tensor_name=graph_edge.name,
