@@ -340,6 +340,7 @@ class LLMSubmodule(StageSubmodule):
                 self.config.latent_downsample,
                 max_num_patches_per_side=self.config.max_latent_size
             )
+            print(f"vae_position_ids = {result["vae_position_ids"]}")
             if "latents" not in inputs or len(inputs["latents"]) == 0:
                 result["latents"] = self._init_latents(
                     device=device,
@@ -349,6 +350,9 @@ class LLMSubmodule(StageSubmodule):
             else:
                result["latents"] = inputs["latents"][0]
                result["time_index"] = inputs["time_index"][0]
+            
+            print(f"latents = {result["latents"]}")
+            print(f"time_index = {result["time_index"]}")
 
             result["empty_combined_emb"] = self._wrap_with_boi_eoi_inplace(
                 torch.zeros(
@@ -564,13 +568,15 @@ class LLMSubmodule(StageSubmodule):
         timestep = self._apply_timestep_shift(t_uniform, shift)
         timestep_next = self._apply_timestep_shift(t_uniform_next, shift)
         dt = timestep - timestep_next  # positive step size
+        print("timestep, next timestep (after shifting): ", timestep, timestep_next)
 
-        pos_embed = self.latent_pos_embed(vae_position_ids)
+        pos_embed = self.latent_pos_embed(vae_position_ids) 
         timestep_embeds = self.time_embedder(timestep)
         empty_combined_emb[1:-1] = self.vae2llm(latents) + timestep_embeds \
             + pos_embed
 
         if requires_cfg:
+            print("running 3 fwd passes for cfg gen")
             cfg_text_scale = self.config.cfg_text_scale
             cfg_img_scale = self.config.cfg_img_scale
             renorm_type = self.config.cfg_renorm_type
@@ -597,6 +603,8 @@ class LLMSubmodule(StageSubmodule):
             v_main = self.llm2vae(velocities["main"])[1:-1]
             v_cfg_text = self.llm2vae(velocities["cfg_text"])[1:-1]
             v_cfg_img = self.llm2vae(velocities["cfg_img"])[1:-1]
+
+            print(v_main.shape, v_cfg_text.shape, v_cfg_img.shape)
 
             # Two-stage CFG velocity combination + renormalization
             if effective_text_scale > 1.0 or effective_img_scale > 1.0:
