@@ -217,5 +217,5 @@ class DummyModel(Model):
             ]
         return result
 
-    def get_submodule(self, stage_name: str) -> torch.nn.Module | None:
+    def get_submodule(self, stage_name: str, device="cpu") -> torch.nn.Module | None:
         return None  # dummy mode — no real computation

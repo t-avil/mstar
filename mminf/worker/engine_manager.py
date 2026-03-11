@@ -67,7 +67,7 @@ class EngineManager:
             submodules: dict[str, torch.nn.Module] = {}
             if model is not None:
                 for name in stage_names:
-                    submodule = model.get_submodule(name)
+                    submodule = model.get_submodule(name, device)
                     if submodule is not None:
                         submodules[name] = submodule.to(device=device, dtype=torch.bfloat16)
 

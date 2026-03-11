@@ -317,7 +317,7 @@ class Model(ABC):
         return output.cpu().numpy().tobytes()
 
     @abstractmethod
-    def get_submodule(self, stage_name: str) -> torch.nn.Module | None:
+    def get_submodule(self, stage_name: str, device="cpu") -> torch.nn.Module | None:
         """
         Return the nn.Module for this stage, or None for dummy mode.
         The engine calls this (via EngineManager) to get the submodule it

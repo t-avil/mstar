@@ -59,7 +59,7 @@ from mminf.model.bagel.components.vit_encoder import BagelVisionModel
 from mminf.model.bagel.config import load_bagel_config
 from mminf.model.bagel.submodules import LLMSubmodule, VAEDecoderSubmodule, VAEEncoderSubmodule, ViTEncoderSubmodule
 from mminf.model.base import STREAM_OUT, CurrentForwardMetadata, Model, StageSubmodule
-from mminf.model.utils import load_weights
+from mminf.model.utils import ModuleAndPrefix, load_weights, load_weights_from_file
 
 logger = logging.getLogger(__name__)
 
@@ -153,180 +153,120 @@ class BagelModel(Model):
         cache_dir = snapshot_download(repo_id=self.model_path_hf)
         self.repo = Path(cache_dir)
 
-    def _init_language_model_components(self):
+    def _init_language_model_components(self, device):
         self._download_hf()
         self.llm_initialized = True
-        self.language_model = BagelForCausalLM(self.config)
-        self.llm2vae = nn.Linear(self.config.hidden_size, self.config.patch_latent_dim)
+        with torch.device("meta"):
+            self.language_model = BagelForCausalLM(self.config)
+            self.llm2vae = nn.Linear(self.config.hidden_size, self.config.patch_latent_dim)
 
         ema_path = self.repo / "ema.safetensors"
-        state_dict = load_file(ema_path)
-        latent_pos_size = self._infer_position_size(state_dict, "latent_pos_embed")
 
-        load_weights(
-            state_dict=state_dict,
-            module=self.language_model,
-            prefix="language_model"
-        )
-        load_weights(
-            state_dict=state_dict,
-            module=self.llm2vae,
-            prefix="llm2vae"
+        load_weights_from_file(
+            ema_path,
+            modules=[
+                ModuleAndPrefix(self.language_model, prefix="language_model"),
+                ModuleAndPrefix(self.llm2vae, prefix="llm2vae"),
+            ],
+            device=device
         )
 
         if not self.vae_initialized:
             # Need these for image gen
-            self.latent_pos_embed = PositionEmbedding(
-                latent_pos_size, self.config.hidden_size
-            )
-            self.time_embedder = TimestepEmbedder(self.config.hidden_size)
-            self.vae2llm = nn.Linear(self.config.patch_latent_dim, self.config.hidden_size)
-
-            load_weights(
-                state_dict=state_dict,
-                module=self.time_embedder,
-                prefix="time_embedder"
-            )
-            load_weights(
-                state_dict=state_dict,
-                module=self.latent_pos_embed,
-                prefix="latent_pos_embed"
-            )
-
-            load_weights(
-                state_dict=state_dict,
-                module=self.vae2llm,
-                prefix="vae2llm"
+            with torch.device("meta"):
+                self.latent_pos_embed = PositionEmbedding(
+                    self.config.max_latent_size, self.config.hidden_size
+                )
+                self.time_embedder = TimestepEmbedder(self.config.hidden_size)
+                self.vae2llm = nn.Linear(self.config.patch_latent_dim, self.config.hidden_size)
+            load_weights_from_file(
+                ema_path,
+                modules=[
+                    ModuleAndPrefix(self.vae2llm, prefix="vae2llm"),
+                    ModuleAndPrefix(self.time_embedder, prefix="time_embedder"),
+                    ModuleAndPrefix(self.latent_pos_embed, prefix="latent_pos_embed")
+                ],
+                device=device
             )
 
-    def _init_vae_components(self):
+    def _init_vae_components(self, device):
         self._download_hf()
         if self.vae_initialized:
             return
         self.vae_initialized = True
         ae_params = self.config.vae_config
-        self.vae_model = BagelAutoEncoder(ae_params)
+        with torch.device("meta"):
+            self.vae_model = BagelAutoEncoder(ae_params)
 
         # Load in weights: VAE
         vae_path = self.repo / "ae.safetensors"
-        state_dict = load_file(vae_path)
-        load_weights(
-            state_dict=state_dict,
-            module=self.vae_model,
-        ) # vae model state dict does not have prefix
-
-        # Load in weights: rest
-        ema_path = self.repo / "ema.safetensors"
-        state_dict = load_file(ema_path)
-        latent_pos_size = self._infer_position_size(state_dict, "latent_pos_embed")
-
-        self.latent_pos_embed = PositionEmbedding(
-            latent_pos_size, self.config.hidden_size
+        load_weights_from_file(
+            vae_path,
+            modules=[ModuleAndPrefix(
+                self.vae_model
+            )],
+            device=device
         )
-        self.time_embedder = TimestepEmbedder(self.config.hidden_size)
-        self.vae2llm = nn.Linear(self.config.patch_latent_dim, self.config.hidden_size)
 
         if not self.llm_initialized:
             # LLM components also need these for image gen, so these
             # might already be initialized by _init_language_model_components()
-            load_weights(
-                state_dict=state_dict,
-                module=self.vae2llm,
-                prefix="vae2llm"
-            )
-            load_weights(
-                state_dict=state_dict,
-                module=self.time_embedder,
-                prefix="time_embedder"
-            )
-            load_weights(
-                state_dict=state_dict,
-                module=self.latent_pos_embed,
-                prefix="latent_pos_embed"
+            with torch.device("meta"):
+                self.latent_pos_embed = PositionEmbedding(
+                    self.config.max_latent_size, self.config.hidden_size
+                )
+                self.time_embedder = TimestepEmbedder(self.config.hidden_size)
+                self.vae2llm = nn.Linear(self.config.patch_latent_dim, self.config.hidden_size)
+            ema_path = self.repo / "ema.safetensors"
+            load_weights_from_file(
+                ema_path,
+                modules=[
+                    ModuleAndPrefix(self.vae2llm, prefix="vae2llm"),
+                    ModuleAndPrefix(self.time_embedder, prefix="time_embedder"),
+                    ModuleAndPrefix(self.latent_pos_embed, prefix="latent_pos_embed")
+                ],
+                device=device
             )
 
-    def _init_vit_components(self):
+
+    def _init_vit_components(self, device):
         self._download_hf()
-        self.vit_model = BagelVisionModel(self.config.vit_config)
-        self.connector = BagelMLPconnector(
-            self.config.vit_config.hidden_size,
-            self.config.hidden_size,
-            self.config.connector_act
-        )
-        ema_path = self.repo / "ema.safetensors"
-        state_dict = load_file(ema_path)
-        vit_pos_size = self._infer_position_size(
-            state_dict, "vit_pos_embed", default=self.config.vit_max_num_patch_per_side
-        )
-        self.vit_pos_embed = PositionEmbedding(
-            vit_pos_size,
-            self.config.hidden_size
-        )
-
-        # Load in weights
+        with torch.device("meta"):
+            self.vit_model = BagelVisionModel(self.config.vit_config)
+            self.connector = BagelMLPconnector(
+                self.config.vit_config.hidden_size,
+                self.config.hidden_size,
+                self.config.connector_act
+            )
+            self.vit_pos_embed = PositionEmbedding(
+                self.config.vit_max_num_patch_per_side,
+                self.config.hidden_size
+            )
         self.vit_model.vision_model.embeddings.convert_conv2d_to_linear(
             self.config.vit_config,
         )
 
-        load_weights(
-            state_dict=state_dict,
-            module=self.vit_model,
-            prefix="vit_model"
+        ema_path = self.repo / "ema.safetensors"
+        load_weights_from_file(
+            ema_path,
+            modules=[
+                ModuleAndPrefix(self.vit_model, prefix="vit_model"),
+                ModuleAndPrefix(self.connector, prefix="connector"),
+                ModuleAndPrefix(self.vit_pos_embed, prefix="vit_pos_embed")
+            ],
+            device=device
         )
-        load_weights(
-            state_dict=state_dict,
-            module=self.connector,
-            prefix="connector"
-        )
-        load_weights(
-            state_dict=state_dict,
-            module=self.vit_pos_embed,
-            prefix="vit_pos_embed"
-        )
-
-    def _infer_position_size(
-        self,
-        state_dict: dict | None,
-        prefix: str,
-        default: int | None = None,
-    ) -> int:
-        if default is not None:
-            expected = default
-        elif prefix == "vit_pos_embed":
-            expected = self.config.vit_max_num_patch_per_side
-        else:
-            expected = self.config.max_latent_size
-
-        pos_key = f"{prefix}.pos_embed"
-        if state_dict is None or pos_key not in state_dict:
-            return expected
-
-        num_pos = state_dict[pos_key].shape[0]
-        if num_pos == 0:
-            return expected
-
-        side = int(num_pos**0.5)
-        if side * side == num_pos:
-            if side != expected:
-                logger.info(
-                    "Auto-adjusting %s size from config %s to checkpoint-derived %s",
-                    prefix,
-                    expected,
-                    side,
-                )
-            return side
-        return expected
 
 
     # -----------------------------------------------------------------------
     # Lazy submodule initialization
     # -----------------------------------------------------------------------
 
-    def _create_submodule(self, stage_name: str) -> StageSubmodule | None:
+    def _create_submodule(self, stage_name: str, device: str) -> StageSubmodule | None:
         """Create a submodule wrapper on first access."""
         logger.debug("Creating submodule for BAGEL model stage %s", stage_name)
         if stage_name == "LLM":
-            self._init_language_model_components()
+            self._init_language_model_components(device)
             return LLMSubmodule(
                 language_model=self.language_model,
                 llm2vae=self.llm2vae,
@@ -340,7 +280,7 @@ class BagelModel(Model):
                 eos_token_id=self.eos_token_id
             )
         elif stage_name == "vit_encoder":
-            self._init_vit_components()
+            self._init_vit_components(device)
             return ViTEncoderSubmodule(
                 vit_model=self.vit_model,
                 connector=self.connector,
@@ -349,7 +289,7 @@ class BagelModel(Model):
                 vit_max_num_patch_per_side=self.config.vit_max_num_patch_per_side
             )
         elif stage_name == "vae_encoder":
-            self._init_vae_components()
+            self._init_vae_components(device)
             return VAEEncoderSubmodule(
                 vae_model=self.vae_model,
                 vae2llm=self.vae2llm,
@@ -361,7 +301,7 @@ class BagelModel(Model):
                 max_latent_size=self.config.max_latent_size,
             )
         elif stage_name == "vae_decoder":
-            self._init_vae_components()
+            self._init_vae_components(device)
             return VAEDecoderSubmodule(
                 vae_model=self.vae_model,
                 latent_patch_size=self.config.latent_patch_size,
@@ -441,10 +381,10 @@ class BagelModel(Model):
             num_qo_heads=self.config.num_attention_heads,
         )
 
-    def get_submodule(self, stage_name: str) -> torch.nn.Module | None:
+    def get_submodule(self, stage_name: str, device: str="cpu") -> torch.nn.Module | None:
         if stage_name in self._submodule_cache:
             return self._submodule_cache[stage_name]
-        submodule = self._create_submodule(stage_name)
+        submodule = self._create_submodule(stage_name, device)
         logger.info(f"Successfully loaded in BAGEL submodule for {stage_name}")
         self._submodule_cache[stage_name] = submodule
         return submodule
