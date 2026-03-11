@@ -290,6 +290,7 @@ class LLMSubmodule(StageSubmodule):
         return torch.randn(
             num_image_tokens,
             self.config.vae_config.z_channels * self.config.latent_patch_size ** 2,
+            dtype=torch.bfloat16,
             device=device
         )
 
@@ -344,14 +345,15 @@ class LLMSubmodule(StageSubmodule):
                     device=device,
                     H=H, W=W
                 )
-                result["time_index"] = torch.tensor([0], device=device)
+                result["time_index"] = torch.tensor([0], device=device, dtype=torch.bfloat16)
             else:
                result["latents"] = inputs["latents"][0]
-               result["time_index"] = inputs["time_index"][0].float()
+               result["time_index"] = inputs["time_index"][0]
 
             result["empty_combined_emb"] = self._wrap_with_boi_eoi_inplace(
                 torch.zeros(
                     (result["latents"].shape[0] + 2, self.config.hidden_size),
+                    dtype=torch.bfloat16,
                     device=device
                 )
             )
@@ -557,14 +559,14 @@ class LLMSubmodule(StageSubmodule):
 
         # Compute shifted timestep and step size for this iteration.
         # time_index goes from 0 to N-2 (N-1 total Euler steps).
-        t_uniform = 1.0 - time_index.float() / (N - 1)
-        t_uniform_next = 1.0 - (time_index.float() + 1) / (N - 1)
+        t_uniform = 1.0 - time_index / (N - 1)
+        t_uniform_next = 1.0 - (time_index + 1) / (N - 1)
         timestep = self._apply_timestep_shift(t_uniform, shift)
         timestep_next = self._apply_timestep_shift(t_uniform_next, shift)
         dt = timestep - timestep_next  # positive step size
 
         pos_embed = self.latent_pos_embed(vae_position_ids)
-        timestep_embeds = self.time_embedder(timestep, device=latents.device)
+        timestep_embeds = self.time_embedder(timestep)
         empty_combined_emb[1:-1] = self.vae2llm(latents) + timestep_embeds \
             + pos_embed
 

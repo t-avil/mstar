@@ -264,10 +264,10 @@ class BagelAttentionMoT(nn.Module):
                 -1, self.num_key_value_heads, self.head_dim
             )
 
-            text_query_states = text_query_states.to(torch.float32)
-            vae_query_states = vae_query_states.to(torch.float32)
-            text_key_states = text_key_states.to(torch.float32)
-            vae_key_states = vae_key_states.to(torch.float32)
+            # text_query_states = text_query_states.to(torch.float32)
+            # vae_query_states = vae_query_states.to(torch.float32)
+            # text_key_states = text_key_states.to(torch.float32)
+            # vae_key_states = vae_key_states.to(torch.float32)
             text_query_states = run_rms_norm(
                 text_query_states,
                 self.q_norm.weight,
@@ -305,9 +305,9 @@ class BagelAttentionMoT(nn.Module):
             query_states, key_states, rope_theta=self.rope_theta
         )
 
-        query_states = query_states.to(torch.bfloat16)
-        key_states = key_states.to(torch.bfloat16)
-        value_states = value_states.to(torch.bfloat16)
+        # query_states = query_states.to(torch.bfloat16)
+        # key_states = key_states.to(torch.bfloat16)
+        # value_states = value_states.to(torch.bfloat16)
 
         # run paged attention
         attn_output = cache_handle.run_attention(
