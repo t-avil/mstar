@@ -769,5 +769,4 @@ class BagelModel(Model):
             # TODO: conditional CFG skip
             "requires_cfg": metadata.kwargs["target_output"] == "image",
             "is_prefill": metadata.is_prefill,
-            "phase": metadata.phase
         }

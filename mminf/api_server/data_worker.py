@@ -159,7 +159,7 @@ class PreprocessWorkerThread:
 
         if input.file_paths is not None:
             for modality in input.file_paths:
-                key = f"{modality}_input"
+                key = f"{modality}_inputs"
                 tensors[key] = []
                 # TODO: maybe make a class of tensors_and_metadata later (figure out how to use metadata)
                 input_metadata[key] = []

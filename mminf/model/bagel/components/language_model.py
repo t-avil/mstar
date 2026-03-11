@@ -576,6 +576,7 @@ class BagelForCausalLM(nn.Module):
         mode="und",
         vae_token_indexes=None,
         text_indexes=None,
+        **kwargs
     ):
         assert mode in ["und", "gen"]
         outputs = self.model(

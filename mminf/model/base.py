@@ -338,5 +338,4 @@ class Model(ABC):
         """
         return {
             "is_prefill": metadata.is_prefill,
-            "phase": metadata.phase
         }
