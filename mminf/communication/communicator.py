@@ -1,7 +1,11 @@
+import logging
+import os
 from abc import ABC, abstractmethod
 from enum import Enum
 
 import zmq
+
+logger = logging.getLogger(__name__)
 
 
 class BaseCommunicator(ABC):
@@ -16,9 +20,9 @@ class BaseCommunicator(ABC):
     def get_all_new_messages(self) -> list:
         pass
 
-    @abstractmethod
-    def get_session_id(self) -> str:
-        pass
+    # @abstractmethod
+    # def get_session_id(self) -> str:
+    #     pass
 
 
 class CommProtocol(Enum):
@@ -38,11 +42,13 @@ class ZMQCommunicator(BaseCommunicator):
         self.context = zmq.Context()
         self.protocol = protocol
         self.pull_socket = self.context.socket(zmq.PULL)
+        os.makedirs(ipc_socket_path_prefix, exist_ok=True)
 
         # TODO: maybe only open sockets as we need them, and close sockets
         # when we no longer need them
         self.push_sockets: dict[str, zmq.SyncSocket] = {}
-        self.session_id = f"ipc://{ipc_socket_path_prefix}/{my_id}.ipc"
+        self.my_id = my_id
+        self.ipc_socket_path_prefix = ipc_socket_path_prefix
 
         if protocol == CommProtocol.IPC:
             self.pull_socket.bind(f"ipc://{ipc_socket_path_prefix}/{my_id}.ipc")
@@ -59,11 +65,20 @@ class ZMQCommunicator(BaseCommunicator):
             )
             self.push_sockets[id].setsockopt(zmq.LINGER, 0)
 
-    def get_session_id(self) -> str:
-        return self.session_id
+    # def get_session_id(self) -> str:
+    #     return self.session_id
 
     def send(self, entity_id: str, msg):
         # TODO: maybe serialize to JSON instead if more efficient
+        logger.debug(
+            "%s to send a message %s to entity %s",
+            self.my_id, str(msg), entity_id
+        )
+        if entity_id not in self.push_sockets:
+            sock = self.context.socket(zmq.PUSH)
+            sock.connect(f"ipc://{self.ipc_socket_path_prefix}/{entity_id}.ipc")
+            sock.setsockopt(zmq.LINGER, 0)
+            self.push_sockets[entity_id] = sock
         self.push_sockets[entity_id].send_pyobj(msg)
 
     def get_all_new_messages(self) -> list:
@@ -76,6 +91,10 @@ class ZMQCommunicator(BaseCommunicator):
                 messages.append(self.pull_socket.recv_pyobj(
                     flags=zmq.NOBLOCK
                 ))
+                logger.debug(
+                    "%s to received message %s",
+                    self.my_id, str(messages[-1])
+                )
             except zmq.Again:
                 # zmq.Again actually means no messages left to read
                 break

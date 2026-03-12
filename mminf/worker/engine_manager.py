@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+import logging
 
 import torch
 
@@ -15,6 +16,8 @@ ENGINE_TYPE_TO_CLASS: dict[str, type[BaseEngine]] = {
     "enc_dec": EncoderDecoderEngine,
     "audio_codec": AudioCodecEngine,
 }
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -64,14 +67,16 @@ class EngineManager:
             submodules: dict[str, torch.nn.Module] = {}
             if model is not None:
                 for name in stage_names:
-                    submodule = model.get_submodule(name)
+                    submodule = model.get_submodule(name, device)
                     if submodule is not None:
-                        submodules[name] = submodule
+                        submodules[name] = submodule.to(device=device, dtype=torch.bfloat16)
 
             engine.load_model(submodules, model_config, device)
+            logger.info("Engine %s loaded in on device %s", cfg["engine_type"], str(device))
 
             for name in stage_names:
                 stage_to_engine[name] = engine
+        logger.info("All engines loaded on device %s", str(device))
 
         return cls(stage_to_engine=stage_to_engine)
 

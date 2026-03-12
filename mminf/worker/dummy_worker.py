@@ -55,7 +55,7 @@ class DummyWorker:
 
         self.communicator = ZMQCommunicator(
             my_id=worker_id,
-            push_ids=worker_ids + ["conductor", "api_server"],
+            push_ids=worker_ids + ["conductor", "api_server", "api_server_preprocess_worker"],
             ipc_socket_path_prefix=socket_path_prefix
         )
         self.tensor_manager = MooncakeCommunicationManager(

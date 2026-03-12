@@ -1,4 +1,5 @@
 import atexit
+import logging
 import multiprocessing as mp
 import os
 import time
@@ -7,7 +8,9 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 
 import numpy as np
+import yaml
 
+from mminf.api_server.types import APIServerMessage, RequestComplete
 from mminf.communication.communicator import ZMQCommunicator
 from mminf.graph.base import GraphPointer, TensorPointerInfo
 from mminf.ipc_formats import (
@@ -22,6 +25,8 @@ from mminf.ipc_formats import (
 )
 from mminf.model.base import CurrentForwardMetadata, Model, Subgraph
 
+logger = logging.getLogger(__name__)
+
 
 def _worker_process_target(
     worker_id: str,
@@ -34,11 +39,20 @@ def _worker_process_target(
     socket_path_prefix: str,
     model: Model | None = None,
     device: str = "cuda",
+    log_level: str = "INFO",
 ):
     """Top-level target for spawned worker processes. Must be module-level for picklability."""
+    logging.basicConfig(
+        level=getattr(logging, log_level),
+        format=f"%(asctime)s %(levelname)s [{worker_id}] %(name)s: %(message)s",
+        force=True,
+    )
     import torch
 
     from mminf.worker.worker import Worker
+    logger.debug("Launching worker %s with graph nodes %s", worker_id, str(
+        sum([sg.section.get_stage_names() for sg in my_subgraphs], start=[])
+    ))
     worker = Worker(
         worker_id=worker_id,
         worker_ids=worker_ids,
@@ -69,10 +83,8 @@ class RequestData:
     # make sure to check all tensors in the list are completed (BLOCKING case)
     completed_subgraph_ids: set[str] = field(default_factory=set)
 
-    # TODO: will need to add to this as we build things out
 
-
-class DummyConductor:
+class Conductor:
     """
     Initial in-progress conductor implementation. TODO: this is extremely
     un-optimized, but it provides a sense of the data movement between the
@@ -82,16 +94,22 @@ class DummyConductor:
         self,
         model: Model,
         model_config_file: str,
-        eos_token_id: int,
         socket_path_prefix: str = "/tmp/mminf",
         hostname: str = "localhost",
+        log_level: str = "INFO",
     ):
         self.requests: dict[str, RequestData] = {}
         self.model = model
-        self.eos_token_id = eos_token_id
         self.hostname = hostname
         self.socket_path_prefix = socket_path_prefix
+        self.log_level = log_level
+        
         self._worker_processes: list[mp.Process] = []
+
+        with open(model_config_file, "r") as f:
+            self.model_config = yaml.safe_load(f)
+        assert "max_seq_len" in self.model_config
+        assert "stage_groups" in self.model_config
 
         self.subgraphs = {
             subgraph.subgraph_id: subgraph
@@ -104,7 +122,7 @@ class DummyConductor:
 
         self.communicator = ZMQCommunicator(
             my_id="conductor",
-            push_ids=self.worker_ids + ["api_server"],
+            push_ids=self.worker_ids + ["api_server", "api_server_preprocess_worker"],
             ipc_socket_path_prefix=socket_path_prefix,
         )
 
@@ -125,6 +143,9 @@ class DummyConductor:
         self._per_worker_subgraphs: dict[str, list[Subgraph]] = {}
         self._per_worker_engine_configs: dict[str, list[dict]] = {}
 
+        engine_model_cfg = {
+            "kv_cache": self.model.get_kv_cache_config()
+        }
         for rank in self._sorted_ranks:
             worker_id = f"worker_{rank}"
             subgraphs = rank_to_subgraphs[rank]
@@ -134,12 +155,15 @@ class DummyConductor:
             engine_type_to_stages: dict[str, list[str]] = defaultdict(list)
             for sg in subgraphs:
                 for stage_name in sg.section.get_stage_names():
-                    etype = stage_engine_types[stage_name]
+                    etype = stage_engine_types[stage_name].value
                     if stage_name not in engine_type_to_stages[etype]:
                         engine_type_to_stages[etype].append(stage_name)
 
             self._per_worker_engine_configs[worker_id] = [
-                {"engine_type": etype, "stage_names": stages, "model_config": {}}
+                {
+                    "engine_type": etype, "stage_names": stages,
+                    "model_config": engine_model_cfg
+                }
                 for etype, stages in engine_type_to_stages.items()
             ]
 
@@ -168,8 +192,9 @@ class DummyConductor:
                     "socket_path_prefix": self.socket_path_prefix,
                     "model": self.model,
                     "device": f"cuda:{rank}",
+                    "log_level": self.log_level,
                 },
-                daemon=True,
+                daemon=False,
             )
             p.start()
             self._worker_processes.append(p)
@@ -177,6 +202,7 @@ class DummyConductor:
         atexit.register(self.shutdown)
 
     def shutdown(self):
+        logger.info("Shutting down conductor...")
         """Terminate and join all worker processes."""
         for p in self._worker_processes:
             if p.is_alive():
@@ -199,7 +225,8 @@ class DummyConductor:
 
     def _split_inputs_to_workers(
         self, subgraph_to_worker: dict[str, str],
-        inputs: list[GraphPointer]
+        inputs: list[GraphPointer],
+        phase: str
     ) -> dict[str, list[GraphPointer]]:
         """
         Given the full ForwardPassInputs for kicking off a new forward pass,
@@ -208,13 +235,17 @@ class DummyConductor:
         """
         inputs_per_worker: dict[str, list[GraphPointer]] = {}
         for subgraph_id, worker_id in subgraph_to_worker.items():
-            stages = set(self.subgraphs[subgraph_id].section.get_stage_names())
+            subgraph = self.subgraphs[subgraph_id]
+            if phase not in subgraph.phases:
+                continue
+            stages = set(subgraph.section.get_stage_names())
 
-            inputs_per_worker[worker_id] = [
+            if worker_id not in inputs_per_worker:
+                inputs_per_worker[worker_id] = []
+            inputs_per_worker[worker_id] += [
                 ptr for ptr in inputs if ptr.next_stage in stages
             ]
         return inputs_per_worker
-
 
     def _ingest_request(
         self, body: NewRequestConductor
@@ -225,11 +256,13 @@ class DummyConductor:
         and notify the workers that the request has arrived + provide the appropriate
         workers with the appropriate initial inputs for the forward pass
         """
+        logger.debug("Conductor ingesting request %s", body.request_id)
         subgraph_to_worker = self._assign_subgraphs_to_workers()
         request_data = RequestData(
             current_forward_metadata=self.model.get_initial_forward_metadata(
                 body.initial_input_modalities,
-                body.initial_output_modalities
+                body.initial_output_modalities,
+                model_kwargs=body.model_kwargs,
             ),
             fwd_inputs=[],
             persist_signals=body.initial_signals,
@@ -249,11 +282,17 @@ class DummyConductor:
             request_data.current_forward_metadata.phase
         )
 
+        # Extract schedule step metadata for per-request cache orchestration
+        step_metadata = self.model.get_step_metadata(
+            request_data.current_forward_metadata
+        )
+
         # send data to appropriate workers
         worker_to_subgraph_ids: dict[str, list[str]] = {}
         inputs_per_worker = self._split_inputs_to_workers(
             subgraph_to_worker=subgraph_to_worker,
-            inputs=first_forward_inputs
+            inputs=first_forward_inputs,
+            phase=request_data.current_forward_metadata.phase
         )
         for subgraph_id, worker_id in subgraph_to_worker.items():
             if worker_id not in worker_to_subgraph_ids:
@@ -266,7 +305,8 @@ class DummyConductor:
                 subgraph_ids=subgraph_ids,
                 subgraph_to_worker=subgraph_to_worker,
                 initial_phase=request_data.current_forward_metadata.phase,
-                initial_inputs=inputs_per_worker[worker],
+                initial_inputs=inputs_per_worker.get(worker, []),
+                per_request_metadata=step_metadata,
             )
             self.communicator.send(
                 worker, WorkerMessage(
@@ -287,33 +327,37 @@ class DummyConductor:
         self, request_id: str
     ):
         """
-        Called when we see an EOS token
+        Called when we see an EOS token, e.g.
         """
-        for worker_id in self.requests[request_id].subgraph_to_worker.values():
+        logger.info("Request %s done", request_id)
+        for worker_id in set(self.requests[request_id].subgraph_to_worker.values()):
             msg = WorkerMessage(
                 message_type=WorkerMessageType.REMOVE_REQUEST,
                 body=RemoveRequest(request_id)
             )
             self.communicator.send(worker_id, msg)
-        # TODO: send done signal back to the API server
+        self.communicator.send(
+            "api_server",
+            APIServerMessage(
+                message_type="request_complete",
+                body=RequestComplete(
+                    request_id=request_id
+                )
+            )
+        )
         del self.requests[request_id]
 
     def _process_done_forward(
         self, request_id: str
     ) -> bool:
         """
-        If we didn't see EOS, start a new forward pass (determine the input and
+        If the request isn't over, start a new forward pass (determine the input and
         output modalities for the new forward pass, wrangle input tensors and send
         them to the appropriate workers)
 
-        Returns a boolean for whether we saw a EOS token
+        Returns a boolean for whether the request is done
         """
         request_data = self.requests[request_id]
-
-        if any([
-            self.eos_token_id in tokens for tokens in request_data.new_tokens.values()
-        ]):
-            return True
 
         prev_forward_meta = deepcopy(request_data.current_forward_metadata)
         request_data.current_forward_metadata = \
@@ -321,6 +365,17 @@ class DummyConductor:
                 metadata=request_data.current_forward_metadata,
                 new_tokens=request_data.new_tokens,
             )
+        logger.debug(
+            ("Request %s completed forward pass; moving from phase %s -> %s.\n"
+             "Received new tokens %s, has persist signals %s.\n"
+             "request_done=%s"),
+            request_id, prev_forward_meta.phase, request_data.current_forward_metadata.phase,
+            str(request_data.new_tokens), str(list(request_data.persist_signals.keys())),
+            str(request_data.current_forward_metadata.request_done)
+        )
+        if request_data.current_forward_metadata.request_done:
+            return True # stop the request
+
         self._set_current_subgraph_ids(
             request_id,
             request_data.current_forward_metadata.phase
@@ -331,10 +386,17 @@ class DummyConductor:
             persist_signals=request_data.persist_signals,
             prev_forward_metadata=prev_forward_meta
         )
+        logger.debug("Forward inputs: %s", str(fwd_inputs))
+
+        # Extract schedule step metadata for per-request cache orchestration
+        step_metadata = self.model.get_step_metadata(
+            request_data.current_forward_metadata
+        )
 
         inputs_per_worker = self._split_inputs_to_workers(
             subgraph_to_worker=request_data.subgraph_to_worker,
-            inputs=fwd_inputs
+            inputs=fwd_inputs,
+            phase=request_data.current_forward_metadata.phase
         )
 
         for worker, inputs in inputs_per_worker.items():
@@ -344,6 +406,7 @@ class DummyConductor:
                     request_id=request_id,
                     phase=request_data.current_forward_metadata.phase,
                     inputs=inputs,
+                    per_request_metadata=step_metadata,
                 )
             )
             self.communicator.send(worker, message)
@@ -385,26 +448,29 @@ class DummyConductor:
 
     def run(self):
         while True:
-            done_forward_passes = []
-            for message in self.communicator.get_all_new_messages():
-                if message.message_type == ConductorMessageType.NEW_REQUEST:
-                    self._ingest_request(message.body)
-                elif message.message_type == ConductorMessageType.SUBGRAPHS_DONE:
-                    done_with_fwd = self._process_subgraphs_done(
-                        message.body
-                    )
-                    if done_with_fwd:
-                        done_forward_passes.append(message.body.request_id)
-                else:
-                    raise ValueError(f"Unknown message type: {message.message_type}")
+            try:
+                done_forward_passes = []
+                for message in self.communicator.get_all_new_messages():
+                    if message.message_type == ConductorMessageType.NEW_REQUEST:
+                        self._ingest_request(message.body)
+                    elif message.message_type == ConductorMessageType.SUBGRAPHS_DONE:
+                        done_with_fwd = self._process_subgraphs_done(
+                            message.body
+                        )
+                        if done_with_fwd:
+                            done_forward_passes.append(message.body.request_id)
+                    else:
+                        raise ValueError(f"Unknown message type: {message.message_type}")
 
-            eos_requests = []
-            for request_id in done_forward_passes:
-                saw_eos = self._process_done_forward(request_id)
-                if saw_eos:
-                    eos_requests.append(request_id)
+                completed_requests = []
+                for request_id in done_forward_passes:
+                    saw_eos = self._process_done_forward(request_id)
+                    if saw_eos:
+                        completed_requests.append(request_id)
 
-            for request_id in eos_requests:
-                self._process_request_done(request_id)
+                for request_id in completed_requests:
+                    self._process_request_done(request_id)
+            except Exception:
+                logger.exception("Conductor error in main loop")
 
             time.sleep(0.1) # just for dummy conductor!

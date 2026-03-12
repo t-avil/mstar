@@ -1,9 +1,12 @@
+import logging
 from copy import deepcopy
 from dataclasses import dataclass, field
 
-from mminf.graph.base import GraphPointer, GraphStage
-from mminf.graph.request_queues import PerRequestStageQueues, ProcessedInputs
+from mminf.graph.base import GraphPointer, GraphStage, TensorPointerInfo
+from mminf.graph.request_queues import PerRequestStageQueues, ProcessedInputs, format_graph_edge_list
 from mminf.model.base import SPECIAL_DESTINATIONS, STREAM_OUT, Subgraph
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -20,10 +23,9 @@ class StageOutputRouting:
     routed_to_this_subgraph:list[GraphPointer]
     to_conductor: list[GraphPointer] # outputs that are going back to the conductor
     to_workers: dict[str, list[GraphPointer]] # worker id to signals
-    completed_subgraphs: list[str] = field(default_factory=list)  # list of subgraph IDs
     stream_out: list[GraphPointer] = field(default_factory=list)
     new_token_outputs: list[GraphPointer] = field(default_factory=list)
-    completed_subgraphs: list[str] = field(default_factory=[])  # list of subgraph IDs
+    completed_subgraphs: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -189,8 +191,8 @@ class SubgraphsManager:
         subgraph_ids = self.per_request_info[request_id].phase_subgraph_ids
 
         completed_subgraphs = []
-        routed_to_this_worker = [] # list of graph edges
-        external_outputs = outputs
+        routed_to_this_worker: list[GraphPointer] = [] # list of graph edges
+        external_outputs: list[GraphPointer] = outputs
         for subgraph_id in subgraph_ids:
             queue = self.queues[subgraph_id] # ready / waiting graph node queue
             # process_new_inputs consumes outputs that are used as
@@ -219,7 +221,7 @@ class SubgraphsManager:
                 stage=ptr.next_stage, phase=self.get_phase(request_id)
             )
             if stage_phase not in self.per_request_info[request_id].stage_to_worker:
-                if ptr.next_stage in SPECIAL_DESTINATIONS:
+                if ptr.next_stage in SPECIAL_DESTINATIONS or ptr.back_to_conductor:
                     if ptr.next_stage == STREAM_OUT:
                         stream_out.append(ptr)
                     continue  # e.g., stream_out — already captured in to_conductor
@@ -231,6 +233,15 @@ class SubgraphsManager:
             if worker_id not in to_workers:
                 to_workers[worker_id] = []
             to_workers[worker_id].append(ptr)
+
+        logger.debug(
+            ("Finished processing outputs from rid %s. \n"
+             "Routed to this worker: %s; sent to others: %s; persist signals: %s"),
+            request_id, format_graph_edge_list(routed_to_this_worker),
+            format_graph_edge_list(external_outputs), format_graph_edge_list(to_conductor),
+        )
+        if completed_subgraphs:
+            logger.debug("Completed %d subgraphs", len(completed_subgraphs))
 
         return StageOutputRouting(
             routed_to_this_subgraph=routed_to_this_worker,
@@ -270,7 +281,7 @@ class SubgraphsManager:
 
     def remove_request(self, request_id: str):
         if request_id in self.per_request_info:
-            for queue_id in self.per_request_info[request_id].phase_subgraph_ids:
+            for queue_id in self.per_request_info[request_id].subgraph_ids:
                 self.queues[queue_id].remove_request(request_id)
             del self.per_request_info[request_id]
 
@@ -291,12 +302,19 @@ class SubgraphsManager:
                 self.per_request_info[request_id].pending_new_tokens[name] = []
             self.per_request_info[request_id].pending_new_tokens[name].extend(tokens)
 
-    def flush_persist_signals(self, request_id: str) -> list[GraphPointer]:
-        """Pop and return all buffered persist signals for a request."""
+    def flush_persist_signals(self, request_id: str) -> dict[str, list[TensorPointerInfo]]:
+        """Pop and return all buffered persist signals for a request.
+
+        Converts from internal list[GraphPointer] to the dict format
+        expected by the conductor (name -> list[TensorPointerInfo]).
+        """
         info = self.per_request_info[request_id]
         signals = info.pending_persist_signals
         info.pending_persist_signals = []
-        return signals
+        result: dict[str, list[TensorPointerInfo]] = {}
+        for gp in signals:
+            result[gp.name] = gp.tensor_info
+        return result
 
     def flush_new_tokens(self, request_id: str) -> dict[str, list[int]]:
         """Pop and return all buffered new tokens for a request."""

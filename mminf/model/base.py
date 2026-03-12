@@ -9,6 +9,8 @@ import torch
 import yaml
 
 from mminf.communication.tensors import NameToTensorList
+from mminf.engine.ar_engine import KVCacheConfig
+from mminf.engine.base import EngineType
 from mminf.graph.base import GraphPointer, GraphSection, GraphStage, Loop, Parallel, Sequential, TensorPointerInfo
 
 STREAM_OUT = "stream_out"
@@ -24,11 +26,11 @@ class StageSubmodule(torch.nn.Module):
     and CUDA graphs on the forward() path.
 
     Engine call pattern:
-        preprocessed = submodule.preprocess(**inputs)   # list → tensors
-        result = submodule(**preprocessed)              # tensor → tensor (compilable)
+        preprocessed = submodule.preprocess(phase, **inputs)  # list → tensors
+        result = submodule(**preprocessed)                     # tensor → tensor (compilable)
     """
 
-    def preprocess(self, **inputs: list[torch.Tensor]) -> dict[str, torch.Tensor]:
+    def preprocess(self, phase: str, **inputs: list[torch.Tensor]) -> dict[str, torch.Tensor]:
         """
         Convert variable-length list[Tensor] inputs to fixed tensors.
         NOT compiled — handles Python-level variability.
@@ -132,8 +134,9 @@ def _divide_into_subgraphs(
         group_id_to_subgraph = {}
         for s in singleton_subgraphs:
             if s._group_id in group_id_to_subgraph:
-                group_id_to_subgraph[s._group_id] = _combine_sections_sequential_or_parallel(
-                    group_id_to_subgraph[s._group_id], s.section,
+                existing = group_id_to_subgraph[s._group_id]
+                existing.section = _combine_sections_sequential_or_parallel(
+                    existing.section, s.section,
                     comb_type=Parallel
                 )
             else:
@@ -179,6 +182,7 @@ class CurrentForwardMetadata:
     output_modalities: list[str]
     phase: str
     is_prefill: bool
+    request_done: bool = field(default=False)
     kwargs: dict = field(default_factory=dict)
 
 
@@ -215,20 +219,24 @@ class Model(ABC):
                 for phase, graph in self.get_phase_graphs().items()
         ], start=[])
 
+    @abstractmethod
+    def get_kv_cache_config(self) -> KVCacheConfig:
+        pass
 
     @abstractmethod
     def get_phase_graphs(self) -> dict[str, GraphSection]:
         pass
 
     @abstractmethod
-    def get_stage_engine_types(self) -> dict[str, str]:
-        """Returns stage_name -> engine_type ("ar", "flow", "enc_dec")."""
+    def get_stage_engine_types(self) -> dict[str, EngineType]:
+        """Returns stage_name -> EngineType enum."""
         pass
 
     @abstractmethod
     def get_initial_forward_metadata(
         self, input_modalities: list[str],
-        output_modalities: list[str]
+        output_modalities: list[str],
+        model_kwargs: dict | None = None,
     ) -> CurrentForwardMetadata:
         pass
 
@@ -254,6 +262,12 @@ class Model(ABC):
     ) -> CurrentForwardMetadata:
         """
         Called by the conductor at the end of a full model fwd pass.
+
+        **Important**: this sets metadata.request_done, which is used to end
+        the request.
+
+        TODO: include default logic for setting request_done, and let models
+        override it
         """
         # e.g., check for BOI token, check if image was generated and should
         # be added to the input modalities and input tensors, adds new token
@@ -262,7 +276,49 @@ class Model(ABC):
         pass
 
     @abstractmethod
-    def get_submodule(self, stage_name: str) -> torch.nn.Module | None:
+    def process_prompt(
+        self,
+        prompt: str | None,
+        input_modalities: list[str],
+        output_modalities: list[str],
+        **kwargs,
+    ) -> NameToTensorList:
+        """Tokenize prompt and produce initial text tensors.
+
+        Called by the API server data worker to convert raw text input
+        into model-specific tensor format (e.g., tokenization). The
+        output dict keys are model-specific and will be referenced by
+        get_forward_pass_inputs via persist_signals.
+
+        Args:
+            prompt: Raw text input from the user, or None if no text.
+            input_modalities: List of input modality types for this request.
+            output_modalities: List of desired output modality types.
+            **kwargs: Model-specific parameters (e.g., from model_kwargs).
+
+        Returns:
+            NameToTensorList with model-specific keys, e.g.:
+            {"text_inputs": [tokenized_tensor], "system_prompt": [sys_tensor]}
+        """
+        pass
+
+    @abstractmethod
+    def postprocess(
+        self, output: torch.Tensor,
+        modality: str # text | image | video | audio
+    ) -> bytes:
+        """
+        Given an output of a certain modality, encode and return as bytes.
+        This will likely need to overridden with model-specific behavior.
+
+        Modality to expected encoding type:
+        - text: utf-8
+        - image: png
+        """
+        return output.cpu().numpy().tobytes()
+
+    @abstractmethod
+    def get_submodule(self, stage_name: str, device="cpu") -> torch.nn.Module | None:
         """
         Return the nn.Module for this stage, or None for dummy mode.
         The engine calls this (via EngineManager) to get the submodule it
@@ -271,18 +327,16 @@ class Model(ABC):
         """
         pass
 
-    def step(
-        self, stage_name: str,
-        phase: str,
-        input_tensors: NameToTensorList,
-        engine,  # BaseEngine — untyped to avoid circular import
-        **kwargs
-    ) -> NameToTensorList:
+
+    def get_step_metadata(
+        self, metadata: CurrentForwardMetadata,
+    ) -> dict:
         """
-        Thin wrapper that dispatches to the engine. The engine handles all
-        engine-specific logic (KV cache, FlashInfer, etc.).
-        Models can override this for model-specific dispatch logic.
+        Extract per-request metadata that will get passed into the model
+        forward pass at the engine level.
+
+        Can override for model-specific behavior.
         """
-        return engine.execute_single_request(
-            self.get_submodule(stage_name), input_tensors, **kwargs
-        )
+        return {
+            "is_prefill": metadata.is_prefill,
+        }

@@ -9,14 +9,38 @@ description = "Multimodal inference engine"
 readme = "README.md"
 license = {file = "LICENSE"}
 requires-python = ">=3.12"
-
-dependencies = []
+dependencies = [
+    "fastapi",
+    "numpy",
+    "PyYAML",
+    "pyzmq",
+    "python-multipart",
+    "torch",
+    "uvicorn",
+]
 
 [project.scripts]
 mminf-serve = "mminf.api_server.entrypoint:main"
 
 [project.optional-dependencies]
-dev = ["ruff>=0.4"]
+dev = [
+    "ruff",
+    "pytest",
+]
+
+bagel = [
+    "einops",
+    "flashinfer-python",
+    "huggingface-hub",
+    "mooncake-transfer-engine-cuda",
+    "Pillow",
+    "regex",
+    "safetensors",
+    "torchvision",
+    "torchaudio",
+    "torchcodec",
+    "transformers",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]

@@ -4,6 +4,8 @@ import numpy as np
 import torch
 
 from mminf.communication.tensors import NameToTensorList
+from mminf.engine.ar_engine import KVCacheConfig
+from mminf.engine.base import EngineType
 from mminf.graph.base import GraphPointer, GraphStage, Loop, Parallel, Sequential, TensorPointerInfo
 from mminf.model.base import STREAM_OUT, CurrentForwardMetadata, Model
 
@@ -48,15 +50,15 @@ class DummyModel(Model):
              )
         ])
 
-    def get_stage_engine_types(self) -> dict[str, str]:
+    def get_stage_engine_types(self) -> dict[str, EngineType]:
         return {
-            "text_emb": "enc_dec",
-            "concat_text": "enc_dec",
-            "image_emb": "enc_dec",
-            "concat_img": "enc_dec",
-            "LLM": "ar",
-            "flow": "flow",
-            "VAE_dec": "enc_dec",
+            "text_emb": EngineType.ENC_DEC,
+            "concat_text": EngineType.ENC_DEC,
+            "image_emb": EngineType.ENC_DEC,
+            "concat_img": EngineType.ENC_DEC,
+            "LLM": EngineType.AR,
+            "flow": EngineType.FLOW,
+            "VAE_dec": EngineType.ENC_DEC,
         }
 
     def get_phase_graphs(self):
@@ -118,6 +120,14 @@ class DummyModel(Model):
             prefill=prefill,
             decode=decode,
             image_gen=image_gen
+        )
+
+    def get_kv_cache_config(self) -> KVCacheConfig:
+        return KVCacheConfig(
+            num_layers=1,
+            num_kv_heads=1,
+            head_dim=1,
+            max_seq_len=1,
         )
 
     def get_initial_forward_metadata(
@@ -182,6 +192,9 @@ class DummyModel(Model):
     ) -> CurrentForwardMetadata:
         # dummy model doesn't actually do anything, so this function will just
         # randomly select a phase
+        if metadata.phase == "image_gen":
+            metadata.request_done = True
+            return
         metadata.phase = str(np.random.choice(["decode", "image_gen"]))
         if metadata.phase == "decode":
             metadata.output_modalities = ["text"]
@@ -189,5 +202,20 @@ class DummyModel(Model):
             metadata.output_modalities = ["image"]
         return metadata
 
-    def get_submodule(self, stage_name: str) -> torch.nn.Module | None:
+    def process_prompt(
+        self,
+        prompt: str | None,
+        input_modalities: list[str],
+        output_modalities: list[str],
+        **kwargs,
+    ) -> NameToTensorList:
+        result = {}
+        if prompt is not None:
+            byte_data = prompt.encode("utf-8")
+            result["text_inputs"] = [
+                torch.tensor(list(byte_data), dtype=torch.uint8)
+            ]
+        return result
+
+    def get_submodule(self, stage_name: str, device="cpu") -> torch.nn.Module | None:
         return None  # dummy mode — no real computation

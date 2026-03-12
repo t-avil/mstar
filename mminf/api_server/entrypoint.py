@@ -9,7 +9,6 @@ import multiprocessing as mp
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -19,9 +18,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
-from mminf.api_server.data_worker import PreprocessInput, PreprocessWorker
+from mminf.api_server.data_worker import PreprocessWorker
+from mminf.api_server.types import APIServerMessage, PreprocessInput, ResultChunk
 from mminf.communication.communicator import ZMQCommunicator
-from mminf.graph.base import GraphPointer
+from mminf.model.registry import HF_MODELS
 
 logger = logging.getLogger(__name__)
 
@@ -43,68 +43,32 @@ def _detect_modality(filename: str) -> str:
 
 
 # ------------------------------------------------------------------
-# Result messages: conductor -> API server
-#
-# The conductor sends these back via ZMQCommunicator.send("api_server", msg).
-# They are defined here (close to the consumer) rather than in ipc_formats
-# because the conductor->api_server protocol is still evolving.
-# ------------------------------------------------------------------
-
-@dataclass
-class ResultChunk:
-    """One chunk of generated output for a request."""
-    request_id: str
-    modality: str          # "text" | "image" | "audio" | "video"
-    data: bytes            # raw payload (text encoded as utf-8)
-    metadata: dict = field(default_factory=dict)
-
-
-@dataclass
-class ResultTensors:
-    """
-    For now, expect the tensor to be pure bytes, and the model
-    handles the postprocessing to convert it to the appropriate
-    format (e.g. PNG encoding for images).
-    """
-    request_id: str
-    modality: str
-    graph_edge: GraphPointer
-    metadata: dict = field(default_factory=dict)
-
-
-@dataclass
-class RequestComplete:
-    """Signals that a request has finished processing."""
-    request_id: str
-
-
-@dataclass
-class APIServerMessage:
-    """Envelope for messages received by the API server."""
-    message_type: str  # "result_chunk" | "request_complete"
-    body: ResultTensors | RequestComplete
-
-
-# ------------------------------------------------------------------
 # Conductor process target (top-level for picklability with spawn)
 # ------------------------------------------------------------------
 
 def _conductor_process_target(
     model_name: str,
     config_path: str,
-    eos_token_id: int,
     socket_path_prefix: str,
+    log_level: str = "INFO",
 ):
     """Runs DummyConductor.run() in a spawned process."""
-    from mminf.conductor.dummy_conductor import DummyConductor
+    logging.basicConfig(
+        level=getattr(logging, log_level),
+        format="%(asctime)s %(levelname)s [conductor] %(name)s: %(message)s",
+        force=True,
+    )
+    from mminf.conductor.conductor import Conductor
     from mminf.model.registry import get_model_class
 
-    model = get_model_class(model_name)()
-    conductor = DummyConductor(
+    model = get_model_class(model_name)(
+        model_path_hf=HF_MODELS.get(model_name, {}).get("model_path_hf", ""),
+    )
+    conductor = Conductor(
         model=model,
         model_config_file=config_path,
-        eos_token_id=eos_token_id,
         socket_path_prefix=socket_path_prefix,
+        log_level=log_level,
     )
     conductor.run()
 
@@ -122,14 +86,16 @@ class APIServer:
         upload_dir: str = "/tmp/mminf_uploads",
         hostname: str="localhost",
         timeout_seconds: float = 600.0,
+        model=None,
     ):
         self.upload_dir = Path(upload_dir)
         self.upload_dir.mkdir(parents=True, exist_ok=True)
         self.timeout_seconds = timeout_seconds
 
         self.preprocess_worker = PreprocessWorker(
+            model=model,
             hostname=hostname,
-            socket_path_prefix=socket_path_prefix
+            socket_path_prefix=socket_path_prefix,
         )
 
         # Concurrent request tracking
@@ -213,9 +179,12 @@ class APIServer:
         stale = [
             rid
             for rid, ts in self.recently_completed.items()
-            if now - ts > self._recently_completed_ttl
+            if now - ts > self._recently_completed_ttl \
+            and not self.preprocess_worker.has_pending_tensors(rid)
         ]
         for rid in stale:
+            # only set the event when there are no more pending chunks
+            self.pending_requests[rid]["event"].set()
             self.preprocess_worker.cleanup_request(rid)
             self.recently_completed.pop(rid, None)
 
@@ -223,6 +192,10 @@ class APIServer:
         """Drain the ZMQ pull socket and route results to pending requests."""
         while self.running:
             try:
+                with self.request_lock:
+                    if len(self.recently_completed) > 0:
+                        self._prune_recently_completed()
+
                 for message in self.communicator.get_all_new_messages():
                     if not isinstance(message, APIServerMessage):
                         logger.warning("Unexpected message type: %s", type(message))
@@ -231,14 +204,17 @@ class APIServer:
                     rid = message.body.request_id
 
                     with self.request_lock:
-                        self._prune_recently_completed()
                         if rid in self.pending_requests:
-                            if message.message_type == "result_chunk":
+                            if message.message_type == "result_tensors":
+                                logger.debug(
+                                    "Got new tensors of %s modality for request %s",
+                                    message.body.modality, rid
+                                )
                                 self.preprocess_worker.new_result_tensors(
                                     message.body
                                 )
                             elif message.message_type == "request_complete":
-                                self.pending_requests[rid]["event"].set()
+                                logger.info("API server received %s done", rid)
                                 self.recently_completed[rid] = time.time()
                         elif rid in self.recently_completed:
                             logger.debug("Late message for completed %s", rid)
@@ -247,6 +223,10 @@ class APIServer:
                                 "Message for unknown request %s", rid
                             )
                 for result_chunk in self.preprocess_worker.get_result_chunks():
+                    logger.debug(
+                        "Got result chunk of %s modality for request %s",
+                        result_chunk.modality, result_chunk.request_id
+                    )
                     rid = result_chunk.request_id
                     self.pending_requests[rid]["chunks"].append(
                         result_chunk
@@ -286,6 +266,7 @@ class APIServer:
                 yield self._chunk_to_ndjson(chunk)
 
             if done:
+                logger.info("Async stream results received finish for %s", request_id)
                 # flush remaining
                 remaining: list[ResultChunk] = []
                 with self.request_lock:
@@ -409,9 +390,9 @@ async def generate(
         in_mods = [m.strip() for m in input_modalities.split(",") if m.strip()]
     else:
         in_mods: list[str] = []
+        in_mods.extend(file_paths.keys())
         if text:
             in_mods.append("text")
-        in_mods.extend(file_paths.keys())
 
     parsed_kwargs = json.loads(model_kwargs) if model_kwargs else None
 
@@ -512,30 +493,37 @@ def main():
 
     logging.basicConfig(
         level=getattr(logging, args.log_level),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        format="%(asctime)s %(levelname)s [api_server] %(name)s: %(message)s",
     )
 
     with open(args.config) as f:
         config = yaml.safe_load(f)
 
     model_name = config.get("model", "dummy")
-    eos_token_id = config.get("eos_token_id", 2)
 
     # Spawn conductor in a separate process
     ctx = mp.get_context("spawn")
     conductor_proc = ctx.Process(
         target=_conductor_process_target,
-        args=(model_name, args.config, eos_token_id, args.socket_path_prefix),
-        daemon=True,
+        args=(model_name, args.config,
+              args.socket_path_prefix, args.log_level),
     )
     conductor_proc.start()
     logger.info("Conductor process started (pid=%d, model=%s)", conductor_proc.pid, model_name)
+
+    # Create a lightweight model instance for prompt processing
+    # (tokenization only — no GPU weights needed)
+    from mminf.model.registry import get_model_class
+    model = get_model_class(model_name)(
+        model_path_hf=HF_MODELS.get(model_name, {}).get("model_path_hf", ""),
+    )
 
     global api_server
     api_server = APIServer(
         socket_path_prefix=args.socket_path_prefix,
         upload_dir=args.upload_dir,
         timeout_seconds=args.timeout,
+        model=model,
     )
 
     try:

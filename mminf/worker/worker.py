@@ -1,10 +1,13 @@
+import logging
+
 import torch
 
-from mminf.api_server.entrypoint import APIServerMessage, ResultTensors
+from mminf.api_server.types import APIServerMessage, ResultTensors
 from mminf.communication.communicator import CommProtocol, ZMQCommunicator
 from mminf.communication.tensors import MooncakeCommunicationManager, NameToTensorList
 from mminf.engine.base import StageBatch, StageOutput
 from mminf.graph.base import GraphPointer
+from mminf.graph.request_queues import format_graph_edge_list
 from mminf.ipc_formats import (
     ConductorMessage,
     ConductorMessageType,
@@ -24,6 +27,8 @@ from mminf.worker.stage_manager_utils import (
     SubgraphQueues,
     SubgraphsManager,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class Worker:
@@ -72,7 +77,7 @@ class Worker:
 
         self.communicator = ZMQCommunicator(
             my_id=worker_id,
-            push_ids=worker_ids + ["conductor", "api_server"],
+            push_ids=worker_ids + ["conductor", "api_server", "api_server_preprocess_worker"],
             ipc_socket_path_prefix=socket_path_prefix,
         )
         self.tensor_manager = MooncakeCommunicationManager(
@@ -82,11 +87,15 @@ class Worker:
             protocol=tensor_comm_protocol,
         )
 
+        # Per-request metadata from conductor (e.g., cache_labels, snapshot_after)
+        self._per_request_metadata: dict[str, dict] = {}
+
     # ------------------------------------------------------------------
     # Message handling
     # ------------------------------------------------------------------
 
     def _add_new_request(self, body: NewRequest) -> None:
+        logger.debug("Worker %s received request %s", self.worker_id, body.request_id)
         self.subgraphs_manager.add_request(
             request_id=body.request_id,
             subgraph_ids=body.subgraph_ids,
@@ -97,6 +106,14 @@ class Worker:
         self.subgraphs_manager.update_phase(
             body.request_id, body.initial_phase
         )
+        logger.debug(
+            "Request %s set to phase %s on worker %s",
+            body.request_id, body.initial_phase, self.worker_id
+        )
+
+        # Store per-request metadata from conductor
+        if body.per_request_metadata:
+            self._per_request_metadata[body.request_id] = body.per_request_metadata
 
         # Start RDMA reads for tensors that have tensor_info
         self.tensor_manager.start_read_tensors(
@@ -117,6 +134,7 @@ class Worker:
         self.engine_manager.remove_request(body.request_id)
         self.subgraphs_manager.remove_request(body.request_id)
         self.tensor_manager.cleanup_request(body.request_id)
+        self._per_request_metadata.pop(body.request_id, None)
 
     def _handle_tensor_received(self, body: TensorReceived) -> None:
         """Sender-side cleanup: receiver confirmed RDMA read, free source buffers."""
@@ -128,6 +146,19 @@ class Worker:
 
     def _process_new_inputs(self, body: InputSignals) -> None:
         self.subgraphs_manager.update_phase(body.request_id, body.phase)
+        logger.debug(
+            "Request %s set to phase %s on worker %s",
+            body.request_id, body.phase, self.worker_id
+        )
+
+        logger.debug(
+            "Received new signals %s at worker %s for request %s",
+            format_graph_edge_list(body.inputs), self.worker_id, body.request_id
+        )
+
+        # Update per-request metadata from conductor
+        if body.per_request_metadata:
+            self._per_request_metadata[body.request_id] = body.per_request_metadata
 
         # Start RDMA reads for tensors with tensor_info
         self.tensor_manager.start_read_tensors(
@@ -172,6 +203,7 @@ class Worker:
     def _build_stage_batch(self, batch: ScheduledBatch) -> StageBatch:
         """Gather input tensors from tensor_manager for all requests in the batch."""
         per_request_inputs: dict[str, NameToTensorList] = {}
+        per_request_metadata: dict[str, dict] = {}
 
         for request_id, stage in batch.stage_objects.items():
             tensors = {}
@@ -184,11 +216,16 @@ class Worker:
                 ]
             per_request_inputs[request_id] = tensors
 
+            # Include per-request metadata (e.g., cache_labels, snapshot_after)
+            if request_id in self._per_request_metadata:
+                per_request_metadata[request_id] = self._per_request_metadata[request_id]
+
         return StageBatch(
             stage_name=batch.stage_name,
             phase=batch.phase,
             request_ids=list(batch.stage_objects.keys()),
             per_request_input_tensors=per_request_inputs,
+            per_request_metadata=per_request_metadata,
         )
 
     # ------------------------------------------------------------------
@@ -307,7 +344,7 @@ class Worker:
         if outputs.stream_out:
             for graph_edge in outputs.stream_out:
                 message = APIServerMessage(
-                    message_type="result_chunk",
+                    message_type="result_tensors",
                     body=ResultTensors(
                         request_id=request_id,
                         modality=graph_edge.output_modality,
@@ -335,38 +372,42 @@ class Worker:
 
     def run(self) -> None:
         while True:
-            # 1. Process ZMQ messages (new requests, input signals, removals)
-            self._process_messages()
+            try:
+                # 1. Process ZMQ messages (new requests, input signals, removals)
+                self._process_messages()
 
-            # 2. Check for ready RDMA tensors, feed to subgraph queues
-            self._check_ready_tensors()
+                # 2. Check for ready RDMA tensors, feed to subgraph queues
+                self._check_ready_tensors()
 
-            # 3. Pick next batch via MicroScheduler
-            batch = self.scheduler.get_next_batch(self.subgraphs_manager)
-            if batch is None:
-                continue
+                # 3. Pick next batch via MicroScheduler
+                batch = self.scheduler.get_next_batch(self.subgraphs_manager)
+                if batch is None:
+                    continue
 
-            # 4. Gather input tensors for the batch
-            stage_batch = self._build_stage_batch(batch)
+                # 4. Gather input tensors for the batch
+                stage_batch = self._build_stage_batch(batch)
 
-            # 5. Execute via engine
-            engine = self.engine_manager.get_engine(batch.stage_name)
-            output = engine.execute_batch(stage_batch)
+                # 5. Execute via engine
+                engine = self.engine_manager.get_engine(batch.stage_name)
+                logger.debug("Executing batch for stage %s on engine %s", stage_batch.stage_name, str(type(engine)))
+                output = engine.execute_batch(stage_batch)
 
-            # 5b. Free consumed input tensors
-            self._cleanup_consumed_inputs(batch)
+                # 5b. Free consumed input tensors
+                self._cleanup_consumed_inputs(batch)
 
-            # 6. Route outputs through SubgraphsManager first to determine routing
-            routing_per_request: dict[str, StageOutputRouting] = {}
-            for request_id,stage in batch.stage_objects.items():
-                routing = self.subgraphs_manager.process_stage_outputs(
-                    request_id, stage.outputs
-                )
-                routing_per_request[request_id] = routing
+                # 6. Route outputs through SubgraphsManager first to determine routing
+                routing_per_request: dict[str, StageOutputRouting] = {}
+                for request_id,stage in batch.stage_objects.items():
+                    routing = self.subgraphs_manager.process_stage_outputs(
+                        request_id, stage.outputs
+                    )
+                    routing_per_request[request_id] = routing
 
-            # 7. Store output tensors, register RDMA if needed
-            self._store_outputs(batch, output, routing_per_request)
+                # 7. Store output tensors, register RDMA if needed
+                self._store_outputs(batch, output, routing_per_request)
 
-            # 8. Send outputs to other workers / conductor
-            for request_id in batch.stage_objects.keys():
-                self._send_outputs(request_id, routing_per_request[request_id])
+                # 8. Send outputs to other workers / conductor
+                for request_id in batch.stage_objects.keys():
+                    self._send_outputs(request_id, routing_per_request[request_id])
+            except Exception:
+                logger.exception("Worker %s error in main loop", self.worker_id)

@@ -38,6 +38,7 @@ class NewRequest(MessageBody):
     subgraph_to_worker: dict[str, str]
     initial_phase: str
     initial_inputs: list[GraphPointer]
+    per_request_metadata: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -50,6 +51,7 @@ class InputSignals(MessageBody):
     request_id: str
     phase: str
     inputs: list[GraphPointer]
+    per_request_metadata: dict = field(default_factory=dict)
 
 
 @dataclass

@@ -1,6 +1,9 @@
+import logging
 from abc import ABC, abstractmethod
 from copy import deepcopy
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 
 def update_list_dicts(signals: dict[str, list], new_signals: dict[str, list]):
@@ -17,8 +20,10 @@ class TensorPointerInfo:
     dtype: str
     nbytes: int
     address: int
+    stride: list[int]
     uuid: str # for all the cleanups, list[tensor] indexing
     source_session_id: str # e.g., f"{HOSTNAME}:{client_engine.get_rpc_port()}"
+    source_tensor_name: str # for streaming outputs, the names of tensors are changed
     source_entity: str # which {worker, api_server} the tensor is on
 
 # class ConnectionType(Enum):
@@ -140,6 +145,9 @@ class GraphStage(GraphSection):
         ]
         if len(stage_to_inputs[self.name]) == 0:
             del stage_to_inputs[self.name]
+        logger.debug(
+            "Stage %s ingesting inputs %s", self.name, list(ingested.values())
+        )
         return list(ingested.values())
 
     def split_off_ready(self):
@@ -373,6 +381,12 @@ class Loop(GraphSection):
     def _advance_one_iter(self) -> "Loop":
         curr_iter_section = self.nxt_iter_section
         nxt_iter_section = deepcopy(self.section)
+
+        logger.debug(
+            "Advancing loop with stages %s from iter %d -> %d (out of %d)",
+            str(self.section.get_stage_names()), self.curr_iter,
+            self.curr_iter + 1, self.n_iters
+        )
 
         loop = Loop(
             section=self.section,

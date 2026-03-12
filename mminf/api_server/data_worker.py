@@ -1,5 +1,6 @@
 
 
+import logging
 import queue
 import threading
 import time
@@ -8,24 +9,19 @@ from dataclasses import asdict, dataclass
 import torch
 import torchaudio
 import torchvision
-from torchcodec.decoders import VideoDecoder
+try:
+    from torchcodec.decoders import VideoDecoder
+except (ImportError, RuntimeError):
+    VideoDecoder = None
 
-from mminf.api_server.entrypoint import ResultChunk, ResultTensors
+from mminf.api_server.types import PreprocessInput, ResultChunk, ResultTensors
 from mminf.communication.communicator import CommProtocol, ZMQCommunicator
 from mminf.communication.tensors import MooncakeCommunicationManager, NameToTensorList
 from mminf.ipc_formats import ConductorMessage, ConductorMessageType, NewRequestConductor
+from mminf.model.base import Model
 
 
-@dataclass
-class PreprocessInput:
-    request_id: str
-    text: str | None
-
-    # file_paths is modality: list of filenames
-    file_paths: dict[str, list[str]] | None
-    input_modalities: list[str]
-    output_modalities: list[str]
-    model_kwargs: dict
+logger = logging.getLogger(__name__)
 
 
 def _preprocess_loop(**kwargs):
@@ -36,6 +32,7 @@ def _preprocess_loop(**kwargs):
 class PreprocessWorker:
     def __init__(
         self,
+        model: Model | None = None,
         hostname: str = "localhost",
         socket_path_prefix: str = "/tmp/mminf",
         tensor_comm_protocol: CommProtocol = CommProtocol.RDMA,
@@ -45,6 +42,8 @@ class PreprocessWorker:
         self.cleanup_request_queue = queue.Queue()
         self.output_queue = queue.Queue()
         self.stop_event = threading.Event()
+
+        self.per_request_reading_tensors = {}
 
         self.thread = threading.Thread(
             target=_preprocess_loop,
@@ -57,19 +56,36 @@ class PreprocessWorker:
                 hostname=hostname,
                 socket_path_prefix=socket_path_prefix,
                 tensor_comm_protocol=tensor_comm_protocol,
+                model=model,
             )
         )
+        self.thread.start()
 
     def new_request(self, input: PreprocessInput):
+        self.per_request_reading_tensors[input.request_id] = 0
         self.request_input_queue.put(input)
 
     def new_result_tensors(self, input: ResultTensors):
-        self.request_input_queue.put(input)
+        self.per_request_reading_tensors[input.request_id] += len(input.graph_edge.tensor_info)
+        logger.debug(
+            "Data worker reading queue for request %s increased to length %d",
+            input.request_id,  self.per_request_reading_tensors[input.request_id]
+        )
+        self.result_tensor_input_queue.put(input)
+
+    def has_pending_tensors(self, request_id: str):            
+        return self.per_request_reading_tensors.get(request_id, 0) > 0
 
     def get_result_chunks(self)-> list[ResultChunk]:
         results = []
         while not self.output_queue.empty():
-            results.append(self.output_queue.get())
+            result: ResultChunk = self.output_queue.get()
+            self.per_request_reading_tensors[result.request_id] -= 1
+            logger.debug(
+                "Data worker reading queue for request %s decreased to length %d",
+                result.request_id,  self.per_request_reading_tensors[result.request_id]
+            )
+            results.append(result)
         return results
 
     def cleanup_request(self, request_id: str):
@@ -77,7 +93,8 @@ class PreprocessWorker:
 
     def shutdown(self):
         self.stop_event.set()
-        self.thread.join()
+        if self.thread.is_alive():
+            self.thread.join()
 
 
 class PreprocessWorkerThread:
@@ -92,6 +109,7 @@ class PreprocessWorkerThread:
         socket_path_prefix: str = "/tmp/mminf",
         tensor_comm_protocol: CommProtocol = CommProtocol.RDMA,
         device: str = "cpu",
+        model: Model | None = None,
     ):
         self.in_queue = in_queue
         self.result_tensor_queue = result_tensor_queue
@@ -100,6 +118,7 @@ class PreprocessWorkerThread:
 
         self.stop_event = stop_event
         self.device = device
+        self.model = model
 
         self.tensor_uuid_to_metadata_per_request = {}
 
@@ -121,17 +140,26 @@ class PreprocessWorkerThread:
     ):
         tensors: NameToTensorList = {}
         input_metadata = {}
-        # now everything is a list of tensors, even if there's only a single entry
-        if input.text is not None:
-            # Encode as UTF-8 bytes -> uint8 tensor
+
+        # Tokenize prompt via model (model-specific tokenization + system prompt)
+        if self.model is not None:
+            prompt_tensors = self.model.process_prompt(
+                input.text,
+                input.input_modalities,
+                input.output_modalities,
+                **(input.model_kwargs or {}),
+            )
+            tensors.update(prompt_tensors)
+        elif input.text is not None:
+            # Fallback: encode as UTF-8 bytes -> uint8 tensor
             byte_data = input.text.encode("utf-8")
-            tensors["text_input"] = [torch.tensor(
+            tensors["text_inputs"] = [torch.tensor(
                 list(byte_data), dtype=torch.uint8, device=self.device
             )]
 
         if input.file_paths is not None:
             for modality in input.file_paths:
-                key = f"{modality}_input"
+                key = f"{modality}_inputs"
                 tensors[key] = []
                 # TODO: maybe make a class of tensors_and_metadata later (figure out how to use metadata)
                 input_metadata[key] = []
@@ -201,46 +229,53 @@ class PreprocessWorkerThread:
             self.tensor_uuid_to_metadata_per_request[result.request_id][
                 tensor_info.uuid] = result.metadata
 
-
     def _process_read_tensors(self):
         for request_id, graph_edges in self.tensor_manager.get_ready_tensors().items():
-            assert len(graph_edges) == 1
-            graph_edge = graph_edges[0]
-            modality = graph_edge.name.replace("_output", "")
+            for graph_edge in graph_edges:
+                modality = graph_edge.name.replace("_output", "")
 
-            uuids = []
-            for tensor_info in graph_edge.tensor_info:
-                tensor = self.tensor_manager.get_tensor(
+                uuids = []
+                for tensor_info in graph_edge.tensor_info:
+                    logger.debug("Reading in OUTPUT tensor %s with uuid %s", graph_edge.name, tensor_info.uuid)
+                    tensor = self.tensor_manager.get_tensor(
+                        request_id=request_id,
+                        tensor_name=graph_edge.name,
+                        uuid=tensor_info.uuid
+                    )
+                    postprocessed = self.model.postprocess(
+                        tensor, modality
+                    )
+
+                    uuids.append(tensor_info.uuid)
+                    self.out_queue.put(ResultChunk(
+                        request_id=request_id,
+                        modality=modality,
+                        data=postprocessed,
+                        metadata=self.tensor_uuid_to_metadata_per_request[request_id][
+                            tensor_info.uuid]
+                    ))
+                    del self.tensor_uuid_to_metadata_per_request[request_id][
+                        tensor_info.uuid]
+                self.tensor_manager.cleanup(
                     request_id=request_id,
                     tensor_name=graph_edge.name,
-                    uuid=tensor_info.uuid
+                    uuids=uuids
                 )
-                uuids.append(tensor_info.uuid)
-                self.out_queue.put(ResultChunk(
-                    request_id=request_id,
-                    modality=modality,
-                    data=tensor.numpy().tobytes(),
-                    metadata=self.tensor_uuid_to_metadata_per_request[request_id][
-                        tensor_info.uuid]
-                ))
-                del self.tensor_uuid_to_metadata_per_request[request_id][
-                    tensor_info.uuid]
-            self.tensor_manager.cleanup(
-                request_id=request_id,
-                tensor_name=graph_edge.name,
-                uuids=uuids
-            )
 
     def run(self):
         while not self.stop_event.is_set():
-            if not self.in_queue.empty():
-                self._process_input(self.in_queue.get())
-            if not self.result_tensor_queue.empty():
-                self._read_result_tensor(self.result_tensor_queue.get())
-            if not self.cleanup_request_queue.empty():
-                req_id = self.cleanup_request_queue.get()
-                self.tensor_manager.cleanup_request(req_id)
-                del self.tensor_uuid_to_metadata_per_request[req_id]
-            self._process_read_tensors()
+            try:
+                if not self.in_queue.empty():
+                    self._process_input(self.in_queue.get())
+                if not self.result_tensor_queue.empty():
+                    self._read_result_tensor(self.result_tensor_queue.get())
+                if not self.cleanup_request_queue.empty():
+                    req_id = self.cleanup_request_queue.get()
+                    self.tensor_manager.cleanup_request(req_id)
+                    if req_id in self.tensor_uuid_to_metadata_per_request:
+                        del self.tensor_uuid_to_metadata_per_request[req_id]
+                self._process_read_tensors()
+            except Exception:
+                logger.exception("PreprocessWorkerThread error")
 
             time.sleep(0.001)
