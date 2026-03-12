@@ -21,6 +21,11 @@ def main():
         data = {
             "text": "Generate a cat eating the item in this image.",
             "output_modalities": "image",
+            "model_kwargs": json.dumps({
+                "cfg_img_scale": 2.0,
+                "cfg_interval": [0.0, 1.0],
+                "cfg_renorm_type": "text_channel",
+            }),
         }
 
         with requests.post(URL, data=data, files=files, stream=True) as resp:
