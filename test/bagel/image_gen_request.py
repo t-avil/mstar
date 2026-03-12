@@ -13,8 +13,8 @@ def main():
     with requests.post(
         URL,
         data={
-            # "text": "Generate an image of a cute cat",
-            "text": "Generate an image of a cute cat who has discovered the meaning of life",
+            "text": "a car made out of small cars",
+            # "text": "A female cosplayer portraying an ethereal fairy or elf, wearing a flowing dress made of delicate fabrics in soft, mystical colors like emerald green and silver. She has pointed ears, a gentle, enchanting expression, and her outfit is adorned with sparkling jewels and intricate patterns. The background is a magical forest with glowing plants, mystical creatures, and a serene atmosphere.",
             "output_modalities": "image",
         },
         stream=True,

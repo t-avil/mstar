@@ -207,6 +207,7 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
         # cleanup_request() skips these so buffers stay alive until the
         # receiver confirms it finished reading.
         self.registered_for_send: dict[str, set[str]] = {}  # request_id -> set of UUIDs
+        self.registered_for_recv: dict[str, set[str]] = {}
 
     def store_and_return_tensor_info(
         self, request_id: str, tensors: NameToTensorList,
@@ -252,7 +253,7 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
                 )
                 if ret_value != 0:
                     # TODO: error handling
-                    raise RuntimeError("Mooncake memory registration failed.")
+                    raise RuntimeError(f"Mooncake memory registration failed for request id {request_id}, tensor {name}, uuid {uuid}.")
             self.registered_for_send.setdefault(request_id, set()).add(uuid)
 
     def store_and_populate_graph_edges(
@@ -290,7 +291,8 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
             logger.warning("Trying to cleanup tensor %s:%s, but uuid not found", tensor_name, uuid)
             return
         if self.protocol == CommProtocol.RDMA and self.engine is not None \
-                and uuid in self.registered_for_send.get(request_id, set()):
+                and (uuid in self.registered_for_send.get(request_id, set()) \
+                    or uuid in self.registered_for_recv.get(request_id, set())):
             ret_value = self.engine.unregister_memory(
                 self.tensor_store.get_tensor(**req_id_name_uuid).data_ptr()
             )
@@ -302,6 +304,11 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
             self.registered_for_send[request_id].discard(uuid)
             if not self.registered_for_send[request_id]:
                 del self.registered_for_send[request_id]
+        
+        if request_id in self.registered_for_recv:
+            self.registered_for_recv[request_id].discard(uuid)
+            if not self.registered_for_recv[request_id]:
+                del self.registered_for_recv[request_id]
 
     def cleanup(self, request_id: str, tensor_name: str, uuids: list[str] | None=None):
         if not self.tensor_store.check_name_presence(
@@ -430,6 +437,7 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
                     request_id=request_id, name=graph_ptr.name,
                     uuid=info.uuid, tensor=buffer
                 )
+                self.registered_for_recv.setdefault(request_id, set()).add(info.uuid)
 
                 if self.protocol == CommProtocol.RDMA:
                     if self.engine is None:
