@@ -286,12 +286,14 @@ class CacheHandle:
             self.request_states[to_key] = KVRequestState(
                 page_indices=new_pages,
                 seq_len=from_state.seq_len,
+                position_id_start=from_state.position_id_start,
             )
         else:
             # Dummy mode: just copy the state metadata
             self.request_states[to_key] = KVRequestState(
                 page_indices=list(from_state.page_indices),
                 seq_len=from_state.seq_len,
+                position_id_start=from_state.position_id_start,
             )
 
     def advance_seq_len(self, n: int, pos_id_n: int | None=None) -> None:
