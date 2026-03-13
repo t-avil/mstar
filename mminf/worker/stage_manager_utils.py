@@ -11,12 +11,12 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
-class StageAndPhase:
+class StageAndGraphWalk:
     """
-    Tuple of stage name and phase, e.g., (LLM, decode) or (flow, image_gen)
+    Tuple of stage name and graph walk, e.g., (LLM, decode) or (flow, image_gen)
     """
     stage: str
-    phase: str
+    graph_walk: str
 
 
 @dataclass
@@ -36,8 +36,8 @@ class WorkerGraphQueues:
     inputs for each request, and which stages are ready to run per request.
     """
     worker_graph_id: str
-    phases: set[str] # e.g., this worker graph is active during decode and image_gen
-                     # but not the prefill phase
+    graph_walks: set[str] # e.g., this worker graph is active during decode and image_gen
+                          # but not the prefill graph walk
     worker_graph: WorkerGraph
     per_request_queues: dict[str, PerRequestStageQueues] # request_id -> queue
 
@@ -108,25 +108,25 @@ class PerRequestInfo:
     """
     Information about a request that the worker needs to keep track of:
     - stage_to_worker: for all stages. This is, e.g., how we say that if
-        an output goes to (LLM, decode phase), what worker that points to.
+        an output goes to (LLM, decode graph walk), what worker that points to.
     - worker_graph_ids: mainly redundant information / syntactic sugar. This is
         the list of worker graph IDs that are on this worker and used by this request
-        (across all possible phases)
-    - current_phase: which computation path we’re currently on, e.g., prefill,
+        (across all possible graph walks)
+    - current_graph_walk: which computation path we’re currently on, e.g., prefill,
         decode, image_gen, etc.
-    - phase_worker_graph_ids: worker graph IDs used in the current phase (e.g., if there
+    - graph_walk_worker_graph_ids: worker graph IDs used in the current graph walk (e.g., if there
         is a prefill LLM worker graph and decode LLM worker graph and we are in decode,
         this list only includes the decode worker graph)
     - pending_persist_signals: buffered persist signals awaiting flush on
         WORKER_GRAPHS_DONE
     - tensors: TBD
     """
-    stage_to_worker: dict[StageAndPhase, str]  # for all stages
+    stage_to_worker: dict[StageAndGraphWalk, str]  # for all stages
     worker_graph_ids: list[str] # for this worker
-    current_phase: str = field(default=None)
+    current_graph_walk: str = field(default=None)
 
-    # phase_worker_graph_ids = worker graphs for current phase
-    phase_worker_graph_ids: list[str] = field(default_factory=list) # for this worker
+    # graph_walk_worker_graph_ids = worker graphs for current graph walk
+    graph_walk_worker_graph_ids: list[str] = field(default_factory=list) # for this worker
 
     pending_persist_signals: list[GraphEdge] = field(default_factory=list)
     pending_new_tokens: dict[str, list[int]] = field(default_factory=dict)
@@ -137,26 +137,26 @@ class WorkerGraphsManager:
     """
     Manages the worker graphs that this worker is responsible for, and the queues
     for each graph and request. Also keeps track of which stages belong
-    to which worker graphs, and which worker graphs belong to which phases, for
+    to which worker graphs, and which worker graphs belong to which graph walks, for
     routing external outputs to the correct worker.
     """
     queues: dict[str, WorkerGraphQueues] # worker graph id to queues
     per_request_info: dict[str, PerRequestInfo] # request id to info
 
     # The following two are for routing purposes:
-    all_worker_graph_ids_to_phases: dict[str, set[str]] # for worker graphs on different workers too
+    all_worker_graph_ids_to_graph_walks: dict[str, set[str]] # for worker graphs on different workers too
     all_worker_graph_ids_to_stages: dict[str, str] # for worker graphs on different workers too
 
-    def update_phase(self, request_id: str, phase: str):
-        if self.per_request_info[request_id].current_phase != phase:
-            self.per_request_info[request_id].current_phase = phase
-            self.per_request_info[request_id].phase_worker_graph_ids = [
+    def update_graph_walk(self, request_id: str, graph_walk: str):
+        if self.per_request_info[request_id].current_graph_walk != graph_walk:
+            self.per_request_info[request_id].current_graph_walk = graph_walk
+            self.per_request_info[request_id].graph_walk_worker_graph_ids = [
                 graph_id for graph_id in self.per_request_info[request_id].worker_graph_ids \
-                    if phase in self.all_worker_graph_ids_to_phases[graph_id]
+                    if graph_walk in self.all_worker_graph_ids_to_graph_walks[graph_id]
             ]
 
-    def get_phase(self, request_id: str):
-        return self.per_request_info[request_id].current_phase
+    def get_graph_walk(self, request_id: str):
+        return self.per_request_info[request_id].current_graph_walk
 
     def process_new_inputs(
         self,
@@ -166,7 +166,7 @@ class WorkerGraphsManager:
         """
         Updates queues with new inputs for a request.
         """
-        worker_graph_ids = self.per_request_info[request_id].phase_worker_graph_ids
+        worker_graph_ids = self.per_request_info[request_id].graph_walk_worker_graph_ids
         for worker_graph_id in worker_graph_ids:
             self.queues[worker_graph_id].process_new_inputs(request_id, inputs)
 
@@ -189,7 +189,7 @@ class WorkerGraphsManager:
         new_token_outputs = [edge for edge in outputs if edge.is_new_token]
 
         # (2) process all internal-facing outputs
-        worker_graph_ids = self.per_request_info[request_id].phase_worker_graph_ids
+        worker_graph_ids = self.per_request_info[request_id].graph_walk_worker_graph_ids
 
         completed_worker_graph_ids = []
         routed_to_this_worker: list[GraphEdge] = [] # list of graph edges
@@ -218,19 +218,19 @@ class WorkerGraphsManager:
         to_workers: dict[str, list[GraphEdge]] = {}
         stream_out: list[GraphEdge] = []
         for edge in external_outputs:
-            stage_phase = StageAndPhase(
-                stage=edge.next_stage, phase=self.get_phase(request_id)
+            stage_graph_walk = StageAndGraphWalk(
+                stage=edge.next_stage, graph_walk=self.get_graph_walk(request_id)
             )
-            if stage_phase not in self.per_request_info[request_id].stage_to_worker:
+            if stage_graph_walk not in self.per_request_info[request_id].stage_to_worker:
                 if edge.next_stage in SPECIAL_DESTINATIONS or edge.persist:
                     if edge.next_stage == STREAM_OUT:
                         stream_out.append(edge)
                     continue  # e.g., stream_out — already captured in to_conductor
                 raise ValueError(
-                    f"Output edge targets unknown stage/phase: {stage_phase}. "
+                    f"Output edge targets unknown stage/graph walk: {stage_graph_walk}. "
                     f"Check graph construction."
                 )
-            worker_id = self.per_request_info[request_id].stage_to_worker[stage_phase]
+            worker_id = self.per_request_info[request_id].stage_to_worker[stage_graph_walk]
             if worker_id not in to_workers:
                 to_workers[worker_id] = []
             to_workers[worker_id].append(edge)
@@ -268,11 +268,11 @@ class WorkerGraphsManager:
             self.queues[graph_id].add_request(request_id)
 
         for worker_graph_id, worker_id in worker_graph_to_worker.items():
-            for phase in self.all_worker_graph_ids_to_phases[worker_graph_id]:
+            for graph_walk in self.all_worker_graph_ids_to_graph_walks[worker_graph_id]:
                 stage_to_worker.update({
-                    StageAndPhase(
+                    StageAndGraphWalk(
                         stage=name,
-                        phase=phase
+                        graph_walk=graph_walk
                     ): worker_id for name in self.all_worker_graph_ids_to_stages[worker_graph_id]
                 })
         self.per_request_info[request_id] = PerRequestInfo(

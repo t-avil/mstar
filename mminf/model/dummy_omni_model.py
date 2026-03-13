@@ -9,7 +9,7 @@ class DummyOmniModel(Model):
     """
     Qwen3-Omni-inspired dummy model for testing speech generation graphs.
 
-    Phases:
+    Graph walks:
       prefill: ThinkerLLM -> TalkerLLM -> MTP x16 -> AudioCodec
       decode:  ThinkerLLM -> TalkerLLM -> MTP x16 -> AudioCodec
 
@@ -17,7 +17,7 @@ class DummyOmniModel(Model):
     """
 
     def _make_full_graph(self):
-        """Build the full sequential graph shared by both phases."""
+        """Build the full sequential graph shared by both graph walks."""
         return Sequential([
             GraphStage(
                 name="ThinkerLLM",
@@ -74,7 +74,7 @@ class DummyOmniModel(Model):
             max_seq_len=1,
         )
 
-    def get_phase_graphs(self):
+    def get_graph_walk_graphs(self):
         return dict(
             prefill=self._make_full_graph(),
             decode=self._make_full_graph(),
@@ -86,7 +86,7 @@ class DummyOmniModel(Model):
         return CurrentForwardMetadata(
             input_modalities=input_modalities,
             output_modalities=output_modalities,
-            phase="prefill",
+            graph_walk="prefill",
             is_prefill=True,
         )
 
@@ -103,7 +103,7 @@ class DummyOmniModel(Model):
         self, metadata: CurrentForwardMetadata,
         new_tokens: dict[str, list[int]],
     ) -> CurrentForwardMetadata:
-        if metadata.phase == "prefill":
+        if metadata.graph_walk == "prefill":
             metadata.is_prefill = False
-            metadata.phase = "decode"
+            metadata.graph_walk = "decode"
         return metadata

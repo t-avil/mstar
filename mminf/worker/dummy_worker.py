@@ -27,7 +27,7 @@ class DummyWorker:
         worker_id: str,
         worker_ids: list[str],
         my_worker_graphs: list[WorkerGraph],
-        all_worker_graph_ids_to_phases: dict[str, set[str]], # for all worker graphs
+        all_worker_graph_ids_to_graph_walks: dict[str, set[str]], # for all worker graphs
         all_worker_graph_ids_to_stages: dict[str, list[str]], # for all worker graphs
         hostname: str="localhost", # TODO: figure this out
         socket_path_prefix: str="/tmp/mminf",
@@ -43,13 +43,13 @@ class DummyWorker:
             queues={
                 worker_graph.worker_graph_id: WorkerGraphQueues(
                     worker_graph_id=worker_graph.worker_graph_id,
-                    phases=worker_graph.phases,
+                    graph_walks=worker_graph.graph_walks,
                     worker_graph=worker_graph,
                     per_request_queues={}
                 ) for worker_graph in my_worker_graphs
             },
             per_request_info={},
-            all_worker_graph_ids_to_phases=all_worker_graph_ids_to_phases,
+            all_worker_graph_ids_to_graph_walks=all_worker_graph_ids_to_graph_walks,
             all_worker_graph_ids_to_stages=all_worker_graph_ids_to_stages
         )
 
@@ -79,8 +79,8 @@ class DummyWorker:
 
         # TODO Atindra: start reading in tensors from body.initial_inputs
 
-        self.worker_graphs_manager.update_phase(
-            body.request_id, body.initial_phase
+        self.worker_graphs_manager.update_graph_walk(
+            body.request_id, body.initial_graph_walk
         )
         self.worker_graphs_manager.process_new_inputs(
             request_id=body.request_id,
@@ -111,8 +111,8 @@ class DummyWorker:
         process those inputs (update the ready/waiting queues for the proper
         worker graphs on this worker, e.g.)
         """
-        self.worker_graphs_manager.update_phase(
-            body.request_id, body.phase
+        self.worker_graphs_manager.update_graph_walk(
+            body.request_id, body.graph_walk
         )
 
         # TODO Atindra: start reading in tensors from body.initial_inputs
@@ -149,7 +149,7 @@ class DummyWorker:
                 message_type=WorkerMessageType.INPUT_SIGNALS,
                 body=InputSignals(
                     request_id=request_id,
-                    phase=self.worker_graphs_manager.get_phase(request_id),
+                    graph_walk=self.worker_graphs_manager.get_graph_walk(request_id),
                     inputs=outputs.to_workers[worker]
                 )
             )

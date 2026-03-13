@@ -23,11 +23,11 @@ class StageSubmodule(torch.nn.Module):
     and CUDA graphs on the forward() path.
 
     Engine call pattern:
-        preprocessed = submodule.preprocess(phase, **inputs)  # list → tensors
+        preprocessed = submodule.preprocess(graph_walk, **inputs)  # list → tensors
         result = submodule(**preprocessed)                     # tensor → tensor (compilable)
     """
 
-    def preprocess(self, phase: str, **inputs: list[torch.Tensor]) -> dict[str, torch.Tensor]:
+    def preprocess(self, graph_walk: str, **inputs: list[torch.Tensor]) -> dict[str, torch.Tensor]:
         """
         Convert variable-length list[Tensor] inputs to fixed tensors.
         NOT compiled — handles Python-level variability.
@@ -49,7 +49,7 @@ class StageSubmodule(torch.nn.Module):
 @dataclass
 class WorkerGraph:
     section: GraphSection
-    phases: set[str] # e.g., prefill, decode, image_gen
+    graph_walks: set[str] # e.g., prefill, decode, image_gen
     consumes_stream: bool = field(default=False)
     ranks: list[int] = field(default_factory=list)
     _group_id: int = field(default=-1) # used in going from config yaml to worker graphs
@@ -74,7 +74,7 @@ def _combine_sections_sequential_or_parallel(
 
 def _divide_into_worker_graphs(
     graph: GraphSection,
-    phase: str,
+    graph_walk: str,
     stage_to_group_idx: dict[str, int],
     stage_groups: list[dict]
 ) -> list[WorkerGraph]:
@@ -84,7 +84,7 @@ def _divide_into_worker_graphs(
     if isinstance(graph, GraphStage):
         return [WorkerGraph(
             section=graph,
-            phases=set([phase]),
+            graph_walks=set([graph_walk]),
             consumes_stream=graph.consumes_stream,
             _group_id=stage_to_group_idx[graph.name],
             ranks=stage_groups[stage_to_group_idx[graph.name]]["ranks"]
@@ -93,7 +93,7 @@ def _divide_into_worker_graphs(
     if isinstance(graph, Sequential):
         worker_graphs = _divide_into_worker_graphs(
             graph.sections[0],
-            phase=phase,
+            graph_walk=graph_walk,
             stage_to_group_idx=stage_to_group_idx,
             stage_groups=stage_groups
         )
@@ -103,7 +103,7 @@ def _divide_into_worker_graphs(
             # that are on the same device
             new_worker_graphs = _divide_into_worker_graphs(
                 graph.sections[i],
-                phase=phase,
+                graph_walk=graph_walk,
                 stage_to_group_idx=stage_to_group_idx,
                 stage_groups=stage_groups
             )
@@ -119,7 +119,7 @@ def _divide_into_worker_graphs(
     if isinstance(graph, Parallel):
         all_worker_graphs = [
             _divide_into_worker_graphs(
-                s, phase=phase,
+                s, graph_walk=graph_walk,
                 stage_to_group_idx=stage_to_group_idx,
                 stage_groups=stage_groups
             ) for s in graph.sections
@@ -146,7 +146,7 @@ def _divide_into_worker_graphs(
     if isinstance(graph, Loop):
         loop_section_worker_graphs = _divide_into_worker_graphs(
             graph.section,
-            phase=phase,
+            graph_walk=graph_walk,
             stage_to_group_idx=stage_to_group_idx,
             stage_groups=stage_groups
         )
@@ -177,7 +177,7 @@ class CurrentForwardMetadata:
     """
     input_modalities: list[str]
     output_modalities: list[str]
-    phase: str
+    graph_walk: str
     is_prefill: bool
     kwargs: dict = field(default_factory=dict)
 
@@ -201,13 +201,13 @@ class ForwardPassArgs:
 
 
 class Model(ABC):
-    def _get_worker_graphs_for_phase(
-        self, phase_name: str, graph: GraphSection,
+    def _get_worker_graphs_for_graph_walk(
+        self, graph_walk: str, graph: GraphSection,
         stage_groups: list[dict],
     ):
         stage_groups = [
             g for g in stage_groups if (
-                "phases" not in g or phase_name in g["phases"]
+                "graph_walks" not in g or graph_walk in g["graph_walks"]
             )
         ]
         stage_to_group_idx: dict[str, int] = {}
@@ -218,7 +218,7 @@ class Model(ABC):
 
         return _divide_into_worker_graphs(
             graph,
-            phase=phase_name,
+            graph_walk=graph_walk,
             stage_to_group_idx=stage_to_group_idx,
             stage_groups=stage_groups
         )
@@ -227,10 +227,10 @@ class Model(ABC):
         with open(config_path, "r") as f:
             stage_groups = yaml.safe_load(f)["stage_groups"]
 
-        # TODO: merge identical worker graphs from different phases
+        # TODO: merge identical worker graphs from different graph walks
         return sum([
-            self._get_worker_graphs_for_phase(phase, graph, stage_groups) \
-                for phase, graph in self.get_phase_graphs().items()
+            self._get_worker_graphs_for_graph_walk(graph_walk, graph, stage_groups) \
+                for graph_walk, graph in self.get_graph_walk_graphs().items()
         ], start=[])
 
     @abstractmethod
@@ -238,7 +238,7 @@ class Model(ABC):
         pass
 
     @abstractmethod
-    def get_phase_graphs(self) -> dict[str, GraphSection]:
+    def get_graph_walk_graphs(self) -> dict[str, GraphSection]:
         pass
 
     @abstractmethod

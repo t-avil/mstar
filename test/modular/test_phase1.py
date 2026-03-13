@@ -1,5 +1,5 @@
 """
-Phase 1 tests: Engine execution + Mooncake integration.
+GraphWalk 1 tests: Engine execution + Mooncake integration.
 Tests engines in dummy mode (model=None, no GPU required) and verifies
 the interleaved LLM<->flow loop fires stages in the correct order.
 """
@@ -81,7 +81,7 @@ class TestEngines:
     def _make_batch(self, stage_name: str, request_ids: list[str]) -> StageBatch:
         return StageBatch(
             stage_name=stage_name,
-            phase="test",
+            graph_walk="test",
             request_ids=request_ids,
             per_request_input_tensors={rid: {} for rid in request_ids},
         )
@@ -193,7 +193,7 @@ class TestEngineManager:
 
 class TestImageGenLoop:
     """
-    Uses DummyModel's image_gen phase graph to verify the interleaved
+    Uses DummyModel's image_gen graph walk to verify the interleaved
     LLM<->flow loop fires stages in the correct order.
 
     The image_gen graph structure:
@@ -210,7 +210,7 @@ class TestImageGenLoop:
 
     def _build_image_gen_graph(self):
         model = DummyModel()
-        graphs = model.get_phase_graphs()
+        graphs = model.get_graph_walk_graphs()
         return graphs["image_gen"]
 
     def test_loop_stage_order(self):
@@ -275,7 +275,7 @@ class TestImageGenLoop:
         worker_graph_id = "sg_image_gen"
         worker_graph = WorkerGraph(
             section=graph,
-            phases={"image_gen"},
+            graph_walks={"image_gen"},
             worker_graph_id=worker_graph_id,
         )
 
@@ -283,13 +283,13 @@ class TestImageGenLoop:
             queues={
                 worker_graph_id: WorkerGraphQueues(
                     worker_graph_id=worker_graph_id,
-                    phases={"image_gen"},
+                    graph_walks={"image_gen"},
                     worker_graph=worker_graph,
                     per_request_queues={},
                 )
             },
             per_request_info={},
-            all_worker_graph_ids_to_phases={worker_graph_id: {"image_gen"}},
+            all_worker_graph_ids_to_graph_walks={worker_graph_id: {"image_gen"}},
             all_worker_graph_ids_to_stages={
                 worker_graph_id: graph.get_stage_names()
             },
@@ -302,7 +302,7 @@ class TestImageGenLoop:
             worker_graph_ids=[worker_graph_id],
             worker_graph_to_worker={worker_graph_id: "worker_0"},
         )
-        manager.update_phase(request_id, "image_gen")
+        manager.update_graph_walk(request_id, "image_gen")
 
         # Provide initial inputs
         initial_inputs = [
@@ -351,7 +351,7 @@ class TestImageGenLoop:
         worker_graph_id = "sg_test"
         worker_graph = WorkerGraph(
             section=graph,
-            phases={"image_gen"},
+            graph_walks={"image_gen"},
             worker_graph_id=worker_graph_id,
         )
 
@@ -373,13 +373,13 @@ class TestImageGenLoop:
             queues={
                 worker_graph_id: WorkerGraphQueues(
                     worker_graph_id=worker_graph_id,
-                    phases={"image_gen"},
+                    graph_walks={"image_gen"},
                     worker_graph=worker_graph,
                     per_request_queues={},
                 )
             },
             per_request_info={},
-            all_worker_graph_ids_to_phases={worker_graph_id: {"image_gen"}},
+            all_worker_graph_ids_to_graph_walks={worker_graph_id: {"image_gen"}},
             all_worker_graph_ids_to_stages={
                 worker_graph_id: graph.get_stage_names()
             },
@@ -391,7 +391,7 @@ class TestImageGenLoop:
             worker_graph_ids=[worker_graph_id],
             worker_graph_to_worker={worker_graph_id: "w0"},
         )
-        manager.update_phase(request_id, "image_gen")
+        manager.update_graph_walk(request_id, "image_gen")
 
         # Initially no stages ready
         batch = scheduler.get_next_batch(manager)
@@ -423,7 +423,7 @@ class TestPrefillDecodeGraph:
     def test_prefill_graph(self):
         """Verify prefill graph fires text_emb + image_emb -> concat -> LLM."""
         model = DummyModel()
-        graphs = model.get_phase_graphs()
+        graphs = model.get_graph_walk_graphs()
         prefill = graphs["prefill"]
 
         queues = PerRequestStageQueues(waiting=prefill)

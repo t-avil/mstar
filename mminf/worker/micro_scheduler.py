@@ -14,14 +14,14 @@ class ReadyStageEntry:
     """A ready stage entry for a single request."""
     request_id: str
     worker_graph_id: str
-    phase: str
+    graph_walk: str
 
 
 @dataclass
 class ScheduledBatch:
     """A batch of stages ready to be executed."""
     stage_name: str
-    phase: str
+    graph_walk: str
     stage_objects: dict[str,GraphStage]
 
 
@@ -51,7 +51,7 @@ class MicroScheduler:
         Scans all worker graph queues for ready stages.
         Groups by stage name. Returns highest-priority group.
         """
-        # Collect all ready (stage_name, request_id, phase) tuples
+        # Collect all ready (stage_name, request_id, graph_walk) tuples
         # grouped by stage name
         stage_name_to_requests: dict[str, list[ReadyStageEntry]] = {}
 
@@ -60,10 +60,10 @@ class MicroScheduler:
             for request_id, stage_names in ready_map.items():
                 if request_id not in worker_graphs_manager.per_request_info:
                     continue  # request was removed between scheduling cycles
-                phase = worker_graphs_manager.get_phase(request_id)
+                graph_walk = worker_graphs_manager.get_graph_walk(request_id)
                 for sname in stage_names:
                     stage_name_to_requests.setdefault(sname, []).append(
-                        ReadyStageEntry(request_id, worker_graph_id, phase)
+                        ReadyStageEntry(request_id, worker_graph_id, graph_walk)
                     )
 
         if not stage_name_to_requests:
@@ -88,7 +88,7 @@ class MicroScheduler:
         # Pop ready stages for all requests of this stage name
         entries = stage_name_to_requests[best_stage_name]
         stage_objects = {}
-        phase = entries[0].phase
+        graph_walk = entries[0].graph_walk
 
         for entry in entries:
             queue = worker_graphs_manager.queues[entry.worker_graph_id]
@@ -96,18 +96,18 @@ class MicroScheduler:
             if popped:
                 assert len(popped) == 1
                 stage_objects[entry.request_id] = popped[0]
-                phase = entry.phase
+                graph_walk = entry.graph_walk
 
         if not stage_objects:
             return None
 
         logger.debug(
-            "MicroScheduler scheduling stage %s with phase %s for %d requests",
-            best_stage_name, phase, len(stage_objects)
+            "MicroScheduler scheduling stage %s with graph walk %s for %d requests",
+            best_stage_name, graph_walk, len(stage_objects)
         )
 
         return ScheduledBatch(
             stage_name=best_stage_name,
-            phase=phase,
+            graph_walk=graph_walk,
             stage_objects=stage_objects
         )

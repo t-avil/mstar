@@ -45,7 +45,7 @@ class Worker:
         worker_ids: list[str],
         my_worker_graphs: list[WorkerGraph],
         engine_configs: list[dict],
-        all_worker_graph_ids_to_phases: dict[str, set[str]],
+        all_worker_graph_ids_to_graph_walks: dict[str, set[str]],
         all_worker_graph_ids_to_stages: dict[str, list[str]],
         hostname: str = "localhost",
         socket_path_prefix: str = "/tmp/mminf",
@@ -60,14 +60,14 @@ class Worker:
             queues={
                 worker_graph.worker_graph_id: WorkerGraphQueues(
                     worker_graph_id=worker_graph.worker_graph_id,
-                    phases=worker_graph.phases,
+                    graph_walks=worker_graph.graph_walks,
                     worker_graph=worker_graph,
                     per_request_queues={},
                 )
                 for worker_graph in my_worker_graphs
             },
             per_request_info={},
-            all_worker_graph_ids_to_phases=all_worker_graph_ids_to_phases,
+            all_worker_graph_ids_to_graph_walks=all_worker_graph_ids_to_graph_walks,
             all_worker_graph_ids_to_stages=all_worker_graph_ids_to_stages,
         )
 
@@ -105,12 +105,12 @@ class Worker:
         )
         self.engine_manager.add_request(body.request_id)
 
-        self.worker_graphs_manager.update_phase(
-            body.request_id, body.initial_phase
+        self.worker_graphs_manager.update_graph_walk(
+            body.request_id, body.initial_graph_walk
         )
         logger.debug(
-            "Request %s set to phase %s on worker %s",
-            body.request_id, body.initial_phase, self.worker_id
+            "Request %s set to graph walk %s on worker %s",
+            body.request_id, body.initial_graph_walk, self.worker_id
         )
 
         # Store per-request metadata from conductor
@@ -151,10 +151,10 @@ class Worker:
             )
 
     def _process_new_inputs(self, body: InputSignals) -> None:
-        self.worker_graphs_manager.update_phase(body.request_id, body.phase)
+        self.worker_graphs_manager.update_graph_walk(body.request_id, body.graph_walk)
         logger.debug(
-            "Request %s set to phase %s on worker %s",
-            body.request_id, body.phase, self.worker_id
+            "Request %s set to graph walk %s on worker %s",
+            body.request_id, body.graph_walk, self.worker_id
         )
 
         logger.debug(
@@ -254,7 +254,7 @@ class Worker:
 
         return StageBatch(
             stage_name=batch.stage_name,
-            phase=batch.phase,
+            graph_walk=batch.graph_walk,
             request_ids=list(batch.stage_objects.keys()),
             per_request_input_tensors=per_request_inputs,
             per_request_metadata=per_request_metadata,
@@ -345,7 +345,7 @@ class Worker:
                 message_type=WorkerMessageType.INPUT_SIGNALS,
                 body=InputSignals(
                     request_id=request_id,
-                    phase=self.worker_graphs_manager.get_phase(request_id),
+                    graph_walk=self.worker_graphs_manager.get_graph_walk(request_id),
                     inputs=edges,
                 ),
             )

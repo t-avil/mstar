@@ -3,14 +3,14 @@ stage_groups:
       - ThinkerLLM
     ranks:
       - 0
-    phases:
+    graph_walks:
       - prefill
 
   - stage_names:
       - ThinkerLLM
     ranks:
       - 1
-    phases:
+    graph_walks:
       - decode
 
   - stage_names:

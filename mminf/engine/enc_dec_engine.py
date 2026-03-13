@@ -42,7 +42,7 @@ class EncoderDecoderEngine(BaseEngine):
                 metadata = batch.per_request_metadata.get(rid, {})
                 if hasattr(submodule, 'preprocess'):
                     # torch.nn.Module: preprocess (list → tensor) then forward
-                    preprocessed = submodule.preprocess(batch.phase, **inputs)
+                    preprocessed = submodule.preprocess(batch.graph_walk, **inputs)
                     outputs[rid] = submodule(**preprocessed, **metadata)
                 else:
                     # Raw nn.Module: unwrap single tensors, run, re-wrap

@@ -96,7 +96,7 @@ class TestDeriveWorkerInfo:
             conductor.shutdown()
 
     def test_global_worker_graph_maps(self):
-        """Verify all_worker_graph_ids_to_phases and all_worker_graph_ids_to_stages are populated."""
+        """Verify all_worker_graph_ids_to_graph_walks and all_worker_graph_ids_to_stages are populated."""
         from mminf.conductor.conductor import Conductor
 
         model = DummyModel()
@@ -106,13 +106,13 @@ class TestDeriveWorkerInfo:
                 model_config_file=CONFIG_PATH,
                 socket_path_prefix=os.path.join(tmpdir, "ipc_worker_graphs_global"),
             )
-            assert len(conductor._all_worker_graph_ids_to_phases) == len(conductor.worker_graphs)
+            assert len(conductor._all_worker_graph_ids_to_graph_walks) == len(conductor.worker_graphs)
             assert len(conductor._all_worker_graph_ids_to_stages) == len(conductor.worker_graphs)
 
             for worker_graph_id in conductor.worker_graphs:
-                assert worker_graph_id in conductor._all_worker_graph_ids_to_phases
+                assert worker_graph_id in conductor._all_worker_graph_ids_to_graph_walks
                 assert worker_graph_id in conductor._all_worker_graph_ids_to_stages
-                assert len(conductor._all_worker_graph_ids_to_phases[worker_graph_id]) > 0
+                assert len(conductor._all_worker_graph_ids_to_graph_walks[worker_graph_id]) > 0
                 assert len(conductor._all_worker_graph_ids_to_stages[worker_graph_id]) > 0
             conductor.shutdown()
 

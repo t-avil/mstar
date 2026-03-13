@@ -429,10 +429,10 @@ class AREngine(BaseEngine):
             inputs = batch.per_request_input_tensors.get(rid, {})
             metadata = batch.per_request_metadata.get(rid, {})
 
-            preprocessed = submodule.preprocess(batch.phase, **inputs)
+            preprocessed = submodule.preprocess(batch.graph_walk, **inputs)
             with torch.no_grad():
                 output = submodule(
-                    phase=batch.phase,
+                    graph_walk=batch.graph_walk,
                     cache_handle=cache_handle,
                     **preprocessed,
                     **metadata,

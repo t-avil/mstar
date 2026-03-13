@@ -22,16 +22,16 @@ stage_groups:
       - LLM
     ranks:
       - 1
-    phases:
+    graph_walks:
       - prefill
-  
+
   - stage_names:
       - LLM
       - flow
     ranks:
       - 2
       - 3
-    phases:
+    graph_walks:
       - decode
       - image_gen
   

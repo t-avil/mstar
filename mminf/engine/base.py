@@ -18,7 +18,7 @@ class EngineType(Enum):
 class StageBatch:
     """Input to an engine's execute_batch()."""
     stage_name: str
-    phase: str
+    graph_walk: str
     request_ids: list[str]
 
     # {request_id: {input_name: list[tensor]}}

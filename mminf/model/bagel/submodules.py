@@ -51,7 +51,7 @@ class ViTEncoderSubmodule(StageSubmodule):
         self.transform = ImageTransform(980, 224, 14)
         self.vae_transform = ImageTransform(1024, 512, 16)
 
-    def preprocess(self, phase: str, image_inputs: list[torch.Tensor]) -> dict:
+    def preprocess(self, graph_walk: str, image_inputs: list[torch.Tensor]) -> dict:
         """Convert raw images to packed ViT input format.
 
         Full implementation should include prepare_vit_images logic from BAGEL:
@@ -142,7 +142,7 @@ class VAEEncoderSubmodule(StageSubmodule):
         self.max_latent_size = max_latent_size
         self.transform = ImageTransform(1024, 512, 16)
 
-    def preprocess(self, phase: str, image_inputs: list[torch.Tensor]) -> dict:
+    def preprocess(self, graph_walk: str, image_inputs: list[torch.Tensor]) -> dict:
         """Convert raw images to VAE encoder input format.
 
         Computes patchified dimensions as Python ints for CUDA graph
@@ -217,10 +217,10 @@ class VAEEncoderSubmodule(StageSubmodule):
 
 
 class LLMSubmodule(StageSubmodule):
-    """Fat LLM wrapper that dispatches based on phase.
+    """Fat LLM wrapper that dispatches based on graph walk.
 
     Absorbs text_emb, lm_head, and flow_proj into a single stage to avoid
-    unnecessary IPC overhead. Phase-based dispatch handles:
+    unnecessary IPC overhead. Graph walk-based dispatch handles:
 
       - prefill_text: embed_tokens -> LLM forward (causal, mode="und")
       - prefill_vit:  BOI + vit_emb + EOI -> LLM forward (bidirectional)
@@ -242,7 +242,7 @@ class LLMSubmodule(StageSubmodule):
     followed by an Euler step: x_{t+1} = x_t + v_final * dt.
 
     Multi-cache orchestration is driven by the requires_cfg flag in
-    per-request metadata. When True, phase methods manage 3 caches:
+    per-request metadata. When True, graph walk methods manage 3 caches:
       - prefill_text: snapshot main->cfg_text, forward [main, cfg_img]
       - prefill_vit/vae: forward [main], snapshot main->cfg_text
       - decode: forward [main, cfg_img]
@@ -293,37 +293,37 @@ class LLMSubmodule(StageSubmodule):
             self.config.vae_config.z_channels * self.config.latent_patch_size ** 2,
         ).to(device=device, dtype=torch.bfloat16)
 
-    def preprocess(self, phase: str, **inputs: list[torch.Tensor]) -> dict[str, torch.Tensor]:
+    def preprocess(self, graph_walk: str, **inputs: list[torch.Tensor]) -> dict[str, torch.Tensor]:
         """Unwrap single-element tensor lists and handle latent initialization.
 
-        For image_gen phase: if "latents" input is empty (first flow matching
+        For image_gen graph walk: if "latents" input is empty (first flow matching
         iteration), initializes random noise. The latent shape (latent_seq_len,
         latent_dim) must be provided via per-request metadata since it depends
         on the output image dimensions.
 
-        For all other phases: standard unwrapping of list[Tensor] -> Tensor.
+        For all other graph walks: standard unwrapping of list[Tensor] -> Tensor.
         """
         device = next(self.parameters()).device
         result = {}
-        if phase == "prefill_text":
+        if graph_walk == "prefill_text":
             # Wrap with BOS EOS
             result["text_inputs"] = inputs["text_inputs"][0].new_zeros(inputs["text_inputs"][0].shape[0] + 2)
             result["text_inputs"][0] = self.bos_token_id
             result["text_inputs"][-1] = self.eos_token_id
             result["text_inputs"][1:-1] = inputs["text_inputs"][0]
-        elif phase == "decode" and len(inputs["text_inputs"]) > 0:
+        elif graph_walk == "decode" and len(inputs["text_inputs"]) > 0:
             result["text_inputs"] = inputs["text_inputs"][0]
-        elif phase == "decode":
+        elif graph_walk == "decode":
             result["text_inputs"] = torch.tensor([self.bos_token_id], device=device)
 
-        if phase in ["prefill_vit", "prefill_vae"]:
+        if graph_walk in ["prefill_vit", "prefill_vae"]:
             img_emb = inputs["img_emb"][0]
             result["combined_emb"] = self._wrap_with_boi_eoi(img_emb)
             result["empty_pos_ids"] = torch.zeros(
                 result["combined_emb"].shape[0], dtype=torch.int32, device=device
             )
 
-        if phase == "prefill_vae":
+        if graph_walk == "prefill_vae":
             text_len = result["combined_emb"].shape[0]
             result["text_indexes"] = torch.zeros(
                 text_len, dtype=torch.bool, device=device
@@ -335,7 +335,7 @@ class LLMSubmodule(StageSubmodule):
                 dtype=torch.long, device=device
             )
 
-        if phase == "image_gen":
+        if graph_walk == "image_gen":
             H, W = 1024, 1024 # TODO: make this configurable?
             result["vae_position_ids"] = get_flattened_position_ids_extrapolate(
                 H, W,
@@ -375,25 +375,25 @@ class LLMSubmodule(StageSubmodule):
 
         return result
 
-    def forward(self, phase: str, cache_handle=None, **kwargs) -> NameToTensorList:
+    def forward(self, graph_walk: str, cache_handle=None, **kwargs) -> NameToTensorList:
         inputs_and_shapes = ", ".join([
             (f"{key} (shape={val.shape})" if isinstance(val, torch.Tensor) else key) \
                 for key, val in kwargs.items()
         ])
-        logger.debug("Running BAGEL LLM for phase %s and inputs %s", phase, inputs_and_shapes)
+        logger.debug("Running BAGEL LLM for graph walk %s and inputs %s", graph_walk, inputs_and_shapes)
 
-        if phase == "prefill_text":
+        if graph_walk == "prefill_text":
             return self._forward_prefill_text(cache_handle=cache_handle, **kwargs)
-        elif phase == "prefill_vit":
+        elif graph_walk == "prefill_vit":
             return self._forward_prefill_vit(cache_handle=cache_handle, **kwargs)
-        elif phase == "prefill_vae":
+        elif graph_walk == "prefill_vae":
             return self._forward_prefill_vae(cache_handle=cache_handle, **kwargs)
-        elif phase == "decode":
+        elif graph_walk == "decode":
             return self._forward_decode(cache_handle=cache_handle, **kwargs)
-        elif phase == "image_gen":
+        elif graph_walk == "image_gen":
             return self._forward_image_gen(cache_handle=cache_handle, **kwargs)
         else:
-            raise ValueError(f"Unknown LLM phase: {phase!r}")
+            raise ValueError(f"Unknown LLM graph walk: {graph_walk!r}")
 
     def _forward_prefill_text(
         self, text_inputs: torch.Tensor,
@@ -719,7 +719,7 @@ class VAEDecoderSubmodule(StageSubmodule):
         self.latent_channel = latent_channel
         self.latent_downsample = latent_downsample
 
-    def preprocess(self, phase: str, latents: list[torch.Tensor]) -> dict:
+    def preprocess(self, graph_walk: str, latents: list[torch.Tensor]) -> dict:
         """Prepare VAE decoder inputs.
 
         Unwraps latents from list. Image dimensions (image_h, image_w)

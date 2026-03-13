@@ -37,7 +37,7 @@ class NewRequest(MessageBody):
     request_id: str
     worker_graph_ids: list[str]
     worker_graph_to_worker: dict[str, str]
-    initial_phase: str
+    initial_graph_walk: str
     initial_inputs: list[GraphEdge]
     per_request_metadata: dict = field(default_factory=dict)
 
@@ -50,7 +50,7 @@ class RemoveRequest(MessageBody):
 @dataclass
 class InputSignals(MessageBody):
     request_id: str
-    phase: str
+    graph_walk: str
     inputs: list[GraphEdge]
     per_request_metadata: dict = field(default_factory=dict)
 

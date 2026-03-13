@@ -33,7 +33,7 @@ def _worker_process_target(
     worker_ids: list[str],
     worker_graphs: list[WorkerGraph],
     engine_configs: list[dict],
-    all_worker_graph_ids_to_phases: dict[str, set[str]],
+    all_worker_graph_ids_to_graph_walks: dict[str, set[str]],
     all_worker_graph_ids_to_stages: dict[str, list[str]],
     hostname: str,
     socket_path_prefix: str,
@@ -58,7 +58,7 @@ def _worker_process_target(
         worker_ids=worker_ids,
         my_worker_graphs=worker_graphs,
         engine_configs=engine_configs,
-        all_worker_graph_ids_to_phases=all_worker_graph_ids_to_phases,
+        all_worker_graph_ids_to_graph_walks=all_worker_graph_ids_to_graph_walks,
         all_worker_graph_ids_to_stages=all_worker_graph_ids_to_stages,
         hostname=hostname,
         socket_path_prefix=socket_path_prefix,
@@ -180,8 +180,8 @@ class Conductor:
             ]
 
         # Global maps needed by all workers
-        self._all_worker_graph_ids_to_phases: dict[str, set[str]] = {
-            worker_graph_id: worker_graph.phases for worker_graph_id, worker_graph in self.worker_graphs.items()
+        self._all_worker_graph_ids_to_graph_walks: dict[str, set[str]] = {
+            worker_graph_id: worker_graph.graph_walks for worker_graph_id, worker_graph in self.worker_graphs.items()
         }
         self._all_worker_graph_ids_to_stages: dict[str, list[str]] = {
             worker_graph_id: worker_graph.section.get_stage_names() for worker_graph_id, worker_graph in self.worker_graphs.items()
@@ -198,7 +198,7 @@ class Conductor:
                     "worker_ids": self.worker_ids,
                     "my_worker_graphs": self._per_worker_graphs[worker_id],
                     "engine_configs": self._per_worker_engine_configs[worker_id],
-                    "all_worker_graph_ids_to_phases": self._all_worker_graph_ids_to_phases,
+                    "all_worker_graph_ids_to_graph_walks": self._all_worker_graph_ids_to_graph_walks,
                     "all_worker_graph_ids_to_stages": self._all_worker_graph_ids_to_stages,
                     "hostname": self.hostname,
                     "socket_path_prefix": self.socket_path_prefix,
@@ -238,7 +238,7 @@ class Conductor:
     def _split_inputs_to_workers(
         self, worker_graph_to_worker: dict[str, str],
         inputs: list[GraphEdge],
-        phase: str
+        graph_walk: str
     ) -> dict[str, list[GraphEdge]]:
         """
         Given the full ForwardPassInputs for kicking off a new forward pass,
@@ -248,7 +248,7 @@ class Conductor:
         inputs_per_worker: dict[str, list[GraphEdge]] = {}
         for worker_graph_id, worker_id in worker_graph_to_worker.items():
             worker_graph = self.worker_graphs[worker_graph_id]
-            if phase not in worker_graph.phases:
+            if graph_walk not in worker_graph.graph_walks:
                 continue
             stages = set(worker_graph.section.get_stage_names())
 
@@ -264,7 +264,7 @@ class Conductor:
     ):
         self._set_current_worker_graph_ids(
             request_id,
-            args.full_metadata.phase
+            args.full_metadata.graph_walk
         )
         self.requests[request_id].current_forward_metadata = args.full_metadata
         self.requests[request_id].fwd_inputs = args.inputs
@@ -310,9 +310,9 @@ class Conductor:
     ):
         """
         When a new request comes in from the API server, assign workers for each
-        worker graph (for all possible execution phases, e.g., prefill, decode, image_gen),
+        worker graph for all possible graph walks, e.g., prefill, decode, image_gen),
         and notify the workers that the request has arrived + provide the appropriate
-        workers with the appropriate initial inputs for the forward pass
+        workers with the appropriate initial inputs for the forward pass.
         """
         logger.debug("Conductor ingesting request %s", body.request_id)
         worker_graph_to_worker = self._assign_worker_graphs_to_workers()
@@ -341,7 +341,7 @@ class Conductor:
         inputs_per_worker = self._split_inputs_to_workers(
             worker_graph_to_worker=worker_graph_to_worker,
             inputs=fwd_args.inputs,
-            phase=fwd_args.full_metadata.phase
+            graph_walk=fwd_args.full_metadata.graph_walk
         )
 
         for worker_graph_id, worker_id in worker_graph_to_worker.items():
@@ -354,7 +354,7 @@ class Conductor:
                 request_id=body.request_id,
                 worker_graph_ids=worker_graph_ids,
                 worker_graph_to_worker=worker_graph_to_worker,
-                initial_phase=request_data.current_forward_metadata.phase,
+                initial_graph_walk=request_data.current_forward_metadata.graph_walk,
                 initial_inputs=inputs_per_worker.get(worker, []),
                 per_request_metadata=fwd_args.step_metadata,
             )
@@ -366,11 +366,11 @@ class Conductor:
             )
 
     def _set_current_worker_graph_ids(
-        self, request_id: str, phase: str
+        self, request_id: str, graph_walk: str
     ):
         self.requests[request_id].current_worker_graph_ids = set([
             worker_graph_id for worker_graph_id in self.requests[request_id].all_worker_graph_ids \
-                if phase in self.worker_graphs[worker_graph_id].phases
+                if graph_walk in self.worker_graphs[worker_graph_id].graph_walks
         ])
 
     def _process_request_done(
@@ -409,7 +409,7 @@ class Conductor:
         """
         request_data = self.requests[request_id]
 
-        prev_phase = request_data.current_forward_metadata.phase
+        prev_graph_walk = request_data.current_forward_metadata.graph_walk
         fwd_args = self.model.get_forward_pass_args(
             request_data.current_forward_metadata,
             persist_signals=request_data.persist_signals,
@@ -418,10 +418,10 @@ class Conductor:
         self._update_request_info(request_id, fwd_args)
 
         logger.debug(
-            ("Request %s completed forward pass; moving from phase %s -> %s.\n"
+            ("Request %s completed forward pass; moving from graph_walk %s -> %s.\n"
              "Received new tokens %s, has persist signals %s.\n"
              "request_done=%s"),
-            request_id, prev_phase, fwd_args.full_metadata.phase,
+            request_id, prev_graph_walk, fwd_args.full_metadata.graph_walk,
             str(request_data.new_tokens), str(list(request_data.persist_signals.keys())),
             str(fwd_args.request_done)
         )
@@ -434,7 +434,7 @@ class Conductor:
         inputs_per_worker = self._split_inputs_to_workers(
             worker_graph_to_worker=request_data.worker_graph_to_worker,
             inputs=fwd_args.inputs,
-            phase=fwd_args.full_metadata.phase
+            graph_walk=fwd_args.full_metadata.graph_walk
         )
 
         for worker, inputs in inputs_per_worker.items():
@@ -442,7 +442,7 @@ class Conductor:
                 message_type=WorkerMessageType.INPUT_SIGNALS,
                 body=InputSignals(
                     request_id=request_id,
-                    phase=request_data.current_forward_metadata.phase,
+                    graph_walk=request_data.current_forward_metadata.graph_walk,
                     inputs=inputs,
                     per_request_metadata=fwd_args.step_metadata,
                 )
@@ -462,7 +462,7 @@ class Conductor:
         request.
 
         Return whether the full model forward pass has been completed (i.e., all
-        worker graphs for the current computation phase have been completed)
+        worker graphs for the current computation graph walk have been completed)
         """
         request_data = self.requests[body.request_id]
 

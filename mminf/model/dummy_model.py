@@ -62,7 +62,7 @@ class DummyModel(Model):
             "VAE_dec": EngineType.ENC_DEC,
         }
 
-    def get_phase_graphs(self):
+    def get_graph_walk_graphs(self):
         prefill = Sequential([
             Parallel([self._get_text_emb(), self._get_img_emb()]),
             GraphStage(
@@ -137,7 +137,7 @@ class DummyModel(Model):
         return CurrentForwardMetadata(
             input_modalities=input_modalities,
             output_modalities=output_modalities,
-            phase="prefill",
+            graph_walk="prefill",
             is_prefill=True
         )
 
@@ -173,11 +173,11 @@ class DummyModel(Model):
         else:
             existing_text.tensor_info = persist_signals.get("text_emb", [])
             existing_img.tensor_info = persist_signals.get("img_emb", [])
-            if prev_forward_metadata.phase == "image_gen":
+            if prev_forward_metadata.graph_walk == "image_gen":
                 img_inp.tensor_info = persist_signals.get("image_output", [])
                 text_inp.tensor_info = persist_signals.get("new_token", [])
 
-            if metadata.phase == "image_gen":
+            if metadata.graph_walk == "image_gen":
                 graph_edges.append(
                     GraphEdge(
                         next_stage="LLM",
@@ -192,12 +192,12 @@ class DummyModel(Model):
         new_tokens: dict[str, list[int]],
     ) -> CurrentForwardMetadata:
         # dummy model doesn't actually do anything, so this function will just
-        # randomly select a phase
-        if metadata.phase == "image_gen":
+        # randomly select a graph walk
+        if metadata.graph_walk == "image_gen":
             metadata.request_done = True
             return
-        metadata.phase = str(np.random.choice(["decode", "image_gen"]))
-        if metadata.phase == "decode":
+        metadata.graph_walk = str(np.random.choice(["decode", "image_gen"]))
+        if metadata.graph_walk == "decode":
             metadata.output_modalities = ["text"]
         else:
             metadata.output_modalities = ["image"]
