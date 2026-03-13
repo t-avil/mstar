@@ -597,7 +597,7 @@ class BagelForCausalLM(nn.Module):
             vae_token_indexes=vae_token_indexes,
             text_indexes=text_indexes,
             pos_ids=pos_ids,
-            # custom_advance_pos_id=custom_advance_pos_id
+            custom_advance_pos_id=custom_advance_pos_id
         )
 
         return outputs
