@@ -137,10 +137,15 @@ class TensorCommunicationManager(ABC):
         pass
 
     @abstractmethod
-    def cleanup(self, request_id: str, uuids: list[str] | None=None):
-        """
-        Removes buffer if exists. Unregisters buffers if relevant
-        """
+    def set_persist(self, request_id: str, uuid: str, persist: bool):
+        pass
+
+    @abstractmethod
+    def dereference(self, request_id: str, uuid: str, n: int=1):
+        pass
+
+    @abstractmethod
+    def increment_ref(self, request_id: str, uuid: str, n: int=1):
         pass
 
     @abstractmethod
