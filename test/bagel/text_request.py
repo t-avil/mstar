@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 
-import requests
 import base64
 import json
 import sys
 
+import requests
 
 URL = "http://0.0.0.0:8000/generate"
 

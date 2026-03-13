@@ -4,11 +4,12 @@ import logging
 import queue
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 
 import torch
 import torchaudio
 import torchvision
+
 try:
     from torchcodec.decoders import VideoDecoder
 except (ImportError, RuntimeError):
@@ -17,9 +18,15 @@ except (ImportError, RuntimeError):
 from mminf.api_server.types import PreprocessInput, ResultChunk, ResultTensors
 from mminf.communication.communicator import CommProtocol, ZMQCommunicator
 from mminf.communication.tensors import MooncakeCommunicationManager, NameToTensorList
-from mminf.ipc_formats import ConductorMessage, ConductorMessageType, NewRequestConductor, TensorReceived, UnpersistTensors, WorkerMessageType
+from mminf.ipc_formats import (
+    ConductorMessage,
+    ConductorMessageType,
+    NewRequestConductor,
+    TensorReceived,
+    UnpersistTensors,
+    WorkerMessageType,
+)
 from mminf.model.base import Model
-
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +80,7 @@ class PreprocessWorker:
         )
         self.result_tensor_input_queue.put(input)
 
-    def has_pending_tensors(self, request_id: str):            
+    def has_pending_tensors(self, request_id: str):
         return self.per_request_reading_tensors.get(request_id, 0) > 0
 
     def get_result_chunks(self)-> list[ResultChunk]:

@@ -132,7 +132,10 @@ class Worker:
                 request_id=body.request_id, inputs=signal_only
             )
         # process messages that may have came in out-of-order
-        self._process_messages()
+        if body.request_id in self._unprocessed_messages:
+            self._process_message_list(self._unprocessed_messages[body.request_id])
+            del self._unprocessed_messages[body.request_id]
+
 
     def _remove_request(self, body: RemoveRequest) -> None:
         self.engine_manager.remove_request(body.request_id)
@@ -175,9 +178,6 @@ class Worker:
             self.subgraphs_manager.process_new_inputs(
                 request_id=body.request_id, inputs=signal_only
             )
-        if body.request_id in self._unprocessed_messages:
-            self._process_message_list(self._unprocessed_messages[body.request_id])
-            del self._unprocessed_messages[body.request_id]
 
     def _unpersist_tensors(self, body: UnpersistTensors):
         for (uuid, ref_cnt) in body.uuid_to_ref_count.items():
@@ -323,7 +323,7 @@ class Worker:
             self.tensor_manager.register_for_send(
                 request_id=request_id, uuids=uuids
             )
-        
+
             for ptr in routing.persist:
                 for info in ptr.tensor_info:
                     self.tensor_manager.set_persist(

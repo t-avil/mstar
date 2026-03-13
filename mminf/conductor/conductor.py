@@ -4,7 +4,6 @@ import multiprocessing as mp
 import os
 import time
 from collections import defaultdict
-from copy import deepcopy
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -116,7 +115,7 @@ class Conductor:
         self.hostname = hostname
         self.socket_path_prefix = socket_path_prefix
         self.log_level = log_level
-        
+
         self._worker_processes: list[mp.Process] = []
 
         with open(model_config_file, "r") as f:
@@ -277,11 +276,12 @@ class Conductor:
                 if info.uuid not in ref_cnts:
                     ref_cnts[info.uuid] = 0
                 ref_cnts[info.uuid] += 1
-    
+
     def _un_persist_tensors(
         self, request_id: str, tensor_info: list[TensorPointerInfo]
     ):
         entity_id_to_msg = {}
+        uuids = []
         for info in tensor_info:
             uuid_to_ref_count = entity_id_to_msg.setdefault(
                 info.source_entity, UnpersistTensors(
@@ -294,8 +294,9 @@ class Conductor:
                 continue
             uuid_to_ref_count[info.uuid] = self.requests[
                 request_id].persist_signal_ref_cnt[info.uuid]
-            self.requests[request_id].remove_persist_signal_uuid(info.uuid)
-        
+            uuids.append(info.uuid)
+        self.requests[request_id].remove_persist_signal_uuids(uuids)
+
         for (entity, body) in entity_id_to_msg.items():
             self.communicator.send(
                 entity, WorkerMessage(
@@ -303,7 +304,7 @@ class Conductor:
                     body=body
                 )
             )
-        
+
     def _ingest_request(
         self, body: NewRequestConductor
     ):
@@ -424,6 +425,7 @@ class Conductor:
             str(request_data.new_tokens), str(list(request_data.persist_signals.keys())),
             str(fwd_args.request_done)
         )
+        self._un_persist_tensors(request_id, fwd_args.unpersist_tensors)
         if fwd_args.request_done:
             return True # stop the request
 

@@ -64,13 +64,13 @@ class TensorStore:
 
     def get_all_uuids(self, request_id: str) -> list[str]:
         return list(self.per_req_tensors.get(request_id, {}).keys())
-    
+
     def can_gc(self, request_id: str, uuid: str)-> bool:
         if not self.check_uuid_presence(request_id, uuid):
             return False
         info = self.per_req_tensors[request_id][uuid]
         return info.ref_cnt <= 0 and not info.persist
-    
+
     def is_registered(self, request_id: str, uuid: str):
         if not self.check_uuid_presence(request_id, uuid):
             return False
@@ -87,13 +87,13 @@ class TensorStore:
             self.per_req_tensors[request_id][uuid].persist = persist
         if mem_registered is not None:
             self.per_req_tensors[request_id][uuid].mem_registered = mem_registered
-    
+
     def increment_ref(self, request_id: str, uuid: str, n: int=1):
         if not self.check_uuid_presence(request_id, uuid):
             return
         assert n >= 0, f"Tried to increment tensor {uuid} reference by a negative number {n}"
         self.per_req_tensors[request_id][uuid].ref_cnt += n
-    
+
     def dereference(self, request_id: str, uuid: str, n: int=1):
         if not self.check_uuid_presence(request_id, uuid):
             return
@@ -309,7 +309,7 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
         if not self.tensor_store.check_uuid_presence(request_id, uuid):
             logger.warning("Trying to cleanup tensor %s, but uuid not found", uuid)
             return
-    
+
         if self.protocol == CommProtocol.RDMA and self.engine is not None \
                 and self.tensor_store.is_registered(request_id, uuid):
             ret_value = self.engine.unregister_memory(
@@ -318,22 +318,22 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
             if ret_value != 0:
                 raise RuntimeError("Mooncake memory unregistration failed.")
         self.tensor_store.remove_tensor(request_id, uuid)
-    
+
     def set_persist(self, request_id: str, uuid: str, persist: bool):
         self.tensor_store.set_metadata(
             request_id, uuid, persist=persist
         )
         if self.tensor_store.can_gc(request_id, uuid):
             self._cleanup_by_uuid(request_id, uuid)
-    
+
     def dereference(self, request_id: str, uuid: str, n: int=1):
         self.tensor_store.dereference(request_id, uuid, n=n)
         if self.tensor_store.can_gc(request_id, uuid):
             self._cleanup_by_uuid(request_id, uuid)
-    
+
     def increment_ref(self, request_id: str, uuid: str, n: int=1):
         self.tensor_store.increment_ref(request_id, uuid, n=n)
-    
+
     def _collect_and_send_acks(
         self, request_id: str, graph_pointers: list[GraphPointer]
     ):
@@ -399,7 +399,7 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
         # request_id -> ready graph pointers
         ready: dict[str, list[GraphPointer]] = {}
         still_pending = []
-        
+
         for ep in self.pending:
             if ep.event.query():
                 for ptr in ep.pointers:

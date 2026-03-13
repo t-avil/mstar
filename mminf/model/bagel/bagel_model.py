@@ -37,7 +37,6 @@ from pathlib import Path
 import torch
 from huggingface_hub import hf_hub_download, snapshot_download
 from PIL import Image
-from safetensors.torch import load_file
 from torch import nn
 
 from mminf.communication.tensors import NameToTensorList
@@ -495,9 +494,9 @@ class BagelModel(Model):
             decode=decode,
             image_gen=image_gen,
         )
-    
+
     def _build_prefill_schedule(
-        self, input_modalities: list[str], 
+        self, input_modalities: list[str],
         input_signals: dict[str, list[TensorPointerInfo]],
         is_understanding: bool,
         think_mode: bool
@@ -521,7 +520,7 @@ class BagelModel(Model):
                 schedule.append(("prefill_text", texts[text_idx]))
                 text_idx += 1
             elif mod == "image":
-                if image_idx > len(images):
+                if image_idx >= len(images):
                     continue
                 if not is_understanding:
                     # Generation/editing: VAE encode the image
@@ -529,7 +528,7 @@ class BagelModel(Model):
                 schedule.append(("prefill_vit", images[image_idx]))
                 image_idx += 1
         return schedule
-    
+
     def _get_step_metadata(
         self, full_metadata: CurrentForwardMetadata,
     ) -> dict:
@@ -582,6 +581,8 @@ class BagelModel(Model):
                 ptr = GraphPointer(next_stage="vit_encoder", name="image_inputs")
             elif phase == "prefill_vae":
                 ptr = GraphPointer(next_stage="vae_encoder", name="image_inputs")
+            else:
+                raise ValueError(f"Unrecognized prefill phase {phase}")
             ptr.tensor_info = input_tensor_info
             return [ptr]
 
@@ -604,7 +605,7 @@ class BagelModel(Model):
             ]
 
         return []
-    
+
     def _get_unpersist_tensors(
         self, phase: str, inputs: list[GraphPointer]
     ) -> list[TensorPointerInfo]:
@@ -674,7 +675,7 @@ class BagelModel(Model):
             unpersist_tensors=unpersist_tensors,
             step_metadata=step_metadata
         )
-    
+
     def get_forward_pass_args(
         self, metadata: CurrentForwardMetadata,
         persist_signals: dict[str, list[TensorPointerInfo]],
@@ -745,4 +746,3 @@ class BagelModel(Model):
             step_metadata=step_metadata,
             request_done=request_done
         )
-    
