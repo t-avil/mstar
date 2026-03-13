@@ -21,9 +21,9 @@ def main():
 
         data = {
             "text": "Please describe how this food is made",
-            "model_kwargs": json.dumps({
-                "think_mode": True,
-            })
+            # "model_kwargs": json.dumps({
+            #     "think_mode": True,
+            # })
         }
 
         with requests.post(URL, data=data, files=files, stream=True) as resp:

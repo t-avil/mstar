@@ -367,7 +367,7 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
         for uuid in self.tensor_store.get_all_uuids(request_id):
             self.tensor_store.set_metadata(request_id, uuid, persist=False)
             if not self.tensor_store.can_gc(request_id, uuid):
-                logger.debug(
+                logger.warning(
                     "Deferring cleanup of tensor uuid %s "
                     "(awaiting TENSOR_RECEIVED ACK)", uuid
                 )
@@ -413,6 +413,11 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
         self.pending = still_pending
         for req_id, ptrs in ready.items():
             self._collect_and_send_acks(req_id, ptrs)
+            for edge in ptrs:
+                for info in edge.tensor_info:
+                    self.tensor_store.dereference(
+                        req_id, info.uuid, 1
+                    )
 
         return ready
 
@@ -439,6 +444,9 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
                 if info.source_entity == self.my_entity_id or self.tensor_store.check_uuid_presence(
                     request_id, info.uuid
                 ): # we already have this tensor!
+                    self.tensor_store.increment_ref(
+                        request_id, info.uuid, 1 # increment reference while it is being read
+                    )
                     continue
                 buffer = torch.empty(info.dims, dtype=info.dtype, device=device).as_strided(
                     info.dims, stride=info.stride
@@ -448,6 +456,9 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
                 )
                 self.tensor_store.set_metadata(
                     request_id, info.uuid, mem_registered=True
+                )
+                self.tensor_store.increment_ref(
+                    request_id, info.uuid, 1 # increment reference while it is being read
                 )
 
                 if self.protocol == CommProtocol.RDMA:

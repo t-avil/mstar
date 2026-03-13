@@ -287,7 +287,7 @@ class LLMSubmodule(StageSubmodule):
         h, w = (H // self.config.latent_downsample,
                 W // self.config.latent_downsample)
         num_image_tokens = h * w
-        torch.random.manual_seed(42)
+        # torch.random.manual_seed(42)
         return torch.randn(
             num_image_tokens,
             self.config.vae_config.z_channels * self.config.latent_patch_size ** 2,
