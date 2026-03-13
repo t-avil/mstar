@@ -528,7 +528,6 @@ class BagelModel(Model):
                     schedule.append(("prefill_vae", images[image_idx]))
                 schedule.append(("prefill_vit", images[image_idx]))
                 image_idx += 1
-        print(schedule)
         return schedule
     
     def _get_step_metadata(
