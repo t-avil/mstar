@@ -215,7 +215,6 @@ class CacheHandle:
             # No FlashInfer: naive attention fallback (for testing)
             logger.error("Could not run flashinfer. Outputting zeros from run_attention()")
             raise e 
-            output = torch.zeros_like(q)
 
         return output
 

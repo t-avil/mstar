@@ -19,7 +19,7 @@ def main():
         ]
 
         data = {
-            "text": "Generate a cat eating the item in this image.",
+            "text": "Make it dessert",
             "output_modalities": "image",
             "model_kwargs": json.dumps({
                 "cfg_img_scale": 2.0,

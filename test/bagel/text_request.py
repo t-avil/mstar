@@ -11,11 +11,11 @@ URL = "http://0.0.0.0:8000/generate"
 
 def main():
     data = {
-            "text": "What is the 7th value after the decimal point in pi?", # 6
-            # "model_kwargs": json.dumps({
-            #     "think_mode": True,
-            # }),
-        }
+        "text": "What is the 7th value after the decimal point in pi?",
+        "model_kwargs": json.dumps({
+            "think_mode": True,
+        }),
+    }
     with requests.post(
         URL,
         data=data,

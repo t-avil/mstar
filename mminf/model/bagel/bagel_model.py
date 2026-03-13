@@ -506,8 +506,8 @@ class BagelModel(Model):
         schedule: list[tuple[str, TensorPointerInfo]] = []
 
         # 1. System prompt (if think mode enabled)
-        if think_mode:
-            schedule.append(("prefill_text", input_signals.get("system_prompt", [])))
+        if think_mode and "system_prompt" in input_signals:
+            schedule.append(("prefill_text", input_signals["system_prompt"][0]))
 
         # 2. Walk through interleaved inputs, building sequential steps
         images = input_signals.get("image_inputs", [])
@@ -528,6 +528,8 @@ class BagelModel(Model):
                     schedule.append(("prefill_vae", images[image_idx]))
                 schedule.append(("prefill_vit", images[image_idx]))
                 image_idx += 1
+        print(schedule)
+        return schedule
     
     def _get_step_metadata(
         self, full_metadata: CurrentForwardMetadata,
@@ -573,7 +575,7 @@ class BagelModel(Model):
         if metadata.is_prefill:
             schedule = metadata.kwargs["prefill_schedule"]
             step = metadata.kwargs["prefill_step"]
-            _, input_tensor_info = [schedule[step]]
+            input_tensor_info = [schedule[step][1]]
 
             if phase == "prefill_text":
                 ptr = GraphPointer(next_stage="LLM", name="text_inputs")
@@ -627,7 +629,6 @@ class BagelModel(Model):
         model_kwargs: dict | None = None,
     ) -> ForwardPassArgs:
         target_output = output_modalities[0]  # "text" or "image"
-        is_understanding = (target_output == "text")
 
         # Per-request overrides with config defaults
         overridable_keys = [
@@ -640,9 +641,12 @@ class BagelModel(Model):
                 if key in model_kwargs:
                     params[key] = model_kwargs[key]
 
-        think_mode = params.pop("think_mode")  # used for schedule logic, not stored in params
+        think_mode = params.pop("think_mode") # used for schedule logic, not stored in params
         schedule = self._build_prefill_schedule(
-            input_modalities, is_understanding, think_mode
+            input_modalities=input_modalities,
+            input_signals=input_signals,
+            is_understanding=(target_output == "text"),
+            think_mode=think_mode
         )
 
         first_phase = schedule[0][0] if schedule else "decode"

@@ -344,9 +344,8 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
             for info in ptr.tensor_info:
                 if info.source_entity not in acks:
                     acks[info.source_entity] = {}
-                acks[info.source_entity][info.uuid] = acks.get(
-                    info.source_entity, 0) + 1
-            
+                acks[info.source_entity][info.uuid] = acks[info.source_entity].get(
+                    info.uuid, 0) + 1
 
         # Send ACKs to senders
         for source_entity, tensors in acks.items():
@@ -445,7 +444,9 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
                 self.tensor_store.put_tensor(
                     request_id=request_id, uuid=info.uuid, tensor=buffer
                 )
-                self.registered_for_recv.setdefault(request_id, set()).add(info.uuid)
+                self.tensor_store.set_metadata(
+                    request_id, info.uuid, mem_registered=True
+                )
 
                 if self.protocol == CommProtocol.RDMA:
                     if self.engine is None:

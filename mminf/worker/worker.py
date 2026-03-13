@@ -175,7 +175,7 @@ class Worker:
             self.subgraphs_manager.process_new_inputs(
                 request_id=body.request_id, inputs=signal_only
             )
-        if body.request_id not in self._unprocessed_messages:
+        if body.request_id in self._unprocessed_messages:
             self._process_message_list(self._unprocessed_messages[body.request_id])
             del self._unprocessed_messages[body.request_id]
 

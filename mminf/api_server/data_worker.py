@@ -241,19 +241,16 @@ class PreprocessWorkerThread:
             for graph_edge in graph_edges:
                 modality = graph_edge.name.replace("_output", "")
 
-                uuids = []
                 for tensor_info in graph_edge.tensor_info:
                     logger.debug("Reading in OUTPUT tensor %s with uuid %s", graph_edge.name, tensor_info.uuid)
                     tensor = self.tensor_manager.get_tensor(
                         request_id=request_id,
-                        tensor_name=graph_edge.name,
                         uuid=tensor_info.uuid
                     )
                     postprocessed = self.model.postprocess(
                         tensor, modality
                     )
 
-                    uuids.append(tensor_info.uuid)
                     self.out_queue.put(ResultChunk(
                         request_id=request_id,
                         modality=modality,
@@ -263,10 +260,10 @@ class PreprocessWorkerThread:
                     ))
                     del self.tensor_uuid_to_metadata_per_request[request_id][
                         tensor_info.uuid]
-                self.tensor_manager.dereference(
-                    request_id=request_id,
-                    uuids=uuids
-                )
+                    self.tensor_manager.dereference(
+                        request_id=request_id,
+                        uuid=tensor_info.uuid
+                    )
 
     def _process_messages(self):
         for message in self.communicator.get_all_new_messages():
