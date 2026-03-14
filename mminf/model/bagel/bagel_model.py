@@ -50,7 +50,7 @@ from mminf.graph.base import (
     Sequential,
     TensorPointerInfo,
 )
-from mminf.graph.special_destinations import STREAM_OUT
+from mminf.graph.special_destinations import EMIT_TO_CLIENT
 from mminf.model.bagel.components.autoencoder import BagelAutoEncoder
 from mminf.model.bagel.components.language_model import BagelForCausalLM
 from mminf.model.bagel.components.modeling_utils import BagelMLPconnector, PositionEmbedding, TimestepEmbedder
@@ -445,7 +445,7 @@ class BagelModel(Model):
             input_ids=["text_inputs"],
             outputs=[
                 GraphEdge(
-                    next_node=STREAM_OUT,
+                    next_node=EMIT_TO_CLIENT,
                     name="new_token",
                     output_modality="text",
                     is_new_token=True,
@@ -478,7 +478,7 @@ class BagelModel(Model):
                 input_ids=["latents"],
                 outputs=[
                     GraphEdge(
-                        next_node=STREAM_OUT,
+                        next_node=EMIT_TO_CLIENT,
                         name="image_output",
                         output_modality="image",
                         persist=True,

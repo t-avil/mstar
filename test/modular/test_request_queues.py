@@ -68,7 +68,7 @@ if __name__ == "__main__":
         n_iters=3,
         outputs=[
             GraphEdge(name="latents", next_node="VAE_decoder"),
-            GraphEdge(name="some_random_external_output", next_node="STREAM_OUT")
+            GraphEdge(name="some_random_external_output", next_node="EMIT_TO_CLIENT")
         ]
     )
 
@@ -178,14 +178,14 @@ if __name__ == "__main__":
             n_iters=3,
             outputs=[
                 GraphEdge(next_node="VAE_decoder", name="latents"),
-                GraphEdge(next_node="STREAM_OUT", name="some_random_external_output")
+                GraphEdge(next_node="EMIT_TO_CLIENT", name="some_random_external_output")
             ]
         ),
         GraphNode(
             name="VAE_decoder",
             input_ids=["latents"],
             outputs=[
-                GraphEdge(next_node="STREAM_OUT", name="generated_image")
+                GraphEdge(next_node="EMIT_TO_CLIENT", name="generated_image")
             ]
         )
     ])

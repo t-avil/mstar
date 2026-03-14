@@ -7,7 +7,7 @@ from mminf.communication.tensors import NameToTensorList
 from mminf.engine.ar_engine import KVCacheConfig
 from mminf.engine.base import EngineType
 from mminf.graph.base import GraphEdge, GraphNode, Loop, Parallel, Sequential, TensorPointerInfo
-from mminf.graph.special_destinations import STREAM_OUT
+from mminf.graph.special_destinations import EMIT_TO_CLIENT
 from mminf.model.base import CurrentForwardMetadata, Model
 
 
@@ -70,7 +70,7 @@ class DummyModel(Model):
                 input_ids=["text_emb", "img_emb"],
                 outputs=[
                     GraphEdge(
-                        next_node=STREAM_OUT,
+                        next_node=EMIT_TO_CLIENT,
                         output_modality="text",
                         name="new_token",
                         is_new_token=True
@@ -108,7 +108,7 @@ class DummyModel(Model):
                 input_ids=["latents"],
                 outputs=[
                     GraphEdge(
-                        next_node=STREAM_OUT,
+                        next_node=EMIT_TO_CLIENT,
                         output_modality="image",
                         name="image_output",
                         persist=True

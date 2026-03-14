@@ -104,13 +104,13 @@ Each of the 50 flow steps requires a FULL LLM forward pass. No KV cache reuse ac
 
 **Pattern 3: Thinker-Talker Streaming (Qwen2.5-Omni / Qwen3-Omni)**
 ```
-Inputs → Encoders (ViT, Audio) → Thinker (AR text) ──RELAY──→ Talker (AR speech codec)
+Inputs → Encoders (ViT, Audio) → Thinker (AR text) ──STREAM──→ Talker (AR speech codec)
                                        ↓                              ↓
                                   DONE_WITH_FWD              Flow DiT (2.5) / Code2Wav (3)
                                        ↓                              ↓
                                  Text output                    Audio stream
 ```
-Thinker streams hidden states + text token IDs to Talker before finishing its own generation. RELAY flag enables this inter-worker producer-consumer pattern. What exactly gets streamed differs: Qwen2.5-Omni sends last-layer hidden states + input embeddings (element-wise sum); Qwen3-Omni sends both layer-0 embeddings and layer-24 hidden states for all tokens (the Talker-side selectively routes them through `text_projection` or `hidden_projection` depending on token type). See [Appendix E](#appendix-e-qwen25-omni-vs-qwen3-omni-comprehensive-architectural-comparison) for the full comparison.
+Thinker streams hidden states + text token IDs to Talker before finishing its own generation. stream flag enables this inter-worker producer-consumer pattern. What exactly gets streamed differs: Qwen2.5-Omni sends last-layer hidden states + input embeddings (element-wise sum); Qwen3-Omni sends both layer-0 embeddings and layer-24 hidden states for all tokens (the Talker-side selectively routes them through `text_projection` or `hidden_projection` depending on token type). See [Appendix E](#appendix-e-qwen25-omni-vs-qwen3-omni-comprehensive-architectural-comparison) for the full comparison.
 
 **Pattern 4: Standard SpeechLM (VoxServe Models)**
 ```
@@ -144,7 +144,7 @@ VoxServe's existing pattern. Detokenizer runs at intervals (every 10-50 tokens) 
 └──────────────┘                     │                   └──────────────────┘   │
        ▲                             │  ┌──────────────────────────────────┐    │
        │                             │  │ WorkerGraph assignment           │    │
-       │ stream out                  │  │ • {req → {worker_graph_id: worker_id}} │    │
+       │ emit_to_client             │  │ • {req → {worker_graph_id: worker_id}} │    │
        │                             │  │ • Graph-walk transitions (model ABC) │    │
        │                             │  └──────────────────────────────────┘    │
        │                             └────────────────┬───────────────────┬─────┘
@@ -182,7 +182,7 @@ VoxServe's existing pattern. Detokenizer runs at intervals (every 10-50 tokens) 
 | **Cluster Manager** | Deployment-time GPU allocation, autoscaling policy, config loading | Runtime request routing (deployment-time only) |
 | **Conductor** | Macro-level request lifecycle: worker selection, worker graph assignment, routing inputs at the start of each forward pass, determining the next computation graph walk (via `model.get_forward_pass_args`), EOS/completion detection, passing per-request metadata (e.g., cache_labels for CFG). Does NOT manage ready/waiting queues or batch scheduling — those are on workers. | GPU computation, batching, tensor operations, intra-forward-pass scheduling |
 | **Model** (replaces "Execution Strategy") | Defines computation graphs for each graph walk via `get_graph_walk_graphs()`, engine types via `get_node_engine_types()`, forward pass orchestration (`get_initial_forward_pass_args`, `get_forward_pass_args`), tokenization (`process_prompt`), and `NodeSubmodule` wrappers (preprocess + forward for each node). Lives on the `Model` ABC. | Scheduling, worker selection, communication. |
-| **Workers** | GPU computation via engines, internal batch scheduling (MicroScheduler), KV cache management (via CacheHandle in AREngine), streaming output directly to API Server (STREAM_OUT), inter-worker communication (Mooncake RDMA + ZMQ), worker graph queue management and completion detection (WorkerGraphsManager with ready/waiting queues), per-request graph walk tracking (applied locally from conductor signals), buffering persist signals and new tokens before reporting to conductor. | Macro-level graph walk transitions (EOS detection, deciding next graph walk), cross-worker scheduling, worker selection. |
+| **Workers** | GPU computation via engines, internal batch scheduling (MicroScheduler), KV cache management (via CacheHandle in AREngine), streaming output directly to API Server (EMIT_TO_CLIENT), inter-worker communication (Mooncake RDMA + ZMQ), worker graph queue management and completion detection (WorkerGraphsManager with ready/waiting queues), per-request graph walk tracking (applied locally from conductor signals), buffering persist signals and new tokens before reporting to conductor. | Macro-level graph walk transitions (EOS detection, deciding next graph walk), cross-worker scheduling, worker selection. |
 
 ---
 
@@ -518,7 +518,7 @@ def get_graph_walk_graphs(self) -> dict[str, GraphSection]:
         input_ids=["text_inputs"],
         outputs=[
             GraphEdge(
-                next_node=STREAM_OUT, name="new_token",
+                next_node=EMIT_TO_CLIENT, name="new_token",
                 output_modality="text", is_new_token=True,
                 persist=True,
             ),
@@ -541,7 +541,7 @@ def get_graph_walk_graphs(self) -> dict[str, GraphSection]:
             input_ids=["latents"],
             outputs=[
                 GraphEdge(
-                    next_node=STREAM_OUT, name="image_output",
+                    next_node=EMIT_TO_CLIENT, name="image_output",
                     output_modality="image", persist=True,
                 ),
             ],
@@ -605,7 +605,7 @@ Sequential([
         name="LLM_text_gen",  # AR text generation graph walk
         input_ids=["text_emb", "img_emb"],
         outputs=[
-            GraphEdge(next_node="STREAM_OUT", name="text_tokens"),
+            GraphEdge(next_node=EMIT_TO_CLIENT, name="text_tokens"),
         ]
     )
 ])
@@ -682,7 +682,7 @@ Sequential([
         input_ids=["latents"],
         outputs=[
             GraphEdge(
-                next_node="STREAM_OUT",
+                next_node=EMIT_TO_CLIENT,
                 name="image"
             )
         ]
@@ -735,7 +735,7 @@ full_graph = Sequential([
             input_ids=["text_emb", "img_emb", "audio_emb"],
             outputs=[
                 GraphEdge(
-                    next_node="STREAM_OUT",
+                    next_node=EMIT_TO_CLIENT,
                     name="text_tokens"
                 ),
                 GraphEdge(
@@ -752,12 +752,12 @@ full_graph = Sequential([
         # Note: The talker is an AR model that runs autoregressively (many forward passes),
         # but this is managed at the worker level (the Talker loop in Section 10.2),
         # not as a Loop in the graph. The graph represents it as a single node
-        # because its lifecycle is managed via RELAY buffering, not graph readiness.
+                # because its lifecycle is managed via stream buffering, not graph readiness.
         Sequential([
             GraphNode(
                 name="talker",
                 consumes_stream=True,
-                input_ids=["hidden_states"],  # from thinker via RELAY
+                input_ids=["hidden_states"],  # from thinker via stream
                 outputs=[
                     GraphEdge(
                         next_node="mtp_module",
@@ -780,7 +780,7 @@ full_graph = Sequential([
                 input_ids=["full_codebook"],
                 outputs=[
                     GraphEdge(
-                        next_node="STREAM_OUT",
+                        next_node=EMIT_TO_CLIENT,
                         name="audio_chunk"
                     )
                 ]
@@ -814,7 +814,7 @@ class GraphEdge:
     # Flags
     persist: bool = field(default=False)
     is_new_token: bool = field(default=False)
-    output_modality: str = field(default="")  # text | image | video | audio (for STREAM_OUT)
+    output_modality: str = field(default="")  # text | image | video | audio (for EMIT_TO_CLIENT)
 ```
 
 ---
@@ -829,7 +829,7 @@ Workers are long-lived GPU processes. Each worker:
 3. Receives dispatched nodes from the Conductor via ZMQ
 4. Executes computation, manages internal batching
 5. Sends completion notifications back to the Conductor
-6. Streams output directly to the API Server (for STREAM_OUT)
+6. Streams output directly to the API Server (for EMIT_TO_CLIENT)
 7. Communicates with other workers for inter-worker data transfer (node outputs and prefill→decode KV cache)
 
 ### 8.2 Engines
@@ -1023,7 +1023,7 @@ class GraphNode(GraphSection):
     name: str
     input_ids: set[str]              # Named inputs this node needs (coerced from list in __post_init__)
     outputs: list[GraphEdge]
-    consumes_stream: bool = False     # For RELAY consumer nodes (e.g., Talker)
+    consumes_stream: bool = False     # For stream consumer nodes (e.g., Talker)
 
     # Populated as predecessors complete — maps input name to the GraphEdge
     # carrying the tensor info (address, uuid, etc.)
@@ -1153,7 +1153,7 @@ class GraphEdge:
     # Flags
     persist: bool = field(default=False)
     is_new_token: bool = field(default=False)
-    output_modality: str = field(default="")  # text | image | video | audio (only for STREAM_OUT)
+    output_modality: str = field(default="")  # text | image | video | audio (only for EMIT_TO_CLIENT)
     _persist_for_loop: bool = field(default=False)  # internal: don't cleanup between loop iters
 ```
 
@@ -1164,7 +1164,7 @@ The `persist` flag is used for signals that **persist between forward passes** a
 The `is_new_token` flag is needed so that the conductor knows where to check for `<EOS>`, `<BOI>`, etc.
 
 #### 9.6.1 Special/"Flag" `next_node` values
-**(1) STREAM_OUT (formerly STREAM)**
+**(1) EMIT_TO_CLIENT (formerly STREAM)**
 
 Signals that output should be streamed to the client via the API Server.
 
@@ -1175,31 +1175,31 @@ Signals that output should be streamed to the client via the API Server.
 - Audio chunks streamed at detokenizer intervals
 - Image sent after flow loop completes
 
-**(2) RELAY**
+**(2) STREAM**
 
-A flag for **producer-consumer streaming between workers**. Distinct from STREAM_OUT (which is client-facing).
+A flag for **producer-consumer streaming between workers**. Distinct from EMIT_TO_CLIENT (which is client-facing).
 
-**Purpose**: Enable inter-worker data streaming without routing through the Conductor.
+**Purpose**: Enable inter-worker streaming without routing through the Conductor.
 
 **Primary use case**: Qwen-Omni Thinker→Talker streaming. Both Qwen2.5-Omni and Qwen3-Omni use a Thinker-Talker architecture where the Thinker streams data to the Talker BEFORE the Thinker finishes generating text. What exactly gets streamed differs between the two models (see comparison in [Appendix E](#appendix-e-qwen25-omni-vs-qwen3-omni-comprehensive-architectural-comparison)).
 
 **Flow**:
 ```
-Thinker Worker ──RELAY (hidden states + token IDs)──→ Talker Worker
+Thinker Worker ──STREAM (hidden states + token IDs)──→ Talker Worker
 Thinker Worker ──WORKER_GRAPHS_DONE──→ Conductor
 Conductor starts next forward pass
 ...
 Conductor ──(at <EOS>)──→ Talker Worker: STOP signal (ZMQ msg: req_id, STOP)
 ```
 
-**Why to have a RELAY flag**: This tells the producer (e.g., thinker) worker that an output will be consumed in a streaming fashion, i.e., the consumer (e.g., talker) will read in the outputs while the next thinker forward pass starts.
-This will allow the thinker to ensure that the tensors it produces remain in a queue until they have been fully read by the talker (whereas, for non-RELAY outputs, the producer worker can automatically overwrite the tensors for each new forward pass).
+**Why to have a STREAM flag**: This tells the producer (e.g., thinker) worker that an output will be consumed in a streaming fashion, i.e., the consumer (e.g., talker) will read the outputs while the next thinker forward pass starts.
+This will allow the thinker to ensure that the tensors it produces remain in a queue until they have been fully read by the talker (whereas, for non-stream outputs, the producer worker can automatically overwrite the tensors for each new forward pass).
 
 **Potential Talker Worker pseudocode** (from IMG_0725):
 
 ```python
 # Talker worker state
-buffer = {req_id: {"hidden_states": [...], "token_ids": [...]}}  # consumed from RELAY stream
+buffer = {req_id: {"hidden_states": [...], "token_ids": [...]}}  # consumed from stream
 status = {req_id: "WAITING" | "TALKING"}
 
 # Talker loop (runs continuously):
@@ -1209,13 +1209,13 @@ while True:
         del buffer[stop_msg.req_id]
         del status[stop_msg.req_id]
 
-    # 2. Consume from RELAY streams (add new req_ids, buffer data)
-    for relay_msg in recv_relay_data():
-        if relay_msg.req_id not in buffer:
-            buffer[relay_msg.req_id] = {"hidden_states": [], "token_ids": []}
-            status[relay_msg.req_id] = "WAITING"
-        buffer[relay_msg.req_id]["hidden_states"].extend(relay_msg.hidden_states)
-        buffer[relay_msg.req_id]["token_ids"].extend(relay_msg.token_ids)
+    # 2. Consume from stream data flow (add new req_ids, buffer data)
+    for stream_msg in recv_stream_data():
+        if stream_msg.req_id not in buffer:
+            buffer[stream_msg.req_id] = {"hidden_states": [], "token_ids": []}
+            status[stream_msg.req_id] = "WAITING"
+        buffer[stream_msg.req_id]["hidden_states"].extend(stream_msg.hidden_states)
+        buffer[stream_msg.req_id]["token_ids"].extend(stream_msg.token_ids)
 
     # 3. For all req_ids: check if can talk (enough data in buffer)
     for req_id in buffer:
@@ -1226,7 +1226,7 @@ while True:
     batch = [req_id for req_id in status if status[req_id] == "TALKING"]
     talker_outputs = run_talker_batch(batch)
 
-    # 5. Stream audio output to API Server (STREAM_OUT)
+    # 5. Emit audio output to API Server (EMIT_TO_CLIENT)
     for req_id, audio_chunk in talker_outputs:
         stream_to_api_server(req_id, audio_chunk)
 ```
@@ -1267,7 +1267,7 @@ class RequestQueues:
         )
 ```
 
-The key insight: `ingest_inputs` consumes entries from its argument. After the call, only un-consumed entries remain in the dict -- these are external outputs (like STREAM_OUT, DONE_WITH_FWD) that don't correspond to any waiting node.
+The key insight: `ingest_inputs` consumes entries from its argument. After the call, only un-consumed entries remain in the dict -- these are external outputs (like EMIT_TO_CLIENT, DONE_WITH_FWD) that don't correspond to any waiting node.
 
 `test/test_request_queues.py` contains a stress test of this system using a Show-o2-style graph with nested loops and parallel branches.
 
@@ -1310,7 +1310,7 @@ The conductor sends inputs and some state information (e.g., "we are currently i
 <!-- **Current resolution**: The final design retains ready/waiting queue tracking at the **Worker** level (via `RequestQueues`, Sections 6.2.3 and 9.8) for macro-level graph progression, while Note 14's insight is incorporated as a two-level split:
 
 - The **Conductor** handles macro-level scheduling: which worker runs which node, graph-level readiness (are all inputs for a node available?), request lifecycle tracking, and worker assignment.
-- The **Workers** handle micro-level readiness: buffering partial inputs (e.g., the Talker buffering RELAY data until enough has arrived to start talking), managing continuous batching (when to actually execute a dispatch), and inter-worker data reception.
+- The **Workers** handle micro-level readiness: buffering partial inputs (e.g., the Talker buffering stream data until enough has arrived to start talking), managing continuous batching (when to actually execute a dispatch), and inter-worker data reception.
 
 This means the Conductor tracks "is this graph node logically ready?" while the Worker tracks "do I have enough data in my buffers to actually run this computation?" -->
 
@@ -1416,7 +1416,7 @@ class KVConnector:
     def pre_forward(self, scheduler_output) -> None:
         """Load required KV cache before computation."""
     def post_forward(self, scheduler_output, wait_for_save=True) -> KVConnectorOutput:
-        """Save/stream KV cache after computation."""
+        """Save and transfer KV cache after computation."""
 ```
 
 This pattern generalizes to any inter-worker data transfer:
@@ -1425,7 +1425,7 @@ class NodeConnector:
     def load_inputs(self, node_id, input_spec) -> None:
         """Asynchronously load inputs for a node."""
     def save_outputs(self, node_id, output_spec) -> None:
-        """Asynchronously stream outputs to downstream nodes."""
+"""Asynchronously stream outputs to downstream nodes."""
     def register_buffers(self, buffer_spec) -> None:
         """Register memory regions for zero-copy transfers."""
 ```
@@ -1441,10 +1441,10 @@ The Talker worker also maintains a status flag for the request (e.g., `"status":
 
 **Talker loop**:
 1. If received STOP from Conductor, remove req_id
-2. Consume from RELAY streams (add new req_ids, buffer tensors)
+2. Consume from stream (add new req_ids, buffer tensors)
 3. For all req_ids: check if enough data to talk (status = TALKING or sufficient buffer)
 4. Run Talker forward for current batch
-5. Stream audio output to API Server
+5. Emit audio output to API Server
 
 ---
 
@@ -1524,7 +1524,7 @@ This supports:
    Each step ends with WORKER_GRAPHS_DONE → Conductor
 5. Conductor transitions to decode graph walk
 6. Decode loop: For every forward pass, conductor sends previous token to Worker 0
-   - Worker 0 runs LLM decode, streams new_token → API Server (STREAM_OUT)
+   - Worker 0 runs LLM decode, emits new_token → API Server (EMIT_TO_CLIENT)
    - Worker 0 sends WORKER_GRAPHS_DONE with new_token to Conductor
 7. At <EOS>, conductor sends REMOVE_REQUEST to all workers
 8. Conductor finishes request
@@ -1583,7 +1583,7 @@ Output mode is known **upfront** from the API request's `output_modalities` (no 
    Loop completion → latents ready
 
 7. Transfer latents from Worker 0 to Worker 1 via RDMA
-8. Worker 1 runs VAE decode → streams image → API Server (STREAM_OUT)
+8. Worker 1 runs VAE decode → emits image → API Server (EMIT_TO_CLIENT)
 9. Conductor marks request done (image_gen graph walk complete = one image per request)
 ```
 
@@ -1612,7 +1612,7 @@ Output mode is known **upfront** from the API request's `output_modalities` (no 
    - Loop completion → Conductor: latents ready
 6. Conductor: vae_decoder becomes ready
 7. Dispatch vae_decoder → Worker 1
-8. Worker 1: VAE decode → stream image → API Server
+8. Worker 1: VAE decode → emit image → API Server
 ... Conductor waits for <EOS> ...
 9. Conductor finishes request
 ```
@@ -1632,22 +1632,22 @@ Output mode is known **upfront** from the API request's `output_modalities` (no 
 4. Dispatch encoder inputs → Worker 0 (parallel). Send WORKER_GRAPHS_DONE signal.
 Thinker becomes ready on Worker 0 (internal Worker scheduling).
 5. Worker 0 runs thinker decode loop:
-   - Streams text tokens → API Server (STREAM_OUT)
-   - Streams layer-0 embeddings + layer-24 hidden states (accept_hidden_layer) + token IDs → Worker 1 (RELAY)
+   - Emits text tokens → API Server (EMIT_TO_CLIENT)
+   - Streams layer-0 embeddings + layer-24 hidden states (accept_hidden_layer) + token IDs → Worker 1 (stream)
 6. Once WORKER_GRAPHS_DONE for the thinker is sent to the conductor, the conductor immediately starts a new forward pass. 
 7. Worker 1 (talker loop, running concurrently):
-   - Buffers incoming hidden states + token IDs from RELAY
+   - Buffers incoming hidden states + token IDs from stream
    - When sufficient data: runs talker AR decode
    - Talker → MTP module (residual codebooks) → Code2Wav → audio chunks
-   - Streams audio → API Server (STREAM_OUT)
+   - Emits audio → API Server (EMIT_TO_CLIENT)
    - On receiving STOP from Conductor: finishes current buffer, winds down
 8. Conductor finishes request when both thinker and talker complete
 ```
 
 **Key features**:
 - Thinker and Talker run CONCURRENTLY on different GPUs
-- RELAY enables hidden state streaming before thinker finishes
-- Layer-0 embeddings + layer-24 hidden states + text token IDs travel via RELAY (see [Appendix E](#appendix-e-qwen25-omni-vs-qwen3-omni-comprehensive-architectural-comparison) for Qwen2.5-Omni vs. Qwen3-Omni differences)
+- Stream enables hidden state communication before thinker finishes
+- Layer-0 embeddings + layer-24 hidden states + text token IDs travel via stream (see [Appendix E](#appendix-e-qwen25-omni-vs-qwen3-omni-comprehensive-architectural-comparison) for Qwen2.5-Omni vs. Qwen3-Omni differences)
 - Talker maintains per-request buffer with WAITING/TALKING status
 
 ### 12.5 SpeechLM -- VoxServe Pattern (Orpheus, CosyVoice, etc.)
@@ -1663,7 +1663,7 @@ Thinker becomes ready on Worker 0 (internal Worker scheduling).
    b. LLM prefill
    c. LLM decode loop (continuous batching):
       - At model-specific intervals (e.g., 28 tokens for Orpheus, 10 for CSM, 25 for GLM): run detokenizer
-      - Detokenizer produces audio chunk → stream to API Server (STREAM_OUT)
+      - Detokenizer produces audio chunk → emit to API Server (EMIT_TO_CLIENT)
 5. Conductor finishes request upon seeing <EOS>
 ```
 
@@ -1711,7 +1711,7 @@ Thinker becomes ready on Worker 0 (internal Worker scheduling).
 | Component | How |
 |-----------|-----|
 | KV cache IPC logic (Note 12) | Borrow -- transfer engine for inter-worker communication |
-| Layer-by-layer streaming during computation | Borrow pattern for RELAY implementation |
+| Layer-by-layer stream during computation | Borrow pattern for stream implementation |
 | Content-addressable block hashing for dedup | Borrow for prefix caching across workers |
 | Topology-aware multi-path transfer | Future -- start with ZMQ/TCP, add RDMA later |
 | Prediction-based early rejection | Borrow pattern for SLO-aware scheduling |
@@ -1725,7 +1725,7 @@ Thinker becomes ready on Worker 0 (internal Worker scheduling).
 | **Worker internals** (WorkerGraphsManager, MicroScheduler) | Graph-aware ready/waiting queues, batch scheduling, worker graph completion detection |
 | **Worker Registry** | Capability-based routing unique to our design |
 | **Computation Graph Model** (GraphSection hierarchy) | Working implementation exists |
-| **RELAY flag handling** | Thinker-Talker streaming pattern specific to our system |
+| **stream flag handling** | Thinker-Talker streaming pattern specific to our system |
 | **WorkerGraph persistence** logic | Re-plan only when modalities change |
 
 ### 13.6 Insert Later (Not Initial Implementation)
@@ -1791,8 +1791,8 @@ Not an expanded view of the same thing.
 | Show-o2 | No (interleaved, LLM invoked per step) | 2 × 50 = 100 if separated | MUST co-locate |
 | JanusFlow | No (interleaved) | 2 × 30 if separated | MUST co-locate |
 | Janus Pro | N/A (pure AR) | 0 | Standard AR |
-| Qwen2.5-Omni | Yes (separate Thinker/Talker models) | Dense hidden states (~3584-dim/token) + token IDs, streamed via RELAY | Separate workers OK |
-| Qwen3-Omni | Yes (separate Thinker/Talker models) | Both layer-0 embeddings + layer-24 hidden states (~2048-dim/token each, both sent for all tokens) + token IDs, streamed via RELAY. Talker-side routes text→`text_projection`, multimodal→`hidden_projection`. | Separate workers OK |
+| Qwen2.5-Omni | Yes (separate Thinker/Talker models) | Dense hidden states (~3584-dim/token) + token IDs, streamed via stream | Separate workers OK |
+| Qwen3-Omni | Yes (separate Thinker/Talker models) | Both layer-0 embeddings + layer-24 hidden states (~2048-dim/token each, both sent for all tokens) + token IDs, streamed via stream. Talker-side routes text_projection, multimodal_hidden_projection. | Separate workers OK |
 
 ---
 
@@ -1896,9 +1896,9 @@ These notes were captured during whiteboard sessions and design discussions. The
 
 **Note 4:** completion signaling (6) and batching across requests (1): can take these mechanisms from voxserve
 
-**Note 5:** RELAY: Is either just another flag like STREAM_OUT (aka/formerly STREAM in the diagrams above) or another process (TBD). It signifies producer-consumer streaming of tokens (between nodes like the Thinker node and the Talker node). RELAY makes sense because:
+**Note 5:** Streaming: Is either just another flag like EMIT_TO_CLIENT (aka/formerly STREAM in the diagrams above) or another process (TBD). It signifies producer-consumer streaming of tensors (between nodes like the Thinker node and the Talker node). Streaming makes sense because:
 - We need inter-worker communication (we would not need it if we relied on the conductor to pass the data around to the talker because the DONE_WITH_FWD flag already wakes the conductor up and the conductor already has the computation graph).
-- Qwen2.5-Omni which sends hidden states from thinker to talker (so before DONE_WITH_FWD flag is on). The Qwen3-Omni architecture works only with DONE_WITH_FWD flag without RELAY if we are willing to take the conductor communication hit.
+- Qwen2.5-Omni which sends hidden states from thinker to talker (so before DONE_WITH_FWD flag is on). The Qwen3-Omni architecture works only with DONE_WITH_FWD flag without streaming if we are willing to take the conductor communication hit.
   - **[Correction]**: The original note said "layer 18." Verified findings: Qwen2.5-Omni sends **last-layer** hidden states + input embeddings (element-wise sum, 3584-dim/token), NOT from a specific intermediate layer. Qwen3-Omni sends from layer 24 (`accept_hidden_layer=24` in the released model config).
 
 **Note 6:** For every forward pass, we are making a computation graph and dispatching it. Have worker graphs all ready per request. The scheduling part of conductor launches them when they are done (for example flow part of worker graph is launched at \<BOI\> and killed at \<EOI\>). We keep the talker worker graph alive throughout.
@@ -1935,7 +1935,7 @@ These notes were captured during whiteboard sessions and design discussions. The
 
 ## Appendix E: Qwen2.5-Omni vs. Qwen3-Omni: comprehensive architectural comparison
 
-These two models share the Thinker-Talker pattern but differ substantially in architecture, what flows via RELAY, and how speech is generated. Verified from:
+These two models share the Thinker-Talker pattern but differ substantially in architecture, what flows via stream, and how speech is generated. Verified from:
 - [HuggingFace Transformers Qwen2.5-Omni implementation](https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen2_5_omni/modeling_qwen2_5_omni.py)
 - Qwen2.5-Omni technical report (arXiv:2503.20215)
 - Qwen3-Omni technical report (arXiv:2509.17765)
@@ -1957,7 +1957,7 @@ These two models share the Thinker-Talker pattern but differ substantially in ar
 | **Speech decoder** | Flow-Matching DiT (22 layers, 10 ODE steps) + BigVGAN, ~449M. Block-wise: must wait for context window. | Causal ConvNet (Code2Wav), ~200M, single forward pass. Frame-by-frame: immediate waveform after each token. |
 | **TMRoPE** | First 16 angles = temporal, 40ms/ID, 2s chunk interleaving | Interleaved 24/20/20 angles (temporal/height/width), 80ms/ID, direct absolute-time alignment (no chunking) |
 
-**Thinker→Talker data flow (what travels via RELAY):**
+**Thinker→Talker data flow (what travels via stream):**
 
 | | **Qwen2.5-Omni** | **Qwen3-Omni** |
 |---|---|---|
@@ -1969,6 +1969,6 @@ These two models share the Thinker-Talker pattern but differ substantially in ar
 | **Speech decoder** | AR codec → Flow-Matching DiT (10 ODE steps) + BigVGAN → waveform | AR codec (codebook 0) → MTP module (codebooks 1–15) → Code2Wav ConvNet → waveform |
 | **Data volume per token** | Dense: ~3584 × 2 bytes (fp16) ≈ **7 KB/token** | Dense: ~2048 × 2 bytes (fp16) × 2 streams (layer-0 + layer-24) ≈ **8 KB/token** total |
 
-**Key insight**: The RELAY stream carries **dense hidden-state vectors**, not lightweight position IDs. For Qwen3-Omni, both layer-0 and layer-24 tensors are sent (so ~2 × 2048 × 2 bytes ≈ **8 KB/token** total). For a 200-token response, that is ~1.4 MB of hidden states for Qwen2.5-Omni, ~1.6 MB for Qwen3-Omni (two streams). This has bandwidth implications for inter-GPU transfer.
+**Key insight**: The stream channel carries **dense hidden-state vectors**, not lightweight position IDs. For Qwen3-Omni, both layer-0 and layer-24 tensors are sent (so ~2 × 2048 × 2 bytes ≈ **8 KB/token** total). For a 200-token response, that is ~1.4 MB of hidden states for Qwen2.5-Omni, ~1.6 MB for Qwen3-Omni (two streaming channels). This has bandwidth implications for inter-GPU transfer.
 
-**Qwen3-Omni RELAY consideration**: Because Qwen3-Omni extracts hidden states from an intermediate layer (layer 24 out of 48) rather than the final layer, the Thinker's text generation (which uses all 48 layers) is architecturally decoupled from the Talker's input. This means RELAY could theoretically be replaced by DONE_WITH_FWD + Conductor forwarding. However, the whiteboard notes present this as a trade-off rather than a settled decision. RELAY avoids the conductor communication hit but adds complexity. For Qwen2.5-Omni, the last-layer hidden states are tightly coupled to the Thinker's text generation, making RELAY more clearly necessary.
+**Qwen3-Omni streaming consideration**: Because Qwen3-Omni extracts hidden states from an intermediate layer (layer 24 out of 48) rather than the final layer, the Thinker's text generation (which uses all 48 layers) is architecturally decoupled from the Talker's input. This means streaming could theoretically be replaced by DONE_WITH_FWD + Conductor forwarding. However, the whiteboard notes present this as a trade-off rather than a settled decision. Streaming avoids the conductor communication hit but adds complexity. For Qwen2.5-Omni, the last-layer hidden states are tightly coupled to the Thinker's text generation, making streaming more clearly necessary.

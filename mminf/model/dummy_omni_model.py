@@ -1,7 +1,7 @@
 
 from mminf.engine.ar_engine import KVCacheConfig
 from mminf.graph.base import GraphEdge, GraphNode, Loop, Sequential, TensorPointerInfo
-from mminf.graph.special_destinations import STREAM_OUT
+from mminf.graph.special_destinations import EMIT_TO_CLIENT
 from mminf.model.base import CurrentForwardMetadata, Model
 
 
@@ -25,7 +25,7 @@ class DummyOmniModel(Model):
                 outputs=[
                     GraphEdge(next_node="TalkerLLM", name="thinker_hidden"),
                     GraphEdge(
-                        next_node=STREAM_OUT, name="thinker_token", is_new_token=True,
+                        next_node=EMIT_TO_CLIENT, name="thinker_token", is_new_token=True,
                         output_modality="text"
                     ),
                 ],
@@ -35,7 +35,7 @@ class DummyOmniModel(Model):
                 input_ids=["thinker_hidden"],
                 outputs=[
                     GraphEdge(next_node="MTP", name="codec_hidden"),
-                    GraphEdge(next_node=STREAM_OUT, name="talker_token", is_new_token=True),
+                    GraphEdge(next_node=EMIT_TO_CLIENT, name="talker_token", is_new_token=True),
                 ],
             ),
             Loop(
@@ -44,7 +44,7 @@ class DummyOmniModel(Model):
                     input_ids=["codec_hidden"],
                     outputs=[
                         GraphEdge(next_node="MTP", name="codec_hidden"),
-                        GraphEdge(next_node=STREAM_OUT, name="mtp_token", is_new_token=True),
+                        GraphEdge(next_node=EMIT_TO_CLIENT, name="mtp_token", is_new_token=True),
                     ],
                 ),
                 n_iters=16,
@@ -57,7 +57,7 @@ class DummyOmniModel(Model):
                 input_ids=["codec_hidden"],
                 outputs=[
                     GraphEdge(
-                        next_node=STREAM_OUT,
+                        next_node=EMIT_TO_CLIENT,
                         name="audio_output",
                         output_modality="audio",
                         persist=True,

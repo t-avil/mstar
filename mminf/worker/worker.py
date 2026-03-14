@@ -315,7 +315,7 @@ class Worker:
             for edge in (
                 routing.persist + \
                 sum(routing.to_workers.values(), start=[]) + \
-                routing.stream_out
+                routing.emit_to_client
             ):
                 uuids.update([
                     info.uuid for info in edge.tensor_info \
@@ -375,8 +375,8 @@ class Worker:
                     request_id, name_to_new_token
                 )
 
-        if outputs.stream_out:
-            for graph_edge in outputs.stream_out:
+        if outputs.emit_to_client:
+            for graph_edge in outputs.emit_to_client:
                 message = APIServerMessage(
                     message_type="result_tensors",
                     body=ResultTensors(

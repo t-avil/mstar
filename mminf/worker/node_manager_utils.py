@@ -8,7 +8,7 @@ from mminf.graph.request_queues import (
     ProcessedInputs,
     format_graph_edge_list,
 )
-from mminf.graph.special_destinations import SPECIAL_DESTINATIONS, STREAM_OUT
+from mminf.graph.special_destinations import SPECIAL_DESTINATIONS, EMIT_TO_CLIENT
 from mminf.model.base import WorkerGraph
 
 logger = logging.getLogger(__name__)
@@ -28,7 +28,7 @@ class NodeOutputRouting:
     routed_to_this_worker_graph:list[GraphEdge]
     persist: list[GraphEdge] # outputs that are going back to the conductor
     to_workers: dict[str, list[GraphEdge]] # worker id to signals
-    stream_out: list[GraphEdge] = field(default_factory=list)
+    emit_to_client: list[GraphEdge] = field(default_factory=list)
     new_token_outputs: list[GraphEdge] = field(default_factory=list)
     completed_worker_graph_ids: list[str] = field(default_factory=list)
 
@@ -215,21 +215,21 @@ class WorkerGraphsManager:
 
         # (3) get mapping of worker to external outputs
         # Skip edges whose next_node is a special destination (e.g.,
-        # stream_out is a virtual destination, not a real node on any worker).
+        # EMIT_TO_CLIENT is a virtual destination, not a real node on any worker).
         # Note: back_to_conductor edges may ALSO route to a worker
         # (e.g., concat_text outputs text_emb -> LLM with back_to_conductor=True),
         # so we do NOT filter on back_to_conductor here.
         to_workers: dict[str, list[GraphEdge]] = {}
-        stream_out: list[GraphEdge] = []
+        emit_to_client: list[GraphEdge] = []
         for edge in external_outputs:
             node_graph_walk = NodeAndGraphWalk(
                 node=edge.next_node, graph_walk=self.get_graph_walk(request_id)
             )
             if node_graph_walk not in self.per_request_info[request_id].node_to_worker:
                 if edge.next_node in SPECIAL_DESTINATIONS or edge.persist:
-                    if edge.next_node == STREAM_OUT:
-                        stream_out.append(edge)
-                    continue  # e.g., stream_out — already captured in to_conductor
+                    if edge.next_node == EMIT_TO_CLIENT:
+                        emit_to_client.append(edge)
+                    continue  # e.g., emit_to_client — already captured in to_conductor
                 raise ValueError(
                     f"Output edge targets unknown node/graph walk: {node_graph_walk}. "
                     f"Check graph construction."
@@ -252,7 +252,7 @@ class WorkerGraphsManager:
             routed_to_this_worker_graph=routed_to_this_worker,
             persist=to_conductor,
             to_workers=to_workers,
-            stream_out=stream_out,
+            emit_to_client=emit_to_client,
             new_token_outputs=new_token_outputs,
             completed_worker_graph_ids=completed_worker_graph_ids,
         )

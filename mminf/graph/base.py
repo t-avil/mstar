@@ -26,7 +26,7 @@ class TensorPointerInfo:
     source_entity: str # which {worker, api_server} the tensor is on
 
 # class ConnectionType(Enum):
-#     RELAY = "relay" # thinker-talker
+#     STREAM = "stream" # thinker-talker
 #     BLOCKING = "blocking" # we need to wait for all tensors in the list to finish
 
 # assume blocking case for all nodes for now.
@@ -42,7 +42,7 @@ class GraphEdge:
     # Flags
     persist: bool = field(default=False) # previously back_to_conductor
     is_new_token: bool = field(default=False)
-    # only for STREAM_OUT
+    # only for EMIT_TO_CLIENT
     output_modality: str = field(default="") # text | image | video | audio
     _persist_for_loop: bool = field(default=False)
 
