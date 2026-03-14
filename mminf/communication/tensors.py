@@ -285,25 +285,25 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
                 name_to_graph_edges[edge.name] = []
             name_to_graph_edges[edge.name].append(edge)
 
-        pointer_info = self.store_and_return_tensor_info(
+        graph_node_info = self.store_and_return_tensor_info(
             request_id=request_id, tensors=tensors
         )
 
         for name in tensors:
             logger.debug(
-                "Storing tensor %s (uuids %s) for stages %s",
-                name, str([info.uuid for info in pointer_info[name]]),
+                "Storing tensor %s (uuids %s) for nodes %s",
+                name, str([info.uuid for info in graph_node_info[name]]),
                 str([edge.name for edge in name_to_graph_edges.get(name, [])])
             )
             edges = name_to_graph_edges.get(name, [])
-            for info in pointer_info[name]:
+            for info in graph_node_info[name]:
                 self.tensor_store.increment_ref(
                     request_id, info.uuid, n=len([
-                        graph_edge for graph_edge in edges if graph_edge.next_stage != EMPTY_DESTINATION
+                        graph_edge for graph_edge in edges if graph_edge.next_node != EMPTY_DESTINATION
                     ]) # number of nodes it will be sent to
                 )
             for edge in edges:
-                edge.tensor_info = pointer_info[name]
+                edge.tensor_info = graph_node_info[name]
 
     def _cleanup_by_uuid(
         self, request_id: str, uuid: str
@@ -409,7 +409,7 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
                     ready.setdefault(ep.request_id, []).append(edge)
                     logger.debug(
                         "Finished reading in %d tensors %s for graph node %s",
-                        len(edge.tensor_info), edge.name, edge.next_stage
+                        len(edge.tensor_info), edge.name, edge.next_node
                     )
             else:
                 still_pending.append(ep)
@@ -440,7 +440,7 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
 
             logger.debug(
                 "Starting to read in %d tensors %s for graph node %s",
-                len(graph_edge.tensor_info), graph_edge.name, graph_edge.next_stage
+                len(graph_edge.tensor_info), graph_edge.name, graph_edge.next_node
             )
 
             for info in graph_edge.tensor_info:

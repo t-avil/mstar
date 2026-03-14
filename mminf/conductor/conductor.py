@@ -34,7 +34,7 @@ def _worker_process_target(
     worker_graphs: list[WorkerGraph],
     engine_configs: list[dict],
     all_worker_graph_ids_to_graph_walks: dict[str, set[str]],
-    all_worker_graph_ids_to_stages: dict[str, list[str]],
+    all_worker_graph_ids_to_nodes: dict[str, list[str]],
     hostname: str,
     socket_path_prefix: str,
     model: Model | None = None,
@@ -51,7 +51,7 @@ def _worker_process_target(
 
     from mminf.worker.worker import Worker
     logger.debug("Launching worker %s with graph nodes %s", worker_id, str(
-        sum([wg.section.get_stage_names() for wg in worker_graphs], start=[])
+        sum([wg.section.get_node_names() for wg in worker_graphs], start=[])
     ))
     worker = Worker(
         worker_id=worker_id,
@@ -59,7 +59,7 @@ def _worker_process_target(
         my_worker_graphs=worker_graphs,
         engine_configs=engine_configs,
         all_worker_graph_ids_to_graph_walks=all_worker_graph_ids_to_graph_walks,
-        all_worker_graph_ids_to_stages=all_worker_graph_ids_to_stages,
+        all_worker_graph_ids_to_nodes=all_worker_graph_ids_to_nodes,
         hostname=hostname,
         socket_path_prefix=socket_path_prefix,
         device=torch.device(device),
@@ -121,7 +121,7 @@ class Conductor:
         with open(model_config_file, "r") as f:
             self.model_config = yaml.safe_load(f)
         assert "max_seq_len" in self.model_config
-        assert "stage_groups" in self.model_config
+        assert "node_groups" in self.model_config
 
         self.worker_graphs = {
             worker_graph.worker_graph_id: worker_graph
@@ -140,7 +140,7 @@ class Conductor:
 
     def _derive_worker_info(self):
         """Derive per-rank worker info from worker graphs and model engine types."""
-        stage_engine_types = self.model.get_stage_engine_types()
+        node_engine_types = self.model.get_node_engine_types()
 
         # Collect unique ranks and per-rank worker graphs
         rank_to_worker_graphs: dict[int, list[WorkerGraph]] = defaultdict(list)
@@ -163,28 +163,28 @@ class Conductor:
             worker_graphs = rank_to_worker_graphs[rank]
             self._per_worker_graphs[worker_id] = worker_graphs
 
-            # Collect engine configs: group stages by engine type
-            engine_type_to_stages: dict[str, list[str]] = defaultdict(list)
+            # Collect engine configs: group nodes by engine type
+            engine_type_to_nodes: dict[str, list[str]] = defaultdict(list)
             for wg in worker_graphs:
-                for stage_name in wg.section.get_stage_names():
-                    etype = stage_engine_types[stage_name].value
-                    if stage_name not in engine_type_to_stages[etype]:
-                        engine_type_to_stages[etype].append(stage_name)
+                for node_name in wg.section.get_node_names():
+                    etype = node_engine_types[node_name].value
+                    if node_name not in engine_type_to_nodes[etype]:
+                        engine_type_to_nodes[etype].append(node_name)
 
             self._per_worker_engine_configs[worker_id] = [
                 {
-                    "engine_type": etype, "stage_names": stages,
+                    "engine_type": etype, "node_names": nodes,
                     "model_config": engine_model_cfg
                 }
-                for etype, stages in engine_type_to_stages.items()
+                for etype, nodes in engine_type_to_nodes.items()
             ]
 
         # Global maps needed by all workers
         self._all_worker_graph_ids_to_graph_walks: dict[str, set[str]] = {
             worker_graph_id: worker_graph.graph_walks for worker_graph_id, worker_graph in self.worker_graphs.items()
         }
-        self._all_worker_graph_ids_to_stages: dict[str, list[str]] = {
-            worker_graph_id: worker_graph.section.get_stage_names() for worker_graph_id, worker_graph in self.worker_graphs.items()
+        self._all_worker_graph_ids_to_nodes: dict[str, list[str]] = {
+            worker_graph_id: worker_graph.section.get_node_names() for worker_graph_id, worker_graph in self.worker_graphs.items()
         }
 
     def _launch_workers(self):
@@ -199,7 +199,7 @@ class Conductor:
                     "my_worker_graphs": self._per_worker_graphs[worker_id],
                     "engine_configs": self._per_worker_engine_configs[worker_id],
                     "all_worker_graph_ids_to_graph_walks": self._all_worker_graph_ids_to_graph_walks,
-                    "all_worker_graph_ids_to_stages": self._all_worker_graph_ids_to_stages,
+                    "all_worker_graph_ids_to_nodes": self._all_worker_graph_ids_to_nodes,
                     "hostname": self.hostname,
                     "socket_path_prefix": self.socket_path_prefix,
                     "model": self.model,
@@ -250,12 +250,12 @@ class Conductor:
             worker_graph = self.worker_graphs[worker_graph_id]
             if graph_walk not in worker_graph.graph_walks:
                 continue
-            stages = set(worker_graph.section.get_stage_names())
+            nodes = set(worker_graph.section.get_node_names())
 
             if worker_id not in inputs_per_worker:
                 inputs_per_worker[worker_id] = []
             inputs_per_worker[worker_id] += [
-                edge for edge in inputs if edge.next_stage in stages
+                edge for edge in inputs if edge.next_node in nodes
             ]
         return inputs_per_worker
 

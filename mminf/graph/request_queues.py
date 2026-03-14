@@ -3,7 +3,7 @@
 import logging
 from dataclasses import dataclass, field
 
-from mminf.graph.base import DestToGraphEdges, GraphEdge, GraphSection, GraphStage, get_stage_to_inputs_mapping
+from mminf.graph.base import DestToGraphEdges, GraphEdge, GraphNode, GraphSection, get_node_to_inputs_mapping
 
 logger = logging.getLogger(__name__)
 
@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 def format_graph_edge_list(
     lst: list[GraphEdge]
 ):
-    return ", ".join([f"{edge.name} -> {edge.next_stage}" for edge in lst])
+    return ", ".join([f"{edge.name} -> {edge.next_node}" for edge in lst])
 
 
 @dataclass
@@ -21,14 +21,14 @@ class ProcessedInputs:
 
 
 @dataclass
-class PerRequestStageQueues:
+class PerRequestNodeQueues:
     """
     The worker has a list of worker graphs; each worker graph has a list of requests
     using that graph. For every (worker graph, request) pair, we instantiate
     one of these queues.
     """
     waiting: GraphSection | None
-    ready: list[GraphStage] = field(default_factory=list)
+    ready: list[GraphNode] = field(default_factory=list)
     worker_graph_id: str = field(default="")
 
     def _update_ready_waiting(self):
@@ -65,7 +65,7 @@ class PerRequestStageQueues:
             format_graph_edge_list(new_inputs)
         )
 
-        new_inputs: DestToGraphEdges = get_stage_to_inputs_mapping(new_inputs)
+        new_inputs: DestToGraphEdges = get_node_to_inputs_mapping(new_inputs)
         ingested = self.waiting.ingest_inputs(new_inputs)
         external_outputs = sum(
             new_inputs.values(), start=[]
@@ -73,10 +73,10 @@ class PerRequestStageQueues:
 
         self._update_ready_waiting()
         logger.debug(
-            ("Finished processing new graph inputs. Ready stages: %s, waiting: %s.\n"
+            ("Finished processing new graph inputs. Ready nodes: %s, waiting: %s.\n"
              "Ingested inputs %s, didn't ingest %s"),
             str([node.name for node in self.ready]),
-            str(list(self.waiting.get_stage_names())) if self.waiting else "[]",
+            str(list(self.waiting.get_node_names())) if self.waiting else "[]",
             str([i.name for i in ingested]),
             str([e.name for e in external_outputs])
         )

@@ -6,10 +6,10 @@ SigLIP2 ViT for image understanding, and FLUX VAE for image generation.
 The LLM itself serves as the denoiser for rectified flow image generation
 (no separate diffusion model).
 
-Architecture (4 stages):
+Architecture (4 nodes):
     vit_encoder   (enc_dec) - SigLIP2 ViT + connector + pos embed
     vae_encoder   (enc_dec) - VAE encode + patchify + projection
-    LLM           (ar)      - Fat stage: embed + Qwen2 + lm_head + CFG + Euler
+    LLM           (ar)      - Fat node: embed + Qwen2 + lm_head + CFG + Euler
     vae_decoder   (enc_dec) - VAE decode to pixels
 
 Graph walks (5):
@@ -19,8 +19,8 @@ Graph walks (5):
     decode        - Autoregressive text generation
     image_gen     - Flow matching loop (3-pass CFG + Euler) + VAE decode
 
-The LLM stage absorbs text_emb, lm_head, and flow_proj because they are
-always colocated on the same GPU. Keeping them as separate graph stages
+The LLM node absorbs text_emb, lm_head, and flow_proj because they are
+always colocated on the same GPU. Keeping them as separate graph nodes
 would add unnecessary IPC overhead. CFG requires 3 LLM forward passes +
 velocity combination, which is easier as one atomic operation.
 
@@ -45,7 +45,7 @@ from mminf.engine.base import EngineType
 from mminf.graph.base import (
     GraphEdge,
     GraphSection,
-    GraphStage,
+    GraphNode,
     Loop,
     Sequential,
     TensorPointerInfo,
@@ -58,7 +58,7 @@ from mminf.model.bagel.components.tokenization import BagelTokenizer, add_specia
 from mminf.model.bagel.components.vit_encoder import BagelVisionModel
 from mminf.model.bagel.config import load_bagel_config
 from mminf.model.bagel.submodules import LLMSubmodule, VAEDecoderSubmodule, VAEEncoderSubmodule, ViTEncoderSubmodule
-from mminf.model.base import CurrentForwardMetadata, ForwardPassArgs, Model, StageSubmodule
+from mminf.model.base import CurrentForwardMetadata, ForwardPassArgs, Model, NodeSubmodule
 from mminf.model.utils import ModuleAndPrefix, load_weights_from_file
 
 logger = logging.getLogger(__name__)
@@ -90,10 +90,10 @@ class BagelModel(Model):
     The LLM serves as both the autoregressive text model and the denoiser
     for rectified flow image generation (no separate diffusion model).
 
-    Stages (4):
+    Nodes (4):
         vit_encoder   (enc_dec) - SigLIP2 ViT + connector + pos embed
         vae_encoder   (enc_dec) - VAE encode + patchify + projection
-        LLM           (ar)      - Fat stage: embed + Qwen2 + lm_head + CFG
+        LLM           (ar)      - Fat node: embed + Qwen2 + lm_head + CFG
         vae_decoder   (enc_dec) - VAE decode to pixels
 
     Graph walks (5):
@@ -133,7 +133,7 @@ class BagelModel(Model):
         # get_submodule(). A worker only instantiates the submodules it
         # actually needs (e.g., a worker running only vit_encoder never
         # creates the LLMSubmodule).
-        self._submodule_cache: dict[str, StageSubmodule | None] = {}
+        self._submodule_cache: dict[str, NodeSubmodule | None] = {}
         self.language_model = None
         self.llm2vae = None
         self.vae_model = None
@@ -262,10 +262,10 @@ class BagelModel(Model):
     # Lazy submodule initialization
     # -----------------------------------------------------------------------
 
-    def _create_submodule(self, stage_name: str, device: str) -> StageSubmodule | None:
+    def _create_submodule(self, node_name: str, device: str) -> NodeSubmodule | None:
         """Create a submodule wrapper on first access."""
-        logger.debug("Creating submodule for BAGEL model stage %s", stage_name)
-        if stage_name == "LLM":
+        logger.debug("Creating submodule for BAGEL model node %s", node_name)
+        if node_name == "LLM":
             self._init_language_model_components(device)
             return LLMSubmodule(
                 language_model=self.language_model,
@@ -279,7 +279,7 @@ class BagelModel(Model):
                 bos_token_id=self.bos_token_id,
                 eos_token_id=self.eos_token_id
             )
-        elif stage_name == "vit_encoder":
+        elif node_name == "vit_encoder":
             self._init_vit_components(device)
             return ViTEncoderSubmodule(
                 vit_model=self.vit_model,
@@ -288,7 +288,7 @@ class BagelModel(Model):
                 vit_patch_size=self.config.vit_config.patch_size,
                 vit_max_num_patch_per_side=self.config.vit_max_num_patch_per_side
             )
-        elif stage_name == "vae_encoder":
+        elif node_name == "vae_encoder":
             self._init_vae_components(device)
             return VAEEncoderSubmodule(
                 vae_model=self.vae_model,
@@ -300,7 +300,7 @@ class BagelModel(Model):
                 latent_downsample=self.config.latent_downsample,
                 max_latent_size=self.config.max_latent_size,
             )
-        elif stage_name == "vae_decoder":
+        elif node_name == "vae_decoder":
             self._init_vae_components(device)
             return VAEDecoderSubmodule(
                 vae_model=self.vae_model,
@@ -382,15 +382,15 @@ class BagelModel(Model):
             num_qo_heads=self.config.num_attention_heads,
         )
 
-    def get_submodule(self, stage_name: str, device: str="cpu") -> torch.nn.Module | None:
-        if stage_name in self._submodule_cache:
-            return self._submodule_cache[stage_name]
-        submodule = self._create_submodule(stage_name, device)
-        logger.info(f"Successfully loaded in BAGEL submodule for {stage_name}")
-        self._submodule_cache[stage_name] = submodule
+    def get_submodule(self, node_name: str, device: str="cpu") -> torch.nn.Module | None:
+        if node_name in self._submodule_cache:
+            return self._submodule_cache[node_name]
+        submodule = self._create_submodule(node_name, device)
+        logger.info(f"Successfully loaded in BAGEL submodule for {node_name}")
+        self._submodule_cache[node_name] = submodule
         return submodule
 
-    def get_stage_engine_types(self) -> dict[str, EngineType]:
+    def get_node_engine_types(self) -> dict[str, EngineType]:
         return {
             "vit_encoder": EngineType.ENC_DEC,
             "vae_encoder": EngineType.ENC_DEC,
@@ -399,9 +399,9 @@ class BagelModel(Model):
         }
 
     def get_graph_walk_graphs(self) -> dict[str, GraphSection]:
-        # -- prefill_text: just the LLM stage (text embedding is internal) --
+        # -- prefill_text: just the LLM node (text embedding is internal) --
         # No output needed — conductor is notified when the worker graph completes.
-        prefill_text = GraphStage(
+        prefill_text = GraphNode(
             name="LLM",
             input_ids=["text_inputs"],
             outputs=[],
@@ -409,14 +409,14 @@ class BagelModel(Model):
 
         # -- prefill_vit: ViT encoder -> LLM --
         prefill_vit = Sequential([
-            GraphStage(
+            GraphNode(
                 name="vit_encoder",
                 input_ids=["image_inputs"],
                 outputs=[
-                    GraphEdge(next_stage="LLM", name="img_emb"),
+                    GraphEdge(next_node="LLM", name="img_emb"),
                 ],
             ),
-            GraphStage(
+            GraphNode(
                 name="LLM",
                 input_ids=["img_emb"],
                 outputs=[],
@@ -425,27 +425,27 @@ class BagelModel(Model):
 
         # -- prefill_vae: VAE encoder -> LLM --
         prefill_vae = Sequential([
-            GraphStage(
+            GraphNode(
                 name="vae_encoder",
                 input_ids=["image_inputs"],
                 outputs=[
-                    GraphEdge(next_stage="LLM", name="img_emb"),
+                    GraphEdge(next_node="LLM", name="img_emb"),
                 ],
             ),
-            GraphStage(
+            GraphNode(
                 name="LLM",
                 input_ids=["img_emb"],
                 outputs=[],
             ),
         ])
 
-        # -- decode: single LLM stage (embed + transformer + lm_head) --
-        decode = GraphStage(
+        # -- decode: single LLM node (embed + transformer + lm_head) --
+        decode = GraphNode(
             name="LLM",
             input_ids=["text_inputs"],
             outputs=[
                 GraphEdge(
-                    next_stage=STREAM_OUT,
+                    next_node=STREAM_OUT,
                     name="new_token",
                     output_modality="text",
                     is_new_token=True,
@@ -460,25 +460,25 @@ class BagelModel(Model):
         # there are N-1 intervals, so N-1 Euler steps are needed.
         image_gen = Sequential([
             Loop(
-                section=GraphStage(
+                section=GraphNode(
                     name="LLM",
                     input_ids=["latents", "time_index"],
                     outputs=[
-                        GraphEdge(next_stage="LLM", name="latents"),
-                        GraphEdge(next_stage="LLM", name="time_index"),
+                        GraphEdge(next_node="LLM", name="latents"),
+                        GraphEdge(next_node="LLM", name="time_index"),
                     ],
                 ),
                 n_iters=self.config.num_timesteps - 1,
                 outputs=[
-                    GraphEdge(next_stage="vae_decoder", name="latents"),
+                    GraphEdge(next_node="vae_decoder", name="latents"),
                 ],
             ),
-            GraphStage(
+            GraphNode(
                 name="vae_decoder",
                 input_ids=["latents"],
                 outputs=[
                     GraphEdge(
-                        next_stage=STREAM_OUT,
+                        next_node=STREAM_OUT,
                         name="image_output",
                         output_modality="image",
                         persist=True,
@@ -576,11 +576,11 @@ class BagelModel(Model):
             input_tensor_info = [schedule[step][1]]
 
             if graph_walk == "prefill_text":
-                graph_edge = GraphEdge(next_stage="LLM", name="text_inputs")
+                graph_edge = GraphEdge(next_node="LLM", name="text_inputs")
             elif graph_walk == "prefill_vit":
-                graph_edge = GraphEdge(next_stage="vit_encoder", name="image_inputs")
+                graph_edge = GraphEdge(next_node="vit_encoder", name="image_inputs")
             elif graph_walk == "prefill_vae":
-                graph_edge = GraphEdge(next_stage="vae_encoder", name="image_inputs")
+                graph_edge = GraphEdge(next_node="vae_encoder", name="image_inputs")
             else:
                 raise ValueError(f"Unrecognized prefill graph_walk {graph_walk}")
             graph_edge.tensor_info = input_tensor_info
@@ -588,7 +588,7 @@ class BagelModel(Model):
 
         elif graph_walk == "decode":
             # Previous token feeds back as text_inputs
-            graph_edge = GraphEdge(next_stage="LLM", name="text_inputs")
+            graph_edge = GraphEdge(next_node="LLM", name="text_inputs")
             graph_edge.tensor_info = persist_signals.get("new_token", [])
             return [graph_edge]
 
@@ -597,11 +597,11 @@ class BagelModel(Model):
             # Note: latents are typically initialized by the submodule's
             # preprocess() (random noise), not passed through persist_signals.
             # This lookup handles the case where latents are externally provided.
-            graph_edge = GraphEdge(next_stage="LLM", name="latents")
+            graph_edge = GraphEdge(next_node="LLM", name="latents")
             graph_edge.tensor_info = persist_signals.get("latents", [])
             return [
                 graph_edge,
-                GraphEdge(next_stage="LLM", name="time_index")
+                GraphEdge(next_node="LLM", name="time_index")
             ]
 
         return []

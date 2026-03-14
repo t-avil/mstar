@@ -14,8 +14,8 @@ from mminf.ipc_formats import (
     WorkerMessageType,
 )
 from mminf.model.base import WorkerGraph
-from mminf.worker.stage_manager_utils import (
-    StageOutputRouting,
+from mminf.worker.node_manager_utils import (
+    NodeOutputRouting,
     WorkerGraphQueues,
     WorkerGraphsManager,
 )
@@ -28,7 +28,7 @@ class DummyWorker:
         worker_ids: list[str],
         my_worker_graphs: list[WorkerGraph],
         all_worker_graph_ids_to_graph_walks: dict[str, set[str]], # for all worker graphs
-        all_worker_graph_ids_to_stages: dict[str, list[str]], # for all worker graphs
+        all_worker_graph_ids_to_nodes: dict[str, list[str]], # for all worker graphs
         hostname: str="localhost", # TODO: figure this out
         socket_path_prefix: str="/tmp/mminf",
         tensor_comm_protocol=CommProtocol.RDMA,
@@ -50,7 +50,7 @@ class DummyWorker:
             },
             per_request_info={},
             all_worker_graph_ids_to_graph_walks=all_worker_graph_ids_to_graph_walks,
-            all_worker_graph_ids_to_stages=all_worker_graph_ids_to_stages
+            all_worker_graph_ids_to_nodes=all_worker_graph_ids_to_nodes
         )
 
         self.communicator = ZMQCommunicator(
@@ -137,7 +137,7 @@ class DummyWorker:
     def _send_outputs(
         self,
         request_id: str,
-        outputs: StageOutputRouting
+        outputs: NodeOutputRouting
     ):
         """
         Sends outputs to other workers and to the conductor.
@@ -177,17 +177,17 @@ class DummyWorker:
         while True:
             self._process_messages()
             for queue in self.worker_graphs_manager.queues.values():
-                ready_stage_names = queue.get_ready_stage_names()
+                ready_node_names = queue.get_ready_node_names()
 
-                for request_id, names in ready_stage_names.items():
-                    stages = queue.pop_ready_stages(request_id, names)
-                    for s in stages:
-                        outputs = self.worker_graphs_manager.process_stage_outputs(
-                            request_id, s.outputs
+                for request_id, names in ready_node_names.items():
+                    nodes = queue.pop_ready_nodes(request_id, names)
+                    for node in nodes:
+                        outputs = self.worker_graphs_manager.process_node_outputs(
+                            request_id, node.outputs
                         )
                         # TODO: in the real worker, we have to update
                         # self.worker_graphs_manager.per_request_info[request_id].tensors
-                        # with the tensors from the stage output, for all tensor IDs
+                        # with the tensors from the node output, for all tensor IDs
                         # in outputs.routed_to_this_worker_graph
 
                         self._send_outputs(request_id, outputs)

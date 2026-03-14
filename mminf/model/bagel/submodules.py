@@ -1,5 +1,5 @@
 # ---------------------------------------------------------------------------
-# StageSubmodule wrappers
+# NodeSubmodule wrappers
 # ---------------------------------------------------------------------------
 
 
@@ -19,18 +19,18 @@ from mminf.model.bagel.components.modeling_utils import (
     patchify,
 )
 from mminf.model.bagel.config import BagelModelConfig
-from mminf.model.base import StageSubmodule
+from mminf.model.base import NodeSubmodule
 
 logger = logging.getLogger(__name__)
 
 
-class ViTEncoderSubmodule(StageSubmodule):
+class ViTEncoderSubmodule(NodeSubmodule):
     """SigLIP2 ViT + connector + vit_pos_embed: pixel patches -> ViT features.
 
     Receives preprocessed inputs containing packed pixel values, position IDs,
     cumulative sequence lengths, and max sequence length. Both vit_encoder and
     vae_encoder receive "image_inputs" as their graph input name; routing is
-    handled by the graph edge's next_stage field.
+    handled by the graph edge's next_node field.
     """
 
     def __init__(
@@ -113,7 +113,7 @@ class ViTEncoderSubmodule(StageSubmodule):
         return {"img_emb": [features]}
 
 
-class VAEEncoderSubmodule(StageSubmodule):
+class VAEEncoderSubmodule(NodeSubmodule):
     """VAE encode + patchify + vae2llm + time_embedder + latent_pos_embed.
 
     Encodes an image tensor to VAE latents, patchifies them, and projects
@@ -216,10 +216,10 @@ class VAEEncoderSubmodule(StageSubmodule):
         return {"img_emb": [packed_latent]}
 
 
-class LLMSubmodule(StageSubmodule):
+class LLMSubmodule(NodeSubmodule):
     """Fat LLM wrapper that dispatches based on graph walk.
 
-    Absorbs text_emb, lm_head, and flow_proj into a single stage to avoid
+    Absorbs text_emb, lm_head, and flow_proj into a single node to avoid
     unnecessary IPC overhead. Graph walk-based dispatch handles:
 
       - prefill_text: embed_tokens -> LLM forward (causal, mode="und")
@@ -622,7 +622,7 @@ class LLMSubmodule(StageSubmodule):
             v_cfg_text = self.llm2vae(velocities["cfg_text"])[1:-1]
             v_cfg_img = self.llm2vae(velocities["cfg_img"])[1:-1]
 
-            # Two-stage CFG velocity combination + renormalization
+            # Two-node CFG velocity combination + renormalization
             cfg_renorm_min = kwargs.pop("cfg_renorm_min", self.config.cfg_renorm_min)
 
             if renorm_type == "text_channel":
@@ -703,7 +703,7 @@ class LLMSubmodule(StageSubmodule):
         return emb
 
 
-class VAEDecoderSubmodule(StageSubmodule):
+class VAEDecoderSubmodule(NodeSubmodule):
     """VAE decoder: latent grid -> pixel image."""
 
     def __init__(

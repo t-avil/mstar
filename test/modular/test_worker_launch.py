@@ -16,23 +16,23 @@ from mminf.model.dummy_model import DummyModel
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "configs", "examples", "dummy.yaml")
 
 
-class TestGetStageEngineTypes:
-    def test_returns_all_stages(self):
+class TestGetNodeEngineTypes:
+    def test_returns_all_nodes(self):
         model = DummyModel()
-        mapping = model.get_stage_engine_types()
-        expected_stages = {"text_emb", "concat_text", "image_emb", "concat_img", "LLM", "flow", "VAE_dec"}
-        assert set(mapping.keys()) == expected_stages
+        mapping = model.get_node_engine_types()
+        expected_nodes = {"text_emb", "concat_text", "image_emb", "concat_img", "LLM", "flow", "VAE_dec"}
+        assert set(mapping.keys()) == expected_nodes
 
     def test_engine_types_are_valid(self):
         model = DummyModel()
-        mapping = model.get_stage_engine_types()
+        mapping = model.get_node_engine_types()
         valid_types = {"ar", "flow", "enc_dec"}
-        for stage, etype in mapping.items():
-            assert etype in valid_types, f"Stage {stage} has invalid engine type {etype}"
+        for node, etype in mapping.items():
+            assert etype in valid_types, f"Node {node} has invalid engine type {etype}"
 
     def test_specific_mappings(self):
         model = DummyModel()
-        mapping = model.get_stage_engine_types()
+        mapping = model.get_node_engine_types()
         assert mapping["LLM"] == "ar"
         assert mapping["flow"] == "flow"
         assert mapping["text_emb"] == "enc_dec"
@@ -91,12 +91,12 @@ class TestDeriveWorkerInfo:
                 assert len(configs) > 0, f"{worker_id} has no engine configs"
                 for cfg in configs:
                     assert "engine_type" in cfg
-                    assert "stage_names" in cfg
+                    assert "node_names" in cfg
                     assert cfg["engine_type"] in {"ar", "flow", "enc_dec"}
             conductor.shutdown()
 
     def test_global_worker_graph_maps(self):
-        """Verify all_worker_graph_ids_to_graph_walks and all_worker_graph_ids_to_stages are populated."""
+        """Verify all_worker_graph_ids_to_graph_walks and all_worker_graph_ids_to_nodes are populated."""
         from mminf.conductor.conductor import Conductor
 
         model = DummyModel()
@@ -107,13 +107,13 @@ class TestDeriveWorkerInfo:
                 socket_path_prefix=os.path.join(tmpdir, "ipc_worker_graphs_global"),
             )
             assert len(conductor._all_worker_graph_ids_to_graph_walks) == len(conductor.worker_graphs)
-            assert len(conductor._all_worker_graph_ids_to_stages) == len(conductor.worker_graphs)
+            assert len(conductor._all_worker_graph_ids_to_nodes) == len(conductor.worker_graphs)
 
             for worker_graph_id in conductor.worker_graphs:
                 assert worker_graph_id in conductor._all_worker_graph_ids_to_graph_walks
-                assert worker_graph_id in conductor._all_worker_graph_ids_to_stages
+                assert worker_graph_id in conductor._all_worker_graph_ids_to_nodes
                 assert len(conductor._all_worker_graph_ids_to_graph_walks[worker_graph_id]) > 0
-                assert len(conductor._all_worker_graph_ids_to_stages[worker_graph_id]) > 0
+                assert len(conductor._all_worker_graph_ids_to_nodes[worker_graph_id]) > 0
             conductor.shutdown()
 
 

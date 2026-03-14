@@ -1,6 +1,6 @@
 import torch
 
-from mminf.engine.base import BaseEngine, EngineType, StageBatch, StageOutput
+from mminf.engine.base import BaseEngine, EngineType, NodeBatch, NodeOutput
 
 
 class FlowEngine(BaseEngine):
@@ -25,11 +25,11 @@ class FlowEngine(BaseEngine):
         self.submodules = submodules
         self.device = device
 
-    def execute_batch(self, batch: StageBatch) -> StageOutput:
-        submodule = self.submodules.get(batch.stage_name)
+    def execute_batch(self, batch: NodeBatch) -> NodeOutput:
+        submodule = self.submodules.get(batch.node_name)
         if submodule is None:
             # Dummy mode
-            return StageOutput(
+            return NodeOutput(
                 per_request_output_tensors={
                     rid: {} for rid in batch.request_ids
                 }
@@ -50,7 +50,7 @@ class FlowEngine(BaseEngine):
                         outputs[rid] = {"output": [result]}
                     else:
                         outputs[rid] = {}
-            return StageOutput(per_request_output_tensors=outputs)
+            return NodeOutput(per_request_output_tensors=outputs)
 
     def add_request(self, request_id: str) -> None:
         pass

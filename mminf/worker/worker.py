@@ -5,7 +5,7 @@ import torch
 from mminf.api_server.types import APIServerMessage, ResultTensors
 from mminf.communication.communicator import CommProtocol, ZMQCommunicator
 from mminf.communication.tensors import MooncakeCommunicationManager, NameToTensorList
-from mminf.engine.base import StageBatch, StageOutput
+from mminf.engine.base import NodeBatch, NodeOutput
 from mminf.graph.base import GraphEdge
 from mminf.graph.request_queues import format_graph_edge_list
 from mminf.ipc_formats import (
@@ -23,8 +23,8 @@ from mminf.ipc_formats import (
 from mminf.model.base import Model, WorkerGraph
 from mminf.worker.engine_manager import EngineManager
 from mminf.worker.micro_scheduler import MicroScheduler, ScheduledBatch
-from mminf.worker.stage_manager_utils import (
-    StageOutputRouting,
+from mminf.worker.node_manager_utils import (
+    NodeOutputRouting,
     WorkerGraphQueues,
     WorkerGraphsManager,
 )
@@ -46,7 +46,7 @@ class Worker:
         my_worker_graphs: list[WorkerGraph],
         engine_configs: list[dict],
         all_worker_graph_ids_to_graph_walks: dict[str, set[str]],
-        all_worker_graph_ids_to_stages: dict[str, list[str]],
+        all_worker_graph_ids_to_nodes: dict[str, list[str]],
         hostname: str = "localhost",
         socket_path_prefix: str = "/tmp/mminf",
         tensor_comm_protocol: CommProtocol = CommProtocol.RDMA,
@@ -68,7 +68,7 @@ class Worker:
             },
             per_request_info={},
             all_worker_graph_ids_to_graph_walks=all_worker_graph_ids_to_graph_walks,
-            all_worker_graph_ids_to_stages=all_worker_graph_ids_to_stages,
+            all_worker_graph_ids_to_nodes=all_worker_graph_ids_to_nodes,
         )
 
         self.engine_manager = EngineManager.from_config(
@@ -233,18 +233,18 @@ class Worker:
     # Batch building
     # ------------------------------------------------------------------
 
-    def _build_stage_batch(self, batch: ScheduledBatch) -> StageBatch:
+    def _build_node_batch(self, batch: ScheduledBatch) -> NodeBatch:
         """Gather input tensors from tensor_manager for all requests in the batch."""
         per_request_inputs: dict[str, NameToTensorList] = {}
         per_request_metadata: dict[str, dict] = {}
 
-        for request_id, stage in batch.stage_objects.items():
+        for request_id, node in batch.node_objects.items():
             tensors = {}
-            for input_name in stage.ready_inputs:
+            for input_name in node.ready_inputs:
                 tensors[input_name] = [
                     self.tensor_manager.get_tensor(
                         request_id=request_id, uuid=info.uuid
-                    ) for info in stage.ready_inputs[input_name].tensor_info
+                    ) for info in node.ready_inputs[input_name].tensor_info
                 ]
             per_request_inputs[request_id] = tensors
 
@@ -252,10 +252,10 @@ class Worker:
             if request_id in self._per_request_metadata:
                 per_request_metadata[request_id] = self._per_request_metadata[request_id]
 
-        return StageBatch(
-            stage_name=batch.stage_name,
+        return NodeBatch(
+            node_name=batch.node_name,
             graph_walk=batch.graph_walk,
-            request_ids=list(batch.stage_objects.keys()),
+            request_ids=list(batch.node_objects.keys()),
             per_request_input_tensors=per_request_inputs,
             per_request_metadata=per_request_metadata,
         )
@@ -265,12 +265,12 @@ class Worker:
     # ------------------------------------------------------------------
 
     def _cleanup_consumed_inputs(self, batch: ScheduledBatch) -> None:
-        """Free input tensors that were consumed by the just-executed stage."""
-        for request_id, stage in batch.stage_objects.items():
-            for input in stage.ready_inputs.values():
-                if input._persist_for_loop:
+        """Free input tensors that were consumed by the just-executed node."""
+        for request_id, node in batch.node_objects.items():
+            for graph_edge in node.ready_inputs.values():
+                if graph_edge._persist_for_loop:
                     continue
-                for info in input.tensor_info:
+                for info in graph_edge.tensor_info:
                     self.tensor_manager.dereference(
                         request_id, info.uuid
                     )
@@ -282,8 +282,8 @@ class Worker:
     def _store_outputs(
         self,
         batch: ScheduledBatch,
-        output: "StageOutput",
-        routing_per_request: dict[str, StageOutputRouting],
+        output: "NodeOutput",
+        routing_per_request: dict[str, NodeOutputRouting],
     ) -> dict[str, list[GraphEdge]]:
         """
         For outputs going to other workers: register tensors for RDMA send
@@ -293,12 +293,12 @@ class Worker:
         """
         output_edges: dict[str, list[GraphEdge]] = {}
 
-        for request_id, stage in batch.stage_objects.items():
+        for request_id, node in batch.node_objects.items():
             # output name to list of tensors
             request_output_tensors = output.per_request_output_tensors.get(
                 request_id, {}
             ) # name -> list of tensors
-            output_edges[request_id] = stage.outputs
+            output_edges[request_id] = node.outputs
 
             if not request_output_tensors:
                 # TODO (error handling?): this should not happen
@@ -307,7 +307,7 @@ class Worker:
             self.tensor_manager.store_and_populate_graph_edges(
                 request_id=request_id,
                 tensors=request_output_tensors,
-                graph_edges=stage.outputs
+                graph_edges=node.outputs
             )
 
             routing = routing_per_request[request_id]
@@ -333,7 +333,7 @@ class Worker:
         return output_edges
 
     def _send_outputs(
-        self, request_id: str, outputs: StageOutputRouting
+        self, request_id: str, outputs: NodeOutputRouting
     ) -> None:
         """
         Send outputs to other workers and to the conductor.
@@ -419,21 +419,21 @@ class Worker:
                     continue
 
                 # 4. Gather input tensors for the batch
-                stage_batch = self._build_stage_batch(batch)
+                node_batch = self._build_node_batch(batch)
 
                 # 5. Execute via engine
-                engine = self.engine_manager.get_engine(batch.stage_name)
-                logger.debug("Executing batch for stage %s on engine %s", stage_batch.stage_name, str(type(engine)))
-                output = engine.execute_batch(stage_batch)
+                engine = self.engine_manager.get_engine(batch.node_name)
+                logger.debug("Executing batch for node %s on engine %s", node_batch.node_name, str(type(engine)))
+                output = engine.execute_batch(node_batch)
 
                 # 5b. Free consumed input tensors
                 self._cleanup_consumed_inputs(batch)
 
                 # 6. Route outputs through WorkerGraphsManager first to determine routing
-                routing_per_request: dict[str, StageOutputRouting] = {}
-                for request_id,stage in batch.stage_objects.items():
-                    routing = self.worker_graphs_manager.process_stage_outputs(
-                        request_id, stage.outputs
+                routing_per_request: dict[str, NodeOutputRouting] = {}
+                for request_id,node in batch.node_objects.items():
+                    routing = self.worker_graphs_manager.process_node_outputs(
+                        request_id, node.outputs
                     )
                     routing_per_request[request_id] = routing
 
@@ -441,7 +441,7 @@ class Worker:
                 self._store_outputs(batch, output, routing_per_request)
 
                 # 8. Send outputs to other workers / conductor
-                for request_id in batch.stage_objects.keys():
+                for request_id in batch.node_objects.keys():
                     self._send_outputs(request_id, routing_per_request[request_id])
             except Exception:
                 logger.exception("Worker %s error in main loop", self.worker_id)

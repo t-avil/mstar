@@ -5,27 +5,27 @@
 model: "dummy"
 eos_token_id: 2
 
-stage_groups:
-  - stage_names:
+node_groups:
+  - node_names:
       - text_emb
       - concat_text
     ranks:
       - 0
   
-  - stage_names:
+  - node_names:
       - image_emb
       - concat_img
     ranks:
       - 0
   
-  - stage_names:
+  - node_names:
       - LLM
     ranks:
       - 1
     graph_walks:
       - prefill
 
-  - stage_names:
+  - node_names:
       - LLM
       - flow
     ranks:
@@ -35,7 +35,7 @@ stage_groups:
       - decode
       - image_gen
   
-  - stage_names:
+  - node_names:
       - VAE_dec
     ranks:
       - 4
