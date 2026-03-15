@@ -491,7 +491,7 @@ class Conductor:
         return done_with_forward
 
     def run(self):
-        from mminf.profiler import range_push, range_pop
+        from mminf.profiler import range_pop, range_push
 
         while True:
             if self.nvtx_enabled:

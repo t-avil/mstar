@@ -409,7 +409,7 @@ class Worker:
 
     def run(self) -> None:
         while True:
-            from mminf.profiler import range_push, range_pop
+            from mminf.profiler import range_pop, range_push
             try:
                 # 1. Process ZMQ messages (new requests, input signals, removals)
                 self._process_messages()
