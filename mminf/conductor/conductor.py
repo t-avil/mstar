@@ -9,10 +9,11 @@ from dataclasses import dataclass, field
 import numpy as np
 import yaml
 
-from mminf.api_server.types import APIServerMessage, RequestComplete
+from mminf.api_server.request_types import APIServerMessage, RequestComplete
 from mminf.communication.communicator import ZMQCommunicator
 from mminf.graph.base import GraphEdge, TensorPointerInfo
-from mminf.ipc_formats import (
+from mminf.model.base import CurrentForwardMetadata, ForwardPassArgs, Model, WorkerGraph
+from mminf.utils.ipc_format import (
     ConductorMessageType,
     InputSignals,
     NewRequest,
@@ -23,7 +24,6 @@ from mminf.ipc_formats import (
     WorkerMessage,
     WorkerMessageType,
 )
-from mminf.model.base import CurrentForwardMetadata, ForwardPassArgs, Model, WorkerGraph
 
 logger = logging.getLogger(__name__)
 
@@ -31,12 +31,13 @@ logger = logging.getLogger(__name__)
 def _worker_process_target(
     worker_id: str,
     worker_ids: list[str],
-    worker_graphs: list[WorkerGraph],
+    my_worker_graphs: list[WorkerGraph],
     engine_configs: list[dict],
     all_worker_graph_ids_to_graph_walks: dict[str, set[str]],
     all_worker_graph_ids_to_nodes: dict[str, list[str]],
     hostname: str,
     socket_path_prefix: str,
+    enable_nvtx: bool = False,
     model: Model | None = None,
     device: str = "cuda",
     log_level: str = "INFO",
@@ -51,17 +52,18 @@ def _worker_process_target(
 
     from mminf.worker.worker import Worker
     logger.debug("Launching worker %s with graph nodes %s", worker_id, str(
-        sum([wg.section.get_node_names() for wg in worker_graphs], start=[])
+        sum([wg.section.get_node_names() for wg in my_worker_graphs], start=[])
     ))
     worker = Worker(
         worker_id=worker_id,
         worker_ids=worker_ids,
-        my_worker_graphs=worker_graphs,
+        my_worker_graphs=my_worker_graphs,
         engine_configs=engine_configs,
         all_worker_graph_ids_to_graph_walks=all_worker_graph_ids_to_graph_walks,
         all_worker_graph_ids_to_nodes=all_worker_graph_ids_to_nodes,
         hostname=hostname,
         socket_path_prefix=socket_path_prefix,
+        enable_nvtx=enable_nvtx,
         device=torch.device(device),
         model=model,
     )
@@ -108,6 +110,7 @@ class Conductor:
         model_config_file: str,
         socket_path_prefix: str = "/tmp/mminf",
         hostname: str = "localhost",
+        enable_nvtx: bool = False,
         log_level: str = "INFO",
     ):
         self.requests: dict[str, RequestData] = {}
@@ -115,6 +118,7 @@ class Conductor:
         self.hostname = hostname
         self.socket_path_prefix = socket_path_prefix
         self.log_level = log_level
+        self.enable_nvtx = enable_nvtx
 
         self._worker_processes: list[mp.Process] = []
 
@@ -204,6 +208,7 @@ class Conductor:
                     "hostname": self.hostname,
                     "socket_path_prefix": self.socket_path_prefix,
                     "model": self.model,
+                    "enable_nvtx": self.enable_nvtx,
                     "device": f"cuda:{rank}",
                     "log_level": self.log_level,
                 },
@@ -486,7 +491,12 @@ class Conductor:
         return done_with_forward
 
     def run(self):
+        from mminf.utils.profiler import range_pop, range_push
+
         while True:
+            if self.enable_nvtx:
+                range_push("conductor.run_loop")
+
             try:
                 done_forward_passes = []
                 for message in self.communicator.get_all_new_messages():
@@ -511,5 +521,8 @@ class Conductor:
                     self._process_request_done(request_id)
             except Exception:
                 logger.exception("Conductor error in main loop")
+            finally:
+                if self.enable_nvtx:
+                    range_pop()
 
             time.sleep(0.001)

@@ -6,6 +6,8 @@ import collections
 import json
 import logging
 import multiprocessing as mp
+import os
+import signal
 import threading
 import time
 import uuid
@@ -19,7 +21,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from mminf.api_server.data_worker import PreprocessWorker
-from mminf.api_server.types import APIServerMessage, PreprocessInput, ResultChunk
+from mminf.api_server.request_types import APIServerMessage, PreprocessInput, ResultChunk
 from mminf.communication.communicator import ZMQCommunicator
 from mminf.model.registry import HF_MODELS
 
@@ -50,6 +52,7 @@ def _conductor_process_target(
     model_name: str,
     config_path: str,
     socket_path_prefix: str,
+    enable_nvtx: bool = False,
     log_level: str = "INFO",
 ):
     """Runs DummyConductor.run() in a spawned process."""
@@ -68,9 +71,36 @@ def _conductor_process_target(
         model=model,
         model_config_file=config_path,
         socket_path_prefix=socket_path_prefix,
+        enable_nvtx=enable_nvtx,
         log_level=log_level,
     )
-    conductor.run()
+    try:
+        conductor.run()
+    finally:
+        conductor.shutdown()
+
+
+def _shutdown_conductor_process(
+    conductor_proc: mp.Process,
+    timeout: float = 5.0,
+) -> None:
+    if not conductor_proc.is_alive():
+        return
+
+    try:
+        conductor_proc.send_signal(signal.SIGINT)
+        conductor_proc.join(timeout=timeout)
+    except Exception:
+        logger.exception("Failed graceful conductor shutdown")
+
+    if conductor_proc.is_alive():
+        conductor_proc.terminate()
+        conductor_proc.join(timeout=timeout)
+
+    if conductor_proc.is_alive():
+        if os.name != "nt":
+            conductor_proc.kill()
+            conductor_proc.join(timeout=timeout)
 
 
 # ------------------------------------------------------------------
@@ -487,6 +517,11 @@ def main():
         help="Per-request timeout in seconds",
     )
     parser.add_argument(
+        "--enable-nvtx",
+        action="store_true",
+        help="Enable torch.cuda.nvtx markers during execution",
+    )
+    parser.add_argument(
         "--log-level", type=str, default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
     )
@@ -506,8 +541,13 @@ def main():
     ctx = mp.get_context("spawn")
     conductor_proc = ctx.Process(
         target=_conductor_process_target,
-        args=(model_name, args.config,
-              args.socket_path_prefix, args.log_level),
+        args=(
+            model_name,
+            args.config,
+            args.socket_path_prefix,
+            args.enable_nvtx,
+            args.log_level,
+        ),
     )
     conductor_proc.start()
     logger.info("Conductor process started (pid=%d, model=%s)", conductor_proc.pid, model_name)
@@ -535,8 +575,7 @@ def main():
     finally:
         if api_server is not None:
             api_server.cleanup()
-        conductor_proc.terminate()
-        conductor_proc.join(timeout=5)
+        _shutdown_conductor_process(conductor_proc)
 
 
 if __name__ == "__main__":

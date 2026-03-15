@@ -17,8 +17,8 @@ from torch import nn
 from transformers.activations import ACT2FN
 
 from mminf.engine.ar_engine import CacheHandle
-from mminf.engine.flashinfer_utils import run_rms_norm
 from mminf.model.bagel.config import BagelModelConfig
+from mminf.utils.flashinfer_utils import run_rms_norm
 
 torch._dynamo.config.cache_size_limit = 512
 torch._dynamo.config.accumulated_cache_size_limit = 4096

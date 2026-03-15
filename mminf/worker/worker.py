@@ -2,13 +2,14 @@ import logging
 
 import torch
 
-from mminf.api_server.types import APIServerMessage, ResultTensors
+from mminf.api_server.request_types import APIServerMessage, ResultTensors
 from mminf.communication.communicator import CommProtocol, ZMQCommunicator
 from mminf.communication.tensors import MooncakeCommunicationManager, NameToTensorList
 from mminf.engine.base import NodeBatch, NodeOutput
 from mminf.graph.base import GraphEdge
 from mminf.graph.request_queues import format_graph_edge_list
-from mminf.ipc_formats import (
+from mminf.model.base import Model, WorkerGraph
+from mminf.utils.ipc_format import (
     ConductorMessage,
     ConductorMessageType,
     InputSignals,
@@ -20,7 +21,6 @@ from mminf.ipc_formats import (
     WorkerMessage,
     WorkerMessageType,
 )
-from mminf.model.base import Model, WorkerGraph
 from mminf.worker.engine_manager import EngineManager
 from mminf.worker.micro_scheduler import MicroScheduler, ScheduledBatch
 from mminf.worker.node_manager_utils import (
@@ -51,10 +51,12 @@ class Worker:
         socket_path_prefix: str = "/tmp/mminf",
         tensor_comm_protocol: CommProtocol = CommProtocol.RDMA,
         device: torch.device = torch.device("cuda"),
+        enable_nvtx: bool = False,
         model: Model | None = None,
     ):
         self.worker_id = worker_id
         self.device = device
+        self.enable_nvtx = enable_nvtx
 
         self.worker_graphs_manager = WorkerGraphsManager(
             queues={
@@ -72,7 +74,8 @@ class Worker:
         )
 
         self.engine_manager = EngineManager.from_config(
-            engine_configs, device, model=model
+            engine_configs=engine_configs, device=device, model=model,
+            enable_nvtx=self.enable_nvtx
         )
         self.scheduler = MicroScheduler(self.engine_manager)
 
@@ -406,6 +409,7 @@ class Worker:
 
     def run(self) -> None:
         while True:
+            from mminf.utils.profiler import range_pop, range_push
             try:
                 # 1. Process ZMQ messages (new requests, input signals, removals)
                 self._process_messages()
@@ -424,7 +428,16 @@ class Worker:
                 # 5. Execute via engine
                 engine = self.engine_manager.get_engine(batch.node_name)
                 logger.debug("Executing batch for node %s on engine %s", node_batch.node_name, str(type(engine)))
-                output = engine.execute_batch(node_batch)
+                if self.enable_nvtx:
+                    range_push(
+                        f"worker[{self.worker_id}].node[{batch.node_name}].graph_walk[{batch.graph_walk}]",
+                        synchronize=False,
+                    )
+                try:
+                    output = engine.execute_batch(node_batch)
+                finally:
+                    if self.enable_nvtx:
+                        range_pop(synchronize=False)
 
                 # 5b. Free consumed input tensors
                 self._cleanup_consumed_inputs(batch)
