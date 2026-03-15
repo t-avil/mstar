@@ -12,7 +12,8 @@ import yaml
 from mminf.api_server.types import APIServerMessage, RequestComplete
 from mminf.communication.communicator import ZMQCommunicator
 from mminf.graph.base import GraphEdge, TensorPointerInfo
-from mminf.ipc_formats import (
+from mminf.model.base import CurrentForwardMetadata, ForwardPassArgs, Model, WorkerGraph
+from mminf.utils.ipc_format import (
     ConductorMessageType,
     InputSignals,
     NewRequest,
@@ -23,7 +24,6 @@ from mminf.ipc_formats import (
     WorkerMessage,
     WorkerMessageType,
 )
-from mminf.model.base import CurrentForwardMetadata, ForwardPassArgs, Model, WorkerGraph
 
 logger = logging.getLogger(__name__)
 
@@ -491,7 +491,7 @@ class Conductor:
         return done_with_forward
 
     def run(self):
-        from mminf.profiler import range_pop, range_push
+        from mminf.utils.profiler import range_pop, range_push
 
         while True:
             if self.nvtx_enabled:

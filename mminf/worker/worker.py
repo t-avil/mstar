@@ -8,7 +8,8 @@ from mminf.communication.tensors import MooncakeCommunicationManager, NameToTens
 from mminf.engine.base import NodeBatch, NodeOutput
 from mminf.graph.base import GraphEdge
 from mminf.graph.request_queues import format_graph_edge_list
-from mminf.ipc_formats import (
+from mminf.model.base import Model, WorkerGraph
+from mminf.utils.ipc_format import (
     ConductorMessage,
     ConductorMessageType,
     InputSignals,
@@ -20,7 +21,6 @@ from mminf.ipc_formats import (
     WorkerMessage,
     WorkerMessageType,
 )
-from mminf.model.base import Model, WorkerGraph
 from mminf.worker.engine_manager import EngineManager
 from mminf.worker.micro_scheduler import MicroScheduler, ScheduledBatch
 from mminf.worker.node_manager_utils import (
@@ -409,7 +409,7 @@ class Worker:
 
     def run(self) -> None:
         while True:
-            from mminf.profiler import range_pop, range_push
+            from mminf.utils.profiler import range_pop, range_push
             try:
                 # 1. Process ZMQ messages (new requests, input signals, removals)
                 self._process_messages()

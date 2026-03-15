@@ -18,7 +18,8 @@ except (ImportError, RuntimeError):
 from mminf.api_server.types import PreprocessInput, ResultChunk, ResultTensors
 from mminf.communication.communicator import CommProtocol, ZMQCommunicator
 from mminf.communication.tensors import MooncakeCommunicationManager, NameToTensorList
-from mminf.ipc_formats import (
+from mminf.model.base import Model
+from mminf.utils.ipc_format import (
     ConductorMessage,
     ConductorMessageType,
     NewRequestConductor,
@@ -26,7 +27,6 @@ from mminf.ipc_formats import (
     UnpersistTensors,
     WorkerMessageType,
 )
-from mminf.model.base import Model
 
 logger = logging.getLogger(__name__)
 

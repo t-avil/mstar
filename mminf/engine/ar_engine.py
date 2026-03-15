@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 import torch
 
 from mminf.engine.base import BaseEngine, EngineType, NodeBatch, NodeOutput
-from mminf.profiler import range_pop, range_push
+from mminf.utils.profiler import range_pop, range_push
 
 logger = logging.getLogger(__name__)
 

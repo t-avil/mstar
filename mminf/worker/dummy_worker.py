@@ -2,7 +2,8 @@ import time
 
 from mminf.communication.communicator import CommProtocol, ZMQCommunicator
 from mminf.communication.tensors import MooncakeCommunicationManager
-from mminf.ipc_formats import (
+from mminf.model.base import WorkerGraph
+from mminf.utils.ipc_format import (
     ConductorMessage,
     ConductorMessageType,
     InputSignals,
@@ -13,7 +14,6 @@ from mminf.ipc_formats import (
     WorkerMessage,
     WorkerMessageType,
 )
-from mminf.model.base import WorkerGraph
 from mminf.worker.node_manager_utils import (
     NodeOutputRouting,
     WorkerGraphQueues,

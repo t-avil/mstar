@@ -16,7 +16,7 @@ import torch
 
 from mminf.communication.communicator import BaseCommunicator, CommProtocol
 from mminf.graph.base import GraphEdge, TensorPointerInfo
-from mminf.ipc_formats import TensorReceived, WorkerMessage, WorkerMessageType
+from mminf.utils.ipc_format import TensorReceived, WorkerMessage, WorkerMessageType
 
 logger = logging.getLogger(__name__)
 
