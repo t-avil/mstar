@@ -45,11 +45,17 @@ class MicroScheduler:
         self.engine_manager = engine_manager
 
     def get_next_batch(
-        self, worker_graphs_manager: WorkerGraphsManager
+        self,
+        worker_graphs_manager: WorkerGraphsManager,
+        max_batch_size: int | None = None,
     ) -> ScheduledBatch | None:
         """
         Scans all worker graph queues for ready nodes.
         Groups by node name. Returns highest-priority group.
+
+        Args:
+            max_batch_size: If set, limit the number of requests in the batch.
+                Useful for CUDA graph compatibility (must match captured sizes).
         """
         # Collect all ready (node_name, request_id, graph_walk) tuples
         # grouped by node name
@@ -87,6 +93,11 @@ class MicroScheduler:
 
         # Pop ready nodes for all requests of this node name
         entries = node_name_to_requests[best_node_name]
+
+        # Limit batch size if requested (e.g., for CUDA graph compatibility)
+        if max_batch_size is not None and len(entries) > max_batch_size:
+            entries = entries[:max_batch_size]
+
         node_objects = {}
         graph_walk = entries[0].graph_walk
 
