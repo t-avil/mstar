@@ -321,6 +321,257 @@ class CacheHandle:
         self._get_state().seq_len = pos
 
 
+class BatchedCacheManager:
+    """Manages batched FlashInfer attention for multiple requests simultaneously.
+
+    Replaces per-request CacheHandle for decode and simple prefill batches where
+    all requests use the same graph_walk. Constructs batch-level FlashInfer index
+    tensors (qo_indptr, paged_kv_indptr, paged_kv_indices) and issues a single
+    FlashInfer call per layer instead of N separate calls.
+
+    Keep existing CacheHandle for backward compatibility — complex paths like
+    image_gen (3-pass CFG with label switching) continue using per-request
+    CacheHandle.
+    """
+
+    def __init__(
+        self,
+        request_ids: list[str],
+        active_labels_per_request: dict[str, str],
+        kv_cache: torch.Tensor,
+        page_allocator: PageAllocator,
+        request_states: dict[tuple[str, str], KVRequestState],
+        workspace_buffer: torch.Tensor,
+        kv_cache_config: KVCacheConfig,
+        device,
+    ):
+        self.request_ids = request_ids
+        self.active_labels = active_labels_per_request  # {req_id: label}
+        self.kv_cache = kv_cache
+        self.page_allocator = page_allocator
+        self.request_states = request_states
+        self.workspace_buffer = workspace_buffer
+        self.kv_cache_config = kv_cache_config
+        self.device = device
+
+        self.base_pos_ids = torch.arange(
+            kv_cache_config.max_seq_len, dtype=torch.long, device=device
+        )
+
+    def _get_state(self, request_id: str, label: str | None = None) -> KVRequestState:
+        label = label or self.active_labels.get(request_id, "main")
+        key = (request_id, label)
+        if key not in self.request_states:
+            self.request_states[key] = KVRequestState()
+        return self.request_states[key]
+
+    def set_active_labels(self, labels: dict[str, str]) -> None:
+        """Switch active cache labels for all requests at once."""
+        self.active_labels = labels
+
+    def set_active_label(self, label: str) -> None:
+        """Switch all requests to the same cache label."""
+        self.active_labels = {rid: label for rid in self.request_ids}
+
+    def run_attention(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        layer_idx: int,
+        is_causal: bool = True,
+        write_cache: bool = True,
+        seq_lens: list[int] | None = None,
+    ) -> torch.Tensor:
+        """Single FlashInfer call for all requests in the batch.
+
+        When seq_lens is provided (batched path), q/k/v are concatenated tensors
+        with shape [sum(seq_lens), heads, head_dim]. When seq_lens is None,
+        falls back to treating q as a single request (backward compat).
+
+        Args:
+            q: [sum(seq_lens), num_q_heads, head_dim] - concatenated queries
+            k: [sum(seq_lens), num_kv_heads, head_dim]
+            v: [sum(seq_lens), num_kv_heads, head_dim]
+            layer_idx: transformer layer index
+            seq_lens: number of new tokens per request
+        Returns:
+            output: [sum(seq_lens), num_q_heads, head_dim]
+        """
+        assert self.kv_cache is not None
+
+        cfg = self.kv_cache_config
+        page_size = cfg.page_size
+        num_kv_heads = cfg.num_kv_heads
+        head_dim = cfg.head_dim
+        num_qo_heads = cfg.num_qo_heads
+
+        if seq_lens is None:
+            # Single-request fallback (shouldn't happen in batched path)
+            seq_lens = [q.shape[0]]
+
+        device = q.device
+
+        # 1. For each request: allocate pages if needed, write K,V to cache
+        qo_indptr_list = [0]
+        kv_indptr_list = [0]
+        all_page_indices = []
+        kv_last_page_lens = []
+
+        offset = 0
+        for i, rid in enumerate(self.request_ids):
+            state = self._get_state(rid)
+            sl = seq_lens[i]
+
+            # Allocate pages if needed
+            total_len = state.seq_len + sl
+            num_pages_needed = (total_len + page_size - 1) // page_size
+            num_new_pages = num_pages_needed - len(state.page_indices)
+            if num_new_pages > 0:
+                new_pages = self.page_allocator.allocate(num_new_pages)
+                state.page_indices.extend(new_pages)
+
+            # Write K, V into cache pages at this layer
+            for j in range(sl):
+                pos = state.seq_len + j
+                page_idx = state.page_indices[pos // page_size]
+                page_offset = pos % page_size
+                self.kv_cache[layer_idx, page_idx, 0, page_offset] = k[offset + j]
+                self.kv_cache[layer_idx, page_idx, 1, page_offset] = v[offset + j]
+
+            # Build indptr entries
+            qo_indptr_list.append(qo_indptr_list[-1] + sl)
+            all_page_indices.extend(state.page_indices)
+            kv_indptr_list.append(kv_indptr_list[-1] + len(state.page_indices))
+
+            last_page_len = total_len % page_size or page_size
+            kv_last_page_lens.append(last_page_len)
+
+            offset += sl
+
+        # 2. Build batched FlashInfer index tensors
+        qo_indptr = torch.tensor(qo_indptr_list, dtype=torch.int32, device=device)
+        paged_kv_indptr = torch.tensor(kv_indptr_list, dtype=torch.int32, device=device)
+        paged_kv_indices = torch.tensor(all_page_indices, dtype=torch.int32, device=device)
+        paged_kv_last_page_len = torch.tensor(kv_last_page_lens, dtype=torch.int32, device=device)
+
+        # 3. Plan + run BatchPrefillWithPagedKVCacheWrapper
+        import flashinfer
+        wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
+            self.workspace_buffer, "NHD"
+        )
+        wrapper.plan(
+            qo_indptr=qo_indptr,
+            paged_kv_indptr=paged_kv_indptr,
+            paged_kv_indices=paged_kv_indices,
+            paged_kv_last_page_len=paged_kv_last_page_len,
+            num_qo_heads=num_qo_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim_qk=head_dim,
+            page_size=page_size,
+            causal=is_causal,
+            q_data_type=q.dtype,
+        )
+        output = wrapper.run(q, self.kv_cache[layer_idx])
+        return output
+
+    def apply_rope_default(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        seq_lens: list[int] | None = None,
+        rotary_dim: int | None = None,
+        interleave: bool = False,
+        rope_scale: float = 1,
+        rope_theta: float = 10000.0,
+    ):
+        """Apply RoPE to concatenated q, k with per-request position offsets."""
+        if seq_lens is None:
+            seq_lens = [q.shape[0]]
+
+        pos_ids = torch.cat([
+            torch.arange(sl, device=q.device, dtype=torch.long)
+            + self._get_state(rid).position_id_start
+            for rid, sl in zip(self.request_ids, seq_lens)
+        ])
+
+        import flashinfer
+        return flashinfer.rope.apply_rope_pos_ids(
+            q, k, pos_ids,
+            rotary_dim=rotary_dim,
+            interleave=interleave,
+            rope_scale=rope_scale,
+            rope_theta=rope_theta,
+        )
+
+    def apply_rope_custom_pos_ids(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        pos_ids: torch.Tensor,
+        rotary_dim: int | None = None,
+        interleave: bool = False,
+        rope_scale: float = 1,
+        rope_theta: float = 10000.0,
+    ):
+        import flashinfer
+        return flashinfer.rope.apply_rope_pos_ids(
+            q, k, pos_ids,
+            rotary_dim=rotary_dim,
+            interleave=interleave,
+            rope_scale=rope_scale,
+            rope_theta=rope_theta,
+        )
+
+    def advance_seq_len(self, n: int, pos_id_n: int | None = None) -> None:
+        """Advance seq_len for all requests by n tokens.
+
+        Used when all requests in the batch process the same number of tokens
+        (e.g., decode where each request generates 1 token).
+        """
+        for rid in self.request_ids:
+            state = self._get_state(rid)
+            state.seq_len += n
+            if pos_id_n is None:
+                state.position_id_start += n
+            else:
+                state.position_id_start += pos_id_n
+
+    def advance_seq_lens(self, n_per_request: list[int], pos_id_ns: list[int] | None = None) -> None:
+        """Advance seq_len for each request by different amounts."""
+        for i, rid in enumerate(self.request_ids):
+            state = self._get_state(rid)
+            state.seq_len += n_per_request[i]
+            if pos_id_ns is None:
+                state.position_id_start += n_per_request[i]
+            else:
+                state.position_id_start += pos_id_ns[i]
+
+    def snapshot_all(self, from_label: str, to_label: str) -> None:
+        """Snapshot KV cache for all requests in batch."""
+        for rid in self.request_ids:
+            from_state = self._get_state(rid, from_label)
+            to_key = (rid, to_label)
+
+            # Free old pages if target already exists
+            if to_key in self.request_states:
+                old_state = self.request_states[to_key]
+                if old_state.page_indices:
+                    self.page_allocator.free(old_state.page_indices)
+
+            num_pages = len(from_state.page_indices)
+            new_pages = self.page_allocator.allocate(num_pages) if num_pages > 0 else []
+
+            for src_page, dst_page in zip(from_state.page_indices, new_pages, strict=False):
+                self.kv_cache[:, dst_page] = self.kv_cache[:, src_page]
+
+            self.request_states[to_key] = KVRequestState(
+                page_indices=new_pages,
+                seq_len=from_state.seq_len,
+                position_id_start=from_state.position_id_start,
+            )
+
+
 class AREngine(BaseEngine):
     """
     Autoregressive engine with paged KV cache.
@@ -354,6 +605,9 @@ class AREngine(BaseEngine):
         self.prefill_wrapper = None
         self.decode_wrapper = None
         self.workspace_buffer = None
+
+        # CUDA graph runners (initialized in warmup())
+        self.cuda_graph_runners: dict[str, "CudaGraphRunner"] = {}
 
     def engine_type(self) -> EngineType:
         return EngineType.AR
@@ -415,6 +669,158 @@ class AREngine(BaseEngine):
             device=self.device
         )
 
+    def _compile_submodules(self) -> None:
+        """Apply torch.compile to submodule forward paths.
+
+        Uses mode="max-autotune-no-cudagraphs" (SGLang's approach) so compiled
+        code gets baked into CUDA graphs when captured. Must be called BEFORE
+        CUDA graph capture.
+        """
+        if not torch.cuda.is_available():
+            return
+
+        for node_name, submodule in self.submodules.items():
+            if not hasattr(submodule, 'language_model'):
+                continue
+            try:
+                lm = submodule.language_model
+                lm.model.forward = torch.compile(
+                    lm.model.forward,
+                    mode="max-autotune-no-cudagraphs",
+                    fullgraph=False,
+                    dynamic=False,
+                )
+                logger.info("AREngine: torch.compile applied to %s language_model", node_name)
+            except Exception:
+                logger.warning("AREngine: torch.compile failed for %s, using eager mode",
+                               node_name, exc_info=True)
+
+    def warmup(self) -> None:
+        """Compile submodules and capture CUDA graphs."""
+        from mminf.engine.cuda_graph_runner import CudaGraphRunner
+
+        if self.kv_cache is None or self.device is None:
+            logger.info("AREngine: skipping warmup (no KV cache or device)")
+            return
+
+        # Step 1: torch.compile (before CUDA graph capture)
+        self._compile_submodules()
+
+        # Step 2: CUDA graph capture
+        for node_name in self.submodules:
+            runner = CudaGraphRunner(self, node_name, self.kv_cache_config)
+            runner.warmup_and_capture()
+            if runner.graphs:
+                self.cuda_graph_runners[node_name] = runner
+                logger.info("AREngine: CUDA graphs captured for %s (%d sizes)",
+                            node_name, len(runner.graphs))
+
+    def _can_batch(self, batch: NodeBatch) -> bool:
+        """Only batch when all requests share a batchable graph_walk path.
+
+        image_gen with 3-pass CFG is too complex to batch initially due to
+        multi-label switching and snapshot operations within the forward pass.
+        """
+        if len(batch.request_ids) <= 1:
+            return False
+        if batch.graph_walk not in ("decode", "prefill_text"):
+            return False
+        # Ensure the submodule supports batched forward
+        submodule = self.submodules.get(batch.node_name)
+        if submodule is None or not hasattr(submodule, "forward_batched"):
+            return False
+        return True
+
+    def _execute_batched(self, batch: NodeBatch, submodule) -> NodeOutput:
+        """Execute batch with BatchedCacheManager for true vectorized batching."""
+        cache_manager = BatchedCacheManager(
+            request_ids=batch.request_ids,
+            active_labels_per_request={rid: "main" for rid in batch.request_ids},
+            kv_cache=self.kv_cache,
+            page_allocator=self.page_allocator,
+            request_states=self.request_states,
+            workspace_buffer=self.workspace_buffer,
+            kv_cache_config=self.kv_cache_config,
+            device=self.device,
+        )
+
+        # Preprocess all requests
+        all_preprocessed = {}
+        for rid in batch.request_ids:
+            inputs = batch.per_request_input_tensors.get(rid, {})
+            preprocessed = submodule.preprocess(batch.graph_walk, **inputs)
+            all_preprocessed[rid] = preprocessed
+
+        with torch.no_grad():
+            batched_output = submodule.forward_batched(
+                graph_walk=batch.graph_walk,
+                cache_manager=cache_manager,
+                per_request_inputs=all_preprocessed,
+                per_request_metadata=batch.per_request_metadata,
+            )
+
+        return NodeOutput(per_request_output_tensors=batched_output)
+
+    def _execute_sequential(self, batch: NodeBatch, submodule) -> NodeOutput:
+        """Original per-request execution with CacheHandle."""
+        per_request_outputs = {}
+        for rid in batch.request_ids:
+            cache_handle = self._create_cache_handle(rid)
+            inputs = batch.per_request_input_tensors.get(rid, {})
+            metadata = batch.per_request_metadata.get(rid, {})
+
+            preprocessed = submodule.preprocess(batch.graph_walk, **inputs)
+            with torch.no_grad():
+                output = submodule(
+                    graph_walk=batch.graph_walk,
+                    cache_handle=cache_handle,
+                    **preprocessed,
+                    **metadata,
+                )
+            per_request_outputs[rid] = output
+
+        return NodeOutput(per_request_output_tensors=per_request_outputs)
+
+    def _can_use_cuda_graph(self, batch: NodeBatch) -> bool:
+        """Check if CUDA graph replay is available for this batch."""
+        if batch.graph_walk != "decode":
+            return False
+        runner = self.cuda_graph_runners.get(batch.node_name)
+        if runner is None:
+            return False
+        return runner.can_run(len(batch.request_ids))
+
+    def _execute_with_cuda_graph(self, batch: NodeBatch, submodule) -> NodeOutput:
+        """Execute using a captured CUDA graph."""
+        runner = self.cuda_graph_runners[batch.node_name]
+
+        cache_manager = BatchedCacheManager(
+            request_ids=batch.request_ids,
+            active_labels_per_request={rid: "main" for rid in batch.request_ids},
+            kv_cache=self.kv_cache,
+            page_allocator=self.page_allocator,
+            request_states=self.request_states,
+            workspace_buffer=self.workspace_buffer,
+            kv_cache_config=self.kv_cache_config,
+            device=self.device,
+        )
+
+        all_preprocessed = {}
+        for rid in batch.request_ids:
+            inputs = batch.per_request_input_tensors.get(rid, {})
+            preprocessed = submodule.preprocess(batch.graph_walk, **inputs)
+            all_preprocessed[rid] = preprocessed
+
+        with torch.no_grad():
+            batched_output = runner.run(
+                batch_size=len(batch.request_ids),
+                per_request_inputs=all_preprocessed,
+                per_request_metadata=batch.per_request_metadata,
+                cache_manager=cache_manager,
+            )
+
+        return NodeOutput(per_request_output_tensors=batched_output)
+
     def execute_batch(self, batch: NodeBatch) -> NodeOutput:
         if self.enable_nvtx:
             range_push(f"engine.ar.{batch.node_name}.{batch.graph_walk}")
@@ -429,24 +835,13 @@ class AREngine(BaseEngine):
             return output
 
         try:
-            # Per-request execution with CacheHandle
-            per_request_outputs = {}
-            for rid in batch.request_ids:
-                cache_handle = self._create_cache_handle(rid)
-                inputs = batch.per_request_input_tensors.get(rid, {})
-                metadata = batch.per_request_metadata.get(rid, {})
-
-                preprocessed = submodule.preprocess(batch.graph_walk, **inputs)
-                with torch.no_grad():
-                    output = submodule(
-                        graph_walk=batch.graph_walk,
-                        cache_handle=cache_handle,
-                        **preprocessed,
-                        **metadata,
-                    )
-                per_request_outputs[rid] = output
-
-            return NodeOutput(per_request_output_tensors=per_request_outputs)
+            # Priority: CUDA graph > batched > sequential
+            if self._can_use_cuda_graph(batch):
+                return self._execute_with_cuda_graph(batch, submodule)
+            elif self._can_batch(batch):
+                return self._execute_batched(batch, submodule)
+            else:
+                return self._execute_sequential(batch, submodule)
         finally:
             if self.enable_nvtx:
                 range_pop()
