@@ -107,6 +107,7 @@ class CacheHandle:
         """Switch which KV cache subsequent run_attention calls use."""
         self.active_label = label
 
+
     def run_attention(
         self,
         q: torch.Tensor,
@@ -354,6 +355,11 @@ class BatchedCacheManager:
         self.kv_cache_config = kv_cache_config
         self.device = device
 
+        self.wrapper = None
+        self.page_indices: torch.Tensor | None = None
+        self.page_offsets: torch.Tensor | None = None
+        self.pos_ids: torch.Tensor | None = None
+
         self.base_pos_ids = torch.arange(
             kv_cache_config.max_seq_len, dtype=torch.long, device=device
         )
@@ -373,15 +379,106 @@ class BatchedCacheManager:
         """Switch all requests to the same cache label."""
         self.active_labels = {rid: label for rid in self.request_ids}
 
+    def plan_attention(
+        self,
+        seq_lens: list[int] | None = None,
+        dtype=torch.bfloat16,
+        is_causal=True
+    ):
+        assert self.kv_cache is not None
+
+        cfg = self.kv_cache_config
+        page_size = cfg.page_size
+        num_kv_heads = cfg.num_kv_heads
+        head_dim = cfg.head_dim
+        num_qo_heads = cfg.num_qo_heads
+        device = self.device
+
+        # 1. For each request: allocate pages if needed, write K,V to cache
+        qo_indptr_list = [0]
+        kv_indptr_list = [0]
+        all_page_indices = []
+        kv_last_page_lens = []
+
+        page_indices_all = []
+        page_offsets_all = []
+        for i, rid in enumerate(self.request_ids):
+            state = self._get_state(rid)
+            sl = seq_lens[i]
+
+            # Allocate pages if needed
+            total_len = state.seq_len + sl
+            num_pages_needed = (total_len + page_size - 1) // page_size
+            num_new_pages = num_pages_needed - len(state.page_indices)
+            if num_new_pages > 0:
+                new_pages = self.page_allocator.allocate(num_new_pages)
+                state.page_indices.extend(new_pages)
+            
+             # Compute positions for this request
+            pos = torch.arange(state.seq_len, state.seq_len + sl, device=self.device)
+
+            page_idx = torch.tensor(state.page_indices, device=self.device)[pos // page_size]
+            page_offset = pos % page_size
+
+            page_indices_all.append(page_idx)
+            page_offsets_all.append(page_offset)
+
+            # Build indptr entries
+            qo_indptr_list.append(qo_indptr_list[-1] + sl)
+            all_page_indices.extend(state.page_indices)
+            kv_indptr_list.append(kv_indptr_list[-1] + len(state.page_indices))
+
+            last_page_len = total_len % page_size or page_size
+            kv_last_page_lens.append(last_page_len)
+        
+        self.page_indices = torch.cat(page_indices_all)
+        self.page_offsets = torch.cat(page_offsets_all)
+        self.token_offsets = torch.arange(self.page_indices.numel(), device=self.device)
+
+        # 2. Build batched FlashInfer index tensors
+        qo_indptr = torch.tensor(qo_indptr_list, dtype=torch.int32, device=device)
+        paged_kv_indptr = torch.tensor(kv_indptr_list, dtype=torch.int32, device=device)
+        paged_kv_indices = torch.tensor(all_page_indices, dtype=torch.int32, device=device)
+        paged_kv_last_page_len = torch.tensor(kv_last_page_lens, dtype=torch.int32, device=device)
+
+        # 3. Plan + run BatchPrefillWithPagedKVCacheWrapper
+        import flashinfer
+        self.wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
+            self.workspace_buffer, "NHD"
+        )
+        self.wrapper.plan(
+            qo_indptr=qo_indptr,
+            paged_kv_indptr=paged_kv_indptr,
+            paged_kv_indices=paged_kv_indices,
+            paged_kv_last_page_len=paged_kv_last_page_len,
+            num_qo_heads=num_qo_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim_qk=head_dim,
+            page_size=page_size,
+            causal=is_causal,
+            q_data_type=dtype,
+        )
+    
+    def plan_rope(
+        self,
+        seq_lens: list[int],
+        pos_ids: torch.Tensor | None = None
+    ):
+        if pos_ids is not None:
+            self.pos_ids = pos_ids
+            return
+        self.pos_ids = torch.cat([
+            torch.arange(sl, device=self.device, dtype=torch.long)
+            + self._get_state(rid).position_id_start
+            for rid, sl in zip(self.request_ids, seq_lens)
+        ])
+
     def run_attention(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
         layer_idx: int,
-        is_causal: bool = True,
-        write_cache: bool = True,
-        seq_lens: list[int] | None = None,
     ) -> torch.Tensor:
         """Single FlashInfer call for all requests in the batch.
 
@@ -398,125 +495,29 @@ class BatchedCacheManager:
         Returns:
             output: [sum(seq_lens), num_q_heads, head_dim]
         """
-        assert self.kv_cache is not None
+        assert self.kv_cache is not None, self.wrapper is not None
+        # Two writes
+        self.kv_cache[layer_idx, self.page_indices, 0, self.page_offsets] = k[self.token_offsets]
+        self.kv_cache[layer_idx, self.page_indices, 1, self.page_offsets] = v[self.token_offsets]
 
-        cfg = self.kv_cache_config
-        page_size = cfg.page_size
-        num_kv_heads = cfg.num_kv_heads
-        head_dim = cfg.head_dim
-        num_qo_heads = cfg.num_qo_heads
-
-        if seq_lens is None:
-            # Single-request fallback (shouldn't happen in batched path)
-            seq_lens = [q.shape[0]]
-
-        device = q.device
-
-        # 1. For each request: allocate pages if needed, write K,V to cache
-        qo_indptr_list = [0]
-        kv_indptr_list = [0]
-        all_page_indices = []
-        kv_last_page_lens = []
-
-        offset = 0
-        for i, rid in enumerate(self.request_ids):
-            state = self._get_state(rid)
-            sl = seq_lens[i]
-
-            # Allocate pages if needed
-            total_len = state.seq_len + sl
-            num_pages_needed = (total_len + page_size - 1) // page_size
-            num_new_pages = num_pages_needed - len(state.page_indices)
-            if num_new_pages > 0:
-                new_pages = self.page_allocator.allocate(num_new_pages)
-                state.page_indices.extend(new_pages)
-
-            # Write K, V into cache pages at this layer
-            for j in range(sl):
-                pos = state.seq_len + j
-                page_idx = state.page_indices[pos // page_size]
-                page_offset = pos % page_size
-                self.kv_cache[layer_idx, page_idx, 0, page_offset] = k[offset + j]
-                self.kv_cache[layer_idx, page_idx, 1, page_offset] = v[offset + j]
-
-            # Build indptr entries
-            qo_indptr_list.append(qo_indptr_list[-1] + sl)
-            all_page_indices.extend(state.page_indices)
-            kv_indptr_list.append(kv_indptr_list[-1] + len(state.page_indices))
-
-            last_page_len = total_len % page_size or page_size
-            kv_last_page_lens.append(last_page_len)
-
-            offset += sl
-
-        # 2. Build batched FlashInfer index tensors
-        qo_indptr = torch.tensor(qo_indptr_list, dtype=torch.int32, device=device)
-        paged_kv_indptr = torch.tensor(kv_indptr_list, dtype=torch.int32, device=device)
-        paged_kv_indices = torch.tensor(all_page_indices, dtype=torch.int32, device=device)
-        paged_kv_last_page_len = torch.tensor(kv_last_page_lens, dtype=torch.int32, device=device)
-
-        # 3. Plan + run BatchPrefillWithPagedKVCacheWrapper
-        import flashinfer
-        wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
-            self.workspace_buffer, "NHD"
-        )
-        wrapper.plan(
-            qo_indptr=qo_indptr,
-            paged_kv_indptr=paged_kv_indptr,
-            paged_kv_indices=paged_kv_indices,
-            paged_kv_last_page_len=paged_kv_last_page_len,
-            num_qo_heads=num_qo_heads,
-            num_kv_heads=num_kv_heads,
-            head_dim_qk=head_dim,
-            page_size=page_size,
-            causal=is_causal,
-            q_data_type=q.dtype,
-        )
-        output = wrapper.run(q, self.kv_cache[layer_idx])
+        output = self.wrapper.run(q, self.kv_cache[layer_idx])
         return output
 
-    def apply_rope_default(
+    def apply_rope(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
-        seq_lens: list[int] | None = None,
         rotary_dim: int | None = None,
         interleave: bool = False,
         rope_scale: float = 1,
         rope_theta: float = 10000.0,
     ):
         """Apply RoPE to concatenated q, k with per-request position offsets."""
-        if seq_lens is None:
-            seq_lens = [q.shape[0]]
-
-        pos_ids = torch.cat([
-            torch.arange(sl, device=q.device, dtype=torch.long)
-            + self._get_state(rid).position_id_start
-            for rid, sl in zip(self.request_ids, seq_lens)
-        ])
+        assert self.pos_ids is not None
 
         import flashinfer
         return flashinfer.rope.apply_rope_pos_ids(
-            q, k, pos_ids,
-            rotary_dim=rotary_dim,
-            interleave=interleave,
-            rope_scale=rope_scale,
-            rope_theta=rope_theta,
-        )
-
-    def apply_rope_custom_pos_ids(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        pos_ids: torch.Tensor,
-        rotary_dim: int | None = None,
-        interleave: bool = False,
-        rope_scale: float = 1,
-        rope_theta: float = 10000.0,
-    ):
-        import flashinfer
-        return flashinfer.rope.apply_rope_pos_ids(
-            q, k, pos_ids,
+            q, k, self.pos_ids,
             rotary_dim=rotary_dim,
             interleave=interleave,
             rope_scale=rope_scale,
