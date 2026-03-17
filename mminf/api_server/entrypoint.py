@@ -92,7 +92,7 @@ def _shutdown_conductor_process(
     try:
         conductor_proc.send_signal(signal.SIGINT)
         conductor_proc.join(timeout=timeout)
-    except Exception:
+    except BaseException:
         logger.exception("Failed graceful conductor shutdown")
 
     if conductor_proc.is_alive():

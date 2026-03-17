@@ -16,6 +16,7 @@ import torch
 from torch import nn
 from transformers.activations import ACT2FN
 
+from mminf.engine.ar_engine import BatchedCacheManager
 from mminf.model.bagel.config import BagelModelConfig
 from mminf.utils.flashinfer_utils import run_rms_norm
 
@@ -474,7 +475,7 @@ class BagelLanguageModel(nn.Module):
     def forward(
         self,
         query_sequence: torch.Tensor,
-        cache_handle,
+        cache_handle: BatchedCacheManager,
         write_cache=True,
         mode="und",
         vae_token_indexes=None,
@@ -492,7 +493,6 @@ class BagelLanguageModel(nn.Module):
                     text_indexes=text_indexes,
                 )
 
-        total_seq_len = query_sequence.shape[0]
         for _layer_idx, decoder_layer in enumerate(self.layers):
             query_sequence = decoder_layer(
                 query_sequence=query_sequence,
@@ -501,7 +501,7 @@ class BagelLanguageModel(nn.Module):
             )
 
         if write_cache:
-            cache_handle.advance_seq_len(total_seq_len, custom_advance_pos_id)
+            cache_handle.advance_seq_lens(pos_id_ns=custom_advance_pos_id)
 
         if self.use_moe:
             if mode == "und":

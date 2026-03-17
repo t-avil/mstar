@@ -824,11 +824,15 @@ class LLMSubmodule(NodeSubmodule):
 
         if graph_walk == "decode":
             return self._forward_decode_batched(
-                cache_manager, packed_inputs,
+                cache_manager=cache_manager,
+                request_ids=request_ids,
+                packed_inputs=packed_inputs,
+                has_cfg=has_cfg
             )
         elif graph_walk == "prefill_text":
             self._forward_prefill_text(
-                cache_manager, requires_cfg=has_cfg, **packed_inputs
+                cache_handle=cache_manager,
+                requires_cfg=has_cfg, **packed_inputs
             ) # prefill is the same batched and unbatched
             return {rid: [] for rid in request_ids}
         else:
@@ -839,7 +843,7 @@ class LLMSubmodule(NodeSubmodule):
         cache_manager: BatchedCacheManager,
         request_ids: list[str],
         packed_inputs: dict[str, torch.Tensor],
-        per_request_metadata: dict[str, dict],
+        has_cfg: bool=False
     ) -> dict[str, NameToTensorList]:
         """Batched decode: all requests generate 1 token each.
 
@@ -854,10 +858,6 @@ class LLMSubmodule(NodeSubmodule):
 
         # 1. Embed and concatenate
         embs = self.embed_tokens(packed_inputs["text_inputs"])
-        has_cfg = any(
-            per_request_metadata.get(rid, {}).get("requires_cfg", False)
-            for rid in request_ids
-        )
 
         # 2. Single LLM forward (main cache, already planned)
         cache_manager.set_active_label("main")
@@ -880,7 +880,7 @@ class LLMSubmodule(NodeSubmodule):
         tokens = torch.argmax(logits, dim=-1)
 
         return {
-            rid: [tokens[i]] for i, rid in enumerate(request_ids)
+            rid: {"new_token": [tokens[i:i+1]]} for i, rid in enumerate(request_ids)
         }
 
 

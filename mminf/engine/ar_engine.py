@@ -447,13 +447,14 @@ class BatchedCacheManager:
                     pos_id_n if pos_id_n is not None else planned[i]
                 )
 
-    def advance_seq_lens(self, n_per_request: list[int], pos_id_ns: list[int] | None = None) -> None:
+    def advance_seq_lens(self, pos_id_ns: list[int] | None = None) -> None:
         """Advance seq_len for each request by different amounts."""
         for i, rid in enumerate(self.request_ids):
+            n = self._plan_states[self.active_labels[rid]].seq_lens[i]
             state = self._get_state(rid)
-            state.seq_len += n_per_request[i]
+            state.seq_len += n
             if pos_id_ns is None:
-                state.position_id_start += n_per_request[i]
+                state.position_id_start += n
             else:
                 state.position_id_start += pos_id_ns[i]
 
@@ -659,6 +660,10 @@ class AREngine(BaseEngine):
 
         # Preprocess all requests
         rids = list(batch.per_request_input_tensors.keys())
+        seq_lens = {
+            rid: cache_manager._get_state(rid, "main").seq_len for rid in rids
+        }
+        logger.debug(f"Execute batched {seq_lens}")
         input_tensors = [
             batch.per_request_input_tensors[rid] for rid in rids
         ]
@@ -674,7 +679,8 @@ class AREngine(BaseEngine):
             batched_output = submodule.forward_batched(
                 graph_walk=batch.graph_walk,
                 cache_manager=cache_manager,
-                per_request_inputs=preprocessed,
+                packed_inputs=preprocessed,
+                request_ids=rids,
                 per_request_metadata=batch.per_request_metadata,
             )
 
@@ -683,10 +689,16 @@ class AREngine(BaseEngine):
     def _execute_sequential(self, batch: NodeBatch, submodule) -> NodeOutput:
         """Original per-request execution with CacheHandle."""
         per_request_outputs = {}
+        
         for rid in batch.request_ids:
             cache_handle = self._create_cache_handle(rid)._manager
             inputs = batch.per_request_input_tensors.get(rid, {})
             metadata = {rid: batch.per_request_metadata.get(rid, {})}
+
+            seq_lens = {
+                rid: cache_handle._get_state(rid, "main").seq_len
+            }
+            logger.debug(f"Execute sequential {seq_lens}")
 
             preprocessed = submodule.preprocess(
                 batch.graph_walk,
@@ -749,8 +761,9 @@ class AREngine(BaseEngine):
         with torch.no_grad():
             batched_output = runner.run(
                 batch_size=len(batch.request_ids),
-                per_request_inputs=preprocessed,
+                packed_inputs=preprocessed,
                 per_request_metadata=batch.per_request_metadata,
+                request_ids=rids,
                 cache_manager=cache_manager,
             )
 
