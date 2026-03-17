@@ -127,11 +127,9 @@ class CudaGraphRunner:
             )
 
             # Build dummy preprocessed inputs
-            dummy_per_request_inputs = {}
-            for rid in dummy_request_ids:
-                dummy_per_request_inputs[rid] = {
-                    "text_inputs": torch.tensor([0], dtype=torch.long, device=self.device),
-                }
+            dummy_per_request_inputs = {
+                "text_inputs": torch.zeros(len(dummy_request_ids), dtype=torch.long, device=self.device),
+            }
 
             def run_once():
                 return submodule.forward_batched(

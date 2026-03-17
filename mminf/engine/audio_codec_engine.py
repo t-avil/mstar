@@ -1,6 +1,7 @@
 import torch
 
 from mminf.engine.base import BaseEngine, EngineType, NodeBatch, NodeOutput
+from mminf.model.base import NodeSubmodule
 from mminf.utils.profiler import range_pop, range_push
 
 
@@ -31,7 +32,7 @@ class AudioCodecEngine(BaseEngine):
         if self.enable_nvtx:
             range_push(f"engine.audio_codec.{batch.node_name}.{batch.graph_walk}")
 
-        submodule = self.submodules.get(batch.node_name)
+        submodule: NodeSubmodule = self.submodules.get(batch.node_name)
         if submodule is None:
             output = NodeOutput(
                 per_request_output_tensors={rid: {} for rid in batch.request_ids}

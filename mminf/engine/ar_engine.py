@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 import torch
 
 from mminf.engine.base import BaseEngine, EngineType, NodeBatch, NodeOutput
+from mminf.engine.cuda_graph_runner import CudaGraphRunner
+from mminf.model.base import NodeSubmodule
 from mminf.utils.profiler import range_pop, range_push
 
 logger = logging.getLogger(__name__)
@@ -615,6 +617,9 @@ class AREngine(BaseEngine):
         # Step 1: torch.compile (before CUDA graph capture)
         self._compile_submodules()
 
+        # TODO rework cuda graph capture
+        return
+
         # Step 2: CUDA graph capture
         for node_name in self.submodules:
             runner = CudaGraphRunner(self, node_name, self.kv_cache_config)
@@ -640,7 +645,7 @@ class AREngine(BaseEngine):
             return False
         return True
 
-    def _execute_batched(self, batch: NodeBatch, submodule) -> NodeOutput:
+    def _execute_batched(self, batch: NodeBatch, submodule: NodeSubmodule) -> NodeOutput:
         """Execute batch with BatchedCacheManager for true vectorized batching."""
         cache_manager = BatchedCacheManager(
             request_ids=batch.request_ids,
@@ -653,42 +658,43 @@ class AREngine(BaseEngine):
             device=self.device,
         )
 
-        # Preprocess all requests (data transform only, no planning)
-        all_preprocessed = {}
-        for rid in batch.request_ids:
-            inputs = batch.per_request_input_tensors.get(rid, {})
-            preprocessed = submodule.preprocess(batch.graph_walk, **inputs)
-            all_preprocessed[rid] = preprocessed
-
-        # Plan attention/rope on shared cache_manager for all labels
-        submodule.preprocess_batched(
-            batch.graph_walk, cache_manager,
-            all_preprocessed, batch.per_request_metadata,
+        # Preprocess all requests
+        rids = list(batch.per_request_input_tensors.keys())
+        input_tensors = [
+            batch.per_request_input_tensors[rid] for rid in rids
+        ]
+        preprocessed = submodule.preprocess(
+            graph_walk=batch.graph_walk,
+            cache_manager=cache_manager,
+            per_request_inputs=input_tensors,
+            request_ids=rids,
+            per_request_metadata=batch.per_request_metadata,
         )
 
         with torch.no_grad():
             batched_output = submodule.forward_batched(
                 graph_walk=batch.graph_walk,
                 cache_manager=cache_manager,
-                per_request_inputs=all_preprocessed,
+                per_request_inputs=preprocessed,
                 per_request_metadata=batch.per_request_metadata,
             )
 
         return NodeOutput(per_request_output_tensors=batched_output)
 
-    def _execute_sequential(self, batch: NodeBatch, submodule) -> NodeOutput:
+    def _execute_sequential(self, batch: NodeBatch, submodule: NodeSubmodule) -> NodeOutput:
         """Original per-request execution with CacheHandle."""
         per_request_outputs = {}
         for rid in batch.request_ids:
-            cache_handle = self._create_cache_handle(rid)
+            cache_handle = self._create_cache_handle(rid)._manager
             inputs = batch.per_request_input_tensors.get(rid, {})
-            metadata = batch.per_request_metadata.get(rid, {})
+            metadata = {rid: batch.per_request_metadata.get(rid, {})}
 
             preprocessed = submodule.preprocess(
                 batch.graph_walk,
-                cache_handle=cache_handle,
-                requires_cfg=metadata.get("requires_cfg", False),
-                **inputs,
+                cache_manager=cache_handle,
+                per_request_inputs=[inputs],
+                request_ids=[rid],
+                per_request_metadata=metadata,
             )
             with torch.no_grad():
                 output = submodule(
@@ -703,6 +709,10 @@ class AREngine(BaseEngine):
 
     def _can_use_cuda_graph(self, batch: NodeBatch) -> bool:
         """Check if CUDA graph replay is available for this batch."""
+
+        # TODO rework cuda graph capture
+        return False
+
         if batch.graph_walk != "decode":
             return False
         runner = self.cuda_graph_runners.get(batch.node_name)
@@ -710,7 +720,7 @@ class AREngine(BaseEngine):
             return False
         return runner.can_run(len(batch.request_ids))
 
-    def _execute_with_cuda_graph(self, batch: NodeBatch, submodule) -> NodeOutput:
+    def _execute_with_cuda_graph(self, batch: NodeBatch, submodule: NodeSubmodule) -> NodeOutput:
         """Execute using a captured CUDA graph."""
         runner = self.cuda_graph_runners[batch.node_name]
 
@@ -725,22 +735,22 @@ class AREngine(BaseEngine):
             device=self.device,
         )
 
-        all_preprocessed = {}
-        for rid in batch.request_ids:
-            inputs = batch.per_request_input_tensors.get(rid, {})
-            preprocessed = submodule.preprocess(batch.graph_walk, **inputs)
-            all_preprocessed[rid] = preprocessed
-
-        # Plan attention/rope before CUDA graph replay
-        submodule.preprocess_batched(
-            batch.graph_walk, cache_manager,
-            all_preprocessed, batch.per_request_metadata,
+        rids = list(batch.per_request_input_tensors.keys())
+        input_tensors = [
+            batch.per_request_input_tensors[rid] for rid in rids
+        ]
+        preprocessed = submodule.preprocess(
+            graph_walk=batch.graph_walk,
+            cache_manager=cache_manager,
+            per_request_inputs=input_tensors,
+            request_ids=rids,
+            per_request_metadata=batch.per_request_metadata,
         )
 
         with torch.no_grad():
             batched_output = runner.run(
                 batch_size=len(batch.request_ids),
-                per_request_inputs=all_preprocessed,
+                per_request_inputs=preprocessed,
                 per_request_metadata=batch.per_request_metadata,
                 cache_manager=cache_manager,
             )
