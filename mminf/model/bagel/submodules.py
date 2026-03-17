@@ -172,7 +172,7 @@ class VAEEncoderSubmodule(NodeSubmodule):
         assert len(per_request_inputs) == 1, "Batching not supported for ViTEncoder"
         image_inputs = per_request_inputs[0]["image_inputs"]
 
-        image_tensor: torch.Tensor = self.transform(self.transform.resize_transform(image_inputs[0]))  # [C, H, W]
+        image_tensor: torch.Tensor = self.transform(self.transform.resize_transform(image_inputs[0].contiguous()))  # [C, H, W]
         device = image_tensor.device
 
         # Compute patchified dimensions as ints (CUDA graph compatible)
@@ -191,7 +191,7 @@ class VAEEncoderSubmodule(NodeSubmodule):
         return {
             "padded_images": image_tensor.unsqueeze(0).to(torch.bfloat16),
             "packed_vae_position_ids": packed_vae_position_ids,
-            "packed_timesteps": torch.tensor([0], device=device),
+            "packed_timesteps": torch.tensor([0.0], device=device),
             "h": h,
             "w": w,
         }
