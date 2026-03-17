@@ -53,10 +53,10 @@ class ViTEncoderSubmodule(NodeSubmodule):
 
     def preprocess(
         self, graph_walk: str,
-        cache_manager: BatchedCacheManager,
         per_request_inputs: list[NameToTensorList],
         request_ids: list[str],
-        per_request_metadata: dict[str, dict]
+        per_request_metadata: dict[str, dict],
+        cache_manager: BatchedCacheManager=None,
     ) -> dict[str, torch.Tensor]: # input name to tensor
         """Convert raw images to packed ViT input format.
 
@@ -154,10 +154,10 @@ class VAEEncoderSubmodule(NodeSubmodule):
 
     def preprocess(
         self, graph_walk: str,
-        cache_manager: BatchedCacheManager,
         per_request_inputs: list[NameToTensorList],
         request_ids: list[str],
-        per_request_metadata: dict[str, dict]
+        per_request_metadata: dict[str, dict],
+        cache_manager: BatchedCacheManager=None,
     ) -> dict[str, torch.Tensor]: # input name to tensor
         """Convert raw images to VAE encoder input format.
 
@@ -372,10 +372,10 @@ class LLMSubmodule(NodeSubmodule):
 
     def preprocess(
         self, graph_walk: str,
-        cache_manager: BatchedCacheManager,
         per_request_inputs: list[NameToTensorList],
         request_ids: list[str],
-        per_request_metadata: dict[str, dict]
+        per_request_metadata: dict[str, dict],
+        cache_manager: BatchedCacheManager,
     ) -> dict[str, torch.Tensor]: # input name to tensor
         """Data transform + plan attention/rope for all relevant labels.
 
@@ -434,34 +434,32 @@ class LLMSubmodule(NodeSubmodule):
             H, W = 1024, 1024 # TODO: make this configurable?
 
             # TODO support batching for image gen
-            assert len(per_request_inputs) == 0
+            assert len(per_request_inputs) == 1, "Batching not supported for image gen"
             inputs = per_request_inputs[0]
     
-            result["vae_position_ids"] = [get_flattened_position_ids_extrapolate(
+            result["vae_position_ids"] = get_flattened_position_ids_extrapolate(
                 H, W,
                 self.config.latent_downsample,
                 max_num_patches_per_side=self.config.max_latent_size
-            )]
+            )
             if "latents" not in inputs or len(inputs["latents"]) == 0:
-                result["latents"] = [self._init_latents(
+                result["latents"] = self._init_latents(
                     device=device,
                     H=H, W=W
-                )]
-                result["time_index"] = [
-                    torch.zeros(result["latents"].shape[0], device=device, dtype=torch.bfloat16)
-                ]
+                )
+                result["time_index"] = torch.zeros(result["latents"].shape[0], device=device, dtype=torch.bfloat16)
             else:
-               result["latents"] = inputs["latents"]
-               result["time_index"] = inputs["time_index"]
+               result["latents"] = inputs["latents"][0]
+               result["time_index"] = inputs["time_index"][0]
 
-            result["empty_combined_emb"] = [self._wrap_with_boi_eoi(
+            result["empty_combined_emb"] = self._wrap_with_boi_eoi(
                 torch.empty(
                     (result["latents"].shape[0], self.config.hidden_size),
                     dtype=torch.bfloat16,
                     device=device
                 )
-            )]
-            seq_lens = [len(result["empty_combined_emb"][0])]
+            )
+            seq_lens = [result["empty_combined_emb"].shape[0]]
             per_label_custom_pos_ids = self._get_image_pos_ids(
                 labels, cache_manager, device, seq_lens, request_ids
             )
@@ -913,14 +911,21 @@ class VAEDecoderSubmodule(NodeSubmodule):
         self.latent_channel = latent_channel
         self.latent_downsample = latent_downsample
 
-    def preprocess(self, graph_walk: str, latents: list[torch.Tensor]) -> dict:
+    def preprocess(
+        self, graph_walk: str,
+        per_request_inputs: list[NameToTensorList],
+        request_ids: list[str],
+        per_request_metadata: dict[str, dict],
+        cache_manager: BatchedCacheManager=None,
+    ):
         """Prepare VAE decoder inputs.
 
         Unwraps latents from list. Image dimensions (image_h, image_w)
         are provided via per-request metadata and converted to ints for
         CUDA graph compatibility.
         """
-        return {"latents": latents[0]}
+        assert len(per_request_inputs) == 1
+        return {"latents": per_request_inputs[0]["latents"][0]}
 
     def forward(
         self,

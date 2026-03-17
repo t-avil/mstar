@@ -43,7 +43,14 @@ class FlowEngine(BaseEngine):
             inputs = batch.per_request_input_tensors.get(rid, {})
             metadata = batch.per_request_metadata.get(rid, {})
             if hasattr(submodule, 'preprocess'):
-                preprocessed = submodule.preprocess(batch.graph_walk, **inputs)
+                preprocessed = submodule.preprocess(
+                    batch.graph_walk,
+                    per_request_inputs=[inputs],
+                    request_ids=[rid],
+                    per_request_metadata={
+                        rid: batch.per_request_metadata.get(rid, {})
+                    },
+                )
                 outputs[rid] = submodule(**preprocessed, **metadata)
             else:
                 result = submodule(**{k: v[0] for k, v in inputs.items()})

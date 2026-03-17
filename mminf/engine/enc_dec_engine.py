@@ -73,30 +73,28 @@ class EncoderDecoderEngine(BaseEngine):
         request_ids = batch.request_ids
 
         # Preprocess all requests
-        all_preprocessed = {}
-        for rid in request_ids:
-            inputs = batch.per_request_input_tensors.get(rid, {})
-            metadata = batch.per_request_metadata.get(rid, {})
-            if hasattr(submodule, 'preprocess'):
-                all_preprocessed[rid] = submodule.preprocess(batch.graph_walk, **inputs)
-            else:
-                all_preprocessed[rid] = {k: v[0] for k, v in inputs.items()}
+        all_preprocessed = submodule.preprocess(
+            batch.graph_walk,
+            per_request_inputs=batch.per_request_input_tensors,
+            request_ids=batch.request_ids,
+            per_request_metadata=batch.per_request_metadata,
+        )
 
-        # Stack inputs along batch dimension (dim=0)
-        first_preprocessed = all_preprocessed[request_ids[0]]
-        stacked_inputs = {}
-        stackable_keys = []
-        for key, val in first_preprocessed.items():
-            if isinstance(val, torch.Tensor):
-                tensors = [all_preprocessed[rid][key] for rid in request_ids]
-                stacked_inputs[key] = torch.stack(tensors, dim=0)
-                stackable_keys.append(key)
-            else:
-                # Non-tensor values (ints, etc.) — use first request's value
-                stacked_inputs[key] = val
+        # # Stack inputs along batch dimension (dim=0)
+        # first_preprocessed = all_preprocessed[request_ids[0]]
+        # stacked_inputs = {}
+        # stackable_keys = []
+        # for key, val in first_preprocessed.items():
+        #     if isinstance(val, torch.Tensor):
+        #         tensors = [all_preprocessed[rid][key] for rid in request_ids]
+        #         stacked_inputs[key] = torch.stack(tensors, dim=0)
+        #         stackable_keys.append(key)
+        #     else:
+        #         # Non-tensor values (ints, etc.) — use first request's value
+        #         stacked_inputs[key] = val
 
         # Single forward pass
-        result = submodule(**stacked_inputs)
+        result = submodule(**all_preprocessed)
 
         # Split outputs back per-request
         outputs = {}
@@ -125,7 +123,14 @@ class EncoderDecoderEngine(BaseEngine):
             inputs = batch.per_request_input_tensors.get(rid, {})
             metadata = batch.per_request_metadata.get(rid, {})
             if hasattr(submodule, 'preprocess'):
-                preprocessed = submodule.preprocess(batch.graph_walk, **inputs)
+                preprocessed = submodule.preprocess(
+                    batch.graph_walk,
+                    per_request_inputs=[inputs],
+                    request_ids=[rid],
+                    per_request_metadata={
+                        rid: batch.per_request_metadata.get(rid, {})
+                    },
+                )
                 outputs[rid] = submodule(**preprocessed, **metadata)
             else:
                 result = submodule(**{k: v[0] for k, v in inputs.items()})

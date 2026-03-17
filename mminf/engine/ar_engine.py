@@ -447,7 +447,7 @@ class BatchedCacheManager:
                     pos_id_n if pos_id_n is not None else planned[i]
                 )
 
-    def advance_seq_lens(self, pos_id_ns: list[int] | None = None) -> None:
+    def advance_seq_lens(self, pos_id_ns: list[int] | int | None = None) -> None:
         """Advance seq_len for each request by different amounts."""
         for i, rid in enumerate(self.request_ids):
             n = self._plan_states[self.active_labels[rid]].seq_lens[i]
@@ -455,6 +455,8 @@ class BatchedCacheManager:
             state.seq_len += n
             if pos_id_ns is None:
                 state.position_id_start += n
+            elif isinstance(pos_id_ns, int):
+                state.position_id_start += pos_id_ns
             else:
                 state.position_id_start += pos_id_ns[i]
 
