@@ -59,6 +59,22 @@ class PageAllocator:
         return self.free_pages.qsize()
 
 
+@dataclass
+class _PlanState:
+    """Pre-computed state from plan_attention/plan_rope for a single cache label.
+
+    Stored per-label so that preprocess can plan for all relevant labels
+    upfront (plan operations are CUDA graph incompatible). During forward,
+    run_attention/apply_rope look up the active label's plan state.
+    """
+    wrapper: object = None  # FlashInfer BatchPrefillWithPagedKVCacheWrapper
+    page_indices: torch.Tensor | None = None
+    page_offsets: torch.Tensor | None = None
+    token_offsets: torch.Tensor | None = None
+    pos_ids: torch.Tensor | None = None
+    seq_lens: list[int] | None = None
+
+
 class CacheHandle:
     """Thin wrapper around BatchedCacheManager for single-request use.
 
@@ -111,15 +127,17 @@ class CacheHandle:
         seq_lens: list[int] | None = None,
         dtype=torch.bfloat16,
         is_causal: bool = True,
+        label: str | None = None,
     ) -> None:
-        self._manager.plan_attention(seq_lens, dtype, is_causal)
+        self._manager.plan_attention(seq_lens, dtype, is_causal, label=label)
 
     def plan_rope(
         self,
         seq_lens: list[int],
         pos_ids: torch.Tensor | None = None,
+        label: str | None = None,
     ) -> None:
-        self._manager.plan_rope(seq_lens, pos_ids)
+        self._manager.plan_rope(seq_lens, pos_ids, label=label)
 
     def run_attention(
         self,
@@ -144,7 +162,7 @@ class CacheHandle:
             rope_scale=rope_scale, rope_theta=rope_theta,
         )
 
-    def advance_seq_len(self, n: int, pos_id_n: int | None = None) -> None:
+    def advance_seq_len(self, n: int | None = None, pos_id_n: int | None = None) -> None:
         self._manager.advance_seq_len(n, pos_id_n)
 
     def snapshot(self, from_label: str, to_label: str) -> None:
@@ -190,11 +208,9 @@ class BatchedCacheManager:
         self.kv_cache_config = kv_cache_config
         self.device = device
 
-        self.wrapper = None
-        self.page_indices: torch.Tensor | None = None
-        self.page_offsets: torch.Tensor | None = None
-        self.pos_ids: torch.Tensor | None = None
-        self._planned_seq_lens: list[int] | None = None
+        # Per-label plan state: plan_attention/plan_rope store results here,
+        # run_attention/apply_rope look up by active label.
+        self._plan_states: dict[str, _PlanState] = {}
 
         self.base_pos_ids = torch.arange(
             kv_cache_config.max_seq_len, dtype=torch.long, device=device
@@ -219,11 +235,26 @@ class BatchedCacheManager:
         self,
         seq_lens: list[int] | None = None,
         dtype=torch.bfloat16,
-        is_causal=True
+        is_causal=True,
+        label: str | None = None,
     ):
+        """Pre-compute FlashInfer plan and page positions for a cache label.
+
+        Allocates pages, computes page_indices/page_offsets/token_offsets for
+        vectorized KV writes, builds FlashInfer index tensors, and plans the
+        wrapper. All state is stored in _plan_states[label].
+
+        Args:
+            seq_lens: number of new tokens per request.
+            dtype: query data type for FlashInfer.
+            is_causal: whether attention is causal.
+            label: cache label to plan for. If None, uses the current active label.
+        """
         assert self.kv_cache is not None
 
-        self._planned_seq_lens = seq_lens
+        effective_label = label
+        if effective_label is None:
+            effective_label = next(iter(self.active_labels.values()))
 
         cfg = self.kv_cache_config
         page_size = cfg.page_size
@@ -232,7 +263,6 @@ class BatchedCacheManager:
         num_qo_heads = cfg.num_qo_heads
         device = self.device
 
-        # 1. For each request: allocate pages if needed, write K,V to cache
         qo_indptr_list = [0]
         kv_indptr_list = [0]
         all_page_indices = []
@@ -241,7 +271,7 @@ class BatchedCacheManager:
         page_indices_all = []
         page_offsets_all = []
         for i, rid in enumerate(self.request_ids):
-            state = self._get_state(rid)
+            state = self._get_state(rid, effective_label)
             sl = seq_lens[i]
 
             # Allocate pages if needed
@@ -251,8 +281,8 @@ class BatchedCacheManager:
             if num_new_pages > 0:
                 new_pages = self.page_allocator.allocate(num_new_pages)
                 state.page_indices.extend(new_pages)
-            
-             # Compute positions for this request
+
+            # Compute positions for this request
             pos = torch.arange(state.seq_len, state.seq_len + sl, device=self.device)
 
             page_idx = torch.tensor(state.page_indices, device=self.device)[pos // page_size]
@@ -268,23 +298,22 @@ class BatchedCacheManager:
 
             last_page_len = total_len % page_size or page_size
             kv_last_page_lens.append(last_page_len)
-        
-        self.page_indices = torch.cat(page_indices_all)
-        self.page_offsets = torch.cat(page_offsets_all)
-        self.token_offsets = torch.arange(self.page_indices.numel(), device=self.device)
 
-        # 2. Build batched FlashInfer index tensors
+        page_indices = torch.cat(page_indices_all)
+        page_offsets = torch.cat(page_offsets_all)
+        token_offsets = torch.arange(page_indices.numel(), device=self.device)
+
+        # Build batched FlashInfer index tensors
         qo_indptr = torch.tensor(qo_indptr_list, dtype=torch.int32, device=device)
         paged_kv_indptr = torch.tensor(kv_indptr_list, dtype=torch.int32, device=device)
         paged_kv_indices = torch.tensor(all_page_indices, dtype=torch.int32, device=device)
         paged_kv_last_page_len = torch.tensor(kv_last_page_lens, dtype=torch.int32, device=device)
 
-        # 3. Plan + run BatchPrefillWithPagedKVCacheWrapper
         import flashinfer
-        self.wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
+        wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
             self.workspace_buffer, "NHD"
         )
-        self.wrapper.plan(
+        wrapper.plan(
             qo_indptr=qo_indptr,
             paged_kv_indptr=paged_kv_indptr,
             paged_kv_indices=paged_kv_indices,
@@ -296,18 +325,43 @@ class BatchedCacheManager:
             causal=is_causal,
             q_data_type=dtype,
         )
+
+        self._plan_states[effective_label] = _PlanState(
+            wrapper=wrapper,
+            page_indices=page_indices,
+            page_offsets=page_offsets,
+            token_offsets=token_offsets,
+            seq_lens=seq_lens,
+        )
     
     def plan_rope(
         self,
         seq_lens: list[int],
-        pos_ids: torch.Tensor | None = None
+        pos_ids: torch.Tensor | None = None,
+        label: str | None = None,
     ):
+        """Pre-compute position IDs for RoPE for a cache label.
+
+        Args:
+            seq_lens: number of new tokens per request.
+            pos_ids: explicit position IDs. If None, computed from
+                each request's position_id_start.
+            label: cache label. If None, uses the current active label.
+        """
+        effective_label = label
+        if effective_label is None:
+            effective_label = next(iter(self.active_labels.values()))
+
+        if effective_label not in self._plan_states:
+            self._plan_states[effective_label] = _PlanState()
+
         if pos_ids is not None:
-            self.pos_ids = pos_ids
+            self._plan_states[effective_label].pos_ids = pos_ids
             return
-        self.pos_ids = torch.cat([
+
+        self._plan_states[effective_label].pos_ids = torch.cat([
             torch.arange(sl, device=self.device, dtype=torch.long)
-            + self._get_state(rid).position_id_start
+            + self._get_state(rid, effective_label).position_id_start
             for rid, sl in zip(self.request_ids, seq_lens)
         ])
 
@@ -318,28 +372,28 @@ class BatchedCacheManager:
         v: torch.Tensor,
         layer_idx: int,
     ) -> torch.Tensor:
-        """Single FlashInfer call for all requests in the batch.
+        """Run pre-planned FlashInfer attention with KV cache write.
 
-        When seq_lens is provided (batched path), q/k/v are concatenated tensors
-        with shape [sum(seq_lens), heads, head_dim]. When seq_lens is None,
-        falls back to treating q as a single request (backward compat).
+        Uses the active label's plan state (set up by a prior plan_attention
+        call). Writes K and V to the paged KV cache at pre-computed page
+        positions, then runs the FlashInfer wrapper for batched attention.
 
         Args:
-            q: [sum(seq_lens), num_q_heads, head_dim] - concatenated queries
-            k: [sum(seq_lens), num_kv_heads, head_dim]
-            v: [sum(seq_lens), num_kv_heads, head_dim]
+            q: [total_tokens, num_q_heads, head_dim]
+            k: [total_tokens, num_kv_heads, head_dim]
+            v: [total_tokens, num_kv_heads, head_dim]
             layer_idx: transformer layer index
-            seq_lens: number of new tokens per request
         Returns:
-            output: [sum(seq_lens), num_q_heads, head_dim]
+            output: [total_tokens, num_q_heads, head_dim]
         """
-        assert self.kv_cache is not None, self.wrapper is not None
-        # Two writes
-        self.kv_cache[layer_idx, self.page_indices, 0, self.page_offsets] = k[self.token_offsets]
-        self.kv_cache[layer_idx, self.page_indices, 1, self.page_offsets] = v[self.token_offsets]
+        label = next(iter(self.active_labels.values()))
+        ps = self._plan_states[label]
+        assert self.kv_cache is not None and ps.wrapper is not None
 
-        output = self.wrapper.run(q, self.kv_cache[layer_idx])
-        return output
+        self.kv_cache[layer_idx, ps.page_indices, 0, ps.page_offsets] = k[ps.token_offsets]
+        self.kv_cache[layer_idx, ps.page_indices, 1, ps.page_offsets] = v[ps.token_offsets]
+
+        return ps.wrapper.run(q, self.kv_cache[layer_idx])
 
     def apply_rope(
         self,
@@ -350,42 +404,47 @@ class BatchedCacheManager:
         rope_scale: float = 1,
         rope_theta: float = 10000.0,
     ):
-        """Apply RoPE to concatenated q, k with per-request position offsets."""
-        assert self.pos_ids is not None
+        """Apply RoPE using the active label's pre-computed position IDs."""
+        label = next(iter(self.active_labels.values()))
+        ps = self._plan_states[label]
+        assert ps.pos_ids is not None
 
         import flashinfer
         return flashinfer.rope.apply_rope_pos_ids(
-            q, k, self.pos_ids,
+            q, k, ps.pos_ids,
             rotary_dim=rotary_dim,
             interleave=interleave,
             rope_scale=rope_scale,
             rope_theta=rope_theta,
         )
 
-    def advance_seq_len(self, n: int, pos_id_n: int | None = None) -> None:
+    def advance_seq_len(self, n: int | None = None, pos_id_n: int | None = None) -> None:
         """Advance seq_len for all requests.
 
-        For multi-request batches, uses per-request seq_lens from the last
-        plan_attention call (since each request may have a different number
-        of new tokens, e.g., different text lengths in prefill).
-        For single-request, uses n directly.
+        Uses provided n and/or pos_id_n if they exist, then falls back to
+        per-request seq_lens from the last plan_attention call. Errors if
+        both n and planned seq_lens are None.
         """
-        planned = self._planned_seq_lens
-        if planned is not None and len(self.request_ids) > 1:
+        if n is not None:
+            for rid in self.request_ids:
+                state = self._get_state(rid)
+                state.seq_len += n
+                state.position_id_start += (pos_id_n if pos_id_n is not None else n)
+        else:
+            # Fall back to planned seq_lens from active label's plan state
+            label = next(iter(self.active_labels.values()))
+            ps = self._plan_states.get(label)
+            planned = ps.seq_lens if ps is not None else None
+            if planned is None:
+                raise ValueError(
+                    "advance_seq_len: both n and planned seq_lens are None"
+                )
             for i, rid in enumerate(self.request_ids):
                 state = self._get_state(rid)
                 state.seq_len += planned[i]
                 state.position_id_start += (
                     pos_id_n if pos_id_n is not None else planned[i]
                 )
-        else:
-            for rid in self.request_ids:
-                state = self._get_state(rid)
-                state.seq_len += n
-                if pos_id_n is None:
-                    state.position_id_start += n
-                else:
-                    state.position_id_start += pos_id_n
 
     def advance_seq_lens(self, n_per_request: list[int], pos_id_ns: list[int] | None = None) -> None:
         """Advance seq_len for each request by different amounts."""
@@ -594,12 +653,18 @@ class AREngine(BaseEngine):
             device=self.device,
         )
 
-        # Preprocess all requests
+        # Preprocess all requests (data transform only, no planning)
         all_preprocessed = {}
         for rid in batch.request_ids:
             inputs = batch.per_request_input_tensors.get(rid, {})
             preprocessed = submodule.preprocess(batch.graph_walk, **inputs)
             all_preprocessed[rid] = preprocessed
+
+        # Plan attention/rope on shared cache_manager for all labels
+        submodule.preprocess_batched(
+            batch.graph_walk, cache_manager,
+            all_preprocessed, batch.per_request_metadata,
+        )
 
         with torch.no_grad():
             batched_output = submodule.forward_batched(
@@ -619,7 +684,12 @@ class AREngine(BaseEngine):
             inputs = batch.per_request_input_tensors.get(rid, {})
             metadata = batch.per_request_metadata.get(rid, {})
 
-            preprocessed = submodule.preprocess(batch.graph_walk, **inputs)
+            preprocessed = submodule.preprocess(
+                batch.graph_walk,
+                cache_handle=cache_handle,
+                requires_cfg=metadata.get("requires_cfg", False),
+                **inputs,
+            )
             with torch.no_grad():
                 output = submodule(
                     graph_walk=batch.graph_walk,
@@ -660,6 +730,12 @@ class AREngine(BaseEngine):
             inputs = batch.per_request_input_tensors.get(rid, {})
             preprocessed = submodule.preprocess(batch.graph_walk, **inputs)
             all_preprocessed[rid] = preprocessed
+
+        # Plan attention/rope before CUDA graph replay
+        submodule.preprocess_batched(
+            batch.graph_walk, cache_manager,
+            all_preprocessed, batch.per_request_metadata,
+        )
 
         with torch.no_grad():
             batched_output = runner.run(
