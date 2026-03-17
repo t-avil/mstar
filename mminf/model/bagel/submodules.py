@@ -9,7 +9,7 @@ import torch
 from torch import nn
 
 from mminf.communication.tensors import NameToTensorList
-from mminf.engine.ar_engine import BatchedCacheManager, CacheHandle
+from mminf.engine.ar_engine import BatchedCacheManager
 from mminf.model.bagel.components.language_model import BagelForCausalLM
 from mminf.model.bagel.components.modeling_utils import (
     ImageTransform,
@@ -680,7 +680,7 @@ class LLMSubmodule(NodeSubmodule):
         text_indexes: torch.Tensor,
         vae_token_indexes: torch.Tensor,
         time_index: torch.Tensor,
-        cache_handle: CacheHandle,
+        cache_handle: BatchedCacheManager,
         requires_cfg: bool = True,
         **kwargs,
     ) -> NameToTensorList:

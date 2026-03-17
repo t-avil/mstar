@@ -76,106 +76,6 @@ class _PlanState:
     seq_lens: list[int] | None = None
 
 
-class CacheHandle:
-    """Thin wrapper around BatchedCacheManager for single-request use.
-
-    Pins request_ids=[request_id] and delegates all operations to a
-    BatchedCacheManager. This ensures a single implementation for paged
-    attention, RoPE, and KV cache management.
-
-    Used by AREngine._execute_sequential() for per-request execution.
-    For batched execution, BatchedCacheManager is used directly.
-    """
-
-    def __init__(
-        self,
-        request_id: str,
-        kv_cache: torch.Tensor | None,
-        page_allocator: PageAllocator | None,
-        request_states: dict[tuple[str, str], KVRequestState],
-        workspace_buffer: torch.Tensor | None,
-        kv_cache_config: KVCacheConfig,
-        device,
-    ):
-        self.request_id = request_id
-        self._manager = BatchedCacheManager(
-            request_ids=[request_id],
-            active_labels_per_request={request_id: "main"},
-            kv_cache=kv_cache,
-            page_allocator=page_allocator,
-            request_states=request_states,
-            workspace_buffer=workspace_buffer,
-            kv_cache_config=kv_cache_config,
-            device=device,
-        )
-
-    @property
-    def device(self):
-        return self._manager.device
-
-    @property
-    def kv_cache_config(self):
-        return self._manager.kv_cache_config
-
-    def _get_state(self, label: str | None = None) -> KVRequestState:
-        return self._manager._get_state(self.request_id, label)
-
-    def set_active_label(self, label: str) -> None:
-        self._manager.set_active_label(label)
-
-    def plan_attention(
-        self,
-        seq_lens: list[int] | None = None,
-        dtype=torch.bfloat16,
-        is_causal: bool = True,
-        label: str | None = None,
-    ) -> None:
-        self._manager.plan_attention(seq_lens, dtype, is_causal, label=label)
-
-    def plan_rope(
-        self,
-        seq_lens: list[int],
-        pos_ids: torch.Tensor | None = None,
-        label: str | None = None,
-    ) -> None:
-        self._manager.plan_rope(seq_lens, pos_ids, label=label)
-
-    def run_attention(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        layer_idx: int,
-    ) -> torch.Tensor:
-        return self._manager.run_attention(q, k, v, layer_idx)
-
-    def apply_rope(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        rotary_dim: int | None = None,
-        interleave: bool = False,
-        rope_scale: float = 1,
-        rope_theta: float = 10000.0,
-    ):
-        return self._manager.apply_rope(
-            q, k, rotary_dim=rotary_dim, interleave=interleave,
-            rope_scale=rope_scale, rope_theta=rope_theta,
-        )
-
-    def advance_seq_len(self, n: int | None = None, pos_id_n: int | None = None) -> None:
-        self._manager.advance_seq_len(n, pos_id_n)
-
-    def snapshot(self, from_label: str, to_label: str) -> None:
-        self._manager.snapshot_all(from_label, to_label)
-
-    def save_seq_position(self) -> int:
-        return self._get_state().seq_len
-
-    def restore_seq_position(self, pos: int) -> None:
-        self._get_state().seq_len = pos
-
-
 class BatchedCacheManager:
     """Manages batched FlashInfer attention for multiple requests simultaneously.
 
@@ -570,10 +470,11 @@ class AREngine(BaseEngine):
         except ImportError:
             pass  # Dummy mode — no FlashInfer
 
-    def _create_cache_handle(self, request_id: str) -> CacheHandle:
+    def _create_cache_manager(self, request_id: str) -> BatchedCacheManager:
         """Create a CacheHandle for a single request."""
-        return CacheHandle(
-            request_id=request_id,
+        return BatchedCacheManager(
+            request_ids=[request_id],
+            active_labels_per_request={request_id: "main"},
             kv_cache=self.kv_cache,
             page_allocator=self.page_allocator,
             request_states=self.request_states,
@@ -611,13 +512,13 @@ class AREngine(BaseEngine):
     def warmup(self) -> None:
         """Compile submodules and capture CUDA graphs."""
         from mminf.engine.cuda_graph_runner import CudaGraphRunner
-
-        # TODO rework cuda graph capture
-        return
     
         if self.kv_cache is None or self.device is None:
             logger.info("AREngine: skipping warmup (no KV cache or device)")
             return
+        
+        # TODO rework cuda graph capture
+        return
 
         # Step 1: torch.compile (before CUDA graph capture)
         self._compile_submodules()
@@ -693,7 +594,7 @@ class AREngine(BaseEngine):
         per_request_outputs = {}
         
         for rid in batch.request_ids:
-            cache_handle = self._create_cache_handle(rid)._manager
+            cache_handle = self._create_cache_manager(rid)
             inputs = batch.per_request_input_tensors.get(rid, {})
             metadata = {rid: batch.per_request_metadata.get(rid, {})}
 
@@ -714,7 +615,7 @@ class AREngine(BaseEngine):
                     graph_walk=batch.graph_walk,
                     cache_handle=cache_handle,
                     **preprocessed,
-                    **metadata,
+                    **metadata[rid],
                 )
             per_request_outputs[rid] = output
 
