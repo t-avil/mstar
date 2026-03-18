@@ -213,6 +213,7 @@ class FlashInferPrefillWrapper:
             self.token_to_page = token_to_page
             self.token_to_cache = token_to_cache
 
+    @torch.compiler.disable
     def run(self, q: torch.Tensor, kv_cache_layer: torch.Tensor) -> torch.Tensor:
         """Run planned batched prefill attention.
 
@@ -359,6 +360,7 @@ class FlashInferDecodeWrapper:
 
         self._n_req = n_req
 
+    @torch.compiler.disable
     def run(self, q: torch.Tensor, kv_cache_layer: torch.Tensor) -> torch.Tensor:
         """Run planned batched decode attention.
 
