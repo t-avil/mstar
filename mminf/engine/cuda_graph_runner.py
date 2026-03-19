@@ -32,7 +32,18 @@ class CudaGraphConfig:
     labels: list[str]  # cache labels used: ["main"] or ["main", "cfg_img"]
 
 
+@dataclass
+class CudaGraphData:
+    graph: torch.cuda.CUDAGraph
+    static_inputs: dict
+    static_outputs: dict
+    static_cache_manager: Any
+    config: CudaGraphConfig
+    bs: int
+
+
 # Pre-defined configs for Option A
+# TODO: have the model declare this itself
 DECODE_NO_CFG = CudaGraphConfig(
     graph_walk="decode", requires_cfg=False, labels=["main"]
 )
@@ -81,10 +92,7 @@ class CudaGraphRunner:
         self.device = ar_engine.device
 
         # Keyed by (graph_walk, requires_cfg, batch_size)
-        self.graphs: dict[tuple, torch.cuda.CUDAGraph] = {}
-        self.static_inputs: dict[tuple, dict] = {}
-        self.static_outputs: dict[tuple, dict] = {}
-        self.static_cache_managers: dict[tuple, Any] = {}
+        self.graphs: dict[tuple, CudaGraphData] = {}
 
         self.workspace = torch.empty(
             256 * 1024 * 1024, dtype=torch.uint8, device=self.device
@@ -288,16 +296,20 @@ class CudaGraphRunner:
             with torch.cuda.graph(graph, pool=self.memory_pool):
                 output = run_forward()
             torch.cuda.synchronize()
-
-            self.graphs[key] = graph
-            self.static_outputs[key] = output
-            self.static_inputs[key] = {
-                "preprocessed": preprocessed,
-                "static_text_inputs": static_text_inputs,
-                "dummy_rids": dummy_rids,
-                "dummy_metadata": dummy_metadata,
-            }
-            self.static_cache_managers[key] = cache_manager
+            
+            self.graphs[key] = CudaGraphData(
+                graph=graph,
+                static_inputs={
+                    "preprocessed": preprocessed,
+                    "static_text_inputs": static_text_inputs,
+                    "dummy_rids": dummy_rids,
+                    "dummy_metadata": dummy_metadata,
+                },
+                static_outputs=output,
+                static_cache_manager=cache_manager,
+                config=config,
+                bs=bs
+            )
 
             logger.debug("Captured graph %s, output keys: %s", key,
                          list(output.keys()) if isinstance(output, dict)
@@ -353,14 +365,15 @@ class CudaGraphRunner:
         padded_bs = self._get_padded_batch_size(batch_size)
         key = (graph_walk, requires_cfg, padded_bs)
 
-        graph = self.graphs[key]
-        static = self.static_inputs[key]
-        static_cm = self.static_cache_managers[key]
-        static_output = self.static_outputs[key]
+        graph_data: CudaGraphData = self.graphs[key]
+        graph = graph_data.graph
+        static = graph_data.static_inputs
+        static_cm = graph_data.static_cache_manager
+        static_output = graph_data.static_outputs
 
         preprocessed = static["preprocessed"]
         dummy_rids = static["dummy_rids"]
-        config_labels = ["main", "cfg_img"] if requires_cfg else ["main"]
+        config_labels = graph_data.config.labels
 
         # --- Step 1: Set up real request states on dummy request IDs ---
         # Save the dummy states, swap in real request states

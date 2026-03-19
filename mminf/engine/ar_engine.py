@@ -739,6 +739,7 @@ class AREngine(BaseEngine):
         """
         runner = self.cuda_graph_runners[batch.node_name]
 
+        # TODO: don't hardcode it like this
         has_cfg = any(
             batch.per_request_metadata.get(rid, {}).get("requires_cfg", False)
             for rid in batch.request_ids
