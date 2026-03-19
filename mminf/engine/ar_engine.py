@@ -267,11 +267,19 @@ class BatchedCacheManager:
             ps.token_offsets = token_offsets
             ps.seq_lens = seq_lens
         else:
-            # Eager mode: create a new wrapper each call (original behavior)
-            import flashinfer
-            wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
-                self.workspace_buffer, "NHD"
-            )
+            # Eager mode: reuse wrapper if one already exists for this label.
+            # Avoids recreating FlashInfer wrapper objects on every call.
+            ps = self._plan_states.get(effective_label)
+            if ps is not None and ps.wrapper is not None:
+                wrapper = ps.wrapper
+            else:
+                import flashinfer
+                wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
+                    self.workspace_buffer, "NHD"
+                )
+                ps = _PlanState(wrapper=wrapper)
+                self._plan_states[effective_label] = ps
+
             wrapper.plan(
                 qo_indptr=qo_indptr,
                 paged_kv_indptr=paged_kv_indptr,
@@ -285,13 +293,10 @@ class BatchedCacheManager:
                 q_data_type=dtype,
             )
 
-            self._plan_states[effective_label] = _PlanState(
-                wrapper=wrapper,
-                page_indices=page_indices,
-                page_offsets=page_offsets,
-                token_offsets=token_offsets,
-                seq_lens=seq_lens,
-            )
+            ps.page_indices = page_indices
+            ps.page_offsets = page_offsets
+            ps.token_offsets = token_offsets
+            ps.seq_lens = seq_lens
     
     def plan_rope(
         self,
