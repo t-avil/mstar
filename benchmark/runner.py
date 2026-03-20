@@ -2,6 +2,7 @@ import argparse
 import asyncio
 from dataclasses import dataclass
 from enum import Enum
+import random
 import time
 from typing import Optional
 
@@ -67,7 +68,6 @@ class Benchmark:
         session: aiohttp.ClientSession,
         requests: list[RequestInput],
     ) -> list[RequestMetrics]:
-        interval = 1.0 / self.config.rate
         tasks: list[asyncio.Task] = []
         for i, req in enumerate(requests):
             task = asyncio.create_task(
@@ -83,6 +83,7 @@ class Benchmark:
             )
             tasks.append(task)
             if i < len(requests) - 1:
+                interval = random.expovariate(self.config.rate)
                 await asyncio.sleep(interval)
         return list(await asyncio.gather(*tasks))
 
