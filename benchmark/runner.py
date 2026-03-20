@@ -9,11 +9,22 @@ import aiohttp
 
 from benchmark.base import Model, RequestType
 from benchmark.dataset import BaseDataset, VBenchDataset
-from benchmark.request import AggregateMetrics, RequestInput, RequestMetrics, aggregate_metrics, send_request
+from benchmark.request import AggregateMetrics, InferenceSystem, OurSystem, RequestInput, RequestMetrics, VLLMOmni, aggregate_metrics
 
 
 class DatasetType(Enum):
     VBENCH = "vbench"
+
+
+class InferenceSystemType(Enum):
+    OURS = "ours"
+    VLLM_OMNI = "vllm_omni"
+
+    def instantiate(self) -> InferenceSystem:
+        if self == InferenceSystemType.OURS:
+            return OurSystem()
+        elif self == InferenceSystemType.VLLM_OMNI:
+            return VLLMOmni()
 
 
 @dataclass
@@ -23,6 +34,7 @@ class BenchmarkConfig:
     dataset: DatasetType
     num_requests: int
     request_type: RequestType
+    inference_system: InferenceSystemType = InferenceSystemType.OURS
     rate: Optional[float] = None  # None = sequential, >0 = requests/sec
     # VBench args
     vbench_cache_dir: str = "./vbench_cache"
@@ -31,6 +43,7 @@ class BenchmarkConfig:
 class Benchmark:
     def __init__(self, config: BenchmarkConfig):
         self.config = config
+        self.inference_system = config.inference_system.instantiate()
 
     def _get_dataset(self) -> BaseDataset:
         if self.config.dataset == DatasetType.VBENCH:
@@ -58,7 +71,7 @@ class Benchmark:
         tasks: list[asyncio.Task] = []
         for i, req in enumerate(requests):
             task = asyncio.create_task(
-                send_request(
+                self.inference_system.send_request(
                     session=session,
                     base_url=self.config.url,
                     request_id=i,
@@ -80,7 +93,7 @@ class Benchmark:
     ) -> list[RequestMetrics]:
         results = []
         for i, req in enumerate(requests):
-            result = await send_request(
+            result = await self.inference_system.send_request(
                 session=session,
                 base_url=self.config.url,
                 request_id=i,
@@ -103,15 +116,17 @@ class Benchmark:
         ) as session:
             print("--- Warmup ---")
             warmup_req = requests[0]
-            await send_request(
-                session=session,
-                base_url=self.config.url,
-                request_id=-1,
-                req_type=warmup_req.req_type,
-                model=self.config.model,
-                prompt=warmup_req.prompt,
-                image_path=warmup_req.image_path,
-            )
+            for i in range(3):
+                print(f"Warmup {i} / 3")
+                await self.inference_system.send_request(
+                    session=session,
+                    base_url=self.config.url,
+                    request_id=-1,
+                    req_type=warmup_req.req_type,
+                    model=self.config.model,
+                    prompt=warmup_req.prompt,
+                    image_path=warmup_req.image_path,
+                )
             print("Warmup complete.\n")
 
             wall_start = time.monotonic()
@@ -141,6 +156,8 @@ def parse_args() -> BenchmarkConfig:
     parser.add_argument("--url", required=True)
     parser.add_argument("--model", required=True, choices=[m.value for m in Model])
     parser.add_argument("--dataset", required=True, choices=[d.value for d in DatasetType])
+    parser.add_argument("--inference-system", choices=[s.value for s in InferenceSystemType],
+                    default=InferenceSystemType.OURS.value)
     parser.add_argument("--num-requests", type=int, default=10)
     parser.add_argument("--rate", type=float, default=None,
                         help="Requests/sec. Omit for sequential mode.")
@@ -161,6 +178,7 @@ def parse_args() -> BenchmarkConfig:
         num_requests=args.num_requests,
         rate=args.rate,
         vbench_cache_dir=args.vbench_cache_dir,
+        inference_system=InferenceSystemType(args.inference_system),
     )
 
 
