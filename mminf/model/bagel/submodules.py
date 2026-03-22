@@ -395,9 +395,8 @@ class LLMSubmodule(NodeSubmodule):
         """
         device = next(self.parameters()).device
 
-        has_cfg = any(
-            per_request_metadata.get(rid, {}).get("requires_cfg", False)
-            for rid in request_ids
+        has_cfg = has_cfg = self._batch_get_requires_cfg(
+            per_request_metadata, request_ids
         )
         labels = self._get_active_labels(graph_walk, has_cfg)
 
@@ -819,6 +818,13 @@ class LLMSubmodule(NodeSubmodule):
             "latents": [latents],
             "time_index": [time_index + 1]
         }
+    
+    @torch.compiler.disable
+    def _batch_get_requires_cfg(self, per_request_metadata, request_ids):
+        return any(
+            per_request_metadata.get(rid, {}).get("requires_cfg", False)
+            for rid in request_ids
+        )
 
     def forward_batched(
         self,
@@ -833,9 +839,8 @@ class LLMSubmodule(NodeSubmodule):
         Concatenates inputs across requests, runs a single LLM forward with
         the BatchedCacheManager, then splits outputs back per-request.
         """
-        has_cfg = any(
-            per_request_metadata.get(rid, {}).get("requires_cfg", False)
-            for rid in request_ids
+        has_cfg = self._batch_get_requires_cfg(
+            per_request_metadata, request_ids
         )
 
         if graph_walk == "decode":
