@@ -38,7 +38,7 @@ class NodeOutput:
 
 
 class BaseEngine(ABC):
-    def __init__(self, enable_nvtx: bool = False):
+    def __init__(self, enable_nvtx: bool = False, **kwargs):
         self.enable_nvtx = enable_nvtx
 
     @abstractmethod

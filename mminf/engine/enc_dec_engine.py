@@ -18,10 +18,16 @@ class EncoderDecoderEngine(BaseEngine):
     Falls back to per-request sequential execution for variable-shape inputs.
     """
 
-    def __init__(self, enable_nvtx: bool = False):
+    def __init__(
+        self,
+        enable_nvtx: bool = False,
+        autocast_dtype=torch.bfloat16,
+        **kwargs
+    ):
         super().__init__(enable_nvtx=enable_nvtx)
         self.submodules: dict[str, torch.nn.Module] = {}
         self.device = None
+        self.autocast_dtype = autocast_dtype
 
     def engine_type(self) -> EngineType:
         return EngineType.ENC_DEC
@@ -79,19 +85,6 @@ class EncoderDecoderEngine(BaseEngine):
             request_ids=batch.request_ids,
             per_request_metadata=batch.per_request_metadata,
         )
-
-        # # Stack inputs along batch dimension (dim=0)
-        # first_preprocessed = all_preprocessed[request_ids[0]]
-        # stacked_inputs = {}
-        # stackable_keys = []
-        # for key, val in first_preprocessed.items():
-        #     if isinstance(val, torch.Tensor):
-        #         tensors = [all_preprocessed[rid][key] for rid in request_ids]
-        #         stacked_inputs[key] = torch.stack(tensors, dim=0)
-        #         stackable_keys.append(key)
-        #     else:
-        #         # Non-tensor values (ints, etc.) — use first request's value
-        #         stacked_inputs[key] = val
 
         # Single forward pass
         result = submodule(**all_preprocessed)
@@ -156,11 +149,12 @@ class EncoderDecoderEngine(BaseEngine):
             return output
 
         try:
-            with torch.no_grad():
-                if self._can_batch_inputs(batch):
-                    return self._execute_batched(batch, submodule)
-                else:
-                    return self._execute_sequential(batch, submodule)
+            with torch.amp.autocast("cuda", enabled=True, dtype=self.autocast_dtype):
+                with torch.no_grad():
+                    if self._can_batch_inputs(batch):
+                        return self._execute_batched(batch, submodule)
+                    else:
+                        return self._execute_sequential(batch, submodule)
         finally:
             if self.enable_nvtx:
                 range_pop()

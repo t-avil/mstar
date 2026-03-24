@@ -94,10 +94,6 @@ class CudaGraphRunner:
         # Keyed by (graph_walk, requires_cfg, batch_size)
         self.graphs: dict[tuple, CudaGraphData] = {}
 
-        self.workspace = torch.empty(
-            256 * 1024 * 1024, dtype=torch.uint8, device=self.device
-        )
-
         self.memory_pool = None
 
     def warmup_and_capture(self) -> None:
@@ -154,11 +150,9 @@ class CudaGraphRunner:
         # multi-pass captures (e.g., main + cfg_img in same graph).
         plan_states = {}
         for label in config.labels:
-            
-
             if config.graph_walk == "decode":
                 wrapper = FlashInferDecodeWrapper(
-                    workspace_buffer=self.workspace,
+                    workspace_buffer=self.ar_engine.buffer_manager.get(f"{label}_cugraph"),
                     num_qo_heads=cfg.num_qo_heads,
                     num_kv_heads=cfg.num_kv_heads,
                     head_dim=cfg.head_dim,
@@ -170,7 +164,7 @@ class CudaGraphRunner:
                 )
             else:
                 wrapper = FlashInferPrefillWrapper(
-                    workspace_buffer=self.workspace,
+                    workspace_buffer=self.ar_engine.buffer_manager.get(f"{label}_cugraph"),
                     num_qo_heads=cfg.num_qo_heads,
                     num_kv_heads=cfg.num_kv_heads,
                     head_dim=cfg.head_dim,
@@ -222,7 +216,7 @@ class CudaGraphRunner:
                 kv_cache=self.ar_engine.kv_cache,
                 page_allocator=self.ar_engine.page_allocator,
                 request_states=self.ar_engine.request_states,
-                workspace_buffer=self.ar_engine.workspace_buffer,
+                buffer_manager=self.ar_engine.buffer_manager,
                 kv_cache_config=cfg,
                 device=self.device,
                 cuda_graph_plan_states=plan_states,

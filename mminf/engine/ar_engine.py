@@ -62,6 +62,22 @@ class PageAllocator:
         return self.free_pages.qsize()
 
 
+class WorkspaceBufferManager:
+    def __init__(
+        self, size, device
+    ):
+        self.size = size
+        self.device = device
+        self.buffers = {}
+    
+    def get(self, label: str="main"):
+        if label not in self.buffers:
+            self.buffers[label] = torch.empty(
+                self.size, dtype=torch.uint8, device=self.device
+            )
+        return self.buffers[label]
+            
+
 @dataclass
 class _PlanState:
     """Pre-computed state from plan_attention/plan_rope for a single cache label.
@@ -102,7 +118,7 @@ class BatchedCacheManager:
         kv_cache: torch.Tensor,
         page_allocator: PageAllocator,
         request_states: dict[tuple[str, str], KVRequestState],
-        workspace_buffer: torch.Tensor,
+        buffer_manager: WorkspaceBufferManager,
         kv_cache_config: KVCacheConfig,
         device,
         cuda_graph_plan_states: dict[str, _PlanState] | None = None,
@@ -112,7 +128,7 @@ class BatchedCacheManager:
         self.kv_cache = kv_cache
         self.page_allocator = page_allocator
         self.request_states = request_states
-        self.workspace_buffer = workspace_buffer
+        self.buffer_manager = buffer_manager
         self.kv_cache_config = kv_cache_config
         self.device = device
         self.layer_idx = 0
@@ -183,6 +199,8 @@ class BatchedCacheManager:
 
         effective_label = label
         if effective_label is None:
+            labels = list(self.active_labels.values())
+            assert len(set(labels)) == 1, f"All active labels must be the same, got {labels}"
             effective_label = next(iter(self.active_labels.values()))
 
         cfg = self.kv_cache_config
@@ -238,69 +256,57 @@ class BatchedCacheManager:
         paged_kv_indices = torch.tensor(all_page_indices, dtype=torch.int32, device=device)
         paged_kv_last_page_len = torch.tensor(kv_last_page_lens, dtype=torch.int32, device=device)
 
-        if self._cuda_graph_mode:
-            # CUDA graph mode: use persistent wrapper, call its plan() method.
-            # The wrapper was created by CudaGraphRunner and stored in _plan_states.
-            ps = self._plan_states[effective_label]
+
+        is_decode = all([sl == 1 for sl in seq_lens])
+        ps = self._plan_states.get(effective_label)
+        if ps is not None and ps.wrapper is not None:
             wrapper = ps.wrapper
-
-            if isinstance(wrapper, FlashInferDecodeWrapper):
-                wrapper.plan(
-                    paged_kv_indptr=paged_kv_indptr,
-                    paged_kv_indices=paged_kv_indices,
-                    paged_kv_last_page_len=paged_kv_last_page_len,
-                    dtype=dtype,
-                )
-            else:
-                wrapper.plan(
-                    qo_indptr=qo_indptr,
-                    paged_kv_indptr=paged_kv_indptr,
-                    paged_kv_indices=paged_kv_indices,
-                    paged_kv_last_page_len=paged_kv_last_page_len,
-                    causal=is_causal,
-                    dtype=dtype,
-                )
-
-            # Note: plain assignment (not .copy_()) is intentional here.
-            # These fields are NOT read inside the CUDA graph — run_attention()
-            # uses wrapper.set_kv_cache()/run() which rely on the wrapper's own
-            # internal static tensors (updated via .copy_() inside wrapper.plan()).
-            # These are stored on _PlanState only for bookkeeping/debugging.
-            ps.page_indices = page_indices
-            ps.page_offsets = page_offsets
-            ps.token_offsets = token_offsets
-            ps.seq_lens = seq_lens
+        elif is_decode:
+            wrapper = FlashInferDecodeWrapper(
+                workspace_buffer=self.buffer_manager.get(effective_label),
+                num_qo_heads=num_qo_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim=head_dim,
+                page_size=page_size,
+            )
+            ps = _PlanState(wrapper=wrapper)
+            self._plan_states[effective_label] = ps
         else:
-            # Eager mode: reuse wrapper if one already exists for this label.
-            # Avoids recreating FlashInfer wrapper objects on every call.
-            ps = self._plan_states.get(effective_label)
-            if ps is not None and ps.wrapper is not None:
-                wrapper = ps.wrapper
-            else:
-                import flashinfer
-                wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
-                    self.workspace_buffer, "NHD"
-                )
-                ps = _PlanState(wrapper=wrapper)
-                self._plan_states[effective_label] = ps
+            wrapper = FlashInferPrefillWrapper(
+                workspace_buffer=self.buffer_manager.get(effective_label),
+                num_qo_heads=num_qo_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim=head_dim,
+                page_size=page_size,
+            )
+            ps = _PlanState(wrapper=wrapper)
+            self._plan_states[effective_label] = ps
 
+        if isinstance(wrapper, FlashInferDecodeWrapper):
+            wrapper.plan(
+                paged_kv_indptr=paged_kv_indptr,
+                paged_kv_indices=paged_kv_indices,
+                paged_kv_last_page_len=paged_kv_last_page_len,
+                dtype=dtype,
+            )
+        else:
             wrapper.plan(
                 qo_indptr=qo_indptr,
                 paged_kv_indptr=paged_kv_indptr,
                 paged_kv_indices=paged_kv_indices,
                 paged_kv_last_page_len=paged_kv_last_page_len,
-                num_qo_heads=num_qo_heads,
-                num_kv_heads=num_kv_heads,
-                head_dim_qk=head_dim,
-                page_size=page_size,
                 causal=is_causal,
-                q_data_type=dtype,
+                dtype=dtype,
             )
-
-            ps.page_indices = page_indices
-            ps.page_offsets = page_offsets
-            ps.token_offsets = token_offsets
-            ps.seq_lens = seq_lens
+        # Note: plain assignment (not .copy_()) is intentional here.
+        # These fields are NOT read inside the CUDA graph — run_attention()
+        # uses wrapper.set_kv_cache()/run() which rely on the wrapper's own
+        # internal static tensors (updated via .copy_() inside wrapper.plan()).
+        # These are stored on _PlanState only for bookkeeping/debugging.
+        ps.page_indices = page_indices
+        ps.page_offsets = page_offsets
+        ps.token_offsets = token_offsets
+        ps.seq_lens = seq_lens
     
     def plan_rope(
         self,
@@ -321,6 +327,8 @@ class BatchedCacheManager:
         """
         effective_label = label
         if effective_label is None:
+            labels = list(self.active_labels.values())
+            assert len(set(labels)) == 1, f"All active labels must be the same, got {labels}"
             effective_label = next(iter(self.active_labels.values()))
 
         if effective_label not in self._plan_states:
@@ -376,19 +384,16 @@ class BatchedCacheManager:
         """
         if layer_idx is None:
             layer_idx = self.layer_idx
+
+        labels = list(self.active_labels.values())
+        assert len(set(labels)) == 1, f"All active labels must be the same, got {labels}"
         label = next(iter(self.active_labels.values()))
+
         ps = self._plan_states[label]
         assert self.kv_cache is not None and ps.wrapper is not None
 
-        if self._cuda_graph_mode:
-            # CUDA graph mode: use wrapper's set_kv_cache + run
-            ps.wrapper.set_kv_cache(self.kv_cache[layer_idx], k, v)
-            return ps.wrapper.run(q, self.kv_cache[layer_idx])
-        else:
-            # Eager mode: direct fancy indexing for KV writes
-            self.kv_cache[layer_idx, ps.page_indices, 0, ps.page_offsets] = k[ps.token_offsets]
-            self.kv_cache[layer_idx, ps.page_indices, 1, ps.page_offsets] = v[ps.token_offsets]
-            return ps.wrapper.run(q, self.kv_cache[layer_idx])
+        ps.wrapper.set_kv_cache(self.kv_cache[layer_idx], k, v)
+        return ps.wrapper.run(q, self.kv_cache[layer_idx])
 
     @torch.compiler.disable
     def apply_rope(
@@ -401,10 +406,18 @@ class BatchedCacheManager:
         rope_theta: float = 10000.0,
     ):
         """Apply RoPE using the active label's pre-computed position IDs."""
+        # Assert all active labels are the same
+        labels = list(self.active_labels.values())
+        assert len(set(labels)) == 1, f"All active labels must be the same, got {labels}"
         label = next(iter(self.active_labels.values()))
     
         ps = self._plan_states[label]
         assert ps.pos_ids is not None
+
+        orig_dtype = q.dtype
+        if q.dtype == torch.float32:
+            q = q.to(torch.bfloat16)
+            k = k.to(torch.bfloat16)
 
         import flashinfer
         flashinfer.rope.apply_rope_pos_ids_inplace(
@@ -414,8 +427,42 @@ class BatchedCacheManager:
             rope_scale=rope_scale,
             rope_theta=rope_theta,
         )
-        return q, k
+        return q.to(orig_dtype), k.to(orig_dtype)
+    
+    @torch.compiler.disable
+    def apply_rope_llama(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        rotary_dim: int | None = None,
+        interleave: bool = False,
+        rope_scale: float = 1,
+        rope_theta: float = 10000.0,
+    ):
+        """Apply RoPE using the active label's pre-computed position IDs."""
+        labels = list(self.active_labels.values())
+        assert len(set(labels)) == 1, f"All active labels must be the same, got {labels}"
+        label = next(iter(self.active_labels.values()))
+    
+        ps = self._plan_states[label]
+        assert ps.pos_ids is not None
 
+        orig_dtype = q.dtype
+        if q.dtype == torch.float32:
+            q = q.to(torch.bfloat16)
+            k = k.to(torch.bfloat16)
+
+        import flashinfer
+        flashinfer.rope.apply_llama31_rope_pos_ids_inplace(
+            q, k, ps.pos_ids,
+            rotary_dim=rotary_dim,
+            interleave=interleave,
+            rope_scale=rope_scale,
+            rope_theta=rope_theta,
+        )
+        return q.to(orig_dtype), k.to(orig_dtype)
+
+    @torch.compiler.disable
     def advance_seq_len(self, n: int | None = None, pos_id_n: int | None = None) -> None:
         """Advance seq_len for all requests.
 
@@ -423,27 +470,14 @@ class BatchedCacheManager:
         per-request seq_lens from the last plan_attention call. Errors if
         both n and planned seq_lens are None.
         """
-        if n is not None:
-            for rid in self.request_ids:
-                state = self._get_state(rid)
-                state.seq_len += n
-                state.position_id_start += (pos_id_n if pos_id_n is not None else n)
-        else:
-            # Fall back to planned seq_lens from active label's plan state
-            label = next(iter(self.active_labels.values()))
-            ps = self._plan_states.get(label)
-            planned = ps.seq_lens if ps is not None else None
-            if planned is None:
-                raise ValueError(
-                    "advance_seq_len: both n and planned seq_lens are None"
-                )
-            for i, rid in enumerate(self.request_ids):
-                state = self._get_state(rid)
-                state.seq_len += planned[i]
-                state.position_id_start += (
-                    pos_id_n if pos_id_n is not None else planned[i]
-                )
-
+        if n is None:
+            return self.advance_seq_lens(pos_id_n)
+        for rid in self.request_ids:
+            state = self._get_state(rid)
+            state.seq_len += n
+            state.position_id_start += (pos_id_n if pos_id_n is not None else n)
+    
+    @torch.compiler.disable
     def advance_seq_lens(self, pos_id_ns: list[int] | int | None = None) -> None:
         """Advance seq_len for each request by different amounts."""
         for i, rid in enumerate(self.request_ids):
@@ -496,6 +530,7 @@ class AREngine(BaseEngine):
     def __init__(
         self,
         kv_cache_config: KVCacheConfig | dict,
+        autocast_dtype=torch.bfloat16,
         enable_nvtx: bool = False,
     ):
         super().__init__(enable_nvtx=enable_nvtx)
@@ -504,17 +539,14 @@ class AREngine(BaseEngine):
         self.submodules: dict[str, torch.nn.Module] = {}
         self.kv_cache_config = kv_cache_config
         self.device = None
+        self.autocast_dtype = autocast_dtype
         self.kv_cache = None  # [num_layers, max_pages, 2, page_size, num_kv_heads, head_dim]
         self.page_allocator: PageAllocator | None = None
         # Keyed by (request_id, cache_label) to support multiple KV caches
         # per request (needed for BAGEL's classifier-free guidance which
         # maintains "main", "cfg_text", and "cfg_img" caches).
         self.request_states: dict[tuple[str, str], KVRequestState] = {}
-
-        # FlashInfer wrappers (initialized in load_model if available)
-        self.prefill_wrapper = None
-        self.decode_wrapper = None
-        self.workspace_buffer = None
+        self.buffer_manager = None
 
         # CUDA graph runners (initialized in warmup())
         self.cuda_graph_runners: dict[str, "CudaGraphRunner"] = {}
@@ -527,6 +559,7 @@ class AREngine(BaseEngine):
         submodules: dict[str, torch.nn.Module],
         model_config: dict,
         device: torch.device,
+        kv_cache_type=torch.bfloat16,
     ) -> None:
         self.submodules = submodules
         self.device = device
@@ -547,25 +580,14 @@ class AREngine(BaseEngine):
         self.kv_cache = torch.zeros(
             num_layers, max_num_pages, 2,
             page_size, num_kv_heads, head_dim,
-            dtype=torch.bfloat16, device=device,
+            dtype=kv_cache_type, device=device,
         )
         self.page_allocator = PageAllocator(max_num_pages)
 
         # 256MB workspace for FlashInfer
-        self.workspace_buffer = torch.empty(
-            256 * 1024 * 1024, dtype=torch.uint8, device=device
+        self.buffer_manager = WorkspaceBufferManager(
+            256 * 1024 * 1024, device=device
         )
-
-        try:
-            import flashinfer
-            self.prefill_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
-                self.workspace_buffer, "NHD"
-            )
-            self.decode_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
-                self.workspace_buffer, "NHD"
-            )
-        except ImportError:
-            pass  # Dummy mode — no FlashInfer
 
     def _create_cache_manager(self, request_id: str) -> BatchedCacheManager:
         """Create a CacheHandle for a single request."""
@@ -575,7 +597,7 @@ class AREngine(BaseEngine):
             kv_cache=self.kv_cache,
             page_allocator=self.page_allocator,
             request_states=self.request_states,
-            workspace_buffer=self.workspace_buffer,
+            buffer_manager=self.buffer_manager,
             kv_cache_config=self.kv_cache_config,
             device=self.device
         )
@@ -653,7 +675,7 @@ class AREngine(BaseEngine):
             kv_cache=self.kv_cache,
             page_allocator=self.page_allocator,
             request_states=self.request_states,
-            workspace_buffer=self.workspace_buffer,
+            buffer_manager=self.buffer_manager,
             kv_cache_config=self.kv_cache_config,
             device=self.device,
         )
@@ -675,14 +697,13 @@ class AREngine(BaseEngine):
             per_request_metadata=batch.per_request_metadata,
         )
 
-        with torch.no_grad():
-            batched_output = submodule.forward_batched(
-                graph_walk=batch.graph_walk,
-                cache_manager=cache_manager,
-                packed_inputs=preprocessed,
-                request_ids=rids,
-                per_request_metadata=batch.per_request_metadata,
-            )
+        batched_output = submodule.forward_batched(
+            graph_walk=batch.graph_walk,
+            cache_manager=cache_manager,
+            packed_inputs=preprocessed,
+            request_ids=rids,
+            per_request_metadata=batch.per_request_metadata,
+        )
 
         return NodeOutput(per_request_output_tensors=batched_output)
 
@@ -707,13 +728,12 @@ class AREngine(BaseEngine):
                 request_ids=[rid],
                 per_request_metadata=metadata,
             )
-            with torch.no_grad():
-                output = submodule(
-                    graph_walk=batch.graph_walk,
-                    cache_handle=cache_handle,
-                    **preprocessed,
-                    **metadata[rid],
-                )
+            output = submodule(
+                graph_walk=batch.graph_walk,
+                cache_handle=cache_handle,
+                **preprocessed,
+                **metadata[rid],
+            )
             per_request_outputs[rid] = output
 
         return NodeOutput(per_request_output_tensors=per_request_outputs)
@@ -758,15 +778,14 @@ class AREngine(BaseEngine):
             batch.per_request_input_tensors[rid] for rid in rids
         ]
 
-        with torch.no_grad():
-            batched_output = runner.run(
-                graph_walk=batch.graph_walk,
-                requires_cfg=has_cfg,
-                request_ids=rids,
-                per_request_inputs=input_tensors,
-                per_request_metadata=batch.per_request_metadata,
-                submodule=submodule,
-            )
+        batched_output = runner.run(
+            graph_walk=batch.graph_walk,
+            requires_cfg=has_cfg,
+            request_ids=rids,
+            per_request_inputs=input_tensors,
+            per_request_metadata=batch.per_request_metadata,
+            submodule=submodule,
+        )
 
         return NodeOutput(per_request_output_tensors=batched_output)
 
@@ -784,13 +803,15 @@ class AREngine(BaseEngine):
             return output
 
         try:
-            # Priority: CUDA graph > batched > sequential
-            if self._can_use_cuda_graph(batch):
-                return self._execute_with_cuda_graph(batch, submodule)
-            elif self._can_batch(batch):
-                return self._execute_batched(batch, submodule)
-            else:
-                return self._execute_sequential(batch, submodule)
+            with torch.no_grad():
+                with torch.amp.autocast("cuda", enabled=True, dtype=self.autocast_dtype):
+                    # Priority: CUDA graph > batched > sequential
+                    if self._can_use_cuda_graph(batch):
+                        return self._execute_with_cuda_graph(batch, submodule)
+                    elif self._can_batch(batch):
+                        return self._execute_batched(batch, submodule)
+                    else:
+                        return self._execute_sequential(batch, submodule)
         finally:
             if self.enable_nvtx:
                 range_pop()
@@ -829,5 +850,5 @@ class AREngine(BaseEngine):
 
     def shutdown(self) -> None:
         self.kv_cache = None
-        self.workspace_buffer = None
+        self.buffer_manager = None
         self.request_states.clear()

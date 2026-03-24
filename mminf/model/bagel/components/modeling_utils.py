@@ -112,7 +112,7 @@ class TimestepEmbedder(nn.Module):
 
     def forward(self, t):
         t_freq = self.timestep_embedding(t, self.frequency_embedding_size)
-        t_emb = self.mlp(t_freq.to(torch.bfloat16))
+        t_emb = self.mlp(t_freq.float())
         return t_emb
 
 

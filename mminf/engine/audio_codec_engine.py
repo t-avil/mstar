@@ -10,7 +10,7 @@ class AudioCodecEngine(BaseEngine):
     Stateless — identical lifecycle to EncoderDecoderEngine.
     """
 
-    def __init__(self, enable_nvtx: bool = False):
+    def __init__(self, enable_nvtx: bool = False, **kwargs):
         super().__init__(enable_nvtx=enable_nvtx)
         self.submodules: dict[str, torch.nn.Module] = {}
         self.device = None

@@ -208,7 +208,7 @@ class BagelAttentionMoT(nn.Module):
             )
 
         # RoPE: pos_ids pre-computed by plan_rope before the LLM forward
-        query_states, key_states = cache_handle.apply_rope(
+        query_states, key_states = cache_handle.apply_rope_llama(
             query_states, key_states, rope_theta=self.rope_theta
         )
 
