@@ -137,7 +137,6 @@ class AREngine(BaseEngine):
         # Step 2: CUDA graph capture for decode (Option A keying)
         for node_name in self.submodules:
             runner = CudaGraphRunner(
-                self,
                 submodule_name=node_name,
                 submodule=self.submodules[node_name],
                 kv_cache_config=self.kv_cache_config,

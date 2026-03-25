@@ -208,7 +208,7 @@ class CudaGraphRunner:
 
         # Add dummy requests with all needed labels
         for rid in dummy_rids:
-            self.alloc_manager.add_request(rid, cache_labels=config.labels)
+            self.alloc_manager.add_request(rid, labels=config.labels)
 
         try:
             # Create persistent wrappers

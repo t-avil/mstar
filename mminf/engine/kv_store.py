@@ -100,7 +100,7 @@ class PagedAllocationManager:
             mooncake_cfg.metadata_server,
             mooncake_cfg.segment_size,
             mooncake_cfg.local_buff_size,
-            mooncake_cfg.protocol.value,
+            "tcp", # this isn't working for RDMA??
             "",
             mooncake_cfg.master_service
         )
@@ -112,7 +112,7 @@ class PagedAllocationManager:
         return f"{request_id}_{label}_{pos}_{layer}"
 
     def flush_to_store(
-        self, request_id: str, label: str, layers: int | list[int] | None
+        self, request_id: str, label: str, layers: int | list[int] | None=None
     ):
         if isinstance(layers, int):
             layers = [layers]
@@ -149,13 +149,17 @@ class PagedAllocationManager:
         # TODO error handling
         assert all([s == 0 for s in status])
     
+    def _new_state(self):
+        state = KVRequestState()
+        state.store_seq_len_per_layer = torch.zeros(
+            self.config.num_layers, dtype=torch.int32
+        )
+        return state
+
     def get_state(self, request_id: str, label: str):
         if label not in self.request_states[request_id]:
-            state = KVRequestState()
-            state.store_seq_len_per_layer = torch.zeros(
-                self.config.num_layers, dtype=torch.int32
-            )
-            self.request_states[request_id][label] = state
+            
+            self.request_states[request_id][label] = self._new_state()
         return self.request_states[request_id][label]
 
     def alloc(
@@ -203,12 +207,12 @@ class PagedAllocationManager:
     
     def reset_label(self, request_id: str, label: str, free: bool=True):
         if label not in self.request_states[request_id]:
-            self.request_states[request_id] = KVRequestState()
+            self.request_states[request_id][label] = self._new_state()
             return
         if free:
             state = self.request_states[request_id][label]
             self.page_allocator.free(state.page_indices)
-        self.request_states[request_id] = KVRequestState()
+        self.request_states[request_id][label] = self._new_state()
 
     def cleanup(self):
         self.mooncake_store.unregister_buffer(
@@ -217,7 +221,7 @@ class PagedAllocationManager:
     
     def add_request(self, request_id: str, labels: list[str]=[]):
         self.request_states[request_id] = {
-            label: KVRequestState() for label in labels
+            label: self._new_state() for label in labels
         }
     
     def remove_request(self, request_id: str):
