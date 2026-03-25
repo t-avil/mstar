@@ -555,7 +555,7 @@ class BagelModel(Model):
             "cfg_interval": full_metadata.kwargs["cfg_interval"],
             "cfg_renorm_type": full_metadata.kwargs["cfg_renorm_type"],
             "cfg_renorm_min": full_metadata.kwargs["cfg_renorm_min"],
-            "temperature": full_metadata.kwargs.get("temperature", 0.0),
+            "temperature": full_metadata.kwargs.get("temperature", 0.6),
             "top_k": full_metadata.kwargs.get("top_k", 0),
             "top_p": full_metadata.kwargs.get("top_p", 1.0),
         }
