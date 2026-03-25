@@ -343,3 +343,6 @@ class Model(ABC):
 
     def get_max_output_tokens(self, **model_kwargs):
         return model_kwargs.get("max_output_tokens", MAX_OUTPUT_TOKENS)
+    
+    def get_autocast_dtype(self):
+        return torch.bfloat16

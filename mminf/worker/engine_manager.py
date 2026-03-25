@@ -61,13 +61,11 @@ class EngineManager:
 
             engine_cls = ENGINE_TYPE_TO_CLASS[engine_type_str]
 
-            if engine_type_str == "ar":
-                engine = engine_cls(
-                    kv_cache_config=model_config.get("kv_cache", {}),
-                    enable_nvtx=enable_nvtx,
-                )
-            else:
-                engine = engine_cls(enable_nvtx=enable_nvtx)
+            engine = engine_cls(
+                kv_cache_config=model_config.get("kv_cache", {}),
+                autocast_dtype=model_config.get("autocast_dtype", torch.bfloat16),
+                enable_nvtx=enable_nvtx,
+            )
 
             # Extract submodules from the Model for this engine's nodes
             submodules: dict[str, torch.nn.Module] = {}
@@ -75,7 +73,10 @@ class EngineManager:
                 for name in node_names:
                     submodule = model.get_submodule(name, device)
                     if submodule is not None:
-                        submodules[name] = submodule.to(device=device, dtype=torch.bfloat16)
+                        submodules[name] = submodule.to(
+                            device=device,
+                            dtype=model.get_autocast_dtype()
+                        )
 
             engine.load_model(submodules, model_config, device)
             logger.info("Engine %s loaded in on device %s", cfg["engine_type"], str(device))

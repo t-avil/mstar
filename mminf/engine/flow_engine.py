@@ -19,7 +19,7 @@ class FlowEngine(BaseEngine):
     from Phase 1).
     """
 
-    def __init__(self, enable_nvtx: bool = False):
+    def __init__(self, enable_nvtx: bool = False, **kwargs):
         super().__init__(enable_nvtx=enable_nvtx)
         self.submodules: dict[str, torch.nn.Module] = {}
         self.device = None
@@ -76,8 +76,9 @@ class FlowEngine(BaseEngine):
             return output
 
         try:
-            with torch.no_grad():
-                return self._execute_sequential(batch, submodule)
+            with torch.amp.autocast("cuda", enabled=True, dtype=self.autocast_dtype):
+                with torch.no_grad():
+                    return self._execute_sequential(batch, submodule)
         finally:
             if self.enable_nvtx:
                 range_pop()

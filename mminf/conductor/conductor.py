@@ -164,7 +164,8 @@ class Conductor:
         self._per_worker_engine_configs: dict[str, list[dict]] = {}
 
         engine_model_cfg = {
-            "kv_cache": self.model.get_kv_cache_config()
+            "kv_cache": self.model.get_kv_cache_config(),
+            "autocast_dtype": self.model.get_autocast_dtype()
         }
         for rank in self._sorted_ranks:
             worker_id = f"worker_{rank}"

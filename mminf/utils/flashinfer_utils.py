@@ -24,14 +24,21 @@ logger = logging.getLogger(__name__)
 
 @torch.compiler.disable
 def run_rms_norm(
-        input: torch.Tensor,
-        weight: torch.Tensor,
-        eps: float = 1e-06
-    ):
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float = 1e-06,
+    rms_norm_dtype=None
+):
+    orig_dtype = input.dtype
+    if rms_norm_dtype is not None:
+        input = input.to(rms_norm_dtype)
+    elif torch.is_autocast_enabled():
+        dtype = torch.get_autocast_gpu_dtype()
+        input = input.to(dtype)
     import flashinfer
     return flashinfer.norm.rmsnorm(
         input, weight, eps=eps
-    )
+    ).to(orig_dtype)
 
 
 def run_attention(
@@ -92,6 +99,7 @@ class FlashInferPrefillWrapper:
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
         self.page_size = page_size
+        self.dtype = None
 
         import flashinfer
 
@@ -154,6 +162,7 @@ class FlashInferPrefillWrapper:
         In CUDA graph mode, updates static buffers via .copy_() so that
         the same GPU addresses are used during graph replay.
         """
+        self.dtype = dtype
         self.attn_wrapper.plan(
             qo_indptr=qo_indptr,
             paged_kv_indptr=paged_kv_indptr,
@@ -225,7 +234,7 @@ class FlashInferPrefillWrapper:
         Returns:
             output: [total_tokens, num_qo_heads, head_dim]
         """
-        return self.attn_wrapper.run(q, kv_cache_layer)
+        return self.attn_wrapper.run(q.to(self.dtype), kv_cache_layer)
 
     def set_kv_cache(
         self,
@@ -243,8 +252,8 @@ class FlashInferPrefillWrapper:
         n = self._total_tokens
         page_idx = self.token_to_page[:n]
         cache_idx = self.token_to_cache[:n]
-        kv_cache_layer[page_idx, 0, cache_idx] = k[:n]
-        kv_cache_layer[page_idx, 1, cache_idx] = v[:n]
+        kv_cache_layer[page_idx, 0, cache_idx] = k[:n].to(self.dtype)
+        kv_cache_layer[page_idx, 1, cache_idx] = v[:n].to(self.dtype)
 
 
 class FlashInferDecodeWrapper:
@@ -284,6 +293,7 @@ class FlashInferDecodeWrapper:
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
         self.page_size = page_size
+        self.dtype = None
 
         import flashinfer
 
@@ -360,6 +370,7 @@ class FlashInferDecodeWrapper:
             self.kv_cache_locations = locations
 
         self._n_req = n_req
+        self.dtype = dtype
 
     @torch.compiler.disable
     def run(self, q: torch.Tensor, kv_cache_layer: torch.Tensor) -> torch.Tensor:
@@ -371,7 +382,7 @@ class FlashInferDecodeWrapper:
         Returns:
             output: [n_req, num_qo_heads, head_dim]
         """
-        return self.attn_wrapper.run(q, kv_cache_layer)
+        return self.attn_wrapper.run(q.to(self.dtype), kv_cache_layer)
 
     def set_kv_cache(
         self,
@@ -389,5 +400,5 @@ class FlashInferDecodeWrapper:
         n = self._n_req
         pages = self.kv_cache_locations[:n, 0]
         positions = self.kv_cache_locations[:n, 1]
-        kv_cache_layer[pages, 0, positions] = k[:n]
-        kv_cache_layer[pages, 1, positions] = v[:n]
+        kv_cache_layer[pages, 0, positions] = k[:n].to(self.dtype)
+        kv_cache_layer[pages, 1, positions] = v[:n].to(self.dtype)

@@ -94,7 +94,7 @@ class ViTEncoderSubmodule(NodeSubmodule):
         max_seqlen = int(num_tokens)
 
         return {
-            "packed_pixel_values": pixel_values.to(torch.bfloat16),
+            "packed_pixel_values": pixel_values,
             "packed_position_ids": position_ids,
             "cu_seqlens": cu_seqlens,
             "max_seqlen": max_seqlen,
@@ -190,7 +190,7 @@ class VAEEncoderSubmodule(NodeSubmodule):
         )
 
         return {
-            "padded_images": image_tensor.unsqueeze(0).to(torch.bfloat16),
+            "padded_images": image_tensor.unsqueeze(0),
             "packed_vae_position_ids": packed_vae_position_ids,
             "packed_timesteps": torch.tensor([0.0], device=device),
             "h": h,
@@ -304,14 +304,18 @@ class LLMSubmodule(NodeSubmodule):
         H: int=1024,
         W: int=1024,
     ):
+        
         h, w = (H // self.config.latent_downsample,
                 W // self.config.latent_downsample)
         num_image_tokens = h * w
         # torch.random.manual_seed(42)
-        return torch.randn(
+        latents = torch.randn(
             num_image_tokens,
             self.config.vae_config.z_channels * self.config.latent_patch_size ** 2,
-        ).to(device=device, dtype=torch.bfloat16)
+        ).to(device=device)
+        if torch.is_autocast_enabled():
+            latents = latents.to(torch.get_autocast_gpu_dtype())
+        return latents
     
     def _preprocess_prefill_text(
         self, text_inputs: torch.Tensor
@@ -452,7 +456,7 @@ class LLMSubmodule(NodeSubmodule):
                     device=device,
                     H=H, W=W
                 )
-                result["time_index"] = torch.zeros(result["latents"].shape[0], device=device, dtype=torch.bfloat16)
+                result["time_index"] = torch.zeros(result["latents"].shape[0], device=device)
             else:
                result["latents"] = inputs["latents"][0]
                result["time_index"] = inputs["time_index"][0]
@@ -460,7 +464,7 @@ class LLMSubmodule(NodeSubmodule):
             result["empty_combined_emb"] = self._wrap_with_boi_eoi(
                 torch.empty(
                     (result["latents"].shape[0], self.config.hidden_size),
-                    dtype=torch.bfloat16,
+                    dtype=result["latents"].dtype,
                     device=device
                 )
             )
