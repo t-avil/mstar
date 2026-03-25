@@ -1,8 +1,14 @@
 """Generic token sampling utilities.
 
-Supports temperature scaling, top-k filtering, top-p (nucleus) filtering,
-and multinomial sampling. Model-agnostic — any AR model returns logits,
+Uses FlashInfer's fused top-k/top-p sampling kernel for GPU efficiency
+and CUDA graph compatibility. Model-agnostic — any AR model returns logits,
 this module selects the next token.
+
+Supports per-request sampling parameters (different temperature/top_k/top_p
+for each request in a batch) via tensor parameters.
+
+CUDA graph compatible: no Python control flow branches — uses masking
+to handle greedy vs sampled requests in the same batch.
 
 Usage:
     from mminf.utils.sampling import sample_tokens
@@ -10,72 +16,74 @@ Usage:
 """
 
 import torch
-import torch.nn.functional as F
 
 
+@torch.compiler.disable
 def sample_tokens(
     logits: torch.Tensor,
-    temperature: float | torch.Tensor = 1.0,
-    top_k: int = 0,
-    top_p: float = 1.0,
+    temperature: float | torch.Tensor = 0.6,
+    top_k: int | torch.Tensor = 0,
+    top_p: float | torch.Tensor = 1.0,
 ) -> torch.Tensor:
     """Sample tokens from logits with temperature, top-k, and top-p.
 
+    CUDA-graph safe: no Python if/else on tensor values. Uses masking
+    to blend greedy argmax with FlashInfer sampled results.
+
     Args:
         logits: [batch_size, vocab_size] raw logits from lm_head.
-        temperature: Scalar or per-request tensor [batch_size, 1].
-            0 = greedy (argmax). >0 = scaled sampling.
-        top_k: Keep only top-k logits. 0 = disabled.
-        top_p: Nucleus sampling threshold. 1.0 = disabled.
+        temperature: Scalar or per-request tensor [batch_size] or [batch_size, 1].
+            0 = greedy (argmax) for that request. >0 = scaled sampling.
+        top_k: Scalar or per-request tensor [batch_size].
+            0 = disabled (uses vocab_size).
+        top_p: Scalar or per-request tensor [batch_size].
+            1.0 = disabled.
 
     Returns:
         tokens: [batch_size] sampled token IDs.
     """
-    # Greedy fast path
-    if _is_greedy(temperature):
-        return torch.argmax(logits, dim=-1)
+    batch_size, vocab_size = logits.shape
 
-    # Temperature scaling
-    if isinstance(temperature, torch.Tensor):
-        logits = logits / temperature
-    else:
-        logits = logits / temperature
+    # Normalize params to tensors [batch_size] for uniform handling
+    temperature = _to_tensor(temperature, batch_size, logits.device)
+    top_k = _to_tensor(top_k, batch_size, logits.device, dtype=torch.int32)
+    top_p = _to_tensor(top_p, batch_size, logits.device)
 
-    # Top-k filtering
-    if top_k > 0:
-        logits = _top_k_filter(logits, top_k)
+    # Greedy result (always computed — cheap relative to attention/MLP)
+    greedy_tokens = torch.argmax(logits, dim=-1)
+    greedy_mask = (temperature == 0).squeeze(-1)  # [batch_size]
 
-    # Top-p (nucleus) filtering
-    if top_p < 1.0:
-        logits = _top_p_filter(logits, top_p)
+    # If entire batch is greedy, skip sampling entirely
+    if greedy_mask.all():
+        return greedy_tokens
 
-    # Sample
-    probs = F.softmax(logits, dim=-1)
-    return torch.multinomial(probs, num_samples=1).squeeze(-1)
+    # For greedy requests, set temperature=1 to avoid division by zero
+    # (their results will be masked out anyway)
+    safe_temperature = temperature.masked_fill(temperature == 0, 1.0)
+    if safe_temperature.dim() == 1:
+        safe_temperature = safe_temperature.unsqueeze(-1)
+    scaled_logits = logits / safe_temperature
+
+    # Disabled top_k (0) → use vocab_size (keep all)
+    safe_top_k = top_k.masked_fill(top_k == 0, vocab_size)
+
+    # FlashInfer fused sampling kernel
+    import flashinfer
+    sampled_tokens, _ = flashinfer.sampling.top_k_top_p_sampling_from_logits(
+        scaled_logits, safe_top_k, top_p, filter_apply_order="joint",
+    )
+
+    # Blend: greedy where temperature==0, sampled otherwise
+    return torch.where(greedy_mask, greedy_tokens, sampled_tokens)
 
 
-def _is_greedy(temperature: float | torch.Tensor) -> bool:
-    if isinstance(temperature, torch.Tensor):
-        return (temperature == 0).all().item()
-    return temperature == 0
-
-
-def _top_k_filter(logits: torch.Tensor, k: int) -> torch.Tensor:
-    """Zero out all logits below the top-k values."""
-    top_k_values, _ = torch.topk(logits, k, dim=-1)
-    threshold = top_k_values[:, -1].unsqueeze(-1)
-    return logits.where(logits >= threshold, torch.full_like(logits, float("-inf")))
-
-
-def _top_p_filter(logits: torch.Tensor, p: float) -> torch.Tensor:
-    """Nucleus filtering: keep smallest set of tokens with cumulative prob >= p."""
-    sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
-    cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
-
-    # Remove tokens with cumulative probability above the threshold
-    # Shift right so the first token above threshold is kept
-    sorted_mask = cumulative_probs - F.softmax(sorted_logits, dim=-1) >= p
-    sorted_logits[sorted_mask] = float("-inf")
-
-    # Scatter back to original ordering
-    return sorted_logits.scatter(1, sorted_indices, sorted_logits)
+def _to_tensor(
+    value: float | int | torch.Tensor,
+    batch_size: int,
+    device: torch.device,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Convert scalar or tensor to [batch_size] tensor."""
+    if isinstance(value, torch.Tensor):
+        return value.to(device=device, dtype=dtype).reshape(-1)
+    return torch.full((batch_size,), value, device=device, dtype=dtype)
