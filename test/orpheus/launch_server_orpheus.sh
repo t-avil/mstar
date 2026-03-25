@@ -6,5 +6,5 @@
 DEVICE=0
 
 CUDA_VISIBLE_DEVICES=$DEVICE python mminf/api_server/entrypoint.py \
-    --config configs/orpheus.yaml
+    --config configs/orpheus.yaml --port 12345
     # --log-level DEBUG
