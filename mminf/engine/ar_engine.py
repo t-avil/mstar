@@ -658,6 +658,32 @@ class AREngine(BaseEngine):
         # Step 1: torch.compile (before CUDA graph capture)
         self._compile_submodules()
 
+    def _sample_decode_outputs(
+        self,
+        output: NodeOutput,
+        per_request_metadata: dict[str, dict],
+    ) -> NodeOutput:
+        """Post-process decode outputs: sample tokens from logits.
+
+        Called AFTER the model forward (and outside CUDA graph capture).
+        Replaces 'logits' with 'new_token' in each request's output.
+        """
+        from mminf.utils.sampling import sample_tokens
+
+        for rid, tensors in output.per_request_output_tensors.items():
+            if "logits" not in tensors:
+                continue
+            logits = tensors["logits"][0]  # [1, vocab_size]
+            meta = per_request_metadata.get(rid, {})
+            temperature = meta.get("temperature", 0.6)
+            top_k = meta.get("top_k", 0)
+            top_p = meta.get("top_p", 1.0)
+            token = sample_tokens(logits, temperature=temperature, top_k=top_k, top_p=top_p)
+            tensors["new_token"] = [token]
+            del tensors["logits"]
+
+        return output
+
     def _can_batch(self, batch: NodeBatch) -> bool:
         """Only batch when all requests share a batchable graph_walk path.
 
@@ -712,7 +738,10 @@ class AREngine(BaseEngine):
             per_request_metadata=batch.per_request_metadata,
         )
 
-        return NodeOutput(per_request_output_tensors=batched_output)
+        output = NodeOutput(per_request_output_tensors=batched_output)
+        if batch.graph_walk == "decode":
+            output = self._sample_decode_outputs(output, batch.per_request_metadata)
+        return output
 
     def _execute_sequential(self, batch: NodeBatch, submodule) -> NodeOutput:
         """Original per-request execution with CacheHandle."""
@@ -743,7 +772,10 @@ class AREngine(BaseEngine):
             )
             per_request_outputs[rid] = output
 
-        return NodeOutput(per_request_output_tensors=per_request_outputs)
+        output = NodeOutput(per_request_output_tensors=per_request_outputs)
+        if batch.graph_walk == "decode":
+            output = self._sample_decode_outputs(output, batch.per_request_metadata)
+        return output
 
     def _can_use_cuda_graph(self, batch: NodeBatch) -> bool:
         """Check if CUDA graph replay is available for this batch."""
