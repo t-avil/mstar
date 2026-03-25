@@ -76,8 +76,9 @@ class FlowEngine(BaseEngine):
             return output
 
         try:
-            with torch.no_grad():
-                return self._execute_sequential(batch, submodule)
+            with torch.amp.autocast("cuda", enabled=True, dtype=self.autocast_dtype):
+                with torch.no_grad():
+                    return self._execute_sequential(batch, submodule)
         finally:
             if self.enable_nvtx:
                 range_pop()

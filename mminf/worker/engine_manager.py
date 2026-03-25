@@ -73,7 +73,10 @@ class EngineManager:
                 for name in node_names:
                     submodule = model.get_submodule(name, device)
                     if submodule is not None:
-                        submodules[name] = submodule.to(device=device)
+                        submodules[name] = submodule.to(
+                            device=device,
+                            dtype=model.get_autocast_dtype()
+                        )
 
             engine.load_model(submodules, model_config, device)
             logger.info("Engine %s loaded in on device %s", cfg["engine_type"], str(device))

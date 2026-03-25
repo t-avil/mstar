@@ -304,14 +304,18 @@ class LLMSubmodule(NodeSubmodule):
         H: int=1024,
         W: int=1024,
     ):
+        
         h, w = (H // self.config.latent_downsample,
                 W // self.config.latent_downsample)
         num_image_tokens = h * w
         # torch.random.manual_seed(42)
-        return torch.randn(
+        latents = torch.randn(
             num_image_tokens,
             self.config.vae_config.z_channels * self.config.latent_patch_size ** 2,
         ).to(device=device)
+        if torch.is_autocast_enabled():
+            latents = latents.to(torch.get_autocast_gpu_dtype())
+        return latents
     
     def _preprocess_prefill_text(
         self, text_inputs: torch.Tensor

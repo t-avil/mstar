@@ -10,10 +10,15 @@ class AudioCodecEngine(BaseEngine):
     Stateless — identical lifecycle to EncoderDecoderEngine.
     """
 
-    def __init__(self, enable_nvtx: bool = False, **kwargs):
+    def __init__(
+        self, enable_nvtx: bool = False,
+        autocast_dtype=torch.bfloat16,
+        **kwargs
+    ):
         super().__init__(enable_nvtx=enable_nvtx)
         self.submodules: dict[str, torch.nn.Module] = {}
         self.device = None
+        self.autocast_dtype = autocast_dtype
 
     def engine_type(self) -> EngineType:
         return EngineType.AUDIO_CODEC
@@ -41,29 +46,30 @@ class AudioCodecEngine(BaseEngine):
             return output
 
         try:
-            with torch.no_grad():
-                outputs = {}
-                for rid in batch.request_ids:
-                    inputs = batch.per_request_input_tensors.get(rid, {})
-                    if hasattr(submodule, 'preprocess'):
-                        preprocessed = submodule.preprocess(
-                            batch.graph_walk,
-                            per_request_inputs=[inputs],
-                            request_ids=[rid],
-                            per_request_metadata={
-                                rid: batch.per_request_metadata.get(rid, {})
-                            },
-                        )
-                        outputs[rid] = submodule(**preprocessed)
-                    else:
-                        result = submodule(**{k: v[0] for k, v in inputs.items()})
-                        if isinstance(result, dict):
-                            outputs[rid] = result
-                        elif isinstance(result, torch.Tensor):
-                            outputs[rid] = {"output": [result]}
+            with torch.amp.autocast("cuda", enabled=True, dtype=self.autocast_dtype):
+                with torch.no_grad():
+                    outputs = {}
+                    for rid in batch.request_ids:
+                        inputs = batch.per_request_input_tensors.get(rid, {})
+                        if hasattr(submodule, 'preprocess'):
+                            preprocessed = submodule.preprocess(
+                                batch.graph_walk,
+                                per_request_inputs=[inputs],
+                                request_ids=[rid],
+                                per_request_metadata={
+                                    rid: batch.per_request_metadata.get(rid, {})
+                                },
+                            )
+                            outputs[rid] = submodule(**preprocessed)
                         else:
-                            outputs[rid] = {}
-                return NodeOutput(per_request_output_tensors=outputs)
+                            result = submodule(**{k: v[0] for k, v in inputs.items()})
+                            if isinstance(result, dict):
+                                outputs[rid] = result
+                            elif isinstance(result, torch.Tensor):
+                                outputs[rid] = {"output": [result]}
+                            else:
+                                outputs[rid] = {}
+                    return NodeOutput(per_request_output_tensors=outputs)
         finally:
             if self.enable_nvtx:
                 range_pop()

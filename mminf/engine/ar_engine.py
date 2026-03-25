@@ -404,6 +404,7 @@ class BatchedCacheManager:
         interleave: bool = False,
         rope_scale: float = 1,
         rope_theta: float = 10000.0,
+        rope_dtype=None
     ):
         """Apply RoPE using the active label's pre-computed position IDs."""
         # Assert all active labels are the same
@@ -415,9 +416,12 @@ class BatchedCacheManager:
         assert ps.pos_ids is not None
 
         orig_dtype = q.dtype
-        if q.dtype == torch.float32:
-            q = q.to(torch.bfloat16)
-            k = k.to(torch.bfloat16)
+
+        if rope_dtype is not None:
+            q, k = q.to(rope_dtype), k.to(rope_dtype)
+        elif torch.is_autocast_enabled():
+            dtype = torch.get_autocast_gpu_dtype()
+            q, k = q.to(dtype), k.to(dtype)
 
         import flashinfer
         flashinfer.rope.apply_rope_pos_ids_inplace(
@@ -438,6 +442,7 @@ class BatchedCacheManager:
         interleave: bool = False,
         rope_scale: float = 1,
         rope_theta: float = 10000.0,
+        rope_dtype=None
     ):
         """Apply RoPE using the active label's pre-computed position IDs."""
         labels = list(self.active_labels.values())
@@ -448,9 +453,11 @@ class BatchedCacheManager:
         assert ps.pos_ids is not None
 
         orig_dtype = q.dtype
-        if q.dtype == torch.float32:
-            q = q.to(torch.bfloat16)
-            k = k.to(torch.bfloat16)
+        if rope_dtype is not None:
+            q, k = q.to(rope_dtype), k.to(rope_dtype)
+        elif torch.is_autocast_enabled():
+            dtype = torch.get_autocast_gpu_dtype()
+            q, k = q.to(dtype), k.to(dtype)
 
         import flashinfer
         flashinfer.rope.apply_llama31_rope_pos_ids_inplace(

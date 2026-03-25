@@ -267,7 +267,8 @@ class CudaGraphRunner:
             # Warmup: 2 forward passes
             torch.cuda.synchronize()
             for _ in range(2):
-                output = run_forward()
+                with torch.amp.autocast("cuda", enabled=True, dtype=self.ar_engine.autocast_dtype):
+                    output = run_forward()
                 # Reset seq_lens after warmup passes so capture starts clean
                 for rid in dummy_rids:
                     for label in config.labels:
@@ -287,8 +288,9 @@ class CudaGraphRunner:
 
             # Capture
             graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph, pool=self.memory_pool):
-                output = run_forward()
+            with torch.amp.autocast("cuda", enabled=True, dtype=self.ar_engine.autocast_dtype):
+                with torch.cuda.graph(graph, pool=self.memory_pool):
+                    output = run_forward()
             torch.cuda.synchronize()
             
             self.graphs[key] = CudaGraphData(

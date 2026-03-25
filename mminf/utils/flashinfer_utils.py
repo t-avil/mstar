@@ -24,13 +24,17 @@ logger = logging.getLogger(__name__)
 
 @torch.compiler.disable
 def run_rms_norm(
-        input: torch.Tensor,
-        weight: torch.Tensor,
-        eps: float = 1e-06
-    ):
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float = 1e-06,
+    rms_norm_dtype=None
+):
     orig_dtype = input.dtype
-    if input.dtype == torch.float32:
-        input = input.to(torch.bfloat16)
+    if rms_norm_dtype is not None:
+        input = input.to(rms_norm_dtype)
+    elif torch.is_autocast_enabled():
+        dtype = torch.get_autocast_gpu_dtype()
+        input = input.to(dtype)
     import flashinfer
     return flashinfer.norm.rmsnorm(
         input, weight, eps=eps
