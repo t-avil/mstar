@@ -100,7 +100,7 @@ class PagedAllocationManager:
             mooncake_cfg.metadata_server,
             mooncake_cfg.segment_size,
             mooncake_cfg.local_buff_size,
-            "tcp", # this isn't working for RDMA??
+            mooncake_cfg.protocol.value.lower(),
             "",
             mooncake_cfg.master_service
         )
@@ -130,6 +130,8 @@ class PagedAllocationManager:
             state.store_seq_len_per_layer[layer] = state.local_cache_seq_len
 
             for pos in range(first_pos, last_pos+1):
+                # TODO inefficient
+                self.mooncake_store.remove_by_regex(self._key(request_id, label, pos, layer))
                 page_idx = state.page_indices[pos]
 
                 # TODO: the fact that we're moving full pages to and from the cache
@@ -142,7 +144,8 @@ class PagedAllocationManager:
                     nbytes=self.kv_cache[layer, page_idx].nbytes
                 ))
         
-        status = self.mooncake_store.batch_put_tensor_from(
+        torch.cuda.default_stream().synchronize()
+        status = self.mooncake_store.batch_put_from(
             keys=[x.key for x in alloc_info],
             buffer_ptrs=[x.ptr for x in alloc_info],
             sizes=[x.nbytes for x in alloc_info]
@@ -176,11 +179,9 @@ class PagedAllocationManager:
     def retrieve_from_store(
         self, request_id: str, label: str, seq_len: int
     ):
-        state = self.request_states[request_id][label]
+        state = self.get_state(request_id, label)
         if state.seq_len >= seq_len:
             return # nothing to do
-        state.seq_len =seq_len
-        state.local_cache_seq_len = seq_len
         
         first_pos = state.seq_len // self.config.page_size
         last_pos = (seq_len - 1) // self.config.page_size
@@ -196,14 +197,19 @@ class PagedAllocationManager:
                     ptr=self.kv_cache[layer, page_idx].data_ptr(),
                     nbytes=self.kv_cache[layer, page_idx].nbytes
                 ))
+                assert self.kv_cache[layer, page_idx].is_contiguous()
         
-        tensors = self.mooncake_store.batch_get_tensor_into(
+        torch.cuda.default_stream().synchronize()
+        tensors = self.mooncake_store.batch_get_into(
             keys=[x.key for x in alloc_info],
             buffer_ptrs=[x.ptr for x in alloc_info],
             sizes=[x.nbytes for x in alloc_info]
         )
         # TODO error handling
         assert all([t is not None for t in tensors])
+
+        state.seq_len =seq_len
+        state.local_cache_seq_len = seq_len
     
     def reset_label(self, request_id: str, label: str, free: bool=True):
         if label not in self.request_states[request_id]:

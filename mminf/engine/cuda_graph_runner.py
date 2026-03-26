@@ -474,8 +474,9 @@ class CudaGraphRunner:
                 self.alloc_manager.reset_label(
                     dummy_rid, label, free=i>=batch_size
                 )
-                if i < batch_size and static_cm.write_store:
-                    self.alloc_manager.flush_to_store(rid, label)
+        for rid in request_ids:
+            if static_cm.write_store:
+                self.alloc_manager.flush_to_store(rid, label)
 
         return outputs
 

@@ -73,7 +73,7 @@ class AREngine(BaseEngine):
             num_layers, max_num_pages, 2,
             page_size, num_kv_heads, head_dim,
             dtype=kv_cache_type, device=device,
-        )
+        ).contiguous()
         self.alloc_manager = PagedAllocationManager(
             config=cfg,
             kv_cache=self.kv_cache,
