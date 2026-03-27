@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from enum import Enum
 import queue
 from mooncake.store import MooncakeDistributedStore
 from mooncake.engine import TransferEngine
@@ -12,6 +13,8 @@ from mminf.communication.communicator import CommProtocol
 # it is made too small), writing large amounts of data to the mooncake store is 
 # sometimes very slow.
 KV_STORE_CHUNK_SIZE = 128
+
+MAX_TRANSFERS = 1000
 
 
 @dataclass
@@ -86,8 +89,8 @@ LabelToState = dict[str, KVRequestState]
 @dataclass
 class StoreAllocInfo:
     key: str
-    ptr: int
-    nbytes: int
+    ptr: list[int]
+    nbytes: list[int]
 
 
 @dataclass
@@ -105,6 +108,11 @@ class TransferEngineInfo:
     my_entity_id: str
     my_session_id: str
     transfer_engine: TransferEngine 
+
+
+class TransferType(Enum):
+    GET = "get"
+    PUT = "put"
 
 
 class PagedAllocationManager:
@@ -142,7 +150,7 @@ class PagedAllocationManager:
         return f"{request_id}_{label}_{pos}_{layer}_{kv}"
 
     def _get_ptr_nbytes(
-        self, layer, page_idx,  kv_idx, token_start, token_end,
+        self, layer, page_idx, token_start, token_end,
         base_ptr=None
     ):
         token_stride = self.kv_cache.stride(3)
@@ -157,15 +165,40 @@ class PagedAllocationManager:
         if base_ptr is None:
             base_ptr = self.kv_cache.data_ptr()
 
-        ptr = base_ptr + (
-            layer * layer_stride +
-            page_idx * page_stride +
-            kv_idx * kv_stride +
-            token_start * token_stride
-        ) * element_size
+        ptrs = [
+            base_ptr + (
+                    layer * layer_stride +
+                    page_idx * page_stride +
+                    kv_idx * kv_stride +
+                    token_start * token_stride
+                ) * element_size for kv_idx in [0, 1]
+        ]
 
-        return ptr, nbytes
+        return ptrs, [nbytes, nbytes]
+    
+    def _transfer_all(
+        self, alloc_info: list[StoreAllocInfo],
+        direction: TransferType
+    ):
+        if not alloc_info:
+            return
         
+        if direction == TransferType.GET:
+            transfer_fn = self.mooncake_store.batch_get_into_multi_buffers
+        else:
+            transfer_fn = self.mooncake_store.batch_put_from_multi_buffers
+
+        torch.cuda.default_stream().synchronize()
+        for i in range(0, len(alloc_info), MAX_TRANSFERS):
+            start = i * MAX_TRANSFERS
+            end = max((i+1) * MAX_TRANSFERS, len(alloc_info))
+            status = transfer_fn(
+                keys=[alloc_info[i].key for i in range(start, end)],
+                buffer_ptrs=[alloc_info[i].ptr for i in range(start, end)],
+                sizes=[alloc_info[i].nbytes for i in range(start, end)]
+            )
+            assert all(s >= 0 for s in status)
+        torch.cuda.default_stream().synchronize()
 
     def flush_to_store(
         self, request_id: str, label: str, layers: int | list[int] | None = None
@@ -219,16 +252,8 @@ class PagedAllocationManager:
                         ptr=ptr,
                         nbytes=nbytes
                     ))
-
         
-        if len(alloc_info) > 0:
-            torch.cuda.synchronize()
-            status = self.mooncake_store.batch_put_from(
-                keys=[x.key for x in alloc_info],
-                buffer_ptrs=[x.ptr for x in alloc_info],
-                sizes=[x.nbytes for x in alloc_info]
-            )
-            assert all(s == 0 for s in status)
+        self._transfer_all(alloc_info, TransferType.PUT)
     
     def _new_state(self):
         state = KVRequestState()
@@ -285,25 +310,18 @@ class PagedAllocationManager:
 
             page_idx = state.page_indices[page_pos]
             for layer in range(self.config.num_layers):
-                for kv_idx, kv_label in enumerate(['k', 'v']):
-                    ptr, nbytes = self._get_ptr_nbytes(
-                        layer, page_idx, kv_idx, token_start, token_end
-                    )
+                ptr, nbytes = self._get_ptr_nbytes(
+                    layer, page_idx, token_start, token_end
+                )
 
-                    alloc_info.append(StoreAllocInfo(
-                        key=self._key(request_id, label, chunk_idx, layer, kv_label),
-                        ptr=ptr,
-                        nbytes=nbytes
-                    ))
-        torch.cuda.default_stream().synchronize()
-        if alloc_info:
-            tensors = self.mooncake_store.batch_get_into(
-                keys=[x.key for x in alloc_info],
-                buffer_ptrs=[x.ptr for x in alloc_info],
-                sizes=[x.nbytes for x in alloc_info]
-            )
-            assert all(t is not None for t in tensors)
-            torch.cuda.default_stream().synchronize()
+                alloc_info.append(StoreAllocInfo(
+                    key=self._key(request_id, label, chunk_idx, layer),
+                    ptr=ptr,
+                    nbytes=nbytes
+                ))
+        self._transfer_all(
+            alloc_info, TransferType.GET
+        )
         
         # --- Path 2: transfer_sync_read for trailing partial chunk ---
         if trailing_tokens > 0:
@@ -317,18 +335,17 @@ class PagedAllocationManager:
 
             local_addrs, remote_addrs, nbytes_list = [], [], []
             for layer in range(self.config.num_layers):
-                for kv_idx in range(2):
-                    ptr, nbytes = self._get_ptr_nbytes(
-                        layer, page_idx, kv_idx, token_start, token_end
-                    )
-                    remote_addr, _ = self._get_ptr_nbytes(
-                        layer, seq_info.last_page_idx, kv_idx, token_start, token_end,
-                        base_ptr=seq_info.kv_cache_addr
-                    )
+                ptrs, nbytes = self._get_ptr_nbytes(
+                    layer, page_idx, token_start, token_end
+                )
+                rem_ptrs, _ = self._get_ptr_nbytes(
+                    layer, seq_info.last_page_idx, token_start, token_end,
+                    base_ptr=seq_info.kv_cache_addr
+                )
 
-                    local_addrs.append(ptr)
-                    remote_addrs.append(remote_addr)
-                    nbytes_list.append(nbytes)
+                local_addrs.extend(ptrs)
+                remote_addrs.extend(rem_ptrs)
+                nbytes_list.extend(nbytes)
 
             # TODO: we might want to make this asynchronous to overlap
             # communication with computation, like in the main tensor mgr
