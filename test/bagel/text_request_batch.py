@@ -6,7 +6,7 @@ import requests
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-URL = "http://0.0.0.0:8001/generate"
+URL = "http://0.0.0.0:8000/generate"
 
 prompts = [
     "What is the 7th value after the decimal point in pi?",

@@ -8,7 +8,9 @@ import torch
 from mminf.communication.communicator import CommProtocol
 
 
-# NOTE: when this is changed to be different from the page size, 
+# NOTE: when this is changed to be different from the page size (or perhaps when
+# it is made too small), writing large amounts of data to the mooncake store is 
+# sometimes very slow.
 KV_STORE_CHUNK_SIZE = 128
 
 

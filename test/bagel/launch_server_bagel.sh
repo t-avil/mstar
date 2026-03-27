@@ -10,5 +10,5 @@ CUDA_VISIBLE_DEVICES=$DEVICES python mminf/api_server/entrypoint.py \
     --cache-dir $CACHE_DIR \
     --socket-path-prefix /tmp/mminf_$WHO/ \
     --upload-dir /tmp/mminf_uploads_$WHO/ \
-    --port 8001
+    --port 8000
     # --log-level DEBUG
