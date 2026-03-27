@@ -8,6 +8,7 @@ import logging
 import multiprocessing as mp
 import os
 import signal
+import socket
 import subprocess
 import threading
 import time
@@ -127,7 +128,21 @@ def start_mooncake_master(log_file: str | None = None):
         preexec_fn=os.setsid,  # start new process group
     )
 
+    wait_for_port("localhost", 50051)
+    logger.info("Successfully started Mooncake metadata server")
+
     return process
+
+
+def wait_for_port(host, port, timeout=10):
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            with socket.create_connection((host, port), timeout=1):
+                return True
+        except OSError:
+            time.sleep(0.1)
+    raise RuntimeError(f"Timeout waiting for {host}:{port}")
 
 
 def stop_mooncake_master(process: subprocess.Popen):
