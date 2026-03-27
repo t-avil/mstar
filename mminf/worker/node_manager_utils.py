@@ -10,7 +10,7 @@ from mminf.graph.request_queues import (
 )
 from mminf.graph.special_destinations import EMIT_TO_CLIENT, SPECIAL_DESTINATIONS
 from mminf.model.base import WorkerGraph
-from mminf.utils.ipc_format import SequenceInfo
+from mminf.engine.kv_store import SequenceInfo
 
 logger = logging.getLogger(__name__)
 

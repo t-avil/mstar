@@ -6,10 +6,22 @@ import requests
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-URL = "http://0.0.0.0:8000/generate"
+URL = "http://0.0.0.0:8001/generate"
+
+prompts = [
+    "What is the 7th value after the decimal point in pi?",
+    "Explain what a black hole is in one paragraph.",
+    "Write a haiku about recursion.",
+    "What is 3 * 4?",
+    "Summarize the theory of relativity briefly.",
+    "What is the capital of France?",
+    "Explain gradient descent in simple terms. Please respond in English.",
+    "What is the Fibonacci sequence?",
+    "Give a fun fact about octopuses.",
+]
 
 print_lock = threading.Lock()
-start_barrier = threading.Barrier(9)  # ensure simultaneous start
+start_barrier = threading.Barrier(len(prompts))  # ensure simultaneous start
 
 
 def make_request(prompt: str, idx: int) -> str:
@@ -17,6 +29,7 @@ def make_request(prompt: str, idx: int) -> str:
         "text": prompt,
         "model_kwargs": json.dumps({
             "think_mode": True,
+            # "max_output_tokens": 400,
         }),
     }
 
@@ -56,21 +69,9 @@ def make_request(prompt: str, idx: int) -> str:
 
 
 def main():
-    prompts = [
-        "What is the 7th value after the decimal point in pi?",
-        "Explain what a black hole is in one paragraph.",
-        "Write a haiku about recursion.",
-        "What is 3 * 4?",
-        "Summarize the theory of relativity briefly.",
-        "What is the capital of France?",
-        "Explain gradient descent in simple terms. Please respond in English.",
-        "What is the Fibonacci sequence?",
-        "Give a fun fact about octopuses.",
-    ]
-
     results = []
 
-    with ThreadPoolExecutor(max_workers=10) as executor:
+    with ThreadPoolExecutor(max_workers=len(prompts)) as executor:
         futures = [
             executor.submit(make_request, prompt, i)
             for i, prompt in enumerate(prompts)

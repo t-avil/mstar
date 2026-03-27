@@ -5,7 +5,7 @@ from enum import Enum
 import torch
 
 from mminf.communication.tensors import NameToTensorList
-from mminf.utils.ipc_format import SequenceInfo
+from mminf.engine.kv_store import SequenceInfo
 
 
 class EngineType(Enum):

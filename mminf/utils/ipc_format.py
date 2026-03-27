@@ -1,6 +1,7 @@
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 
+from mminf.engine.kv_store import SequenceInfo
 from mminf.graph.base import GraphEdge, TensorPointerInfo
 
 
@@ -48,17 +49,6 @@ class NewRequest(MessageBody):
 @dataclass
 class RemoveRequest(MessageBody):
     request_id: str
-
-
-@dataclass
-class SequenceInfo:
-    seq_len: int
-    pos_id: int
-
-    def update(self, other: "SequenceInfo"):
-        self.seq_len = max(self.seq_len, other.seq_len)
-        self.pos_id = max(self.pos_id, other.pos_id)
-        return self
 
 
 @dataclass

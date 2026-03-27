@@ -472,11 +472,12 @@ class CudaGraphRunner:
         for i, rid in enumerate(dummy_rids):
             for label in config_labels:
                 self.alloc_manager.reset_label(
-                    dummy_rid, label, free=i>=batch_size
+                    rid, label, free=i>=batch_size
                 )
         for rid in request_ids:
             if static_cm.write_store:
-                self.alloc_manager.flush_to_store(rid, label)
+                for label in config_labels:
+                    self.alloc_manager.flush_to_store(rid, label)
 
         return outputs
 

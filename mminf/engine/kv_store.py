@@ -1,10 +1,27 @@
 from dataclasses import dataclass, field
 import queue
 from mooncake.store import MooncakeDistributedStore
+from mooncake.engine import TransferEngine
 
 import torch
 
 from mminf.communication.communicator import CommProtocol
+
+
+# NOTE: when this is changed to be different from the page size, 
+KV_STORE_CHUNK_SIZE = 128
+
+
+@dataclass
+class SequenceInfo:
+    seq_len: int
+    pos_id: int
+
+    # for tracking KV cache
+    latest_entity_id: str = ""
+    latest_session_id: str = ""
+    kv_cache_addr: int = -1
+    last_page_idx: int = -1
 
 
 class PageAllocator:
@@ -76,17 +93,25 @@ class MooncakeStoreConfig:
     hostname: str
     metadata_server: str="http://localhost:8080/metadata"
     segment_size=512*1024*1024
-    local_buff_size= 28*1024*1024
+    local_buff_size= 256*1024*1024
     protocol: CommProtocol=CommProtocol.RDMA
     master_service: str="localhost:50051"
-    
+
+
+@dataclass
+class TransferEngineInfo:
+    my_entity_id: str
+    my_session_id: str
+    transfer_engine: TransferEngine 
+
 
 class PagedAllocationManager:
     def __init__(
         self,
         config: KVCacheConfig,
         kv_cache: torch.Tensor,
-        mooncake_cfg: MooncakeStoreConfig
+        mooncake_cfg: MooncakeStoreConfig,
+        transfer_engine_info: TransferEngineInfo
     ):
         self.config = config
         self.page_allocator = PageAllocator(config.max_num_pages)
@@ -94,6 +119,7 @@ class PagedAllocationManager:
         self.kv_cache = kv_cache
     
         self.mooncake_store = MooncakeDistributedStore()
+        self.engine = transfer_engine_info.transfer_engine
 
         self.mooncake_store.setup(
             mooncake_cfg.hostname,
@@ -107,51 +133,100 @@ class PagedAllocationManager:
         self.mooncake_store.register_buffer(
             self.kv_cache.data_ptr(), self.kv_cache.nbytes
         )
-    
-    def _key(self, request_id: str, label: str, pos: int, layer: int):
-        return f"{request_id}_{label}_{pos}_{layer}"
+        self.my_entity_id = transfer_engine_info.my_entity_id
+        self.my_session_id = transfer_engine_info.my_session_id
+
+    def _key(self, request_id: str, label: str, pos: int, layer: int, kv: str):
+        return f"{request_id}_{label}_{pos}_{layer}_{kv}"
+
+    def _get_ptr_nbytes(
+        self, layer, page_idx,  kv_idx, token_start, token_end,
+        base_ptr=None
+    ):
+        token_stride = self.kv_cache.stride(3)
+        kv_stride = self.kv_cache.stride(2)
+        page_stride = self.kv_cache.stride(1)
+        layer_stride = self.kv_cache.stride(0)
+        element_size = self.kv_cache.element_size()
+        tokens_per_chunk = token_end - token_start
+
+        nbytes = tokens_per_chunk * token_stride * element_size  # token_stride = num_kv_heads * head_dim
+
+        if base_ptr is None:
+            base_ptr = self.kv_cache.data_ptr()
+
+        ptr = base_ptr + (
+            layer * layer_stride +
+            page_idx * page_stride +
+            kv_idx * kv_stride +
+            token_start * token_stride
+        ) * element_size
+
+        return ptr, nbytes
+        
 
     def flush_to_store(
-        self, request_id: str, label: str, layers: int | list[int] | None=None
+        self, request_id: str, label: str, layers: int | list[int] | None = None
     ):
+        assert self.config.page_size % KV_STORE_CHUNK_SIZE == 0, (
+            f"page_size ({self.config.page_size}) must be a multiple of "
+            f"KV_STORE_CHUNK_SIZE ({KV_STORE_CHUNK_SIZE})"
+        )
+        tokens_per_chunk = KV_STORE_CHUNK_SIZE
+        chunks_per_page = self.config.page_size // tokens_per_chunk
+
         if isinstance(layers, int):
             layers = [layers]
         if layers is None:
-            layers = torch.arange(self.config.num_layers, dtype=torch.int32)
-        state = self.request_states[request_id][label]            
-        
+            layers = list(range(self.config.num_layers))
+
+        state = self.request_states[request_id][label]
+
+        # Only flush complete chunks — drop any trailing partial chunk
+        num_complete_chunks = state.local_cache_seq_len // tokens_per_chunk
+        flush_up_to = num_complete_chunks * tokens_per_chunk  # token boundary
+
         alloc_info: list[StoreAllocInfo] = []
 
-        last_pos = (state.local_cache_seq_len - 1) // self.config.page_size
         for layer in layers:
-            if state.store_seq_len_per_layer[layer] >= state.local_cache_seq_len:
+            if state.store_seq_len_per_layer[layer] >= flush_up_to:
                 continue
-            first_pos = state.store_seq_len_per_layer[layer] // self.config.page_size
-            state.store_seq_len_per_layer[layer] = state.local_cache_seq_len
 
-            for pos in range(first_pos, last_pos+1):
-                # TODO inefficient
-                self.mooncake_store.remove_by_regex(self._key(request_id, label, pos, layer))
-                page_idx = state.page_indices[pos]
+            first_chunk = state.store_seq_len_per_layer[layer] // tokens_per_chunk
+            last_chunk = num_complete_chunks  # exclusive
 
-                # TODO: the fact that we're moving full pages to and from the cache
-                # is inefficient. We can instead move dynamic amounts of memory that
-                # are <= a page at once, and also store metadata specifying how many
-                # sequence indices are being stored at once
-                alloc_info.append(StoreAllocInfo(
-                    key=self._key(request_id, label, pos, layer),
-                    ptr=self.kv_cache[layer, page_idx].data_ptr(),
-                    nbytes=self.kv_cache[layer, page_idx].nbytes
-                ))
+            state.store_seq_len_per_layer[layer] = flush_up_to
+
+            for chunk_idx in range(first_chunk, last_chunk):
+                page_pos = chunk_idx // chunks_per_page
+                chunk_within_page = chunk_idx % chunks_per_page
+
+                page_idx = state.page_indices[page_pos]
+
+                # Slice the chunk out of the page tensor
+                token_start = chunk_within_page * tokens_per_chunk
+                token_end = token_start + tokens_per_chunk
+
+                for kv_idx, kv_label in enumerate(['k', 'v']):
+                    ptr, nbytes = self._get_ptr_nbytes(
+                        layer, page_idx, kv_idx, token_start, token_end
+                    )
+
+                    alloc_info.append(StoreAllocInfo(
+                        key=self._key(request_id, label, chunk_idx, layer, kv_label),
+                        ptr=ptr,
+                        nbytes=nbytes
+                    ))
+
         
-        torch.cuda.default_stream().synchronize()
-        status = self.mooncake_store.batch_put_from(
-            keys=[x.key for x in alloc_info],
-            buffer_ptrs=[x.ptr for x in alloc_info],
-            sizes=[x.nbytes for x in alloc_info]
-        )
-        # TODO error handling
-        assert all([s == 0 for s in status])
+        if len(alloc_info) > 0:
+            torch.cuda.synchronize()
+            status = self.mooncake_store.batch_put_from(
+                keys=[x.key for x in alloc_info],
+                buffer_ptrs=[x.ptr for x in alloc_info],
+                sizes=[x.nbytes for x in alloc_info]
+            )
+            assert all(s == 0 for s in status)
     
     def _new_state(self):
         state = KVRequestState()
@@ -177,45 +252,121 @@ class PagedAllocationManager:
             state.page_indices.extend(new_pages)
 
     def retrieve_from_store(
-        self, request_id: str, label: str, seq_len: int
+        self, request_id: str, label: str, seq_info: SequenceInfo
     ):
+        assert self.config.page_size % KV_STORE_CHUNK_SIZE == 0, (
+            f"page_size ({self.config.page_size}) must be a multiple of "
+            f"KV_STORE_CHUNK_SIZE ({KV_STORE_CHUNK_SIZE})"
+        )
+        tokens_per_chunk = KV_STORE_CHUNK_SIZE
+        chunks_per_page = self.config.page_size // tokens_per_chunk
+
+        seq_len = seq_info.seq_len
         state = self.get_state(request_id, label)
         if state.seq_len >= seq_len:
-            return # nothing to do
-        
-        first_pos = state.seq_len // self.config.page_size
-        last_pos = (seq_len - 1) // self.config.page_size
+            return  # nothing to do
+
+        num_complete_chunks = seq_len // tokens_per_chunk
+        trailing_tokens = seq_len % tokens_per_chunk
+
+        first_chunk = (state.seq_len + 1) // tokens_per_chunk
 
         self.alloc(request_id, label, seq_len)
 
+        # --- Path 1: mooncake store for complete chunks ---
         alloc_info: list[StoreAllocInfo] = []
-        for pos in range(first_pos, last_pos+1):
-            page_idx = state.page_indices[pos]
-            for layer in range(self.config.num_layers):
-                alloc_info.append(StoreAllocInfo(
-                    key=self._key(request_id, label, pos, layer),
-                    ptr=self.kv_cache[layer, page_idx].data_ptr(),
-                    nbytes=self.kv_cache[layer, page_idx].nbytes
-                ))
-                assert self.kv_cache[layer, page_idx].is_contiguous()
-        
-        torch.cuda.default_stream().synchronize()
-        tensors = self.mooncake_store.batch_get_into(
-            keys=[x.key for x in alloc_info],
-            buffer_ptrs=[x.ptr for x in alloc_info],
-            sizes=[x.nbytes for x in alloc_info]
-        )
-        # TODO error handling
-        assert all([t is not None for t in tensors])
+        for chunk_idx in range(first_chunk, num_complete_chunks):
+            page_pos = chunk_idx // chunks_per_page
+            chunk_within_page = chunk_idx % chunks_per_page
+            token_start = chunk_within_page * tokens_per_chunk
+            token_end = token_start + tokens_per_chunk
 
-        state.seq_len =seq_len
+            page_idx = state.page_indices[page_pos]
+            for layer in range(self.config.num_layers):
+                for kv_idx, kv_label in enumerate(['k', 'v']):
+                    ptr, nbytes = self._get_ptr_nbytes(
+                        layer, page_idx, kv_idx, token_start, token_end
+                    )
+
+                    alloc_info.append(StoreAllocInfo(
+                        key=self._key(request_id, label, chunk_idx, layer, kv_label),
+                        ptr=ptr,
+                        nbytes=nbytes
+                    ))
+        torch.cuda.default_stream().synchronize()
+        if alloc_info:
+            tensors = self.mooncake_store.batch_get_into(
+                keys=[x.key for x in alloc_info],
+                buffer_ptrs=[x.ptr for x in alloc_info],
+                sizes=[x.nbytes for x in alloc_info]
+            )
+            assert all(t is not None for t in tensors)
+            torch.cuda.default_stream().synchronize()
+        
+        # --- Path 2: transfer_sync_read for trailing partial chunk ---
+        if trailing_tokens > 0:
+            chunk_idx = num_complete_chunks  # index of the trailing chunk
+            page_pos = chunk_idx // chunks_per_page
+            chunk_within_page = chunk_idx % chunks_per_page
+            token_start = chunk_within_page * tokens_per_chunk
+            token_end = token_start + trailing_tokens
+            
+            page_idx = state.page_indices[page_pos]
+
+            local_addrs, remote_addrs, nbytes_list = [], [], []
+            for layer in range(self.config.num_layers):
+                for kv_idx in range(2):
+                    ptr, nbytes = self._get_ptr_nbytes(
+                        layer, page_idx, kv_idx, token_start, token_end
+                    )
+                    remote_addr, _ = self._get_ptr_nbytes(
+                        layer, seq_info.last_page_idx, kv_idx, token_start, token_end,
+                        base_ptr=seq_info.kv_cache_addr
+                    )
+
+                    local_addrs.append(ptr)
+                    remote_addrs.append(remote_addr)
+                    nbytes_list.append(nbytes)
+
+            # TODO: we might want to make this asynchronous to overlap
+            # communication with computation, like in the main tensor mgr
+            status = self.engine.batch_transfer_sync_read(
+                seq_info.latest_session_id,
+                local_addrs,
+                remote_addrs,
+                nbytes_list,
+            )
+            assert status == 0
+            torch.cuda.default_stream().synchronize()
+
+        state.seq_len = seq_len
+        state.store_seq_len_per_layer = [
+            num_complete_chunks * tokens_per_chunk for _ in range(self.config.num_layers)
+        ]
         state.local_cache_seq_len = seq_len
+        state.position_id_start = seq_info.pos_id
+
+    def get_per_label_seq_info(
+        self, request_id: str,
+    ):
+        torch.cuda.default_stream().synchronize()
+        per_label_seq_info: dict[str, SequenceInfo] = {}
+        for label, state in self.request_states.get(request_id, {}).items():
+            state = self.get_state(request_id, label)
+            per_label_seq_info[label] = SequenceInfo(
+                seq_len = state.seq_len,
+                pos_id = state.position_id_start,
+                latest_entity_id = self.my_entity_id,
+                latest_session_id = self.my_session_id,
+                kv_cache_addr = self.kv_cache.data_ptr(),
+            )
+            if state.seq_len > 0:
+                per_label_seq_info[label].last_page_idx = state.page_indices[
+                    (state.seq_len - 1) // self.config.page_size]
+        return per_label_seq_info
     
     def reset_label(self, request_id: str, label: str, free: bool=True):
-        if label not in self.request_states[request_id]:
-            self.request_states[request_id][label] = self._new_state()
-            return
-        if free:
+        if label in self.request_states[request_id] and free:
             state = self.request_states[request_id][label]
             self.page_allocator.free(state.page_indices)
         self.request_states[request_id][label] = self._new_state()

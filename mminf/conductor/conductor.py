@@ -12,6 +12,7 @@ import yaml
 from mminf.api_server.request_types import APIServerMessage, RequestComplete
 from mminf.communication.communicator import ZMQCommunicator
 from mminf.engine.base import EngineType
+from mminf.engine.kv_store import SequenceInfo
 from mminf.graph.base import GraphEdge, TensorPointerInfo
 from mminf.model.base import DECODE, CurrentForwardMetadata, ForwardPassArgs, Model, WorkerGraph
 from mminf.utils.ipc_format import (
@@ -20,7 +21,6 @@ from mminf.utils.ipc_format import (
     NewRequest,
     NewRequestConductor,
     RemoveRequest,
-    SequenceInfo,
     UnpersistTensors,
     WorkerGraphsDone,
     WorkerMessage,
@@ -515,13 +515,10 @@ class Conductor:
         """
         request_data = self.requests[body.request_id]
 
-        for label, seq_info in body.per_label_seq_info.items():
-            if label not in request_data.per_label_seq_info:
-                request_data.per_label_seq_info[label] = seq_info
-                continue
-            request_data.per_label_seq_info[label] = seq_info.update(
-                request_data.per_label_seq_info[label]
-            )
+        request_data.per_label_seq_info = {
+            **request_data.per_label_seq_info,
+            **body.per_label_seq_info
+        }
 
         # Absorb persist signals and new tokens sent with this message
         if body.persist_signals:

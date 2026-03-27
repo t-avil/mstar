@@ -5,8 +5,8 @@ import torch
 from mminf.engine.base import BaseEngine, EngineType, NodeBatch, NodeOutput
 from mminf.engine.cache_manager import BatchedCacheManager, WorkspaceBufferManager
 from mminf.engine.cuda_graph_runner import CudaGraphRunner
-from mminf.engine.kv_store import KVCacheConfig, MooncakeStoreConfig, PagedAllocationManager
-from mminf.utils.ipc_format import SequenceInfo
+from mminf.engine.kv_store import KVCacheConfig, MooncakeStoreConfig, PagedAllocationManager, TransferEngineInfo
+from mminf.engine.kv_store import SequenceInfo
 from mminf.utils.profiler import range_pop, range_push
 
 logger = logging.getLogger(__name__)
@@ -51,6 +51,7 @@ class AREngine(BaseEngine):
         model_config: dict,
         device: torch.device,
         mooncake_cfg: MooncakeStoreConfig,
+        transfer_engine_info: TransferEngineInfo,
         kv_cache_type=torch.bfloat16,
     ) -> None:
         self.submodules = submodules
@@ -77,7 +78,8 @@ class AREngine(BaseEngine):
         self.alloc_manager = PagedAllocationManager(
             config=cfg,
             kv_cache=self.kv_cache,
-            mooncake_cfg=mooncake_cfg
+            mooncake_cfg=mooncake_cfg,
+            transfer_engine_info=transfer_engine_info
         )
 
         # 256MB workspace for FlashInfer
@@ -94,7 +96,7 @@ class AREngine(BaseEngine):
             alloc_manager=self.alloc_manager,
             buffer_manager=self.buffer_manager,
             kv_cache_config=self.kv_cache_config,
-            device=self.device
+            device=self.device,
         )
 
     def _compile_submodules(self) -> None:
@@ -342,10 +344,8 @@ class AREngine(BaseEngine):
             for req_id, per_label_seq_info in batch.per_request_seq_info.items():
                 for label, seq_info in per_label_seq_info.items():
                     self.alloc_manager.retrieve_from_store(
-                        req_id, label, seq_info.seq_len
+                        req_id, label, seq_info
                     )
-                    self.alloc_manager.get_state(
-                        req_id, label).position_id_start  = seq_info.pos_id
 
             with torch.no_grad():
                 with torch.amp.autocast("cuda", enabled=True, dtype=self.autocast_dtype):
@@ -358,11 +358,8 @@ class AREngine(BaseEngine):
                         return self._execute_sequential(batch, submodule)
         finally:
             for req_id in batch.request_ids:
-                for label, state in self.alloc_manager.request_states[req_id].items():
-                    batch.per_request_seq_info.setdefault(req_id, {})[label] = SequenceInfo(
-                        seq_len=state.seq_len,
-                        pos_id=state.position_id_start
-                    )
+                batch.per_request_seq_info[req_id] = \
+                    self.alloc_manager.get_per_label_seq_info(req_id)
             if self.enable_nvtx:
                 range_pop()
 

@@ -6,7 +6,7 @@ from mminf.api_server.request_types import APIServerMessage, ResultTensors
 from mminf.communication.communicator import CommProtocol, ZMQCommunicator
 from mminf.communication.tensors import MooncakeCommunicationManager, NameToTensorList
 from mminf.engine.base import NodeBatch, NodeOutput
-from mminf.engine.kv_store import MooncakeStoreConfig
+from mminf.engine.kv_store import MooncakeStoreConfig, TransferEngineInfo
 from mminf.graph.base import GraphEdge
 from mminf.graph.request_queues import format_graph_edge_list
 from mminf.model.base import Model, WorkerGraph
@@ -76,18 +76,6 @@ class Worker:
             all_worker_graph_ids_to_nodes=all_worker_graph_ids_to_nodes,
         )
 
-        self.engine_manager = EngineManager.from_config(
-            engine_configs=engine_configs, device=device,
-            mooncake_cfg=MooncakeStoreConfig(
-                hostname=hostname,
-                metadata_server=metadata_server,
-                protocol=tensor_comm_protocol,
-                master_service=master_service
-            ),
-            model=model,
-            enable_nvtx=self.enable_nvtx
-        )
-        self.scheduler = MicroScheduler(self.engine_manager)
 
         self.communicator = ZMQCommunicator(
             my_id=worker_id,
@@ -100,6 +88,24 @@ class Worker:
             communicator=self.communicator,
             protocol=tensor_comm_protocol,
         )
+
+        self.engine_manager = EngineManager.from_config(
+            engine_configs=engine_configs, device=device,
+            mooncake_cfg=MooncakeStoreConfig(
+                hostname=hostname,
+                metadata_server=metadata_server,
+                protocol=tensor_comm_protocol,
+                master_service=master_service
+            ),
+            transfer_engine_info=TransferEngineInfo(
+                my_entity_id=worker_id,
+                my_session_id=self.tensor_manager.my_session_id,
+                transfer_engine=self.tensor_manager.engine
+            ),
+            model=model,
+            enable_nvtx=self.enable_nvtx
+        )
+        self.scheduler = MicroScheduler(self.engine_manager)
 
         # Per-request metadata from conductor (e.g., cache_labels, snapshot_after)
         self._per_request_metadata: dict[str, dict] = {}

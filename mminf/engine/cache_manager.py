@@ -463,7 +463,11 @@ class BatchedCacheManager:
             self.alloc_manager.alloc(
                 rid, to_label, seq_len=from_state.seq_len
             )
-            to_state = self._get_state(rid, to_label)
+
+            to_state: KVRequestState = self._get_state(rid, to_label)
+            to_state.seq_len = from_state.seq_len
+            to_state.position_id_start = from_state.position_id_start
+            to_state.local_cache_seq_len = from_state.local_cache_seq_len
 
             for src_page, dst_page in zip(
                 from_state.page_indices,
