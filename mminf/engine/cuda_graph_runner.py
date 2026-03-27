@@ -443,7 +443,8 @@ class CudaGraphRunner:
             # advance_seq_lens uses planned seq_lens (all 1 for decode)
             static_cm.advance_seq_lens()
 
-        # --- Step 6: Clone and remap outputs ---
+        # --- Step 6: Sample from logits (outside graph) and remap outputs ---
+        from mminf.utils.sampling import sample_tokens
         outputs = {}
         for i, rid in enumerate(request_ids):
             dummy_rid = dummy_rids[i]
@@ -451,7 +452,18 @@ class CudaGraphRunner:
                 dummy_out = static_output[dummy_rid]
                 outputs[rid] = {}
                 for out_key, val in dummy_out.items():
-                    if isinstance(val, list):
+                    if out_key == "logits":
+                        # Sample token from logits (post-graph, CUDA-graph safe)
+                        logits = val[0] if isinstance(val, list) else val
+                        meta = per_request_metadata.get(rid, {})
+                        token = sample_tokens(
+                            logits,
+                            temperature=meta.get("temperature", 0.6),
+                            top_k=meta.get("top_k", 0),
+                            top_p=meta.get("top_p", 1.0),
+                        )
+                        outputs[rid]["new_token"] = [token.clone()]
+                    elif isinstance(val, list):
                         outputs[rid][out_key] = [t.clone() for t in val]
                     elif isinstance(val, torch.Tensor):
                         outputs[rid][out_key] = [val.clone()]

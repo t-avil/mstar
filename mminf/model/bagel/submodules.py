@@ -638,10 +638,13 @@ class LLMSubmodule(NodeSubmodule):
 
     def _forward_decode(
         self, text_inputs: torch.Tensor,
-        cache_handle: BatchedCacheManager, 
+        cache_handle: BatchedCacheManager,
         **kwargs
     ) -> NameToTensorList:
-        """embed_tokens -> LLM forward -> lm_head -> argmax.
+        """embed_tokens -> LLM forward -> lm_head -> logits.
+
+        Returns logits; token sampling is done by the engine post-forward
+        (outside CUDA graph capture).
 
         When requires_cfg is True: also forward for cfg_img to keep its
         KV cache in sync (cfg_img tracks all text, no images).
@@ -652,6 +655,9 @@ class LLMSubmodule(NodeSubmodule):
         kwargs.pop("cache_labels", None)
         kwargs.pop("snapshot_after", None)
         kwargs.pop("is_prefill", None)
+        kwargs.pop("temperature", None)
+        kwargs.pop("top_k", None)
+        kwargs.pop("top_p", None)
         emb = self.embed_tokens(text_inputs)
 
         if cache_handle is not None:
@@ -669,9 +675,8 @@ class LLMSubmodule(NodeSubmodule):
             )
 
         logits = self.lm_head(hidden[-1:])
-        token = torch.argmax(logits, dim=-1)
         return {
-            "new_token": [token],
+            "logits": [logits],
         }
 
     @staticmethod
@@ -852,7 +857,7 @@ class LLMSubmodule(NodeSubmodule):
                 cache_manager=cache_manager,
                 request_ids=request_ids,
                 packed_inputs=packed_inputs,
-                has_cfg=has_cfg
+                has_cfg=has_cfg,
             )
         elif graph_walk == "prefill_text":
             self._forward_prefill_text(
@@ -868,14 +873,18 @@ class LLMSubmodule(NodeSubmodule):
         cache_manager: BatchedCacheManager,
         request_ids: list[str],
         packed_inputs: dict[str, torch.Tensor],
-        has_cfg: bool=False
+        has_cfg: bool = False,
+        per_request_metadata: dict[str, dict] | None = None,
     ) -> dict[str, NameToTensorList]:
         """Batched decode: all requests generate 1 token each.
 
         1. Concatenate embeddings: [N, hidden] where N = num_requests
         2. Single LLM forward with cache_manager (batched attention)
         3. If any request requires CFG, run a second pass for cfg_img
-        4. Per-request lm_head + argmax
+        4. Per-request lm_head -> logits
+
+        Returns logits per request. Token sampling is done by the engine
+        post-forward (outside CUDA graph capture).
 
         plan_attention/plan_rope are called in preprocess_batched.
         """
@@ -899,14 +908,31 @@ class LLMSubmodule(NodeSubmodule):
                 cache_handle=cache_manager,
             )
 
-        # 4. Per-request lm_head + argmax
+        # 4. Per-request lm_head -> logits (no sampling — done post-forward)
         logits = self.lm_head(hidden)
-        # decode has seq_len == 1 for all inputs in batch
-        tokens = torch.argmax(logits, dim=-1)
 
         return {
-            rid: {"new_token": [tokens[i:i+1]]} for i, rid in enumerate(request_ids)
+            rid: {"logits": [logits[i:i+1]]} for i, rid in enumerate(request_ids)
         }
+
+    @torch.compiler.disable
+    def _batch_get_sampling_param(
+        self,
+        per_request_metadata: dict[str, dict],
+        request_ids: list[str],
+        key: str,
+        default: float | int,
+        device,
+        dtype: torch.dtype = torch.float32,
+    ) -> float | int | torch.Tensor:
+        """Extract a sampling param. Returns scalar if uniform, tensor if per-request."""
+        values = [
+            per_request_metadata.get(rid, {}).get(key, default)
+            for rid in request_ids
+        ]
+        if len(set(values)) == 1:
+            return values[0]
+        return torch.tensor(values, device=device, dtype=dtype)
 
 
     def _wrap_with_boi_eoi(self, emb: torch.Tensor) -> torch.Tensor:
