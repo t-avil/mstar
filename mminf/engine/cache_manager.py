@@ -457,29 +457,29 @@ class BatchedCacheManager:
     def snapshot_all(
         self, from_label: str,
         to_label: str,
-        reset_store: bool=False,
+        realloc: bool=False,
         write_store: bool=True
     ) -> None:
         """Snapshot KV cache for all requests in batch."""
         for rid in self.request_ids:
             from_state = self._get_state(rid, from_label)
-            old_store_seq_len = self._get_state(rid, to_label).store_seq_len_per_layer
-            self.alloc_manager.reset_label(rid, to_label, clear_store=reset_store)
+
+            if realloc:
+                self.alloc_manager.reset_label(rid, to_label, clear_store=True)
+
+            to_state = self._get_state(rid, to_label)
+            start_pos =  to_state.seq_len // self.kv_cache_config.page_size
             self.alloc_manager.alloc(
                 rid, to_label, seq_len=from_state.seq_len
-            )           
+            )
 
-            to_state: KVRequestState = self._get_state(rid, to_label)
             to_state.seq_len = from_state.seq_len
             to_state.position_id_start = from_state.position_id_start
             to_state.local_cache_seq_len = from_state.local_cache_seq_len
 
-            if not reset_store:
-                to_state.store_seq_len_per_layer = old_store_seq_len
-
             for src_page, dst_page in zip(
-                from_state.page_indices,
-                to_state.page_indices,
+                from_state.page_indices[start_pos:],
+                to_state.page_indices[start_pos:],
                 strict=True
             ):
                 self.kv_cache[:, dst_page] = self.kv_cache[:, src_page]
