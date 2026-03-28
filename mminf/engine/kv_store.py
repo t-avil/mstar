@@ -14,7 +14,7 @@ from mminf.communication.communicator import CommProtocol
 # sometimes very slow.
 KV_STORE_CHUNK_SIZE = 128
 
-MAX_TRANSFERS = 1000
+MAX_TRANSFERS = 500
 
 
 @dataclass
@@ -97,8 +97,8 @@ class StoreAllocInfo:
 class MooncakeStoreConfig:
     hostname: str
     metadata_server: str="http://localhost:8080/metadata"
-    segment_size=512*1024*1024
-    local_buff_size= 256*1024*1024
+    segment_size=4 * 1024*1024*1024
+    local_buff_size=4 * 1024*1024*1024
     protocol: CommProtocol=CommProtocol.RDMA
     master_service: str="localhost:50051"
 
@@ -146,8 +146,8 @@ class PagedAllocationManager:
         self.my_entity_id = transfer_engine_info.my_entity_id
         self.my_session_id = transfer_engine_info.my_session_id
 
-    def _key(self, request_id: str, label: str, pos: int, layer: int, kv: str):
-        return f"{request_id}_{label}_{pos}_{layer}_{kv}"
+    def _key(self, request_id: str, label: str, pos: int, layer: int):
+        return f"{request_id}_{label}_{pos}_{layer}"
 
     def _get_ptr_nbytes(
         self, layer, page_idx, token_start, token_end,
@@ -189,13 +189,12 @@ class PagedAllocationManager:
             transfer_fn = self.mooncake_store.batch_put_from_multi_buffers
 
         torch.cuda.default_stream().synchronize()
-        for i in range(0, len(alloc_info), MAX_TRANSFERS):
-            start = i * MAX_TRANSFERS
-            end = max((i+1) * MAX_TRANSFERS, len(alloc_info))
+        for start in range(0, len(alloc_info), MAX_TRANSFERS):
+            end = min(start + MAX_TRANSFERS, len(alloc_info))
             status = transfer_fn(
                 keys=[alloc_info[i].key for i in range(start, end)],
-                buffer_ptrs=[alloc_info[i].ptr for i in range(start, end)],
-                sizes=[alloc_info[i].nbytes for i in range(start, end)]
+                all_buffer_ptrs=[alloc_info[i].ptr for i in range(start, end)],
+                all_sizes=[alloc_info[i].nbytes for i in range(start, end)]
             )
             assert all(s >= 0 for s in status)
         torch.cuda.default_stream().synchronize()
@@ -242,24 +241,20 @@ class PagedAllocationManager:
                 token_start = chunk_within_page * tokens_per_chunk
                 token_end = token_start + tokens_per_chunk
 
-                for kv_idx, kv_label in enumerate(['k', 'v']):
-                    ptr, nbytes = self._get_ptr_nbytes(
-                        layer, page_idx, kv_idx, token_start, token_end
-                    )
-
-                    alloc_info.append(StoreAllocInfo(
-                        key=self._key(request_id, label, chunk_idx, layer, kv_label),
-                        ptr=ptr,
-                        nbytes=nbytes
-                    ))
+                ptr, nbytes = self._get_ptr_nbytes(
+                    layer, page_idx, token_start, token_end
+                )
+                alloc_info.append(StoreAllocInfo(
+                    key=self._key(request_id, label, chunk_idx, layer),
+                    ptr=ptr,
+                    nbytes=nbytes
+                ))
         
         self._transfer_all(alloc_info, TransferType.PUT)
     
     def _new_state(self):
         state = KVRequestState()
-        state.store_seq_len_per_layer = torch.zeros(
-            self.config.num_layers, dtype=torch.int32
-        )
+        state.store_seq_len_per_layer = [0] * self.config.num_layers
         return state
 
     def get_state(self, request_id: str, label: str):
@@ -338,13 +333,13 @@ class PagedAllocationManager:
                 ptrs, nbytes = self._get_ptr_nbytes(
                     layer, page_idx, token_start, token_end
                 )
-                rem_ptrs, _ = self._get_ptr_nbytes(
+                remote_ptrs, _ = self._get_ptr_nbytes(
                     layer, seq_info.last_page_idx, token_start, token_end,
                     base_ptr=seq_info.kv_cache_addr
                 )
 
                 local_addrs.extend(ptrs)
-                remote_addrs.extend(rem_ptrs)
+                remote_addrs.extend(remote_ptrs)
                 nbytes_list.extend(nbytes)
 
             # TODO: we might want to make this asynchronous to overlap
@@ -384,10 +379,12 @@ class PagedAllocationManager:
                     (state.seq_len - 1) // self.config.page_size]
         return per_label_seq_info
     
-    def reset_label(self, request_id: str, label: str, free: bool=True):
+    def reset_label(self, request_id: str, label: str, free: bool=True, clear_store=True):
         if label in self.request_states[request_id] and free:
             state = self.request_states[request_id][label]
             self.page_allocator.free(state.page_indices)
+        if clear_store:
+            self.mooncake_store.remove_by_regex(f"^{request_id}_{label}.*")
         self.request_states[request_id][label] = self._new_state()
 
     def cleanup(self):
