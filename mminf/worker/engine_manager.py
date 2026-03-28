@@ -8,6 +8,7 @@ from mminf.engine.audio_codec_engine import AudioCodecEngine
 from mminf.engine.base import BaseEngine
 from mminf.engine.enc_dec_engine import EncoderDecoderEngine
 from mminf.engine.flow_engine import FlowEngine
+from mminf.engine.kv_store import MooncakeStoreConfig, PagedAllocationManager, TransferEngineInfo
 from mminf.model.base import Model
 
 ENGINE_TYPE_TO_CLASS: dict[str, type[BaseEngine]] = {
@@ -30,6 +31,8 @@ class EngineManager:
         cls,
         engine_configs: list[dict],
         device: torch.device,
+        mooncake_cfg: MooncakeStoreConfig,
+        transfer_engine_info: TransferEngineInfo,
         enable_nvtx: bool = False,
         model: Model | None = None,
     ) -> "EngineManager":
@@ -78,7 +81,11 @@ class EngineManager:
                             dtype=model.get_autocast_dtype()
                         )
 
-            engine.load_model(submodules, model_config, device)
+            engine.load_model(
+                submodules, model_config, device,
+                mooncake_cfg=mooncake_cfg,
+                transfer_engine_info=transfer_engine_info
+            )
             logger.info("Engine %s loaded in on device %s", cfg["engine_type"], str(device))
 
             for name in node_names:
@@ -116,6 +123,13 @@ class EngineManager:
             if eid not in seen:
                 seen.add(eid)
                 engine.remove_request(request_id)
+
+    def get_ar_alloc_manager(self) -> PagedAllocationManager | None:
+        """Return the PagedAllocationManager from the first AR engine, if any."""
+        for engine in self.node_to_engine.values():
+            if isinstance(engine, AREngine) and engine.alloc_manager is not None:
+                return engine.alloc_manager
+        return None
 
     def shutdown(self) -> None:
         seen = set()

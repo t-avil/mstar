@@ -8,6 +8,8 @@ import logging
 import multiprocessing as mp
 import os
 import signal
+import socket
+import subprocess
 import threading
 import time
 import uuid
@@ -55,6 +57,7 @@ def _conductor_process_target(
     enable_nvtx: bool = False,
     log_level: str = "INFO",
     cache_dir: str | None = None,
+    mooncake_port: int=8080,
 ):
     """Runs DummyConductor.run() in a spawned process."""
     logging.basicConfig(
@@ -75,6 +78,7 @@ def _conductor_process_target(
         socket_path_prefix=socket_path_prefix,
         enable_nvtx=enable_nvtx,
         log_level=log_level,
+        mooncake_port=mooncake_port
     )
     try:
         conductor.run()
@@ -106,6 +110,47 @@ def _shutdown_conductor_process(
 
 
 # ------------------------------------------------------------------
+# Mooncake KV store setup
+# ------------------------------------------------------------------
+def start_mooncake_master(port=8080, log_file: str | None = None):
+    cmd = [
+        "mooncake_master",
+        "--enable_http_metadata_server=true",
+        "--http_metadata_server_host=0.0.0.0",
+        f"--http_metadata_server_port={port}",
+    ]
+
+    stdout = open(log_file, "a") if log_file else subprocess.DEVNULL
+    stderr = subprocess.STDOUT
+
+    process = subprocess.Popen(
+        cmd,
+        stdout=stdout,
+        stderr=stderr,
+        preexec_fn=os.setsid,  # start new process group
+    )
+
+    wait_for_port("localhost", 50051)
+    logger.info("Successfully started Mooncake metadata server")
+
+    return process
+
+
+def wait_for_port(host, port, timeout=10):
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            with socket.create_connection((host, port), timeout=1):
+                return True
+        except OSError:
+            time.sleep(0.1)
+    raise RuntimeError(f"Timeout waiting for {host}:{port}")
+
+
+def stop_mooncake_master(process: subprocess.Popen):
+    os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+
+# ------------------------------------------------------------------
 # APIServer
 # ------------------------------------------------------------------
 
@@ -118,11 +163,14 @@ class APIServer:
         upload_dir: str = "/tmp/mminf_uploads",
         hostname: str="localhost",
         timeout_seconds: float = 600.0,
+        mooncake_port=8080,
         model=None,
     ):
         self.upload_dir = Path(upload_dir)
         self.upload_dir.mkdir(parents=True, exist_ok=True)
         self.timeout_seconds = timeout_seconds
+
+        self.mooncake_pid = start_mooncake_master(port=mooncake_port)
 
         self.preprocess_worker = PreprocessWorker(
             model=model,
@@ -360,6 +408,7 @@ class APIServer:
     # ----------------------------------------------------------
 
     def cleanup(self) -> None:
+        stop_mooncake_master(self.mooncake_pid)
         self.preprocess_worker.shutdown()
         self.running = False
         if hasattr(self, "_msg_thread") and self._msg_thread.is_alive():
@@ -516,6 +565,7 @@ def main():
     parser.add_argument("--config", type=str, required=True, help="Path to YAML config file")
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--mooncake-port", type=int, default=8080)
     parser.add_argument(
         "--socket-path-prefix", type=str, default="/tmp/mminf",
         help="ZMQ IPC socket path prefix (shared with conductor/workers)",
@@ -553,23 +603,7 @@ def main():
 
     model_name = config.get("model", "dummy")
 
-    # Spawn conductor in a separate process
-    ctx = mp.get_context("spawn")
-    conductor_proc = ctx.Process(
-        target=_conductor_process_target,
-        args=(
-            model_name,
-            args.config,
-            args.socket_path_prefix,
-            args.enable_nvtx,
-            args.log_level,
-            args.cache_dir,
-        ),
-    )
-    conductor_proc.start()
-    logger.info("Conductor process started (pid=%d, model=%s)", conductor_proc.pid, model_name)
-
-    # Create a lightweight model instance for prompt processing
+     # Create a lightweight model instance for prompt processing
     # (tokenization only — no GPU weights needed)
     from mminf.model.registry import get_model_class
     model = get_model_class(model_name)(
@@ -582,8 +616,26 @@ def main():
         socket_path_prefix=args.socket_path_prefix,
         upload_dir=args.upload_dir,
         timeout_seconds=args.timeout,
+        mooncake_port=args.mooncake_port,
         model=model,
     )
+
+    # Spawn conductor in a separate process
+    ctx = mp.get_context("spawn")
+    conductor_proc = ctx.Process(
+        target=_conductor_process_target,
+        args=(
+            model_name,
+            args.config,
+            args.socket_path_prefix,
+            args.enable_nvtx,
+            args.log_level,
+            args.cache_dir,
+            args.mooncake_port,
+        ),
+    )
+    conductor_proc.start()
+    logger.info("Conductor process started (pid=%d, model=%s)", conductor_proc.pid, model_name)
 
     try:
         logger.info("Starting mminf API server on %s:%s", args.host, args.port)

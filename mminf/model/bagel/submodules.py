@@ -10,7 +10,7 @@ import torch
 from torch import nn
 
 from mminf.communication.tensors import NameToTensorList
-from mminf.engine.ar_engine import BatchedCacheManager
+from mminf.engine.cache_manager import BatchedCacheManager
 from mminf.model.bagel.components.language_model import BagelForCausalLM
 from mminf.model.bagel.components.modeling_utils import (
     ImageTransform,
@@ -399,7 +399,7 @@ class LLMSubmodule(NodeSubmodule):
         """
         device = next(self.parameters()).device
 
-        has_cfg = has_cfg = self._batch_get_requires_cfg(
+        has_cfg = self._batch_get_requires_cfg(
             per_request_metadata, request_ids
         )
         labels = self._get_active_labels(graph_walk, has_cfg)
@@ -485,7 +485,8 @@ class LLMSubmodule(NodeSubmodule):
                 "prefill_text", "decode"
             ],
             labels=labels,
-            snapshots=[("main", "cfg_text")] if graph_walk == "prefill_text" else []
+            snapshots=[("main", "cfg_text")] if graph_walk == "prefill_text" and has_cfg else [],
+            write_cache=graph_walk != "image_gen"
         )
 
         result = {
@@ -504,6 +505,7 @@ class LLMSubmodule(NodeSubmodule):
         is_causal=True,
         labels=["main"],
         snapshots=[],
+        write_cache=True
     ) -> None:
         """Plan attention and rope for all cache labels needed by this graph walk."""
         for snap in snapshots:
@@ -515,7 +517,8 @@ class LLMSubmodule(NodeSubmodule):
             if pos_ids is not None:
                 pos_ids = torch.cat(pos_ids)
             cache_handle.plan_attention(
-                seq_lens=seq_lens, is_causal=is_causal, label=label
+                seq_lens=seq_lens, is_causal=is_causal, label=label,
+                write_store=write_cache
             )
             cache_handle.plan_rope(
                 seq_lens=seq_lens, pos_ids=pos_ids, label=label
@@ -823,6 +826,8 @@ class LLMSubmodule(NodeSubmodule):
 
         # Euler step: x_{t-dt} = x_t - v * dt  (velocity points data -> noise)
         latents = latents - v_final * dt
+        if torch.is_autocast_enabled():
+            latents = latents.to(torch.get_autocast_gpu_dtype())
         return {
             "latents": [latents],
             "time_index": [time_index + 1]

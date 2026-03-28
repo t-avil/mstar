@@ -14,6 +14,7 @@ def main():
         "text": "What is the 7th value after the decimal point in pi?",
         "model_kwargs": json.dumps({
             "think_mode": True,
+            # "max_output_tokens": 100,
         }),
     }
     with requests.post(

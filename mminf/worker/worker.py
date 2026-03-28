@@ -5,7 +5,8 @@ import torch
 from mminf.api_server.request_types import APIServerMessage, ResultTensors
 from mminf.communication.communicator import CommProtocol, ZMQCommunicator
 from mminf.communication.tensors import MooncakeCommunicationManager, NameToTensorList
-from mminf.engine.base import NodeBatch, NodeOutput
+from mminf.engine.base import EngineType, NodeBatch, NodeOutput
+from mminf.engine.kv_store import MooncakeStoreConfig, StoreWritePolicy, TransferEngineInfo
 from mminf.graph.base import GraphEdge
 from mminf.graph.request_queues import format_graph_edge_list
 from mminf.model.base import Model, WorkerGraph
@@ -48,11 +49,13 @@ class Worker:
         all_worker_graph_ids_to_graph_walks: dict[str, set[str]],
         all_worker_graph_ids_to_nodes: dict[str, list[str]],
         hostname: str = "localhost",
+        master_service: str = "localhost:50051",
         socket_path_prefix: str = "/tmp/mminf",
         tensor_comm_protocol: CommProtocol = CommProtocol.RDMA,
         device: torch.device = torch.device("cuda"),
         enable_nvtx: bool = False,
         model: Model | None = None,
+        mooncake_port: int=8080
     ):
         self.worker_id = worker_id
         self.device = device
@@ -73,11 +76,6 @@ class Worker:
             all_worker_graph_ids_to_nodes=all_worker_graph_ids_to_nodes,
         )
 
-        self.engine_manager = EngineManager.from_config(
-            engine_configs=engine_configs, device=device, model=model,
-            enable_nvtx=self.enable_nvtx
-        )
-        self.scheduler = MicroScheduler(self.engine_manager)
 
         self.communicator = ZMQCommunicator(
             my_id=worker_id,
@@ -91,9 +89,79 @@ class Worker:
             protocol=tensor_comm_protocol,
         )
 
+        self.engine_manager = EngineManager.from_config(
+            engine_configs=engine_configs, device=device,
+            mooncake_cfg=MooncakeStoreConfig(
+                hostname=hostname,
+                metadata_server=f"http://localhost:{mooncake_port}/metadata",
+                protocol=tensor_comm_protocol,
+                master_service=master_service
+            ),
+            transfer_engine_info=TransferEngineInfo(
+                my_entity_id=worker_id,
+                my_session_id=self.tensor_manager.my_session_id,
+                transfer_engine=self.tensor_manager.engine
+            ),
+            model=model,
+            enable_nvtx=self.enable_nvtx
+        )
+        self.scheduler = MicroScheduler(self.engine_manager)
+
+        # Determine store write policy based on worker graph topology
+        write_policy = self._compute_store_write_policy(
+            my_worker_graphs, all_worker_graph_ids_to_graph_walks,
+            all_worker_graph_ids_to_nodes,
+        )
+        alloc_mgr = self.engine_manager.get_ar_alloc_manager()
+        if alloc_mgr is not None:
+            alloc_mgr.write_policy = write_policy
+        logger.info(
+            "Worker %s: store write policy = %s", worker_id, write_policy.value
+        )
+
         # Per-request metadata from conductor (e.g., cache_labels, snapshot_after)
         self._per_request_metadata: dict[str, dict] = {}
         self._unprocessed_messages = {} # req_id -> messages for requests that are not in the queue
+
+    def _compute_store_write_policy(
+        self,
+        my_worker_graphs: list[WorkerGraph],
+        all_worker_graph_ids_to_graph_walks: dict[str, set[str]],
+        all_worker_graph_ids_to_nodes: dict[str, list[str]],
+    ) -> StoreWritePolicy:
+        """Determine whether this worker needs to write KV to the mooncake store.
+
+        If this worker handles ALL AR engine graph walks, no other worker
+        needs its KV cache — return NEVER. Otherwise return ALWAYS.
+        """
+        my_ar_walks: set[str] = set()
+        all_ar_walks: set[str] = set()
+
+        # Collect this worker's AR graph walks
+        for wg in my_worker_graphs:
+            for node_name in wg.section.get_node_names():
+                engine = self.engine_manager.node_to_engine.get(node_name)
+                if engine is not None and engine.engine_type() == EngineType.AR:
+                    my_ar_walks.update(wg.graph_walks)
+
+        # Collect all workers' AR graph walks
+        for wg_id, walks in all_worker_graph_ids_to_graph_walks.items():
+            nodes = all_worker_graph_ids_to_nodes.get(wg_id, [])
+            for node_name in nodes:
+                # We can only check engines on THIS worker; for other workers,
+                # check if the node is known to be AR on this worker too
+                # (same node name = same engine type across workers)
+                engine = self.engine_manager.node_to_engine.get(node_name)
+                if engine is not None and engine.engine_type() == EngineType.AR:
+                    all_ar_walks.update(walks)
+
+        if not all_ar_walks:
+            return StoreWritePolicy.NEVER  # no AR engines at all
+
+        if my_ar_walks == all_ar_walks:
+            return StoreWritePolicy.NEVER  # all AR walks on this worker
+
+        return StoreWritePolicy.ALWAYS
 
     # ------------------------------------------------------------------
     # Message handling
@@ -108,7 +176,7 @@ class Worker:
         )
         self.engine_manager.add_request(body.request_id)
 
-        self.worker_graphs_manager.update_graph_walk_and_fwd_number(
+        self.worker_graphs_manager.update_request_info(
             body.request_id, body.initial_graph_walk, fwd_number=0
         )
         logger.debug(
@@ -154,8 +222,10 @@ class Worker:
             )
 
     def _process_new_inputs(self, body: InputSignals) -> None:
-        self.worker_graphs_manager.update_graph_walk_and_fwd_number(
-            body.request_id, body.graph_walk,body.fwd_pass_number
+        self.worker_graphs_manager.update_request_info(
+            body.request_id, body.graph_walk,
+            body.fwd_pass_number,
+            body.per_label_seq_info
         )
         logger.debug(
             "Request %s set to graph walk %s on worker %s",
@@ -242,6 +312,7 @@ class Worker:
         """Gather input tensors from tensor_manager for all requests in the batch."""
         per_request_inputs: dict[str, NameToTensorList] = {}
         per_request_metadata: dict[str, dict] = {}
+        per_request_seq_info: dict[str, dict] = {}
 
         for request_id, node in batch.node_objects.items():
             tensors = {}
@@ -252,6 +323,7 @@ class Worker:
                     ) for info in node.ready_inputs[input_name].tensor_info
                 ]
             per_request_inputs[request_id] = tensors
+            per_request_seq_info[request_id] = self.worker_graphs_manager.get_seq_info(request_id)
 
             # Include per-request metadata (e.g., cache_labels, snapshot_after)
             if request_id in self._per_request_metadata:
@@ -263,6 +335,7 @@ class Worker:
             request_ids=list(batch.node_objects.keys()),
             per_request_input_tensors=per_request_inputs,
             per_request_metadata=per_request_metadata,
+            per_request_seq_info=per_request_seq_info
         )
 
     # ------------------------------------------------------------------
@@ -353,6 +426,8 @@ class Worker:
                     graph_walk=self.worker_graphs_manager.get_graph_walk(request_id),
                     fwd_pass_number=self.worker_graphs_manager.get_fwd_number(request_id),
                     inputs=edges,
+                    per_label_seq_info=self.worker_graphs_manager.get_seq_info(request_id),
+                    per_request_metadata=self._per_request_metadata[request_id]
                 ),
             )
             self.communicator.send(worker_id, message)
@@ -406,7 +481,8 @@ class Worker:
                     worker_graph_ids=outputs.completed_worker_graph_ids,
                     persist_signals=self.worker_graphs_manager.flush_persist_signals(request_id),
                     new_tokens=self.worker_graphs_manager.flush_new_tokens(request_id),
-                    output_signal_names=self.worker_graphs_manager.flush_output_signals(request_id)
+                    output_signal_names=self.worker_graphs_manager.flush_output_signals(request_id),
+                    per_label_seq_info=self.worker_graphs_manager.get_seq_info(request_id),
                 ),
             )
             self.communicator.send("conductor", message)
@@ -449,6 +525,11 @@ class Worker:
                 finally:
                     if self.enable_nvtx:
                         range_pop(synchronize=False)
+                
+                for rid, per_label_seq_info in node_batch.per_request_seq_info.items():
+                    self.worker_graphs_manager.update_request_info(
+                        rid, per_label_seq_info=per_label_seq_info
+                    )
 
                 # 5b. Free consumed input tensors
                 self._cleanup_consumed_inputs(batch)

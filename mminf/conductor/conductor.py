@@ -11,8 +11,10 @@ import yaml
 
 from mminf.api_server.request_types import APIServerMessage, RequestComplete
 from mminf.communication.communicator import ZMQCommunicator
+from mminf.engine.base import EngineType
+from mminf.engine.kv_store import SequenceInfo
 from mminf.graph.base import GraphEdge, TensorPointerInfo
-from mminf.model.base import CurrentForwardMetadata, ForwardPassArgs, Model, WorkerGraph
+from mminf.model.base import DECODE, CurrentForwardMetadata, ForwardPassArgs, Model, WorkerGraph
 from mminf.utils.ipc_format import (
     ConductorMessageType,
     InputSignals,
@@ -41,6 +43,7 @@ def _worker_process_target(
     model: Model | None = None,
     device: str = "cuda",
     log_level: str = "INFO",
+    mooncake_port: int=8080
 ):
     """Top-level target for spawned worker processes. Must be module-level for picklability."""
     logging.basicConfig(
@@ -66,6 +69,7 @@ def _worker_process_target(
         enable_nvtx=enable_nvtx,
         device=torch.device(device),
         model=model,
+        mooncake_port=mooncake_port
     )
     worker.run()
 
@@ -90,6 +94,7 @@ class RequestData:
     completed_worker_graph_ids: set[str] = field(default_factory=set)
     fwd_pass_number: int = field(default=0)
     curr_forward_outputs: list[str] = field(default_factory=list)
+    per_label_seq_info: dict[str, SequenceInfo] = field(default_factory=dict)
 
     def remove_persist_signal_uuids(self, uuids: list[str]):
         uuids = set(uuids)
@@ -116,6 +121,7 @@ class Conductor:
         hostname: str = "localhost",
         enable_nvtx: bool = False,
         log_level: str = "INFO",
+        mooncake_port: int=8080
     ):
         self.requests: dict[str, RequestData] = {}
         self.model = model
@@ -123,6 +129,7 @@ class Conductor:
         self.socket_path_prefix = socket_path_prefix
         self.log_level = log_level
         self.enable_nvtx = enable_nvtx
+        self.mooncake_port = mooncake_port
 
         self._worker_processes: list[mp.Process] = []
 
@@ -216,6 +223,7 @@ class Conductor:
                     "enable_nvtx": self.enable_nvtx,
                     "device": f"cuda:{rank}",
                     "log_level": self.log_level,
+                    "mooncake_port": self.mooncake_port
                 },
                 daemon=False,
             )
@@ -327,6 +335,8 @@ class Conductor:
         """
         logger.debug("Conductor ingesting request %s", body.request_id)
         worker_graph_to_worker = self._assign_worker_graphs_to_workers()
+
+        # set up request data
         model_kwargs = body.model_kwargs or {}
         max_output_tokens = self.model.get_max_output_tokens(**model_kwargs)
         request_data = RequestData(
@@ -471,7 +481,8 @@ class Conductor:
                     graph_walk=request_data.current_forward_metadata.graph_walk,
                     inputs=inputs,
                     per_request_metadata=fwd_args.step_metadata,
-                    fwd_pass_number=request_data.fwd_pass_number
+                    fwd_pass_number=request_data.fwd_pass_number,
+                    per_label_seq_info=self.requests[request_id].per_label_seq_info
                 )
             )
             self.communicator.send(worker, message)
@@ -492,6 +503,11 @@ class Conductor:
         worker graphs for the current computation graph walk have been completed)
         """
         request_data = self.requests[body.request_id]
+
+        request_data.per_label_seq_info = {
+            **request_data.per_label_seq_info,
+            **body.per_label_seq_info
+        }
 
         # Absorb persist signals and new tokens sent with this message
         if body.persist_signals:

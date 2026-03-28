@@ -1,6 +1,7 @@
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 
+from mminf.engine.kv_store import SequenceInfo
 from mminf.graph.base import GraphEdge, TensorPointerInfo
 
 
@@ -27,6 +28,8 @@ class MessageBody:
 class WorkerMessageType(Enum):
     NEW_REQUEST = "new_request"
     REMOVE_REQUEST = "remove_request"
+    KV_TRANSFER_LAYER = "kv_transfer_layer"
+    KV_TRANSFER_META = "kv_transfer_meta"
     INPUT_SIGNALS = "input_signals"
     UNPERSIST_TENSORS = "unpersist"
     TENSOR_RECEIVED = "tensor_received"
@@ -54,6 +57,9 @@ class InputSignals(MessageBody):
     fwd_pass_number: int
     inputs: list[GraphEdge]
     per_request_metadata: dict = field(default_factory=dict)
+
+    # for KV cache transfer (PD disaggregation)
+    per_label_seq_info: dict[str, SequenceInfo] = field(default_factory=dict)
 
 
 @dataclass
@@ -100,6 +106,7 @@ class WorkerGraphsDone(MessageBody):
     persist_signals: dict[str, list[TensorPointerInfo]] = field(default_factory=dict)
     new_tokens: dict[str, list[int]] = field(default_factory=dict) # name to tokens
     output_signal_names: int = field(default=0)
+    per_label_seq_info: dict[str, SequenceInfo] = field(default_factory=dict)
 
 
 @dataclass
