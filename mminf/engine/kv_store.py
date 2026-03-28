@@ -196,7 +196,8 @@ class PagedAllocationManager:
                 all_buffer_ptrs=[alloc_info[i].ptr for i in range(start, end)],
                 all_sizes=[alloc_info[i].nbytes for i in range(start, end)]
             )
-            assert all(s >= 0 for s in status)
+            if any(s < 0 for s in status):
+                raise RuntimeError("Mooncake transfer failed")
         torch.cuda.default_stream().synchronize()
 
     def flush_to_store(
@@ -350,7 +351,8 @@ class PagedAllocationManager:
                 remote_addrs,
                 nbytes_list,
             )
-            assert status == 0
+            if status < 0:
+                raise RuntimeError("Mooncake retrieve failed")
             torch.cuda.default_stream().synchronize()
 
         state.seq_len = seq_len
@@ -407,4 +409,5 @@ class PagedAllocationManager:
 
         count = self.mooncake_store.remove_by_regex(f"^{request_id}_.*")
         # TODO error handling
-        assert count >= 0
+        if count < 0:
+            raise RuntimeError("Mooncake remove failed")
