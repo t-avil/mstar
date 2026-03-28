@@ -302,6 +302,150 @@ class BatchedCacheManager:
             self._plan_states[effective_label].pos_ids = computed_pos_ids
 
     @torch.compiler.disable
+    def plan_attention_batched_cfg(
+        self,
+        labels: list[str],
+        seq_lens: list[int],
+        is_causal: bool = False,
+        write_store: bool = False,
+        dtype=torch.bfloat16,
+        combined_label: str = "_cfg_batched",
+    ):
+        """Plan a single FlashInfer batch across multiple cache labels.
+
+        Each (label, request_id) pair becomes one entry in the FlashInfer batch.
+        For 3-branch CFG with 1 request this creates a 3-entry batch, enabling
+        all CFG branches to execute in a single LLM forward pass.
+
+        Args:
+            labels: cache labels to batch (e.g. ["main", "cfg_text", "cfg_img"]).
+            seq_lens: number of new tokens per request (same for all labels).
+            is_causal: whether attention is causal.
+            write_store: whether to write to mooncake store (False for image_gen).
+            combined_label: key for the combined _PlanState.
+        """
+        assert self.kv_cache is not None
+
+        cfg = self.kv_cache_config
+        page_size = cfg.page_size
+        num_kv_heads = cfg.num_kv_heads
+        head_dim = cfg.head_dim
+        num_qo_heads = cfg.num_qo_heads
+        device = self.device
+
+        qo_indptr_list = [0]
+        kv_indptr_list = [0]
+        all_page_indices = []
+        kv_last_page_lens = []
+        page_indices_all = []
+        page_offsets_all = []
+        combined_seq_lens = []
+
+        for label in labels:
+            for i, rid in enumerate(self.request_ids):
+                state = self._get_state(rid, label)
+                sl = seq_lens[i]
+                total_len = state.seq_len + sl
+                state.local_cache_seq_len = total_len
+
+                self.alloc_manager.alloc(rid, label=label, seq_len=total_len)
+
+                pos = torch.arange(state.seq_len, state.seq_len + sl, device=device)
+                page_idx = torch.tensor(
+                    state.page_indices, device=device
+                )[pos // page_size]
+                page_offset = pos % page_size
+
+                page_indices_all.append(page_idx)
+                page_offsets_all.append(page_offset)
+
+                qo_indptr_list.append(qo_indptr_list[-1] + sl)
+                all_page_indices.extend(state.page_indices)
+                kv_indptr_list.append(
+                    kv_indptr_list[-1] + len(state.page_indices)
+                )
+
+                last_page_len = total_len % page_size or page_size
+                kv_last_page_lens.append(last_page_len)
+                combined_seq_lens.append(sl)
+
+        page_indices = torch.cat(page_indices_all)
+        page_offsets = torch.cat(page_offsets_all)
+        token_offsets = torch.arange(page_indices.numel(), device=device)
+
+        qo_indptr = torch.tensor(
+            qo_indptr_list, dtype=torch.int32, device=device
+        )
+        paged_kv_indptr = torch.tensor(
+            kv_indptr_list, dtype=torch.int32, device=device
+        )
+        paged_kv_indices = torch.tensor(
+            all_page_indices, dtype=torch.int32, device=device
+        )
+        paged_kv_last_page_len = torch.tensor(
+            kv_last_page_lens, dtype=torch.int32, device=device
+        )
+
+        wrapper = FlashInferPrefillWrapper(
+            workspace_buffer=self.buffer_manager.get(combined_label),
+            num_qo_heads=num_qo_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            page_size=page_size,
+        )
+
+        wrapper.plan(
+            qo_indptr=qo_indptr,
+            paged_kv_indptr=paged_kv_indptr,
+            paged_kv_indices=paged_kv_indices,
+            paged_kv_last_page_len=paged_kv_last_page_len,
+            causal=is_causal,
+            dtype=dtype,
+        )
+
+        ps = _PlanState(
+            wrapper=wrapper,
+            page_indices=page_indices,
+            page_offsets=page_offsets,
+            token_offsets=token_offsets,
+            seq_lens=combined_seq_lens,
+            write_store=write_store,
+        )
+        self._plan_states[combined_label] = ps
+
+    @torch.compiler.disable
+    def plan_rope_batched_cfg(
+        self,
+        labels: list[str],
+        seq_lens: list[int],
+        per_label_pos_ids: dict[str, list[torch.Tensor]] | None = None,
+        combined_label: str = "_cfg_batched",
+    ):
+        """Concatenate position IDs across multiple labels for batched CFG.
+
+        Args:
+            labels: cache labels in batch order.
+            seq_lens: new tokens per request (same for all labels).
+            per_label_pos_ids: {label: [pos_ids_tensor per request]}.
+                If None or a label is missing, computed from position_id_start.
+            combined_label: key for the combined _PlanState (must already exist
+                from plan_attention_batched_cfg).
+        """
+        parts = []
+        for label in labels:
+            if per_label_pos_ids and label in per_label_pos_ids:
+                parts.append(torch.cat(per_label_pos_ids[label]))
+            else:
+                parts.append(torch.cat([
+                    torch.arange(sl, device=self.device, dtype=torch.long)
+                    + self._get_state(rid, label).position_id_start
+                    for rid, sl in zip(self.request_ids, seq_lens)
+                ]))
+
+        combined_pos_ids = torch.cat(parts)
+        self._plan_states[combined_label].pos_ids = combined_pos_ids
+
+    @torch.compiler.disable
     def run_attention(
         self,
         q: torch.Tensor,
