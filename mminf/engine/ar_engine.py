@@ -89,6 +89,7 @@ class AREngine(BaseEngine):
 
     def _create_cache_manager(self, request_id: str) -> BatchedCacheManager:
         """Create a CacheHandle for a single request."""
+        from mminf.engine.kv_store import StoreWritePolicy
         return BatchedCacheManager(
             request_ids=[request_id],
             active_labels_per_request={request_id: "main"},
@@ -97,6 +98,7 @@ class AREngine(BaseEngine):
             buffer_manager=self.buffer_manager,
             kv_cache_config=self.kv_cache_config,
             device=self.device,
+            auto_write_store=self.alloc_manager.write_policy == StoreWritePolicy.ALWAYS,
         )
 
     def _compile_submodules(self) -> None:
@@ -200,6 +202,7 @@ class AREngine(BaseEngine):
 
     def _execute_batched(self, batch: NodeBatch, submodule) -> NodeOutput:
         """Execute batch with BatchedCacheManager for true vectorized batching."""
+        from mminf.engine.kv_store import StoreWritePolicy
         cache_manager = BatchedCacheManager(
             request_ids=batch.request_ids,
             active_labels_per_request={rid: "main" for rid in batch.request_ids},
@@ -208,6 +211,7 @@ class AREngine(BaseEngine):
             buffer_manager=self.buffer_manager,
             kv_cache_config=self.kv_cache_config,
             device=self.device,
+            auto_write_store=self.alloc_manager.write_policy == StoreWritePolicy.ALWAYS,
         )
 
         # Preprocess all requests
