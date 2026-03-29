@@ -396,6 +396,7 @@ class Conductor:
             worker_graph_id for worker_graph_id in self.requests[request_id].all_worker_graph_ids \
                 if graph_walk in self.worker_graphs[worker_graph_id].graph_walks
         ])
+        print(graph_walk, [self.worker_graphs[id].section.get_node_names() for id in self.requests[request_id].current_worker_graph_ids])
 
     def _process_request_done(
         self, request_id: str
@@ -473,6 +474,9 @@ class Conductor:
             graph_walk=fwd_args.full_metadata.graph_walk
         )
 
+        request_data.new_tokens = {}
+        request_data.completed_worker_graph_ids = set()
+
         for worker, inputs in inputs_per_worker.items():
             message = WorkerMessage(
                 message_type=WorkerMessageType.INPUT_SIGNALS,
@@ -487,8 +491,6 @@ class Conductor:
             )
             self.communicator.send(worker, message)
 
-        request_data.new_tokens = {}
-        request_data.completed_worker_graph_ids = set()
         return False
 
     def _process_worker_graphs_done(
@@ -510,6 +512,8 @@ class Conductor:
             return False
 
         request_data = self.requests[body.request_id]
+
+        print("WORKER GRAPH DONE", [self.worker_graphs[id].section.get_node_names() for id in body.worker_graph_ids])
 
         request_data.per_label_seq_info = {
             **request_data.per_label_seq_info,

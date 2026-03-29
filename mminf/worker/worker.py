@@ -472,6 +472,7 @@ class Worker:
                 request_id, outputs.emit_to_client
             )
             for graph_edge in outputs.emit_to_client:
+                print(f"Sending {graph_edge} to client", outputs.completed_worker_graph_ids)
                 message = APIServerMessage(
                     message_type="result_tensors",
                     body=ResultTensors(
@@ -522,6 +523,7 @@ class Worker:
 
                 # 4. Gather input tensors for the batch
                 node_batch = self._build_node_batch(batch)
+                print(node_batch)
 
                 # 5. Execute via engine
                 engine = self.engine_manager.get_engine(batch.node_name)
