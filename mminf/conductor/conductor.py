@@ -396,7 +396,6 @@ class Conductor:
             worker_graph_id for worker_graph_id in self.requests[request_id].all_worker_graph_ids \
                 if graph_walk in self.worker_graphs[worker_graph_id].graph_walks
         ])
-        print(graph_walk, [self.worker_graphs[id].section.get_node_names() for id in self.requests[request_id].current_worker_graph_ids])
 
     def _process_request_done(
         self, request_id: str
@@ -512,8 +511,6 @@ class Conductor:
             return False
 
         request_data = self.requests[body.request_id]
-
-        print("WORKER GRAPH DONE", [self.worker_graphs[id].section.get_node_names() for id in body.worker_graph_ids])
 
         request_data.per_label_seq_info = {
             **request_data.per_label_seq_info,

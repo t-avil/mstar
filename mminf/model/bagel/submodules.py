@@ -236,6 +236,51 @@ class VAEEncoderSubmodule(NodeSubmodule):
         return {"img_emb": [packed_latent]}
 
 
+def _init_latents_and_time_index(
+    config: BagelModelConfig,
+    device,
+    H: int=1024,
+    W: int=1024,
+):
+    
+    h, w = (H // config.latent_downsample,
+            W // config.latent_downsample)
+    num_image_tokens = h * w
+    # torch.random.manual_seed(42)
+    latents = torch.randn(
+        num_image_tokens,
+        config.vae_config.z_channels * config.latent_patch_size ** 2,
+    ).to(device=device)
+    if torch.is_autocast_enabled():
+        latents = latents.to(torch.get_autocast_gpu_dtype())
+    time_idx = torch.zeros(latents.shape[0], device=device)
+    return latents, time_idx
+
+
+class InitLatents(NodeSubmodule):
+    def __init__(self, config: BagelModelConfig, **kwargs):
+        super().__init__()
+        self.config = config
+        self.register_buffer("detect_device", torch.zeros(1))
+    
+    def preprocess(
+        self, *args, **kwargs
+    ) -> dict[str, torch.Tensor]:
+        result = {}
+        H, W = 1024, 1024
+        device = self.detect_device.device
+        result["latents"], result["time_index"] = _init_latents_and_time_index(
+            self.config, device, H=H, W=W
+        )
+        return result
+    
+    def forward(self, latents, time_index, **kwargs) -> NameToTensorList:
+        return {
+            "latents": [latents],
+            "time_index": [time_index]
+        }
+
+
 class LLMSubmodule(NodeSubmodule):
     """Fat LLM wrapper that dispatches based on graph walk.
 
@@ -306,25 +351,6 @@ class LLMSubmodule(NodeSubmodule):
         self.eoi_token_id = eoi_token_id
         self.bos_token_id = bos_token_id
         self.eos_token_id = eos_token_id
-
-    def _init_latents(
-        self,
-        device,
-        H: int=1024,
-        W: int=1024,
-    ):
-        
-        h, w = (H // self.config.latent_downsample,
-                W // self.config.latent_downsample)
-        num_image_tokens = h * w
-        # torch.random.manual_seed(42)
-        latents = torch.randn(
-            num_image_tokens,
-            self.config.vae_config.z_channels * self.config.latent_patch_size ** 2,
-        ).to(device=device)
-        if torch.is_autocast_enabled():
-            latents = latents.to(torch.get_autocast_gpu_dtype())
-        return latents
     
     def _preprocess_prefill_text(
         self, text_inputs: torch.Tensor
@@ -464,11 +490,9 @@ class LLMSubmodule(NodeSubmodule):
                 max_num_patches_per_side=self.config.max_latent_size
             )
             if "latents" not in inputs or len(inputs["latents"]) == 0:
-                result["latents"] = self._init_latents(
-                    device=device,
-                    H=H, W=W
+                result["latents"], result["time_index"] = _init_latents_and_time_index(
+                    self.config, device, H=H, W=W
                 )
-                result["time_index"] = torch.zeros(result["latents"].shape[0], device=device)
             else:
                result["latents"] = inputs["latents"][0]
                result["time_index"] = inputs["time_index"][0]

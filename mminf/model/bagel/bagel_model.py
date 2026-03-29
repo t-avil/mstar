@@ -58,7 +58,7 @@ from mminf.model.bagel.components.modeling_utils import BagelMLPconnector, Posit
 from mminf.model.bagel.components.tokenization import BagelTokenizer, add_special_tokens
 from mminf.model.bagel.components.vit_encoder import BagelVisionModel
 from mminf.model.bagel.config import load_bagel_config
-from mminf.model.bagel.submodules import CombineCFGSubmodule, LLMSubmodule, VAEDecoderSubmodule, VAEEncoderSubmodule, ViTEncoderSubmodule
+from mminf.model.bagel.submodules import CombineCFGSubmodule, InitLatents, LLMSubmodule, VAEDecoderSubmodule, VAEEncoderSubmodule, ViTEncoderSubmodule
 from mminf.model.base import DECODE, CurrentForwardMetadata, ForwardPassArgs, Model, NodeSubmodule
 from mminf.model.utils import ModuleAndPrefix, load_weights_from_file
 
@@ -332,6 +332,10 @@ class BagelModel(Model):
                 latent_channel=self.config.vae_config.z_channels,
                 latent_downsample=self.config.latent_downsample,
             )
+        elif node_name == "init_latents":
+            return InitLatents(
+                config=self.config
+            )
         return None
 
     # -----------------------------------------------------------------------
@@ -418,6 +422,7 @@ class BagelModel(Model):
         return {
             "vit_encoder": EngineType.ENC_DEC,
             "vae_encoder": EngineType.ENC_DEC,
+            "init_latents": EngineType.ENC_DEC,
             "LLM": EngineType.AR,
             "LLM_cfg_text": EngineType.AR,
             "LLM_cfg_img": EngineType.AR,
@@ -529,6 +534,20 @@ class BagelModel(Model):
         # Each CFG branch (main, cfg_text, cfg_img) runs on its own GPU.
         # combine_cfg applies the CFG formula + Euler step after each iteration.
         image_gen_cfg = Sequential([
+            GraphNode(
+                name="init_latents",
+                input_ids=["start_flag"],
+                outputs=[
+                    GraphEdge(next_node="LLM", name="latents"),
+                    GraphEdge(next_node="LLM", name="time_index"),
+                    GraphEdge(next_node="LLM_cfg_text", name="latents"),
+                    GraphEdge(next_node="LLM_cfg_text", name="time_index"),
+                    GraphEdge(next_node="LLM_cfg_img", name="latents"),
+                    GraphEdge(next_node="LLM_cfg_img", name="time_index"),
+                    GraphEdge(next_node="combine_cfg", name="latents"),
+                    GraphEdge(next_node="combine_cfg", name="time_index"),
+                ]
+            ),
             Loop(
                 section=Sequential([
                     Parallel([
@@ -537,8 +556,6 @@ class BagelModel(Model):
                             input_ids=["latents", "time_index"],
                             outputs=[
                                 GraphEdge(next_node="combine_cfg", name="v_main"),
-                                GraphEdge(next_node="combine_cfg", name="latents"),
-                                GraphEdge(next_node="combine_cfg", name="time_index"),
                             ],
                         ),
                         GraphNode(
@@ -569,6 +586,8 @@ class BagelModel(Model):
                             GraphEdge(next_node="LLM_cfg_text", name="time_index"),
                             GraphEdge(next_node="LLM_cfg_img", name="latents"),
                             GraphEdge(next_node="LLM_cfg_img", name="time_index"),
+                            GraphEdge(next_node="combine_cfg", name="latents"),
+                            GraphEdge(next_node="combine_cfg", name="time_index"),
                         ],
                     ),
                 ]),
@@ -715,15 +734,13 @@ class BagelModel(Model):
             ]
 
         elif graph_walk == "image_gen_cfg":
-            # Parallel CFG: provide initial latents + time_index to all 3 LLM nodes
-            latent_info = persist_signals.get("latents", [])
-            edges = []
-            for node in ["LLM", "LLM_cfg_text", "LLM_cfg_img"]:
-                latent_edge = GraphEdge(next_node=node, name="latents")
-                latent_edge.tensor_info = latent_info
-                edges.append(latent_edge)
-                edges.append(GraphEdge(next_node=node, name="time_index"))
-            return edges
+            return [
+                GraphEdge(
+                    next_node="init_latents",
+                    name="start_flag",
+                    tensor_info=[]
+                )
+            ]
 
         return []
 
