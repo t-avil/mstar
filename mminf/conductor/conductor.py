@@ -502,6 +502,13 @@ class Conductor:
         Return whether the full model forward pass has been completed (i.e., all
         worker graphs for the current computation graph walk have been completed)
         """
+        if body.request_id not in self.requests:
+            logger.debug(
+                "Ignoring late WORKER_GRAPHS_DONE for completed request %s",
+                body.request_id
+            )
+            return False
+
         request_data = self.requests[body.request_id]
 
         request_data.per_label_seq_info = {
