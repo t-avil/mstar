@@ -253,13 +253,17 @@ class PagedAllocationManager:
             return
         for start in range(0, len(alloc_info), MAX_TRANSFERS):
             end = min(start + MAX_TRANSFERS, len(alloc_info))
+            keys = [alloc_info[i].key for i in range(start, end)]
             status = self.mooncake_store.batch_get_into_multi_buffers(
-                keys=[alloc_info[i].key for i in range(start, end)],
+                keys=keys,
                 all_buffer_ptrs=[alloc_info[i].ptr for i in range(start, end)],
                 all_sizes=[alloc_info[i].nbytes for i in range(start, end)]
             )
             if any(s < 0 for s in status):
-                raise RuntimeError("Mooncake read failed")
+                bad_key_status = str({
+                    keys[i]: s for i, s in enumerate(status) if s < 0
+                })
+                raise RuntimeError("Mooncake read failed: " + bad_key_status[:1000] + ("..." if len(bad_key_status) > 1000 else ""))
         torch.cuda.default_stream().synchronize()
 
     def flush_to_store(

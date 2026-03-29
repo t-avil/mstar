@@ -137,8 +137,8 @@ class Worker:
         If this worker handles ALL AR engine graph walks, no other worker
         needs its KV cache — return NEVER. Otherwise return ALWAYS.
         """
-        my_ar_walks: set[str] = set()
-        all_ar_walks: set[str] = set()
+        my_ar_walks_nodes: set[str] = set()
+        all_ar_walks_nodes: set[str] = set()
 
         def _is_ar(node_name: str) -> bool:
             # Check local engine first, then fall back to model's type map
@@ -153,19 +153,23 @@ class Worker:
         for wg in my_worker_graphs:
             for node_name in wg.section.get_node_names():
                 if _is_ar(node_name):
-                    my_ar_walks.update(wg.graph_walks)
+                    my_ar_walks_nodes.update([(walk, node_name) for walk in wg.graph_walks])
 
         # Collect all workers' AR graph walks
         for wg_id, walks in all_worker_graph_ids_to_graph_walks.items():
             nodes = all_worker_graph_ids_to_nodes.get(wg_id, [])
             for node_name in nodes:
                 if _is_ar(node_name):
-                    all_ar_walks.update(walks)
+                    all_ar_walks_nodes.update([(walk, node_name) for walk in walks])
 
-        if not all_ar_walks:
+        if not all_ar_walks_nodes:
             return StoreWritePolicy.NEVER  # no AR engines at all
 
-        if my_ar_walks == all_ar_walks:
+        if my_ar_walks_nodes == all_ar_walks_nodes:
+            logger.info(
+                "No LLM disaggregation detected; my_ar_walks_nodes == all_ar_walks_nodes: %s",
+                str(my_ar_walks_nodes)
+            )
             return StoreWritePolicy.NEVER  # all AR walks on this worker
 
         return StoreWritePolicy.ALWAYS
