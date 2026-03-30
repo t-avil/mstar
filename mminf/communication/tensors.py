@@ -481,13 +481,22 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
                         "Tensor transport for IPC is not implemented yet in this build."
                     )
 
-                with torch.cuda.stream(stream):
-                    self.engine.transfer_read_on_cuda(
+                if hasattr(self.engine, "transfer_read_on_cuda"):
+                    with torch.cuda.stream(stream):
+                        self.engine.transfer_read_on_cuda(
+                            info.source_session_id,
+                            buffer.data_ptr(),
+                            info.address,
+                            info.nbytes,
+                            stream.cuda_stream,
+                        )
+                else:
+                    # TODO: maybe replace both transfer read paths with a thread-based mechanism
+                    self.engine.transfer_sync_read(
                         info.source_session_id,
                         buffer.data_ptr(),
                         info.address,
                         info.nbytes,
-                        stream.cuda_stream,
                     )
                 logger.debug("Started transfer read for uuid %s", info.uuid)
             # For now, have one cuda event for all tensors in this graph edge

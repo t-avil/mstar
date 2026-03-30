@@ -7,12 +7,12 @@ import time
 from dataclasses import asdict, dataclass
 
 import torch
-import torchaudio
 import torchvision
 
 try:
+    import torchaudio
     from torchcodec.decoders import VideoDecoder
-except (ImportError, RuntimeError):
+except (ImportError, RuntimeError, OSError):
     VideoDecoder = None
 
 from mminf.api_server.request_types import PreprocessInput, ResultChunk, ResultTensors
