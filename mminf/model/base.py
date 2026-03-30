@@ -53,6 +53,16 @@ class NodeSubmodule(torch.nn.Module):
         """
         return {k: v[0] for k, v in per_request_inputs[0].items()}
 
+    def get_needed_cache_labels(
+        self, graph_walk: str, per_request_metadata: dict[str, dict]
+    ) -> list[str] | None:
+        """Return cache labels this node needs, or None to retrieve all.
+
+        Used by AREngine to skip redundant KV cache transfers.
+        Override in subclasses that only need a subset of available labels.
+        """
+        return None
+
     @abstractmethod
     def forward(self, **kwargs) -> NameToTensorList:
         """
