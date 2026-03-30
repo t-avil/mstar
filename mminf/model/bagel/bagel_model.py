@@ -40,7 +40,7 @@ from PIL import Image
 from torch import nn
 
 from mminf.communication.tensors import NameToTensorList
-from mminf.conductor.request_info import CurrentForwardMetadata
+from mminf.conductor.request_info import CurrentForwardConductorMetadata
 from mminf.engine.kv_store import KVCacheConfig
 from mminf.engine.base import EngineType
 from mminf.graph.base import (
@@ -650,7 +650,7 @@ class BagelModel(Model):
         )
 
     def _get_step_metadata(
-        self, full_metadata: CurrentForwardMetadata,
+        self, full_metadata: CurrentForwardConductorMetadata,
     ) -> dict:
         return {
             "is_prefill": full_metadata.is_prefill,
@@ -666,7 +666,7 @@ class BagelModel(Model):
 
     def _get_fwd_pass_inputs(
         self,
-        metadata: CurrentForwardMetadata,
+        metadata: CurrentForwardConductorMetadata,
         persist_signals: dict[str, list[TensorPointerInfo]],
     ) -> list[GraphEdge]:
         """Construct the external inputs for the current forward pass.
@@ -783,7 +783,7 @@ class BagelModel(Model):
             "think_mode": think_mode,
             **params,  # CFG params
         }
-        full_metadata = CurrentForwardMetadata(
+        full_metadata = CurrentForwardConductorMetadata(
             input_modalities=input_modalities,
             output_modalities=output_modalities,
             graph_walk=first_graph_walk,
@@ -804,7 +804,7 @@ class BagelModel(Model):
         )
 
     def get_forward_pass_args(
-        self, metadata: CurrentForwardMetadata,
+        self, metadata: CurrentForwardConductorMetadata,
         persist_signals: dict[str, list[TensorPointerInfo]],
         new_tokens: dict[str, list[int]],
     ) -> ForwardPassArgs:

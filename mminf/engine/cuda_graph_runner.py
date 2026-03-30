@@ -22,7 +22,7 @@ from typing import Any
 import torch
 from torch import nn
 
-from mminf.conductor.request_info import CurrentForwardMetadata, CurrentForwardPassInfo
+from mminf.conductor.request_info import CurrentForwardConductorMetadata, CurrentForwardPassInfo
 from mminf.engine.cache_manager import BatchedCacheManager, WorkspaceBufferManager
 from mminf.engine.kv_store import KVCacheConfig, PagedAllocationManager
 

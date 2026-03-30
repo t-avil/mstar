@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 
 
 @dataclass
-class CurrentForwardMetadata:
+class CurrentForwardConductorMetadata:
     """
     Full-model forward pass-level metadata for running the current
     forward pass. On the conductor/model level.

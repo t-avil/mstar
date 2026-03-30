@@ -9,7 +9,7 @@ import torch
 import yaml
 
 from mminf.communication.tensors import NameToTensorList
-from mminf.conductor.request_info import CurrentForwardMetadata, CurrentForwardPassInfo
+from mminf.conductor.request_info import CurrentForwardConductorMetadata, CurrentForwardPassInfo
 from mminf.engine.cache_manager import BatchedCacheManager
 from mminf.engine.base import EngineType
 from mminf.engine.kv_store import KVCacheConfig
@@ -203,7 +203,7 @@ def _divide_into_worker_graphs(
 @dataclass
 class ForwardPassArgs:
     # full_metadata is at the conductor level
-    full_metadata: CurrentForwardMetadata
+    full_metadata: CurrentForwardConductorMetadata
     inputs: list[GraphEdge]
 
     # de_persist_tensors are tensors that will be used for the final time and
@@ -278,7 +278,7 @@ class Model(ABC):
 
     @abstractmethod
     def get_forward_pass_args(
-        self, metadata: CurrentForwardMetadata,
+        self, metadata: CurrentForwardConductorMetadata,
         persist_signals: dict[str, list[TensorPointerInfo]],
         new_tokens: dict[str, list[int]],
     ) -> ForwardPassArgs:

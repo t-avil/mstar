@@ -11,7 +11,7 @@ import yaml
 
 from mminf.api_server.request_types import APIServerMessage, RequestComplete
 from mminf.communication.communicator import ZMQCommunicator
-from mminf.conductor.request_info import CurrentForwardMetadata, CurrentForwardPassInfo
+from mminf.conductor.request_info import CurrentForwardConductorMetadata, CurrentForwardPassInfo
 from mminf.engine.base import EngineType
 from mminf.conductor.request_info import SequenceInfo
 from mminf.graph.base import GraphEdge, TensorPointerInfo
@@ -81,7 +81,7 @@ def _worker_process_target(
 
 @dataclass
 class RequestData:
-    current_forward_metadata: CurrentForwardMetadata
+    current_forward_metadata: CurrentForwardConductorMetadata
     fwd_inputs: list[GraphEdge]
     # name -> list[TensorPointerInfo]
     persist_signals: dict[str, list[TensorPointerInfo]] # signals passed back to conductor
