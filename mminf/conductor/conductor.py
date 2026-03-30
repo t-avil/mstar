@@ -11,10 +11,11 @@ import yaml
 
 from mminf.api_server.request_types import APIServerMessage, RequestComplete
 from mminf.communication.communicator import ZMQCommunicator
+from mminf.conductor.request_info import CurrentForwardMetadata, CurrentForwardPassInfo
 from mminf.engine.base import EngineType
-from mminf.engine.kv_store import SequenceInfo
+from mminf.conductor.request_info import SequenceInfo
 from mminf.graph.base import GraphEdge, TensorPointerInfo
-from mminf.model.base import DECODE, CurrentForwardMetadata, ForwardPassArgs, Model, WorkerGraph
+from mminf.model.base import DECODE, ForwardPassArgs, Model, WorkerGraph
 from mminf.utils.ipc_format import (
     ConductorMessageType,
     InputSignals,
@@ -28,6 +29,10 @@ from mminf.utils.ipc_format import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _req_id_to_seed(req_id: str):
+    return abs(hash(req_id)) % 2**32
 
 
 def _worker_process_target(
@@ -84,6 +89,8 @@ class RequestData:
 
     worker_graph_to_worker: dict[str, str]
     new_tokens: dict[str, list[int]]
+
+    random_seed: int
 
     # for tracking progress
     all_worker_graph_ids: set[str]
@@ -343,6 +350,7 @@ class Conductor:
             current_forward_metadata=None,
             fwd_inputs=[],
             persist_signals=body.initial_signals,
+            random_seed=_req_id_to_seed(body.request_id),
             persist_signal_ref_cnt={},
             worker_graph_to_worker=worker_graph_to_worker,
             all_worker_graph_ids=set(worker_graph_to_worker.keys()),
@@ -378,9 +386,14 @@ class Conductor:
                 request_id=body.request_id,
                 worker_graph_ids=worker_graph_ids,
                 worker_graph_to_worker=worker_graph_to_worker,
-                initial_graph_walk=request_data.current_forward_metadata.graph_walk,
                 initial_inputs=inputs_per_worker.get(worker, []),
-                per_request_metadata=fwd_args.step_metadata,
+                request_info=CurrentForwardPassInfo(
+                    graph_walk=fwd_args.full_metadata.graph_walk,
+                    step_metadata=fwd_args.step_metadata,
+                    fwd_index=request_data.fwd_pass_number,
+                    random_seed=request_data.random_seed,
+                    requires_cfg=fwd_args.full_metadata.requires_cfg,
+                )
             )
             self.communicator.send(
                 worker, WorkerMessage(
@@ -463,6 +476,7 @@ class Conductor:
             return True # stop the request
         
         request_data.fwd_pass_number += 1
+        request_data.random_seed += 1
         request_data.curr_forward_outputs.clear()
 
         logger.debug("Forward inputs: %s", str(fwd_args.inputs))
@@ -481,11 +495,15 @@ class Conductor:
                 message_type=WorkerMessageType.INPUT_SIGNALS,
                 body=InputSignals(
                     request_id=request_id,
-                    graph_walk=request_data.current_forward_metadata.graph_walk,
                     inputs=inputs,
-                    per_request_metadata=fwd_args.step_metadata,
-                    fwd_pass_number=request_data.fwd_pass_number,
-                    per_label_seq_info=self.requests[request_id].per_label_seq_info
+                    request_info=CurrentForwardPassInfo(
+                        graph_walk=fwd_args.full_metadata.graph_walk,
+                        step_metadata=fwd_args.step_metadata,
+                        fwd_index=request_data.fwd_pass_number,
+                        random_seed=request_data.random_seed,
+                        per_label_seq_info=self.requests[request_id].per_label_seq_info,
+                        requires_cfg=fwd_args.full_metadata.requires_cfg,
+                    )                    
                 )
             )
             self.communicator.send(worker, message)

@@ -170,7 +170,7 @@ class APIServer:
         self.upload_dir.mkdir(parents=True, exist_ok=True)
         self.timeout_seconds = timeout_seconds
 
-        self.mooncake_pid = start_mooncake_master(port=mooncake_port)
+        # self.mooncake_pid = start_mooncake_master(port=mooncake_port)
 
         self.preprocess_worker = PreprocessWorker(
             model=model,
@@ -408,7 +408,7 @@ class APIServer:
     # ----------------------------------------------------------
 
     def cleanup(self) -> None:
-        stop_mooncake_master(self.mooncake_pid)
+        # stop_mooncake_master(self.mooncake_pid)
         self.preprocess_worker.shutdown()
         self.running = False
         if hasattr(self, "_msg_thread") and self._msg_thread.is_alive():

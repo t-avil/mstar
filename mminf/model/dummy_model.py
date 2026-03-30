@@ -4,11 +4,12 @@ import numpy as np
 import torch
 
 from mminf.communication.tensors import NameToTensorList
+from mminf.conductor.request_info import CurrentForwardMetadata
 from mminf.engine.kv_store import KVCacheConfig
 from mminf.engine.base import EngineType
 from mminf.graph.base import GraphEdge, GraphNode, Loop, Parallel, Sequential, TensorPointerInfo
 from mminf.graph.special_destinations import EMIT_TO_CLIENT
-from mminf.model.base import CurrentForwardMetadata, Model
+from mminf.model.base import Model
 
 
 class DummyModel(Model):
