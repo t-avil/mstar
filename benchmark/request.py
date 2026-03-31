@@ -284,6 +284,7 @@ class VLLMOmni(InferenceSystem):
             "model": model.get_hf_url(),
             "messages": messages,
             "modalities": [output_modality],
+            "max_tokens": 2048,
         }
         if extra_body:
             payload["extra_body"] = extra_body
@@ -300,9 +301,8 @@ class VLLMOmni(InferenceSystem):
                 raise Exception(f"No choices in response: {resp_json}")
 
             msg = choices[0].get("message", {})
-            content = msg.get("content", [])
+            content = msg.get("content", "")
 
-            # content is a list of modality chunks for image output, plain string for text
             if isinstance(content, list):
                 for chunk in content:
                     if chunk.get("type") == "image_url" or chunk.get("type") == "text":
