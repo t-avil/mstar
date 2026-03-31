@@ -289,6 +289,12 @@ class VLLMOmni(InferenceSystem):
         if extra_body:
             payload["extra_body"] = extra_body
 
+        print(
+            f"[DEBUG] VLLMOmni request: image={image_path}, "
+            f"image_bytes={len(Path(image_path).read_bytes()) if image_path else 0}, "
+            f"output_modality={output_modality}"
+        )
+
         async with session.post(
             f"{base_url}/v1/chat/completions", json=payload, read_bufsize=2**24
         ) as resp:
@@ -302,6 +308,12 @@ class VLLMOmni(InferenceSystem):
 
             msg = choices[0].get("message", {})
             content = msg.get("content", "")
+
+            print(
+                f"[DEBUG] VLLMOmni response: content_type={type(content).__name__}, "
+                f"content_len={len(content) if content else 0}, "
+                f"content_preview={repr(content[:200]) if isinstance(content, str) else repr(content)[:200]}"
+            )
 
             if isinstance(content, list):
                 for chunk in content:
