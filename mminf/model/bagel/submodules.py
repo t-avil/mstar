@@ -1172,14 +1172,18 @@ class CombineCFGSubmodule(NodeSubmodule):
             "v_main": inputs["v_main"][0],
             "v_cfg_text": inputs["v_cfg_text"][0],
             "v_cfg_img": inputs["v_cfg_img"][0],
-            "latents": inputs["latents"][0],
-            "time_index": inputs["time_index"][0],
         }
         if "latents" not in inputs or len(inputs["latents"]) == 0:
             H, W = 1024, 1024
             result["latents"], result["time_index"] = _init_latents_and_time_index(
                 self.config, device=device, seed=metadata.random_seed, H=H, W=W
             )
+        else:
+            result = {
+                "latents": inputs["latents"][0],
+                "time_index": inputs["time_index"][0],
+                **result,
+            }
         return result
 
     def forward(

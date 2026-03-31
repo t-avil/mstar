@@ -721,11 +721,14 @@ class BagelModel(Model):
 
         elif graph_walk == "image_gen_cfg":
             return [
-                GraphEdge(
-                    next_node="init_latents",
-                    name="start_flag",
-                    tensor_info=[]
-                )
+                GraphEdge(next_node="LLM", name="latents"),
+                GraphEdge(next_node="LLM", name="time_index"),
+                GraphEdge(next_node="LLM_cfg_text", name="latents"),
+                GraphEdge(next_node="LLM_cfg_text", name="time_index"),
+                GraphEdge(next_node="LLM_cfg_img", name="latents"),
+                GraphEdge(next_node="LLM_cfg_img", name="time_index"),
+                GraphEdge(next_node="combine_cfg", name="latents"),
+                GraphEdge(next_node="combine_cfg", name="time_index"),
             ]
 
         return []
