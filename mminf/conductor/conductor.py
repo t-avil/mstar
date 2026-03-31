@@ -49,7 +49,8 @@ def _worker_process_target(
     device: str = "cuda",
     log_level: str = "INFO",
     mooncake_port: int=8080,
-    tensor_comm_protocol=CommProtocol.RDMA
+    tensor_comm_protocol=CommProtocol.RDMA,
+    tcp_transfer_device="",
 ):
     """Top-level target for spawned worker processes. Must be module-level for picklability."""
     logging.basicConfig(
@@ -76,7 +77,8 @@ def _worker_process_target(
         device=torch.device(device),
         model=model,
         mooncake_port=mooncake_port,
-        tensor_comm_protocol=tensor_comm_protocol
+        tensor_comm_protocol=tensor_comm_protocol,
+        tcp_transfer_device=tcp_transfer_device,
     )
     worker.run()
 
@@ -132,6 +134,7 @@ class Conductor:
         log_level: str = "INFO",
         mooncake_port: int=8080,
         tensor_comm_protocol=CommProtocol.RDMA,
+        tcp_transfer_device=""
     ):
         self.requests: dict[str, RequestData] = {}
         self.model = model
@@ -141,6 +144,7 @@ class Conductor:
         self.enable_nvtx = enable_nvtx
         self.mooncake_port = mooncake_port
         self.tensor_comm_protocol = tensor_comm_protocol
+        self.tcp_transfer_device = tcp_transfer_device
 
         self._worker_processes: list[mp.Process] = []
 
@@ -235,7 +239,8 @@ class Conductor:
                     "device": f"cuda:{rank}",
                     "log_level": self.log_level,
                     "mooncake_port": self.mooncake_port,
-                    "tensor_comm_protocol": self.tensor_comm_protocol
+                    "tensor_comm_protocol": self.tensor_comm_protocol,
+                    "tcp_transfer_device": self.tcp_transfer_device
                 },
                 daemon=False,
             )

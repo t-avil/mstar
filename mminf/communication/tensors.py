@@ -182,7 +182,8 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
         hostname: str,
         communicator: BaseCommunicator,
         protocol: CommProtocol=CommProtocol.RDMA,
-        metadata_server: str="P2PHANDSHAKE" # [ETCD_SERVER_URL, P2PHANDSHAKE, ...]
+        metadata_server: str="P2PHANDSHAKE", # [ETCD_SERVER_URL, P2PHANDSHAKE, ...]
+        tcp_transfer_device="",
 
     ):
         self.my_entity_id = my_entity_id
@@ -199,7 +200,7 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
             if self.protocol == CommProtocol.RDMA:
                 transfer_device = ""
             elif self.protocol == CommProtocol.TCP:
-                transfer_device = "eth0" # TODO: don't hardcode
+                transfer_device = tcp_transfer_device
             else:
                 raise NotImplementedError(f"Unknown protocol {self.protocol} for mooncake")
             self.engine = TransferEngine()

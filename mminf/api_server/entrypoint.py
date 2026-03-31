@@ -58,7 +58,8 @@ def _conductor_process_target(
     log_level: str = "INFO",
     cache_dir: str | None = None,
     mooncake_port: int=8080,
-    tensor_comm_protocol=CommProtocol.RDMA
+    tensor_comm_protocol=CommProtocol.RDMA,
+    tcp_transfer_device=""
 ):
     """Runs DummyConductor.run() in a spawned process."""
     logging.basicConfig(
@@ -80,7 +81,8 @@ def _conductor_process_target(
         enable_nvtx=enable_nvtx,
         log_level=log_level,
         mooncake_port=mooncake_port,
-        tensor_comm_protocol=tensor_comm_protocol
+        tensor_comm_protocol=tensor_comm_protocol,
+        tcp_transfer_device=tcp_transfer_device
     )
     try:
         conductor.run()
@@ -167,6 +169,7 @@ class APIServer:
         timeout_seconds: float = 600.0,
         mooncake_port=8080,
         tensor_comm_protocol=CommProtocol.RDMA,
+        tcp_transfer_device="",
         model=None,
     ):
         self.upload_dir = Path(upload_dir)
@@ -179,7 +182,8 @@ class APIServer:
             model=model,
             hostname=hostname,
             socket_path_prefix=socket_path_prefix,
-            tensor_comm_protocol=tensor_comm_protocol
+            tensor_comm_protocol=tensor_comm_protocol,
+            tcp_transfer_device=tcp_transfer_device
         )
 
         # Concurrent request tracking
@@ -593,6 +597,10 @@ def main():
         help="RDMA or TCP"
     )
     parser.add_argument(
+        "--tcp-transfer-device",
+        type=str, default="",
+    )
+    parser.add_argument(
         "--cache-dir", type=str, default=None,
         help="Directory for caching downloaded HuggingFace model files",
     )
@@ -628,6 +636,7 @@ def main():
         mooncake_port=args.mooncake_port,
         tensor_comm_protocol=CommProtocol(args.tensor_comm_protocol),
         model=model,
+        tcp_transfer_device=args.tcp_transfer_device
     )
 
     # Spawn conductor in a separate process
@@ -642,7 +651,8 @@ def main():
             args.log_level,
             args.cache_dir,
             args.mooncake_port,
-            CommProtocol(args.tensor_comm_protocol)
+            CommProtocol(args.tensor_comm_protocol),
+            args.tcp_transfer_device
         ),
     )
     conductor_proc.start()

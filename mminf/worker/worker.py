@@ -57,7 +57,8 @@ class Worker:
         device: torch.device = torch.device("cuda"),
         enable_nvtx: bool = False,
         model: Model | None = None,
-        mooncake_port: int=8080
+        mooncake_port: int=8080,
+        tcp_transfer_device=""
     ):
         self.worker_id = worker_id
         self.device = device
@@ -89,6 +90,7 @@ class Worker:
             hostname=hostname,
             communicator=self.communicator,
             protocol=tensor_comm_protocol,
+            tcp_transfer_device=tcp_transfer_device,
         )
 
         self.engine_manager = EngineManager.from_config(
