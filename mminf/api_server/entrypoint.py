@@ -626,7 +626,7 @@ def main():
         upload_dir=args.upload_dir,
         timeout_seconds=args.timeout,
         mooncake_port=args.mooncake_port,
-        tensor_comm_protocol=args.tensor_comm_protocol,
+        tensor_comm_protocol=CommProtocol(args.tensor_comm_protocol),
         model=model,
     )
 
