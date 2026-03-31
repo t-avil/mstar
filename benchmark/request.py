@@ -279,12 +279,11 @@ class VLLMOmni(InferenceSystem):
             messages = [{"role": "user", "content": f"<|im_start|>{prompt}<|im_end|>"}]
 
         extra_body = {k: v for k, v in additional_model_kwargs.items()}
-        # if output_modality != "text":
-        #     extra_body.setdefault("modalities", [output_modality])
 
         payload = {
             "model": model.get_hf_url(),
             "messages": messages,
+            "modalities": [output_modality],
         }
         if extra_body:
             payload["extra_body"] = extra_body
