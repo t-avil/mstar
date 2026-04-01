@@ -67,7 +67,13 @@ class MicroScheduler:
                 if request_id not in worker_graphs_manager.per_request_info:
                     continue  # request was removed between scheduling cycles
                 graph_walk = worker_graphs_manager.get_graph_walk(request_id)
+                fwd_info = worker_graphs_manager.get_fwd_info(request_id)
                 for sname in node_names:
+                    # check if the node is ready on the engine level
+                    # (e.g., for AR, whether the kv cache is read in)
+                    engine = self.engine_manager.get_engine(sname)
+                    if not engine.check_ready(sname, request_id, fwd_info):
+                        continue
                     node_name_to_requests.setdefault(sname, []).append(
                         ReadyNodeEntry(request_id, worker_graph_id, graph_walk)
                     )

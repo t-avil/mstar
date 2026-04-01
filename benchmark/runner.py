@@ -208,7 +208,9 @@ class Benchmark:
         agg = aggregate_metrics(
             metrics,
             wall_time=wall_time,
-            rate=self.config.rate
+            online=self.config.profiling_type == ProfilingType.ONLINE,
+            batch_size=self.config.batch_size,
+            rate=self.config.rate,
         )
 
         print(f"\n--- Benchmark Results (wall time: {wall_time:.2f}s) ---")

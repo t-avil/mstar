@@ -96,12 +96,6 @@ class Worker:
 
         self.engine_manager = EngineManager.from_config(
             engine_configs=engine_configs, device=device,
-            mooncake_cfg=MooncakeStoreConfig(
-                hostname=hostname,
-                metadata_server=f"http://localhost:{mooncake_port}/metadata",
-                protocol=tensor_comm_protocol,
-                master_service=master_service
-            ),
             transfer_engine_info=TransferEngineInfo(
                 my_entity_id=worker_id,
                 my_session_id=self.tensor_manager.my_session_id,

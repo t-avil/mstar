@@ -193,8 +193,9 @@ class AsyncMooncakeReader:
     The default stream is never blocked by store writes.
     """
 
-    def __init__(self, engine, device, max_workers: int = 1):
+    def __init__(self, engine, device, max_workers: int = 1, max_batch_size=500):
         self._engine = engine
+        self.max_batch_size = max_batch_size
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
         self._pending: list[Future] = []
         if device != "cpu":
@@ -222,16 +223,23 @@ class AsyncMooncakeReader:
         self._copy_stream.wait_event(event)
         self._copy_stream.synchronize()
 
-        # TODO: batch sync read (must have same source session ID)
+        # group read_info by session id for batch read
+        grouped_read = {}
         for info in read_info:
-            status = self._engine.transfer_sync_read(
-                info.source_session_id,
-                info.local_ptr,
-                info.remote_ptr,
-                info.nbytes,
-            )
-            if status < 0:
-                raise RuntimeError(f"Mooncake read failed. Status: {status}")
+            grouped_read.setdefault(info.source_session_id, []).append(info)
+
+        for (session_id, infos) in grouped_read.items():
+            for start in range(0, len(infos), self.max_batch_size):
+                end = min(start + self.max_batch_size, len(infos))
+            
+                status = self._engine.batch_transfer_sync_read(
+                    session_id,
+                    [infos[i].local_ptr for i in range(start, end)],
+                    [infos[i].remote_ptr for i in range(start, end)],
+                    [infos[i].nbytes for i in range(start, end)],
+                )
+                if status < 0:
+                    raise RuntimeError(f"Mooncake read failed. Status: {status}")
 
     def wait_all(self):
         """Block until all pending writes complete. Re-raises exceptions."""
