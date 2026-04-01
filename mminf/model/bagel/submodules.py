@@ -11,6 +11,7 @@ from torch import nn
 
 from mminf.communication.tensors import NameToTensorList
 from mminf.conductor.request_info import CurrentForwardPassInfo
+from mminf.engine.base import NodeBatch
 from mminf.engine.cache_manager import BatchedCacheManager
 from mminf.model.bagel.components.language_model import BagelForCausalLM
 from mminf.model.bagel.components.modeling_utils import (
@@ -1066,6 +1067,11 @@ class LLMSubmodule(NodeSubmodule):
             boi_emb = self.embed_tokens(boi_ids).to(emb.dtype)
             eoi_emb = self.embed_tokens(eoi_ids).to(emb.dtype)
         return torch.cat([boi_emb, emb, eoi_emb], dim=0)
+
+    def can_batch(
+        self, batch: NodeBatch
+    ):
+        return batch.graph_walk in ["decode", "prefill_text"]
 
 
 class VAEDecoderSubmodule(NodeSubmodule):

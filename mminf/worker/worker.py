@@ -91,6 +91,7 @@ class Worker:
             communicator=self.communicator,
             protocol=tensor_comm_protocol,
             tcp_transfer_device=tcp_transfer_device,
+            device=self.device
         )
 
         self.engine_manager = EngineManager.from_config(
@@ -193,7 +194,6 @@ class Worker:
         # Start RDMA reads for tensors that have tensor_info
         self.tensor_manager.start_read_tensors(
             body.request_id, body.initial_inputs,
-            device=self.device
         )
 
         # Signal-only edges (tensor_info is None) can be processed immediately
@@ -235,7 +235,6 @@ class Worker:
         # Start RDMA reads for tensors with tensor_info
         self.tensor_manager.start_read_tensors(
             body.request_id, body.inputs,
-            device=self.device
         )
 
         # Signal-only edges can be processed immediately
