@@ -427,10 +427,10 @@ class LLMSubmodule(NodeSubmodule):
         """
         device = next(self.parameters()).device
 
-        has_cfg = self._batch_get_requires_cfg(
-            per_request_info, request_ids
+        requires_cfg = self._batch_get_requires_cfg(
+            per_request_info
         )
-        labels = self._get_active_labels(graph_walk, has_cfg)
+        labels = self._get_active_labels(graph_walk, requires_cfg)
 
          # these will get filled in
         seq_lens = []
@@ -504,7 +504,7 @@ class LLMSubmodule(NodeSubmodule):
                 **self._get_text_vae_idxs(seq_lens, device)
             }
 
-        if graph_walk == "image_gen" and has_cfg:
+        if graph_walk == "image_gen" and requires_cfg:
             # Batched CFG: plan a single FlashInfer batch across all 3 labels
             # so that image_gen can run one forward pass instead of 3.
             cache_manager.plan_attention_batched_cfg(
@@ -527,7 +527,7 @@ class LLMSubmodule(NodeSubmodule):
                     "prefill_text", "decode"
                 ],
                 labels=labels,
-                snapshots=[("main", "cfg_text")] if graph_walk == "prefill_text" and has_cfg else [],
+                snapshots=[("main", "cfg_text")] if graph_walk == "prefill_text" and requires_cfg else [],
                 write_cache=graph_walk not in ("image_gen", "image_gen_cfg")
             )
 
@@ -537,6 +537,7 @@ class LLMSubmodule(NodeSubmodule):
             ) else val for (key, val) in result.items()
         }
         result["seq_lens"] = seq_lens
+        result["requires_cfg"] =  requires_cfg
 
         return result
 
@@ -949,11 +950,10 @@ class LLMSubmodule(NodeSubmodule):
             result["time_index"] = [time_index]
         return result
 
-    @torch.compiler.disable
-    def _batch_get_requires_cfg(self, per_request_info: dict[str, CurrentForwardPassInfo], request_ids):
+    def _batch_get_requires_cfg(self, per_request_info: dict[str, CurrentForwardPassInfo]):
         return any(
-            per_request_info[rid].requires_cfg
-            for rid in request_ids
+            info.requires_cfg
+            for info in per_request_info.values()
         )
 
     def forward_batched(
@@ -969,21 +969,19 @@ class LLMSubmodule(NodeSubmodule):
         Concatenates inputs across requests, runs a single LLM forward with
         the BatchedCacheManager, then splits outputs back per-request.
         """
-        has_cfg = self._batch_get_requires_cfg(
-            per_request_info, request_ids
-        )
+        requires_cfg = packed_inputs.get("requires_cfg", True)
 
         if graph_walk == "decode":
             return self._forward_decode_batched(
                 cache_manager=cache_manager,
                 request_ids=request_ids,
                 packed_inputs=packed_inputs,
-                has_cfg=has_cfg,
+                requires_cfg=requires_cfg,
             )
         elif graph_walk == "prefill_text":
             self._forward_prefill_text(
                 cache_handle=cache_manager,
-                requires_cfg=has_cfg, **packed_inputs
+                **packed_inputs
             ) # prefill is the same batched and unbatched
             return {rid: [] for rid in request_ids}
         else:
@@ -994,7 +992,7 @@ class LLMSubmodule(NodeSubmodule):
         cache_manager: BatchedCacheManager,
         request_ids: list[str],
         packed_inputs: dict[str, torch.Tensor],
-        has_cfg: bool = False,
+        requires_cfg: bool = False,
         per_request_info: dict[str, CurrentForwardPassInfo] | None=None
     ) -> dict[str, NameToTensorList]:
         """Batched decode: all requests generate 1 token each.
@@ -1009,8 +1007,6 @@ class LLMSubmodule(NodeSubmodule):
 
         plan_attention/plan_rope are called in preprocess_batched.
         """
-        request_ids = cache_manager.request_ids
-
         # 1. Embed and concatenate
         embs = self.embed_tokens(packed_inputs["text_inputs"])
 
@@ -1022,7 +1018,7 @@ class LLMSubmodule(NodeSubmodule):
         )
 
         # 3. CFG sync pass for cfg_img if needed (already planned)
-        if has_cfg:
+        if requires_cfg:
             cache_manager.set_active_label("cfg_img")
             self.language_model(
                 embs, mode="und",

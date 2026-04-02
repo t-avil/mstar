@@ -63,7 +63,7 @@ class TxtFileDataset(BaseDataset):
                     req_type=RequestType.T2T,
                     prompt=line.strip()
                 ))
-        self._resize_data(self.items)
+        self.items = self._resize_data(self.items)
     
     @property
     def num_requests(self):
@@ -102,7 +102,7 @@ class VBenchDataset(BaseDataset):
         self.task = task
         self._num_requests = num_requests
         self.items = self._load_data()
-        self._resize_data(self.items)
+        self.items = self._resize_data(self.items)
     
     @property
     def num_requests(self):
