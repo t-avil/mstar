@@ -35,6 +35,8 @@ for bs in "${BATCH_SIZES[@]}"; do
   NUM_REQUESTS=$NUM_REQUESTS TASK=text_to_image BATCH_SIZE=$bs benchmark/run_benchmark.sh
 done
 
+BATCH_SIZES=(1 2 4 8)
+
 # image_to_image
 for bs in "${BATCH_SIZES[@]}"; do
   NUM_REQUESTS=$(compute_num_requests $bs)

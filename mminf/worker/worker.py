@@ -482,6 +482,7 @@ class Worker:
                 # 3. Pick next batch via MicroScheduler
                 batch = self.scheduler.get_next_batch(self.worker_graphs_manager)
                 if batch is None:
+                    sleep(0.001) # added this (with my original original code) and it works!
                     continue
 
                 # 4. Gather input tensors for the batch
