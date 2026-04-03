@@ -335,7 +335,7 @@ class AREngine(BaseEngine):
             )
             for req_id, info in batch.per_request_info.items():
                 for label, seq_info in info.per_label_seq_info.items():
-                    if needed_labels is None or label not in needed_labels:
+                    if needed_labels is not None and label not in needed_labels:
                         continue
                     self.alloc_manager.sync_retrieve(
                         req_id, label, seq_info
@@ -380,15 +380,17 @@ class AREngine(BaseEngine):
             }
         )
 
+        labels_to_check = []
         for label, seq_info in request_info.per_label_seq_info.items():
-            if needed_labels is None or label not in needed_labels:
+            if needed_labels is not None and label not in needed_labels:
                 continue
-            self.alloc_manager.start_aysnc_retrieve(
+            self.alloc_manager.start_async_retrieve(
                 request_id, label, seq_info
             )
+            labels_to_check.append(label)
         return all([
             self.alloc_manager.check_retrieve_ready(request_id, label) \
-                for label in needed_labels
+                for label in labels_to_check
         ])
         
     def add_request(

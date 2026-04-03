@@ -215,10 +215,10 @@ class PagedAllocationManager:
     def sync_retrieve(
         self, request_id: str, label: str, seq_info: SequenceInfo
     ):
-        self.start_aysnc_retrieve(request_id, label, seq_info)
+        self.start_async_retrieve(request_id, label, seq_info)
         self.wait_for_retrieves(request_id, label)
 
-    def start_aysnc_retrieve(
+    def start_async_retrieve(
         self, request_id: str, label: str, seq_info: SequenceInfo
     ):
         seq_len = seq_info.seq_len
@@ -234,9 +234,9 @@ class PagedAllocationManager:
         read_info = []
 
         for page_pos in range(first_page, last_page + 1):
-            token_start = 0 if page_pos > 0 else (state.seq_len % self.config.page_size)
+            token_start = 0 if page_pos > first_page else (state.seq_len % self.config.page_size)
             token_end = self.config.page_size if page_pos != last_page else (
-                seq_len % self.config.page_size
+                seq_len % self.config.page_size or self.config.page_size
             )
 
             local_page_idx = state.page_indices[page_pos]
@@ -258,7 +258,8 @@ class PagedAllocationManager:
                     ) for local_ptr, remote_ptr in zip(local_ptrs, remote_ptrs)
                 ])
         future = self._async_reader.submit(read_info)
-        self.pending_reads[request_id].setdefault(label, []).append(future)
+        if future is not None:
+            self.pending_reads[request_id].setdefault(label, []).append(future)
         state.seq_len = seq_len
         state.position_id_start = seq_info.pos_id
         state.read_in_progress = True
