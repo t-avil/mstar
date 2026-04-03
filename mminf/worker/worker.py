@@ -289,6 +289,54 @@ class Worker:
             )
 
     # ------------------------------------------------------------------
+    # CPU offloading
+    # ------------------------------------------------------------------
+
+    def _try_offload_cold_request(self, exclude_ids: set[str]) -> bool:
+        """Offload the request with the most GPU pages (not in *exclude_ids*) to CPU.
+
+        Returns True if a request was offloaded, False otherwise.
+        """
+        ar_engine = self.engine_manager.get_ar_engine()
+        if ar_engine is None or ar_engine.cpu_page_pool is None:
+            return False
+        alloc = ar_engine.alloc_manager
+        # Pick the request with the most allocated GPU pages
+        candidates = []
+        for rid, labels in alloc.request_states.items():
+            if rid in exclude_ids:
+                continue
+            total_pages = sum(len(s.page_indices) for s in labels.values())
+            if total_pages > 0:
+                candidates.append((rid, total_pages))
+        if not candidates:
+            return False
+        victim_id = max(candidates, key=lambda x: x[1])[0]
+        freed = alloc.offload_request(victim_id, ar_engine.cpu_page_pool)
+        logger.info(
+            "Offloaded request %s to CPU (%d GPU pages freed)", victim_id, freed
+        )
+        return freed > 0
+
+    def _try_reload_request(self, request_id: str) -> bool:
+        """Reload an offloaded request back to GPU. Returns True if reloaded."""
+        ar_engine = self.engine_manager.get_ar_engine()
+        if ar_engine is None or ar_engine.cpu_page_pool is None:
+            return False
+        if not ar_engine.cpu_page_pool.is_offloaded(request_id):
+            return False
+        try:
+            ar_engine.alloc_manager.reload_request(
+                request_id, ar_engine.cpu_page_pool
+            )
+            logger.info("Reloaded request %s from CPU to GPU", request_id)
+            return True
+        except RuntimeError:
+            # Not enough GPU pages to reload; will retry later
+            logger.debug("Cannot reload request %s yet (insufficient GPU pages)", request_id)
+            return False
+
+    # ------------------------------------------------------------------
     # Batch building
     # ------------------------------------------------------------------
 
@@ -501,7 +549,26 @@ class Worker:
                 finally:
                     if self.enable_nvtx:
                         range_pop(synchronize=False)
-                
+
+                # 5a. Handle allocation failure: push nodes back, try offload, backoff
+                if output.allocation_failed:
+                    # Try to offload a cold request to free GPU pages
+                    self._try_offload_cold_request(
+                        exclude_ids=set(batch.node_objects.keys())
+                    )
+                    for request_id, node in batch.node_objects.items():
+                        wg_id = batch.request_to_worker_graph[request_id]
+                        self.worker_graphs_manager.queues[wg_id].push_back_node(
+                            request_id, node
+                        )
+                    self.scheduler.hold_requests(list(batch.node_objects.keys()))
+                    logger.warning(
+                        "Batch held (OOM): node=%s walk=%s requests=%s",
+                        batch.node_name, batch.graph_walk,
+                        list(batch.node_objects.keys()),
+                    )
+                    continue
+
                 for rid, req_info in node_batch.per_request_info.items():
                     self.worker_graphs_manager.update_request_info(
                         rid, per_label_seq_info=req_info.per_label_seq_info
