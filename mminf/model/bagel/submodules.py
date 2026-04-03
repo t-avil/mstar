@@ -1178,6 +1178,7 @@ class CombineCFGSubmodule(NodeSubmodule):
             "v_main": inputs["v_main"][0],
             "v_cfg_text": inputs["v_cfg_text"][0],
             "v_cfg_img": inputs["v_cfg_img"][0],
+            **metadata.step_metadata
         }
         if "latents" not in inputs or len(inputs["latents"]) == 0:
             H, W = 1024, 1024
