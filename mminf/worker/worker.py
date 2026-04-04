@@ -614,9 +614,18 @@ class Worker:
             self.communicator.send(worker_id, message)
 
         if outputs.completed_worker_graph_ids:
-            # Determine partition_name from the current forward info
+            # Determine partition_name: prefer the graph_walk-based lookup,
+            # fall back to current fwd_info. This is necessary because with
+            # async partitions, a worker may have multiple partitions' fwd_info
+            # and the "current" one may not match the completing graph walk.
             fwd_info = self.worker_graphs_manager.get_fwd_info(request_id)
             partition_name = getattr(fwd_info, 'partition_name', 'default')
+            if graph_walk is not None and graph_walk != fwd_info.graph_walk:
+                # The completing walk doesn't match current fwd_info — this
+                # happens when streaming edges from another partition updated
+                # fwd_info. Use "default" and let the conductor resolve it
+                # from the worker_graph_ids.
+                partition_name = "default"
             message = ConductorMessage(
                 message_type=ConductorMessageType.WORKER_GRAPHS_DONE,
                 body=WorkerGraphsDone(

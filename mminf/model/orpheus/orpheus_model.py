@@ -129,7 +129,7 @@ class OrpheusModel(Model):
                 ),
                 GraphEdge(
                     next_node="snac_decoder",
-                    name="streaming_token",
+                    name="new_token",
                     is_streaming=True,
                 ),
             ],

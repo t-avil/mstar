@@ -842,8 +842,6 @@ class Conductor:
             request_data.streaming_token_count,
         )
 
-        self._un_persist_tensors(request_id, fwd_args.unpersist_tensors)
-
         if fwd_args.request_done:
             pstate.is_done = True
             # If this is a producer partition, mark producer_done for consumers
@@ -853,8 +851,11 @@ class Conductor:
                     request_data.streaming_producer_done = True
                     request_data.partition_states[other_name].producer_done = True
         else:
-            # Send InputSignals for the partition's next forward pass
+            # Send InputSignals first (registers ref counts for the tensors),
+            # then unpersist old tensors that are no longer needed.
             self._send_partition_inputs(request_id, partition_name, fwd_args)
+
+        self._un_persist_tensors(request_id, fwd_args.unpersist_tensors)
 
         # Reset partition forward pass state
         pstate.new_tokens = {}
@@ -935,6 +936,14 @@ class Conductor:
                 producer_done=request_data.streaming_producer_done,
             )
             if ready:
+                logger.debug(
+                    "Kicking consumer partition %s for request %s "
+                    "(accumulated=%d, consumed=%d, producer_done=%s)",
+                    pname, request_id,
+                    request_data.streaming_token_count,
+                    request_data.streaming_consumed_count,
+                    request_data.streaming_producer_done,
+                )
                 self._kick_consumer_partition(request_id, pname)
 
     def _kick_consumer_partition(self, request_id: str, partition_name: str):

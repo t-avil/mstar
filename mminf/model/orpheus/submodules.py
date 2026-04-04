@@ -35,8 +35,9 @@ class OrpheusLLMSubmodule(NodeSubmodule):
         graph_walk: str,
         per_request_inputs: list[NameToTensorList],
         request_ids: list[str],
-        per_request_metadata: dict[str, dict],
         cache_manager: BatchedCacheManager,
+        per_request_info: dict | None = None,
+        per_request_metadata: dict | None = None,
     ) -> dict[str, torch.Tensor]:
         seq_lens = []
 
@@ -112,7 +113,8 @@ class OrpheusLLMSubmodule(NodeSubmodule):
         request_ids: list[str],
         cache_manager: BatchedCacheManager,
         packed_inputs: dict[str, torch.Tensor],
-        per_request_metadata: dict[str, dict],
+        per_request_info: dict | None = None,
+        per_request_metadata: dict | None = None,
     ) -> dict[str, NameToTensorList]:
         """Batched forward pass for prefill and decode."""
         if graph_walk == "decode":
@@ -168,7 +170,7 @@ class SNACDecoderSubmodule(NodeSubmodule):
         request_info,
     ) -> bool:
         """Check if the streaming buffer has enough tokens for a chunk."""
-        tokens = streaming_buffer.get("streaming_token", [])
+        tokens = streaming_buffer.get("new_token", [])
         window = self.config.snac_window_tokens
         return len(tokens) >= window
 
@@ -193,7 +195,7 @@ class SNACDecoderSubmodule(NodeSubmodule):
         step_meta = fwd_info.step_metadata if fwd_info else {}
 
         streaming_buffer = step_meta.get("_streaming_buffer", {})
-        token_tensors = streaming_buffer.get("streaming_token", [])
+        token_tensors = streaming_buffer.get("new_token", [])
 
         window_start = step_meta.get("window_start", 0)
         window_size = step_meta.get("window_size", self.config.snac_window_tokens)
