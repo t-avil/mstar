@@ -355,8 +355,10 @@ class Conductor:
             if info.uuid in uuid_to_ref_count:
                 # duplicate; skip
                 continue
-            uuid_to_ref_count[info.uuid] = self.requests[
-                request_id].persist_signal_ref_cnt[info.uuid]
+            ref_cnt = self.requests[request_id].persist_signal_ref_cnt.get(info.uuid)
+            if ref_cnt is None:
+                continue  # tensor not tracked (e.g., from a different partition)
+            uuid_to_ref_count[info.uuid] = ref_cnt
             uuids.append(info.uuid)
         self.requests[request_id].remove_persist_signal_uuids(uuids)
 
@@ -492,20 +494,35 @@ class Conductor:
         Called when we see an EOS token, e.g.
         """
         logger.info("Request %s done", request_id)
-        for worker_id in set(self.requests[request_id].worker_graph_to_worker.values()):
+        request_data = self.requests[request_id]
+        for worker_id in set(request_data.worker_graph_to_worker.values()):
             msg = WorkerMessage(
                 message_type=WorkerMessageType.REMOVE_REQUEST,
                 body=RemoveRequest(request_id)
             )
             self.communicator.send(worker_id, msg)
+
+        # For partitioned requests, aggregate final outputs from all partitions.
+        # Use the fwd_pass_number from the partition that produces output
+        # (e.g., SNAC), so the API server's received_final_chunks check works.
+        final_fwd_pass = request_data.fwd_pass_number
+        final_outputs = list(request_data.curr_forward_outputs)
+        if request_data.has_partitions:
+            for pstate in request_data.partition_states.values():
+                if pstate.curr_forward_outputs:
+                    # Use this partition's last completed fwd_pass_number
+                    # (fwd_pass_number was already incremented past the last pass)
+                    final_fwd_pass = max(0, pstate.fwd_pass_number - 1)
+                final_outputs += pstate.curr_forward_outputs
+
         self.communicator.send(
             "api_server",
             APIServerMessage(
                 message_type="request_complete",
                 body=RequestComplete(
                     request_id=request_id,
-                    final_forward_pass=self.requests[request_id].fwd_pass_number,
-                    final_forward_outputs=self.requests[request_id].curr_forward_outputs
+                    final_forward_pass=final_fwd_pass,
+                    final_forward_outputs=final_outputs,
                 )
             )
         )
@@ -799,9 +816,9 @@ class Conductor:
         if body.new_tokens:
             for name, tokens in body.new_tokens.items():
                 pstate.new_tokens.setdefault(name, []).extend(tokens)
-                pstate.num_output_tokens += len(tokens)
-                # Also update streaming token count for consumer partitions
+                # Track raw token count for streaming window positioning
                 request_data.streaming_token_count += len(tokens)
+                pstate.num_output_tokens += len(tokens)
 
         pstate.completed_worker_graph_ids.update(body.worker_graph_ids)
         pstate.curr_forward_outputs += body.output_signal_names if isinstance(
@@ -837,6 +854,15 @@ class Conductor:
         prev_walk = pstate.metadata.graph_walk
         pstate.metadata = fwd_args.full_metadata
 
+        pdef = request_data.partition_definitions[partition_name]
+        if not pdef.producer_partitions and \
+                request_data.streaming_token_count >= request_data.max_output_tokens:
+            logger.info(
+                "Partition %s reached max output tokens %d. Ending.",
+                partition_name, request_data.max_output_tokens,
+            )
+            fwd_args.request_done = True
+
         logger.debug(
             "Partition %s of request %s: %s -> %s (request_done=%s, tokens=%d)",
             partition_name, request_id, prev_walk,
@@ -862,6 +888,7 @@ class Conductor:
         # Reset partition forward pass state
         pstate.new_tokens = {}
         pstate.completed_worker_graph_ids = set()
+        pstate.current_worker_graph_ids = set()
         pstate.fwd_pass_number += 1
         pstate.random_seed += 1
 
@@ -1035,8 +1062,9 @@ class Conductor:
                     if all_done:
                         completed_requests.append(request_id)
 
-                for request_id in completed_requests:
-                    self._process_request_done(request_id)
+                for request_id in dict.fromkeys(completed_requests):
+                    if request_id in self.requests:
+                        self._process_request_done(request_id)
             except Exception:
                 logger.exception("Conductor error in main loop")
             finally:

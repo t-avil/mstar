@@ -200,31 +200,36 @@ class SNACDecoderSubmodule(NodeSubmodule):
         window_start = step_meta.get("window_start", 0)
         window_size = step_meta.get("window_size", self.config.snac_window_tokens)
 
+        # Flatten all token tensors into a list of raw vocab IDs
+        all_token_ids = []
+        for tensor in token_tensors:
+            vals = tensor.cpu().numpy().tolist()
+            if isinstance(vals, list):
+                all_token_ids.extend(vals)
+            else:
+                all_token_ids.append(int(vals))
+
+        # Extract the window from raw tokens FIRST, then filter + convert
+        window_tokens = all_token_ids[window_start:window_start + window_size]
+
         # Convert raw LLM vocab IDs to SNAC audio codes, filtering out
         # non-audio tokens (matching the reference decoder's behavior).
         base_id = self.config.custom_token_base_id
         min_audio_token = base_id + 10  # custom_token_10 is the first valid audio token
-        audio_codes = []
+        snac_codes = []
         count = 0
-        for tensor in token_tensors:
-            vals = tensor.cpu().numpy().tolist()
-            token_ids = vals if isinstance(vals, list) else [int(vals)]
-            for t in token_ids:
-                if t < min_audio_token:
-                    continue  # skip non-audio tokens
-                code = (t - base_id) - 10 - ((count % 7) * 4096)
-                if code > 0:
-                    audio_codes.append(code)
-                    count += 1
-
-        # Extract the window
-        window_end = window_start + window_size
-        snac_codes = audio_codes[window_start:window_end]
+        for t in window_tokens:
+            if t < min_audio_token:
+                continue  # skip non-audio tokens
+            code = (t - base_id) - 10 - ((count % 7) * 4096)
+            if 0 <= code <= 4096:
+                snac_codes.append(code)
+                count += 1
 
         logger.debug(
-            "SNAC preprocess: valid_codes=%d, window=[%d:%d], chunk_len=%d, first_codes=%s",
-            len(audio_codes), window_start, window_end, len(snac_codes),
-            snac_codes[:7] if snac_codes else "[]",
+            "SNAC preprocess: buf=%d, window=[%d:%d], codes=%d, first=%s",
+            len(all_token_ids), window_start, window_start + window_size,
+            len(snac_codes), snac_codes[:7] if snac_codes else "[]",
         )
 
         return {
@@ -235,9 +240,9 @@ class SNACDecoderSubmodule(NodeSubmodule):
 
     def forward(self, request_id: str, audio_token_ids: list[int], **kwargs) -> NameToTensorList:
         if not audio_token_ids or len(audio_token_ids) < 7:
-            logger.warning(
-                "SNAC forward: no/insufficient token IDs for request %s (got %d)",
-                request_id, len(audio_token_ids) if audio_token_ids else 0,
+            logger.debug(
+                "SNAC forward: skipping chunk with %d token IDs (need >=7) for request %s",
+                len(audio_token_ids) if audio_token_ids else 0, request_id,
             )
             return {}
         device = next(self.snac_model.parameters()).device

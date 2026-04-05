@@ -81,6 +81,9 @@ class PreprocessWorker:
 
     def new_result_tensors(self, input: ResultTensors):
         name = input.graph_edge.name
+        if input.request_id not in self.output_fwd_pass_numbers:
+            logger.debug("Late result_tensors for cleaned-up request %s, ignoring", input.request_id)
+            return
         self.output_fwd_pass_numbers[input.request_id][name] = max(
             self.output_fwd_pass_numbers[input.request_id].get(name, -1),
             input.fwd_pass_number

@@ -342,9 +342,12 @@ class WorkerGraphsManager:
         """
         node_to_worker = {}
         for graph_id in worker_graph_ids:
-            self.queues[graph_id].add_request(request_id)
+            if graph_id in self.queues:
+                self.queues[graph_id].add_request(request_id)
 
         for worker_graph_id, worker_id in worker_graph_to_worker.items():
+            if worker_graph_id not in self.all_worker_graph_ids_to_graph_walks:
+                continue
             for graph_walk in self.all_worker_graph_ids_to_graph_walks[worker_graph_id]:
                 node_to_worker.update({
                     NodeAndGraphWalk(
@@ -353,13 +356,14 @@ class WorkerGraphsManager:
                     ): worker_id for name in self.all_worker_graph_ids_to_nodes[worker_graph_id]
                 })
         graph_walk = current_fwd_info.graph_walk
+        my_worker_graph_ids = [gid for gid in worker_graph_ids if gid in self.queues]
         self.per_request_info[request_id] = PerRequestInfo(
             node_to_worker=node_to_worker,
-            worker_graph_ids=worker_graph_ids,
+            worker_graph_ids=my_worker_graph_ids,
             current_fwd_info=current_fwd_info,
             graph_walk_worker_graph_ids = [
-                graph_id for graph_id in worker_graph_ids \
-                    if graph_walk in self.all_worker_graph_ids_to_graph_walks[graph_id]
+                graph_id for graph_id in my_worker_graph_ids
+                if graph_walk in self.all_worker_graph_ids_to_graph_walks[graph_id]
             ]
         )
 

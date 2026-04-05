@@ -269,12 +269,8 @@ class APIServer:
         stale = [
             rid
             for rid, ts in self.recently_completed.items()
-            if (
-                self.preprocess_worker.received_final_chunks(
-                    rid, self.pending_requests[rid]["final_forward_pass"],
-                    self.pending_requests[rid]["final_forward_outputs"]
-                ) and not self.preprocess_worker.has_pending_tensors(rid)
-            ) or (now - ts) >= self._recently_completed_ttl
+            if not self.preprocess_worker.has_pending_tensors(rid)
+            or (now - ts) >= self._recently_completed_ttl
         ]
         for rid in stale:
             # only set the event when there are no more pending chunks
