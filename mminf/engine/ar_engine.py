@@ -425,13 +425,18 @@ class AREngine(BaseEngine):
         )
 
         labels_to_check = []
-        for label, seq_info in request_info.per_label_seq_info.items():
-            if needed_labels is not None and label not in needed_labels:
-                continue
-            self.alloc_manager.start_async_retrieve(
-                request_id, label, seq_info
-            )
-            labels_to_check.append(label)
+        try:
+            for label, seq_info in request_info.per_label_seq_info.items():
+                if needed_labels is not None and label not in needed_labels:
+                    continue
+                self.alloc_manager.start_async_retrieve(
+                    request_id, label, seq_info
+                )
+                labels_to_check.append(label)
+        except RuntimeError:
+            # Not enough pages to allocate for retrieval — not ready
+            return False
+
         return all([
             self.alloc_manager.check_retrieve_ready(request_id, label) \
                 for label in labels_to_check
