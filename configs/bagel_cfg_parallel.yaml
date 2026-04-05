@@ -1,6 +1,6 @@
 model: "bagel"
 max_seq_len: 32768
-max_concurrent_requests: 16
+max_concurrent_requests: 32
 
 kv_cache:
   cpu_offload_pages: 2048
