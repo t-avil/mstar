@@ -132,7 +132,7 @@ class Worker:
 
         # CPU offloading: LRU tracking and eviction policy
         self._last_active: dict[str, float] = {}  # request_id -> monotonic timestamp
-        self.eviction_policy = EvictionPolicy.LRU
+        self.eviction_policy = EvictionPolicy.MOST_PAGES
 
     def _compute_store_write_policy(
         self,
