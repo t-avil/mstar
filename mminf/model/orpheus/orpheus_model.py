@@ -250,6 +250,7 @@ class OrpheusModel(Model):
             "is_prefill": metadata.is_prefill,
             "temperature": self.config.temperature,
             "top_p": self.config.top_p,
+            "repetition_penalty": self.config.repetition_penalty,
         }
 
         return ForwardPassArgs(
@@ -366,6 +367,7 @@ class OrpheusModel(Model):
                 "is_prefill": True,
                 "temperature": self.config.temperature,
                 "top_p": self.config.top_p,
+                "repetition_penalty": self.config.repetition_penalty,
             },
         )
 

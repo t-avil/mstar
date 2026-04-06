@@ -29,6 +29,11 @@ class OrpheusLLMSubmodule(NodeSubmodule):
         self.embed_tokens = language_model.model.embed_tokens
         self.lm_head = language_model.lm_head
         self.config = config
+        self._seen_ids: dict[str, list[int]] = {}
+
+    def cleanup_request(self, request_id: str):
+        """Clean up per-request repetition penalty state."""
+        self._seen_ids.pop(request_id, None)
 
     def preprocess(
         self,
@@ -46,11 +51,24 @@ class OrpheusLLMSubmodule(NodeSubmodule):
                 "text_inputs": [inp["text_inputs"][0] for inp in per_request_inputs],
             }
             seq_lens = [inp.shape[0] for inp in result["text_inputs"]]
+            # Seed seen-token history with prompt ids for repetition penalty
+            for rid, inp in zip(request_ids, per_request_inputs):
+                self._seen_ids[rid] = inp["text_inputs"][0].tolist()
         elif graph_walk == "decode":
             result = {
                 "text_inputs": [inp["text_inputs"][0] for inp in per_request_inputs],
             }
             seq_lens = [1] * len(per_request_inputs)
+            # Append incoming token to seen history and expose to sampler
+            for rid, inp in zip(request_ids, per_request_inputs):
+                token_ids = inp["text_inputs"][0].tolist()
+                self._seen_ids.setdefault(rid, []).extend(
+                    token_ids if isinstance(token_ids, list) else [token_ids]
+                )
+                if per_request_info and rid in per_request_info:
+                    meta = per_request_info[rid].step_metadata
+                    meta["seen_token_ids"] = self._seen_ids[rid]
+                    meta["repetition_penalty"] = self.config.repetition_penalty
         else:
             raise ValueError(f"Unknown graph walk for OrpheusLLM: {graph_walk!r}")
 

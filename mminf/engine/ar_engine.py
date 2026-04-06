@@ -191,7 +191,12 @@ class AREngine(BaseEngine):
             top_k = meta.get("top_k", 0)
             top_p = meta.get("top_p", 1.0)
             # TODO add random seed here
-            token = sample_tokens(logits, temperature=temperature, top_k=top_k, top_p=top_p)
+            rep_pen = meta.get("repetition_penalty", 1.0)
+            seen_ids = meta.get("seen_token_ids", None)
+            token = sample_tokens(
+                logits, temperature=temperature, top_k=top_k, top_p=top_p,
+                repetition_penalty=rep_pen, seen_token_ids=seen_ids,
+            )
             tensors["new_token"] = [token]
             del tensors["logits"]
 
@@ -449,6 +454,9 @@ class AREngine(BaseEngine):
         if self.cpu_page_pool is not None:
             self.cpu_page_pool.remove_request(request_id)
         self.alloc_manager.remove_request(request_id)
+        for sub in self.submodules.values():
+            if hasattr(sub, 'cleanup_request'):
+                sub.cleanup_request(request_id)
 
     def pause_request(
         self, request_id: str, cache_label: str = "main",

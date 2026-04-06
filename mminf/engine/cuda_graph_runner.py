@@ -464,6 +464,8 @@ class CudaGraphRunner:
                             temperature=meta.get("temperature", 0.6),
                             top_k=meta.get("top_k", 0),
                             top_p=meta.get("top_p", 1.0),
+                            repetition_penalty=meta.get("repetition_penalty", 1.0),
+                            seen_token_ids=meta.get("seen_token_ids", None),
                         )
                         outputs[rid]["new_token"] = [token.clone()]
                     elif isinstance(val, list):
