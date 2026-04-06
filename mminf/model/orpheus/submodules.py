@@ -123,6 +123,9 @@ class OrpheusLLMSubmodule(NodeSubmodule):
         logits = self.lm_head(hidden[-1:])
         return {"logits": [logits]}
 
+    def can_batch(self, batch) -> bool:
+        return True
+
     def forward_batched(
         self,
         graph_walk: str,

@@ -405,10 +405,12 @@ class CudaGraphRunner:
         real_inputs = []
         for i in range(batch_size):
             real_inputs.append(per_request_inputs[i])
-        # Pad with dummy inputs for remaining slots
+        # Pad with dummy inputs for remaining slots (use a dummy token tensor
+        # so submodule.preprocess doesn't crash on empty lists)
+        dummy_token = torch.zeros(1, dtype=torch.long, device=self.device)
         for i in range(batch_size, padded_bs):
             real_inputs.append(
-                {"text_inputs": []}
+                {"text_inputs": [dummy_token]}
             )
 
         # Update metadata for real requests
