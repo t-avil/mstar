@@ -79,12 +79,12 @@ class OrpheusModel(Model):
 
         self._submodule_cache: dict[str, NodeSubmodule | None] = {}
 
-    # -------------------------------------------------------------------
-    # Model ABC: autocast dtype
-    # -------------------------------------------------------------------
+    # # -------------------------------------------------------------------
+    # # Model ABC: autocast dtype
+    # # -------------------------------------------------------------------
 
-    def get_autocast_dtype(self):
-        return torch.float32
+    # def get_autocast_dtype(self):
+    #     return torch.float32
 
     # -------------------------------------------------------------------
     # Model ABC: KV cache config
