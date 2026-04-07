@@ -300,7 +300,10 @@ class OrpheusModel(Model):
 
         step_metadata = {"consumed_tokens": stride}
 
-        # Check if this is the last chunk
+        # Check if this is the last chunk. Basically, the new_consumed = consumed + stride 
+        # is only used to calculate is_last. it's asking "after the worker consumes another 
+        # stride's worth of tokens, will there be enough left for another chunk?"
+        # It's not actually advancing any state.
         new_consumed = consumed + stride
         remaining_after = token_buffer_count - new_consumed
         is_last = producer_done and remaining_after < stride
