@@ -147,13 +147,17 @@ class MicroScheduler:
                 # Skip requests in OOM backoff
                 if request_id in self.held_until:
                     continue
-                primary_walk = worker_graphs_manager.get_graph_walk(request_id)
+                # Look up the partition for nodes in this queue
+                node_partition = None
+                if node_names:
+                    node_partition = worker_graphs_manager.get_partition_for_node(node_names[0])
+                primary_walk = worker_graphs_manager.get_graph_walk(request_id, node_partition)
                 if primary_walk in queue.graph_walks:
                     graph_walk = primary_walk
                 else:
                     # Side walk node — use the queue's graph walk
                     graph_walk = next(iter(queue.graph_walks))
-                fwd_info = worker_graphs_manager.get_fwd_info(request_id)
+                fwd_info = worker_graphs_manager.get_fwd_info(request_id, node_partition)
                 for sname in node_names:
                     # check if the node is ready on the engine level
                     # (e.g., for AR, whether the kv cache is read in)
