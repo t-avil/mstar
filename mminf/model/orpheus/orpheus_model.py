@@ -47,9 +47,10 @@ def _resolve_local_hf_snapshot(repo_id: str, cache_dir: str | None = None) -> st
         local_dir = snapshot_download(
             repo_id=repo_id,
             cache_dir=cache_dir,
-            local_files_only=True,
+            local_files_only=False,
         )
-    except Exception:
+    except Exception as e:
+        logger.warning("Error downloading from huggingface: %s", str(e))
         return repo_id
     return str(Path(local_dir))
 
