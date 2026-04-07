@@ -148,9 +148,7 @@ class Worker:
         if self.partition_topology:
             my_node_names = set()
             for wg in my_worker_graphs:
-                for node in (wg.section if isinstance(wg.section, list) else [wg.section]):
-                    if hasattr(node, 'name'):
-                        my_node_names.add(node.name)
+                my_node_names.update(wg.section.get_node_names())
             for conn in self.partition_topology.connections:
                 # Check if any graph walk graph node for the consumer partition is on this worker
                 # by checking if the streaming edge's next_node is in my nodes
@@ -423,8 +421,11 @@ class Worker:
                         name=edge_name,
                         tensor_info=tensor_infos.get(edge_name, []),
                     )
+                    # Route to all worker graphs (not just current walk) since
+                    # streaming chunks arrive cross-partition
                     self.worker_graphs_manager.process_new_inputs(
                         request_id=request_id, inputs=[synthetic_edge],
+                        all_walks=True,
                     )
 
     def _check_ready_tensors(self) -> None:

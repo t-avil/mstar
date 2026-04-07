@@ -201,11 +201,19 @@ class WorkerGraphsManager:
         self,
         request_id: str,
         inputs: list[GraphEdge],
+        all_walks: bool = False,
     ):
         """
         Updates queues with new inputs for a request.
+
+        When ``all_walks`` is True, routes inputs to ALL worker graphs
+        (not just the current walk's). This is needed for streaming
+        chunks that arrive cross-partition.
         """
-        worker_graph_ids = self.per_request_info[request_id].graph_walk_worker_graph_ids
+        if all_walks:
+            worker_graph_ids = self.per_request_info[request_id].worker_graph_ids
+        else:
+            worker_graph_ids = self.per_request_info[request_id].graph_walk_worker_graph_ids
         for worker_graph_id in worker_graph_ids:
             self.queues[worker_graph_id].process_new_inputs(request_id, inputs)
 
