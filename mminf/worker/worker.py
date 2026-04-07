@@ -550,6 +550,7 @@ class Worker:
         """Gather input tensors from tensor_manager for all requests in the batch."""
         per_request_inputs: dict[str, NameToTensorList] = {}
         per_request_info: dict[CurrentForwardPassInfo] = {}
+        batch_partition = self.worker_graphs_manager.get_partition_for_node(batch.node_name)
 
         for request_id, node in batch.node_objects.items():
             tensors = {}
@@ -560,7 +561,7 @@ class Worker:
                     ) for info in node.ready_inputs[input_name].tensor_info
                 ]
             per_request_inputs[request_id] = tensors
-            per_request_info[request_id] = self.worker_graphs_manager.get_fwd_info(request_id)
+            per_request_info[request_id] = self.worker_graphs_manager.get_fwd_info(request_id, batch_partition)
 
         return NodeBatch(
             node_name=batch.node_name,
@@ -646,6 +647,7 @@ class Worker:
     def _send_outputs(
         self, request_id: str, outputs: NodeOutputRouting,
         graph_walk: str | None = None,
+        partition_name: str | None = None,
     ) -> None:
         """
         Send outputs to other workers and to the conductor.
@@ -653,14 +655,14 @@ class Worker:
         WORKER_GRAPHS_DONE message to avoid race conditions.
         """
         if graph_walk is None:
-            graph_walk = self.worker_graphs_manager.get_graph_walk(request_id)
+            graph_walk = self.worker_graphs_manager.get_graph_walk(request_id, partition_name)
         for worker_id, edges in outputs.to_workers.items():
             message = WorkerMessage(
                 message_type=WorkerMessageType.INPUT_SIGNALS,
                 body=InputSignals(
                     request_id=request_id,
                     inputs=edges,
-                    request_info=self.worker_graphs_manager.get_fwd_info(request_id)
+                    request_info=self.worker_graphs_manager.get_fwd_info(request_id, partition_name)
                 ),
             )
             self.communicator.send(worker_id, message)
@@ -700,7 +702,7 @@ class Worker:
                         request_id=request_id,
                         modality=graph_edge.output_modality,
                         graph_edge=graph_edge,
-                        fwd_pass_number=self.worker_graphs_manager.get_fwd_number(request_id),
+                        fwd_pass_number=self.worker_graphs_manager.get_fwd_number(request_id, partition_name),
                         metadata={}
                     )
                 )
@@ -718,14 +720,15 @@ class Worker:
                 body=InputSignals(
                     request_id=request_id,
                     inputs=edges,
-                    request_info=self.worker_graphs_manager.get_fwd_info(request_id),
+                    request_info=self.worker_graphs_manager.get_fwd_info(request_id, partition_name),
                 ),
             )
             self.communicator.send(worker_id, message)
 
         if outputs.completed_worker_graph_ids:
-            fwd_info = self.worker_graphs_manager.get_fwd_info(request_id)
-            partition_name = getattr(fwd_info, 'partition_name', 'default')
+            fwd_info = self.worker_graphs_manager.get_fwd_info(request_id, partition_name)
+            if partition_name is None:
+                partition_name = getattr(fwd_info, 'partition_name', 'default')
             req_info = self.worker_graphs_manager.per_request_info.get(request_id)
             p_done = req_info.stream_partition_done if req_info else False
 
@@ -743,7 +746,7 @@ class Worker:
                     persist_signals=self.worker_graphs_manager.flush_persist_signals(request_id),
                     new_tokens=self.worker_graphs_manager.flush_new_tokens(request_id),
                     output_signal_names=self.worker_graphs_manager.flush_output_signals(request_id),
-                    per_label_seq_info=self.worker_graphs_manager.get_seq_info(request_id),
+                    per_label_seq_info=self.worker_graphs_manager.get_seq_info(request_id, partition_name),
                     partition_name=partition_name,
                     partition_done=p_done,
                     stream_tokens_consumed=stream_consumed,
@@ -830,9 +833,12 @@ class Worker:
                 for rid in batch.node_objects:
                     self._last_active[rid] = now
 
+                batch_partition = self.worker_graphs_manager.get_partition_for_node(batch.node_name)
+
                 for rid, req_info in node_batch.per_request_info.items():
                     self.worker_graphs_manager.update_request_info(
-                        rid, per_label_seq_info=req_info.per_label_seq_info
+                        rid, per_label_seq_info=req_info.per_label_seq_info,
+                        partition_name=batch_partition,
                     )
 
                 # 5b. Free consumed input tensors
@@ -854,6 +860,7 @@ class Worker:
                     self._send_outputs(
                         request_id, routing_per_request[request_id],
                         graph_walk=batch.graph_walk,
+                        partition_name=batch_partition,
                     )
             except Exception:
                 logger.exception("Worker %s error in main loop", self.worker_id)
