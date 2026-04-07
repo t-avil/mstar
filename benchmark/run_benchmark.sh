@@ -1,11 +1,18 @@
 #!/bin/bash
 set -euo pipefail
 
-WHO=naomi
-CACHE_DIR=/mnt/storage/$WHO/vbench
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="$SCRIPT_DIR/../test/bagel/.env"
+if [ -f "$ENV_FILE" ]; then
+    source "$ENV_FILE"
+fi
+
+HOST=${HOST:-0.0.0.0}
+PORT=${PORT:-8000}
+CACHE_DIR=${CACHE_DIR:-/mnt/storage/${WHO:-$USER}/vbench}
 
 python -m benchmark.runner \
-    --url "${URL:-http://localhost:8000}" \
+    --url "${URL:-http://${HOST}:${PORT}}" \
     --model "${MODEL:-bagel}" \
     --dataset ${DATASET:-vbench} \
     --profiling-type "${PROF_TYPE:-offline}" \
