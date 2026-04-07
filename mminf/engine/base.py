@@ -89,7 +89,8 @@ class BaseEngine(ABC):
         self, node_name: str, request_id: str,
         request_info: CurrentForwardPassInfo,
     ):
-        """Check if the engine is ready to execute.
+        """
+        Check if the engine is ready to execute.
         """
         return True
 
