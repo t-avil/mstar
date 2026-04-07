@@ -208,8 +208,9 @@ class OrpheusModel(Model):
             conn = incoming_connections[0] if incoming_connections else None
             token_buffer_count = conn.token_count if conn else 0
             producer_done = conn.producer_done if conn else False
+            consumed = conn.consumed_count if conn else 0
             return self._get_snac_partition_forward(
-                partition_metadata, token_buffer_count, producer_done,
+                partition_metadata, token_buffer_count, producer_done, consumed,
             )
         raise ValueError(f"Unknown partition: {partition_name!r}")
 
@@ -269,6 +270,7 @@ class OrpheusModel(Model):
         metadata: CurrentForwardConductorMetadata,
         token_buffer_count: int,
         producer_done: bool,
+        consumed: int = 0,
     ) -> ForwardPassArgs:
         """SNAC partition: trigger one streaming chunk decode.
 
@@ -276,8 +278,11 @@ class OrpheusModel(Model):
         the last 28 valid codes (matching the reference decoder). The
         conductor just needs to trigger it periodically and track whether
         there are more tokens to process.
+
+        ``consumed`` comes from the StreamingConnectionState.consumed_count,
+        which is updated from the worker's StreamBuffer via
+        WorkerGraphsDone.stream_tokens_consumed.
         """
-        consumed = metadata.kwargs.get("snac_consumed", 0)
         stride = self.config.snac_stride_tokens
 
         metadata.graph_walk = "snac_chunk"
@@ -293,20 +298,16 @@ class OrpheusModel(Model):
                 request_done=True,
             )
 
-        # Advance consumed count by stride (raw tokens)
-        new_consumed = consumed + stride
-        metadata.kwargs["snac_consumed"] = new_consumed
-
-        graph_edge = GraphEdge(next_node="snac_decoder", name="trigger")
         step_metadata = {"consumed_tokens": stride}
 
         # Check if this is the last chunk
+        new_consumed = consumed + stride
         remaining_after = token_buffer_count - new_consumed
         is_last = producer_done and remaining_after < stride
 
         return ForwardPassArgs(
             full_metadata=metadata,
-            inputs=[graph_edge],
+            inputs=[],
             unpersist_tensors=[],
             step_metadata=step_metadata,
             request_done=is_last,
@@ -391,15 +392,6 @@ class OrpheusModel(Model):
                 unpersist_tensors=[],
             )
         raise ValueError(f"Unknown partition: {partition_name!r}")
-
-    def get_forward_pass_args(
-        self,
-        metadata: CurrentForwardConductorMetadata,
-        persist_signals: dict[str, list[TensorPointerInfo]],
-        new_tokens: dict[str, list[int]],
-    ) -> ForwardPassArgs:
-        # Delegate to the LLM partition logic (single-partition fallback path).
-        return self._get_llm_partition_forward(metadata, persist_signals, new_tokens)
 
     # -------------------------------------------------------------------
     # Model ABC: postprocess
