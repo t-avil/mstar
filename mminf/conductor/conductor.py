@@ -601,6 +601,15 @@ class Conductor:
                     if conn.from_partition == partition_name and conn.edge_name == name:
                         conn.token_count += len(tokens)
 
+        # Update consumed counts from worker-reported stream consumption
+        if body.stream_tokens_consumed:
+            for conn in request_data.streaming_connections.values():
+                if conn.from_partition == partition_name:
+                    continue  # skip producer connections
+                consumed = body.stream_tokens_consumed.get(conn.edge_name, 0)
+                if consumed > conn.consumed_count:
+                    conn.consumed_count = consumed
+
         pstate.completed_worker_graph_ids.update(body.worker_graph_ids)
         pstate.curr_forward_outputs += body.output_signal_names if isinstance(
             body.output_signal_names, list
