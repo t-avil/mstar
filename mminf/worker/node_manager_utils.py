@@ -134,6 +134,8 @@ class PerRequestInfo:
         this list only includes the decode worker graph)
     - pending_persist_signals: buffered persist signals awaiting flush on
         WORKER_GRAPHS_DONE
+    - partition_fwd_infos: per-partition forward info for the colocated case
+        where multiple partitions run on the same worker
     - tensors: TBD
     """
     node_to_worker: dict[NodeAndGraphWalk, str]  # for all nodes
@@ -142,6 +144,11 @@ class PerRequestInfo:
 
     # graph_walk_worker_graph_ids = worker graphs for current graph walk
     graph_walk_worker_graph_ids: list[str] = field(default_factory=list) # for this worker
+
+    # Per-partition forward info (partition_name -> info). In the colocated case,
+    # a worker has nodes from multiple partitions; this dict lets each partition’s
+    # fwd_info be tracked independently.
+    partition_fwd_infos: dict[str, CurrentForwardPassInfo] = field(default_factory=dict)
 
     pending_persist_signals: list[GraphEdge] = field(default_factory=list)
     pending_new_tokens: dict[str, list[int]] = field(default_factory=dict)
@@ -165,6 +172,11 @@ class WorkerGraphsManager:
     all_worker_graph_ids_to_graph_walks: dict[str, set[str]] # for worker graphs on different workers too
     all_worker_graph_ids_to_nodes: dict[str, str] # for worker graphs on different workers too
 
+    # Maps node_name -> partition_name. Populated from the model's partitions
+    # and graph walk definitions. Used to look up which partition a node belongs
+    # to in the colocated case.
+    node_to_partition: dict[str, str] = field(default_factory=dict)
+
     def update_request_info(
         self, request_id: str,
         current_fwd_info: CurrentForwardPassInfo | None=None,
@@ -179,23 +191,33 @@ class WorkerGraphsManager:
                         if graph_walk in self.all_worker_graph_ids_to_graph_walks[graph_id]
                 ]
             req_info.current_fwd_info = current_fwd_info
+            # Also store per-partition for the colocated case
+            partition_name = getattr(current_fwd_info, 'partition_name', 'default')
+            req_info.partition_fwd_infos[partition_name] = current_fwd_info
         if per_label_seq_info is not None:
             req_info.current_fwd_info.per_label_seq_info = {
                 **req_info.current_fwd_info.per_label_seq_info,
                 **per_label_seq_info
             }
 
-    def get_graph_walk(self, request_id: str):
-        return self.per_request_info[request_id].current_fwd_info.graph_walk
+    def get_graph_walk(self, request_id: str, partition_name: str | None = None):
+        return self.get_fwd_info(request_id, partition_name).graph_walk
 
-    def get_seq_info(self, request_id: str):
-        return self.per_request_info[request_id].current_fwd_info.per_label_seq_info
+    def get_seq_info(self, request_id: str, partition_name: str | None = None):
+        return self.get_fwd_info(request_id, partition_name).per_label_seq_info
 
-    def get_fwd_number(self, request_id: str):
-        return self.per_request_info[request_id].current_fwd_info.fwd_index
+    def get_fwd_number(self, request_id: str, partition_name: str | None = None):
+        return self.get_fwd_info(request_id, partition_name).fwd_index
 
-    def get_fwd_info(self, request_id: str):
-        return self.per_request_info[request_id].current_fwd_info
+    def get_fwd_info(self, request_id: str, partition_name: str | None = None):
+        req_info = self.per_request_info[request_id]
+        if partition_name and partition_name in req_info.partition_fwd_infos:
+            return req_info.partition_fwd_infos[partition_name]
+        return req_info.current_fwd_info
+
+    def get_partition_for_node(self, node_name: str) -> str | None:
+        """Look up which partition a node belongs to."""
+        return self.node_to_partition.get(node_name)
 
     def process_new_inputs(
         self,
@@ -368,6 +390,7 @@ class WorkerGraphsManager:
                 })
         graph_walk = current_fwd_info.graph_walk
         my_worker_graph_ids = [gid for gid in worker_graph_ids if gid in self.queues]
+        partition_name = getattr(current_fwd_info, 'partition_name', 'default')
         self.per_request_info[request_id] = PerRequestInfo(
             node_to_worker=node_to_worker,
             worker_graph_ids=my_worker_graph_ids,
@@ -375,7 +398,8 @@ class WorkerGraphsManager:
             graph_walk_worker_graph_ids = [
                 graph_id for graph_id in my_worker_graph_ids
                 if graph_walk in self.all_worker_graph_ids_to_graph_walks[graph_id]
-            ]
+            ],
+            partition_fwd_infos={partition_name: current_fwd_info},
         )
 
     def remove_request(self, request_id: str):
