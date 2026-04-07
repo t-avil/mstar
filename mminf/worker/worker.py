@@ -414,7 +414,7 @@ class Worker:
         """Check all active StreamBuffers; when a chunk is ready, feed it as a normal input."""
         for request_id, req_info in list(self.worker_graphs_manager.per_request_info.items()):
             for edge_name, sbuf in req_info.stream_buffers.items():
-                while sbuf.has_chunk_ready():
+                if sbuf.has_chunk_ready():
                     chunk = sbuf.pop_chunk()
                     chunk_tensor = chunk.data.get("data")
                     if chunk_tensor is None:

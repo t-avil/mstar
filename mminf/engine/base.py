@@ -90,18 +90,8 @@ class BaseEngine(ABC):
         request_info: CurrentForwardPassInfo,
     ):
         """Check if the engine is ready to execute.
-
-        Default implementation delegates to submodule's check_streaming_ready
-        if streaming buffers are set and the submodule supports it.
         """
-        if self._streaming_buffers is None:
-            return True
-        submodules = getattr(self, 'submodules', {})
-        submodule = submodules.get(node_name) if isinstance(submodules, dict) else None
-        if submodule is None or not hasattr(submodule, 'check_streaming_ready'):
-            return True
-        buf = self._streaming_buffers.get(request_id, {})
-        return submodule.check_streaming_ready(buf, request_info)
+        return True
 
     def warmup(self) -> None:
         """Optional CUDA graph capture. Override in subclasses."""
