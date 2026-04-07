@@ -63,10 +63,13 @@ class StreamBuffer:
         """Producer signals no more items will arrive."""
         self.producer_done = True
 
+    def producer_done_and_all_read(self) -> bool:
+        return self.producer_done and self._num_buffer_writes >= self._num_tensors_registered
+
     def has_chunk_ready(self) -> bool:
         self._update_buffer()
         buf_len = len(self._buffer)
-        if self.producer_done and buf_len > 0 and self._num_buffer_writes >= self._num_tensors_registered:
+        if self.producer_done_and_all_read() and buf_len > 0:
             return True
         return self.policy.is_ready(buf_len, self._consumed)
 
@@ -78,12 +81,11 @@ class StreamBuffer:
         start_offset is the global position of the first item in the chunk.
         """
         self._update_buffer()
-        print(self._num_tensors_registered, self._num_buffer_writes)
         buf_len = len(self._buffer)
         window = self.policy.window_size()
         offset = self._consumed  # global position of buffer[0]
 
-        if self.producer_done and not self.policy.is_ready(buf_len, self._consumed):
+        if self.producer_done_and_all_read() and not self.policy.is_ready(buf_len, self._consumed):
             # Flush remainder — return whatever is left
             items = list(self._buffer)
             self._buffer.clear()
@@ -96,7 +98,7 @@ class StreamBuffer:
             self._buffer = self._buffer[stride:]
             self._consumed += stride
 
-        is_final = self.producer_done and len(self._buffer) == 0
+        is_final = self.producer_done_and_all_read() and len(self._buffer) == 0
 
         chunk = StreamChunk(
             data=self._collate(items),
