@@ -519,7 +519,7 @@ class BatchedCacheManager:
         elif torch.is_autocast_enabled():
             dtype = torch.get_autocast_gpu_dtype()
             q, k = q.to(dtype), k.to(dtype)
-        
+
         llama31_params = {}
         for key, value in kwargs.items():
             if key in ['low_freq_factor', 'high_freq_factor', 'old_context_len']:
@@ -534,7 +534,7 @@ class BatchedCacheManager:
                 interleave=interleave,
                 rope_scale=rope_scale,
                 rope_theta=rope_theta,
-            
+
             )
         else:
             flashinfer.rope.apply_llama31_rope_pos_ids_inplace(

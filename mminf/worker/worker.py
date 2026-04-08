@@ -431,7 +431,7 @@ class Worker:
                         name=edge_name,
                         tensor_info=tensor_infos.get(edge_name, []),
                     )
-                
+
                 if synthetic_edge is not None:
                     # Route to all worker graphs (not just current walk) since
                     # streaming chunks arrive cross-partition

@@ -1,9 +1,9 @@
 from collections import deque
 from dataclasses import dataclass, field
 
-from mminf.graph.base import GraphEdge
 import torch
 
+from mminf.graph.base import GraphEdge
 from mminf.streaming.chunk_policy import ChunkPolicy
 
 
@@ -117,7 +117,7 @@ class StreamBuffer:
         )
         self._chunks_popped += 1
         return chunk
-    
+
     def store_uningested_edge(self, edge: GraphEdge):
         self._waiting_graph_edges.append(edge)
 
