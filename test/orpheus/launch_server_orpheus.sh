@@ -11,13 +11,13 @@ export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 
 # Clean stale IPC sockets to avoid ZMQ race conditions
 # rm -rf /tmp/mminf
+username="${1:-${USER:-keisuke}}"
 
-CACHE_DIR=/m-coriander/coriander/naomi/mminf_cache/orpheus/
-
+CACHE_DIR=/m-coriander/coriander/$username/mminf_cache/orpheus/
 
 CUDA_VISIBLE_DEVICES=$DEVICES python mminf/api_server/entrypoint.py \
     --config configs/orpheus.yaml --port 20001 \
     --cache-dir $CACHE_DIR \
-    --socket-path-prefix /tmp/mminf_naomi/ \
-    --upload-dir /tmp/mminf_uploads_naomi/ \
+    --socket-path-prefix /tmp/mminf_${username}/ \
+    --upload-dir /tmp/mminf_uploads_${username}/ \
     --tensor-comm-protocol TCP --tcp-transfer-device "0.0.0.0:0"
