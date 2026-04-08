@@ -15,33 +15,109 @@ Usage:
     tokens = sample_tokens(logits, temperature=0.7, top_p=0.9)
 """
 
+from dataclasses import asdict, dataclass, field
+
 import torch
+
+
+@dataclass
+class SamplingConfig:
+    temperature: float = 0.6
+    top_k: int = 0
+    top_p: float = 1
+    repetition_penalty: float = 1
+
+
+@dataclass
+class Sampler:
+    # per request
+    _sampling_config: dict[str, SamplingConfig] = field(default_factory=dict)
+    _seen_token_mask: dict[str, torch.Tensor]= field(default_factory=dict)
+
+    def add_request(self, request_id: str):
+        self._sampling_config[request_id] = SamplingConfig()
+        # lazy init _seen_token_mask, taking vocab size from logits
+    
+    def remove_request(self, request_id: str):
+        del self._sampling_config[request_id]
+        if request_id in self._seen_token_mask:
+            del self._seen_token_mask[request_id]
+    
+    def set_config(self, request_id: str, **kwargs):
+        curr_config = asdict(self._sampling_config[request_id])
+        kwargs = [kwargs[k] for k in kwargs if k in curr_config]
+        self._sampling_config[request_id] = SamplingConfig({
+            **curr_config, **kwargs
+        })
+    
+    def sample(
+        self, request_ids: list[str], logits: torch.Tensor
+    ) -> torch.Tensor:
+        for rid in request_ids:
+            if rid not in self._seen_token_mask:
+                self._seen_token_mask[rid] = torch.zeros(
+                    logits.shape[1], dtype=torch.long, device=logits.device
+                )
+        configs = [
+            self._sampling_config[rid] for rid in request_ids
+        ]
+        temperature = torch.tensor([c.temperature for c in configs], device=logits.device)
+        top_k = torch.tensor([c.top_k for c in configs], device=logits.device, dtype=torch.int32)
+        top_p = torch.tensor([c.top_p for c in configs], device=logits.device)
+        r_pen = torch.tensor([c.repetition_penalty for c in configs], device=logits.device)
+        seen_mask = torch.stack(
+            [self._seen_token_mask[rid] for rid in request_ids],
+            dim=0,
+        )
+        tokens = sample_tokens(
+            logits=logits,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            repetition_penalty=r_pen,
+            seen_token_mask=seen_mask
+        )
+
+        res = {}
+        for i, rid in enumerate(request_ids):
+            token = tokens[i]
+            res[rid] = token
+            self._seen_token_mask[rid][token] = 1
+        
+        return res
 
 
 @torch.compiler.disable
 def _apply_repetition_penalty(
-    logits: torch.Tensor,
-    seen_token_ids: list[int] | torch.Tensor,
-    penalty: float,
+    logits: torch.Tensor,          # [B, V]
+    seen_mask: torch.Tensor,       # [B, V] (bool or 0/1)
+    penalty: torch.Tensor,         # [B]
 ) -> torch.Tensor:
-    """Apply vLLM-style sign-aware repetition penalty in-place.
-
-    For each seen token id: divide logit by penalty if positive,
-    multiply by penalty if negative. Applied before temperature scaling.
     """
-    if isinstance(seen_token_ids, list):
-        if not seen_token_ids:
-            return logits
-        ids = torch.tensor(seen_token_ids, device=logits.device, dtype=torch.long)
-    else:
-        ids = seen_token_ids
-        if ids.numel() == 0:
-            return logits
+    Apply vLLM-style sign-aware repetition penalty in-place.
 
-    # logits shape: [batch_size, vocab_size] — typically [1, V] here
-    selected = logits[:, ids]
-    penalized = torch.where(selected > 0, selected / penalty, selected * penalty)
-    logits[:, ids] = penalized
+    seen_mask[b, v] = 1 if token v has been seen in batch element b.
+    penalty is per-batch.
+    """
+
+    if seen_mask is None or seen_mask.sum() == 0:
+        return logits
+
+    # Expand penalty to [B, 1] so it broadcasts over vocab
+    penalty = penalty.view(-1, 1)
+
+    # Only touch seen positions
+    selected = logits
+
+    penalized = torch.where(
+        selected > 0,
+        selected / penalty,
+        selected * penalty,
+    )
+
+    # Apply only where seen_mask == 1
+    logits = torch.where(seen_mask, penalized, logits)
+
     return logits
 
 
@@ -51,8 +127,8 @@ def sample_tokens(
     temperature: float | torch.Tensor = 0.6,
     top_k: int | torch.Tensor = 0,
     top_p: float | torch.Tensor = 1.0,
-    repetition_penalty: float = 1.0,
-    seen_token_ids: list[int] | torch.Tensor | None = None,
+    repetition_penalty: float | torch.Tensor= 1.0,
+    seen_token_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Sample tokens from logits with temperature, top-k, top-p, and repetition penalty.
 
@@ -75,9 +151,11 @@ def sample_tokens(
     """
     batch_size, vocab_size = logits.shape
 
+    repetition_penalty = _to_tensor(repetition_penalty, batch_size, logits.device)
+
     # Step 0: Repetition penalty (before temperature scaling)
-    if repetition_penalty != 1.0 and seen_token_ids is not None:
-        logits = _apply_repetition_penalty(logits, seen_token_ids, repetition_penalty)
+    if (repetition_penalty != 1.0).any() and seen_token_mask is not None:
+        logits = _apply_repetition_penalty(logits, seen_token_mask, repetition_penalty)
 
     # Normalize params to tensors [batch_size] for uniform handling
     temperature = _to_tensor(temperature, batch_size, logits.device)

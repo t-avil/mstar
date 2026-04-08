@@ -25,6 +25,7 @@ from torch import nn
 from mminf.conductor.request_info import CurrentForwardPassInfo
 from mminf.engine.cache_manager import BatchedCacheManager, WorkspaceBufferManager
 from mminf.engine.kv_store import KVCacheConfig, PagedAllocationManager
+from mminf.utils.sampling import Sampler
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +92,7 @@ class CudaGraphRunner:
         submodule: nn.Module,
         kv_cache_config: KVCacheConfig,
         alloc_manager: PagedAllocationManager,
+        sampler: Sampler,
         buffer_manager: WorkspaceBufferManager,
         device: torch.device,
         autocast_dtype: torch.dtype
@@ -99,6 +101,7 @@ class CudaGraphRunner:
         self.submodule = submodule
         self.kv_cache_config = kv_cache_config
         self.alloc_manager = alloc_manager
+        self.sampler = sampler
         self.device = device
         self.autocast_dtype = autocast_dtype
         self.buffer_manager = buffer_manager
@@ -449,7 +452,6 @@ class CudaGraphRunner:
             static_cm.advance_seq_lens()
 
         # --- Step 6: Sample from logits (outside graph) and remap outputs ---
-        from mminf.utils.sampling import sample_tokens
         outputs = {}
         for i, rid in enumerate(request_ids):
             dummy_rid = dummy_rids[i]
@@ -460,16 +462,9 @@ class CudaGraphRunner:
                     if out_key == "logits":
                         # Sample token from logits (post-graph, CUDA-graph safe)
                         logits = val[0] if isinstance(val, list) else val
-                        meta = per_request_info[rid].step_metadata
-                        token = sample_tokens(
-                            logits,
-                            temperature=meta.get("temperature", 0.6),
-                            top_k=meta.get("top_k", 0),
-                            top_p=meta.get("top_p", 1.0),
-                            repetition_penalty=meta.get("repetition_penalty", 1.0),
-                            seen_token_ids=meta.get("seen_token_ids", None),
-                        )
-                        outputs[rid]["new_token"] = [token.clone()]
+                        outputs[rid]["new_token"] = self.sampler.sample(
+                            [rid],  logits
+                        )[rid].clone()
                     elif isinstance(val, list):
                         outputs[rid][out_key] = [t.clone() for t in val]
                     elif isinstance(val, torch.Tensor):
