@@ -184,12 +184,6 @@ class SNACDecoderSubmodule(NodeSubmodule):
         self.idx_14 = torch.tensor([1, 4], dtype=torch.long, device=device)
         self.idx_2356 = torch.tensor([2, 3, 5, 6], dtype=torch.long, device=device)
         self.config = config
-        # Per-request accumulated valid codes and running count.
-        # We process only the NEW tokens (stride) each chunk, append
-        # to the running code list, and take the last `window` codes.
-        self._all_codes: dict[str, list[int]] = {}
-        self._valid_count: dict[str, int] = {}
-        self._raw_consumed: dict[str, int] = {}
 
     def preprocess(
         self,
@@ -220,12 +214,6 @@ class SNACDecoderSubmodule(NodeSubmodule):
             "request_id": request_id,
             "audio_token_ids": snac_codes,
         }
-
-    def cleanup_request(self, request_id: str):
-        """Clean up per-request state."""
-        self._valid_count.pop(request_id, None)
-        self._all_codes.pop(request_id, None)
-        self._raw_consumed.pop(request_id, None)
 
     def forward(self, request_id: str, audio_token_ids: torch.Tensor, **kwargs) -> NameToTensorList:
         if audio_token_ids is None or audio_token_ids.numel() < 7:
