@@ -5,8 +5,8 @@ import torch
 
 from mminf.communication.tensors import NameToTensorList
 from mminf.conductor.request_info import CurrentForwardConductorMetadata
-from mminf.engine.kv_store import KVCacheConfig
 from mminf.engine.base import EngineType
+from mminf.engine.kv_store import KVCacheConfig
 from mminf.graph.base import GraphEdge, GraphNode, Loop, Parallel, Sequential, TensorPointerInfo
 from mminf.graph.special_destinations import EMIT_TO_CLIENT
 from mminf.model.base import Model
@@ -186,7 +186,7 @@ class DummyModel(Model):
         else:
             existing_text.tensor_info = persist_signals.get("text_emb", [])
             existing_img.tensor_info = persist_signals.get("img_emb", [])
-            if prev_forward_metadata.graph_walk == "image_gen":
+            if metadata.graph_walk == "image_gen":
                 img_inp.tensor_info = persist_signals.get("image_output", [])
                 text_inp.tensor_info = persist_signals.get("new_token", [])
 

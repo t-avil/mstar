@@ -11,10 +11,10 @@ from mminf.communication.tensors import MooncakeCommunicationManager, NameToTens
 from mminf.conductor.request_info import CurrentForwardPassInfo
 from mminf.engine.base import EngineType, NodeBatch, NodeOutput
 from mminf.engine.kv_store import StoreWritePolicy, TransferEngineInfo
-from mminf.graph.base import GraphEdge, TensorPointerInfo
-from mminf.streaming.stream_buffer import StreamBuffer
+from mminf.graph.base import GraphEdge
 from mminf.graph.request_queues import format_graph_edge_list
 from mminf.model.base import Model, WorkerGraph
+from mminf.streaming.stream_buffer import StreamBuffer
 from mminf.utils.ipc_format import (
     ConductorMessage,
     ConductorMessageType,

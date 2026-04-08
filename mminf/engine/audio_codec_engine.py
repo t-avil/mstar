@@ -27,7 +27,7 @@ class AudioCodecEngine(BaseEngine):
 
     def engine_type(self) -> EngineType:
         return EngineType.AUDIO_CODEC
-    
+
     def has_autocast(self):
         return False
 

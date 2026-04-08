@@ -3,7 +3,7 @@ from mminf.conductor.request_info import CurrentForwardConductorMetadata
 from mminf.engine.kv_store import KVCacheConfig
 from mminf.graph.base import GraphEdge, GraphNode, Loop, Sequential, TensorPointerInfo
 from mminf.graph.special_destinations import EMIT_TO_CLIENT
-from mminf.model.base import Model
+from mminf.model.base import ForwardPassArgs, Model
 
 
 class DummyOmniModel(Model):
@@ -106,8 +106,7 @@ class DummyOmniModel(Model):
         persist_signals: dict[str, list[TensorPointerInfo]],
         new_tokens: dict[str, list[int]] = None,
         incoming_connections=None,
-    ) -> "ForwardPassArgs":
-        from mminf.model.base import ForwardPassArgs
+    ) -> ForwardPassArgs:
         metadata = partition_metadata
 
         # Advance graph walk (merged from update_for_next_forward)

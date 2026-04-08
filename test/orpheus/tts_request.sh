@@ -10,9 +10,9 @@ TMPFILE=$(mktemp /tmp/orpheus_response.XXXXXX)
 trap "rm -f $TMPFILE" EXIT
 
 curl -s -X POST "$URL" \
-  -F 'text=Hello, how are you doing today? thanks for asking!' \
+  -F 'text=And now for something completely different.' \
   -F 'output_modalities=audio' \
-  -F 'model_kwargs={"voice": "tara", "max_output_tokens": 500}' \
+  -F 'model_kwargs={"voice": "tara", "max_output_tokens": 1000}' \
   -o "$TMPFILE"
 
 python3 -c "

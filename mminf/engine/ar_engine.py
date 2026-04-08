@@ -2,12 +2,12 @@ import logging
 
 import torch
 
+from mminf.conductor.request_info import CurrentForwardPassInfo
 from mminf.engine.base import BaseEngine, EngineType, NodeBatch, NodeOutput
 from mminf.engine.cache_manager import BatchedCacheManager, WorkspaceBufferManager
 from mminf.engine.cpu_page_pool import CPUPagePool
 from mminf.engine.cuda_graph_runner import CudaGraphRunner
-from mminf.engine.kv_store import KVCacheConfig, MooncakeStoreConfig, PagedAllocationManager, TransferEngineInfo
-from mminf.conductor.request_info import CurrentForwardPassInfo, SequenceInfo
+from mminf.engine.kv_store import KVCacheConfig, PagedAllocationManager, TransferEngineInfo
 from mminf.utils.profiler import range_pop, range_push
 
 logger = logging.getLogger(__name__)
@@ -249,7 +249,7 @@ class AREngine(BaseEngine):
     def _execute_sequential(self, batch: NodeBatch, submodule) -> NodeOutput:
         """Original per-request execution with CacheHandle."""
         per_request_outputs = {}
-        
+
         for rid in batch.request_ids:
             cache_manager = self._create_cache_manager(rid)
             inputs = batch.per_request_input_tensors.get(rid, {})
@@ -447,7 +447,7 @@ class AREngine(BaseEngine):
         if not ar_ready:
             return False
         return super().check_ready(node_name, request_id, request_info)
-        
+
     def add_request(
         self, request_id: str, cache_labels: list[str] | None = None,
     ) -> None:

@@ -131,7 +131,7 @@ def start_mooncake_master(port=8080, log_file: str | None = None):
         cmd,
         stdout=stdout,
         stderr=stderr,
-        preexec_fn=os.setsid,  # start new process group
+        process_group=os.setsid,  # start new process group
     )
 
     wait_for_port("localhost", 50051)

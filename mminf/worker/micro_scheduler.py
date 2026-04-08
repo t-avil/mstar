@@ -1,7 +1,7 @@
-from enum import Enum
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from enum import Enum
 
 from mminf.engine.base import EngineType
 from mminf.graph.base import GraphNode
@@ -62,7 +62,7 @@ class MicroScheduler:
         self.node_and_walk_to_last_batch_num = {}
         # request_id -> monotonic time until which the request is held
         self.held_until: dict[str, float] = {}
-    
+
     def _select_node_priority(
         self, node_name_to_requests: dict[str, list[ReadyNodeEntry]]
     ):

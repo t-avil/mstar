@@ -605,8 +605,7 @@ class Conductor:
                 if conn.from_partition == partition_name:
                     continue  # skip producer connections
                 consumed = body.stream_tokens_consumed.get(conn.edge_name, 0)
-                if consumed > conn.consumed_count:
-                    conn.consumed_count = consumed
+                conn.consumed_count = max(conn.consumed_count, consumed)
 
         pstate.completed_worker_graph_ids.update(body.worker_graph_ids)
         pstate.curr_forward_outputs += body.output_signal_names if isinstance(

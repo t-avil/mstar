@@ -1,7 +1,7 @@
 from collections import deque
+from dataclasses import dataclass, field
 
 import torch
-from dataclasses import dataclass, field
 
 from mminf.streaming.chunk_policy import ChunkPolicy
 
@@ -48,7 +48,7 @@ class StreamBuffer:
     def put(self, tensor_id: str, item: torch.Tensor) -> None:
         """Called when a tensor arrives via normal RDMA routing."""
         self._id_to_tensor[tensor_id] = item
-    
+
     def _update_buffer(self):
         while len(self._tensor_ids_in_order) > 0:
             tensor_id = self._tensor_ids_in_order[0]

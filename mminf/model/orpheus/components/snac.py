@@ -13,11 +13,10 @@ import math
 from typing import List
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
+from torch import nn
 from torch.nn.utils.parametrizations import weight_norm
-
 
 # ---------------------------------------------------------------------------
 # Utility layers
@@ -296,7 +295,11 @@ class VectorQuantize(nn.Module):
         codebook = self.codebook.weight
         encodings = F.normalize(encodings)
         codebook = F.normalize(codebook)
-        dist = encodings.pow(2).sum(1, keepdim=True) - 2 * encodings @ codebook.t() + codebook.pow(2).sum(1, keepdim=True).t()
+        dist = (
+            encodings.pow(2).sum(1, keepdim=True)
+            - 2 * encodings @ codebook.t()
+            + codebook.pow(2).sum(1, keepdim=True).t()
+        )
         indices = rearrange((-dist).max(1)[1], "(b t) -> b t", b=latents.size(0))
         z_q = self.decode_code(indices)
         return z_q, indices

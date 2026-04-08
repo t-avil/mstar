@@ -41,8 +41,8 @@ from torch import nn
 
 from mminf.communication.tensors import NameToTensorList
 from mminf.conductor.request_info import CurrentForwardConductorMetadata
-from mminf.engine.kv_store import KVCacheConfig
 from mminf.engine.base import EngineType
+from mminf.engine.kv_store import KVCacheConfig
 from mminf.graph.base import (
     GraphEdge,
     GraphNode,
@@ -59,7 +59,13 @@ from mminf.model.bagel.components.modeling_utils import BagelMLPconnector, Posit
 from mminf.model.bagel.components.tokenization import BagelTokenizer, add_special_tokens
 from mminf.model.bagel.components.vit_encoder import BagelVisionModel
 from mminf.model.bagel.config import load_bagel_config
-from mminf.model.bagel.submodules import CombineCFGSubmodule, LLMSubmodule, VAEDecoderSubmodule, VAEEncoderSubmodule, ViTEncoderSubmodule
+from mminf.model.bagel.submodules import (
+    CombineCFGSubmodule,
+    LLMSubmodule,
+    VAEDecoderSubmodule,
+    VAEEncoderSubmodule,
+    ViTEncoderSubmodule,
+)
 from mminf.model.base import DECODE, ForwardPassArgs, Model, NodeSubmodule
 from mminf.model.utils import ModuleAndPrefix, load_weights_from_file
 
@@ -637,7 +643,7 @@ class BagelModel(Model):
                 schedule.append(("prefill_vit", images[image_idx]))
                 image_idx += 1
         return schedule
-    
+
     def _requires_cfg(
         self, **kwargs,
     ):

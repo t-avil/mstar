@@ -32,10 +32,10 @@ from mminf.engine.ar_engine import KVCacheConfig
 from mminf.engine.base import EngineType
 from mminf.graph.base import GraphEdge, GraphNode, GraphSection, TensorPointerInfo
 from mminf.graph.special_destinations import EMIT_TO_CLIENT, EMPTY_DESTINATION
-from mminf.streaming.chunk_policy import SlidingWindowChunkPolicy
-from mminf.streaming.topology import Connection, PartitionTopology, StreamingGraphEdge
 from mminf.model.base import ForwardPassArgs, Model, NodeSubmodule
 from mminf.model.orpheus.config import OrpheusModelConfig
+from mminf.streaming.chunk_policy import SlidingWindowChunkPolicy
+from mminf.streaming.topology import Connection, PartitionTopology, StreamingGraphEdge
 
 logger = logging.getLogger(__name__)
 
@@ -306,8 +306,8 @@ class OrpheusModel(Model):
 
         step_metadata = {"consumed_tokens": stride}
 
-        # Check if this is the last chunk. Basically, the new_consumed = consumed + stride 
-        # is only used to calculate is_last. it's asking "after the worker consumes another 
+        # Check if this is the last chunk. Basically, the new_consumed = consumed + stride
+        # is only used to calculate is_last. it's asking "after the worker consumes another
         # stride's worth of tokens, will there be enough left for another chunk?"
         # It's not actually advancing any state.
         new_consumed = consumed + stride

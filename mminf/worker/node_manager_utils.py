@@ -4,7 +4,6 @@ from dataclasses import dataclass, field
 
 from mminf.conductor.request_info import CurrentForwardPassInfo
 from mminf.graph.base import GraphEdge, GraphNode, TensorPointerInfo
-from mminf.streaming.stream_buffer import StreamBuffer
 from mminf.graph.request_queues import (
     PerRequestNodeQueues,
     ProcessedInputs,
@@ -12,6 +11,7 @@ from mminf.graph.request_queues import (
 )
 from mminf.graph.special_destinations import EMIT_TO_CLIENT, SPECIAL_DESTINATIONS
 from mminf.model.base import WorkerGraph
+from mminf.streaming.stream_buffer import StreamBuffer
 
 logger = logging.getLogger(__name__)
 

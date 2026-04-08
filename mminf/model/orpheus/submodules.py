@@ -52,7 +52,7 @@ class OrpheusLLMSubmodule(NodeSubmodule):
             }
             seq_lens = [inp.shape[0] for inp in result["text_inputs"]]
             # Seed seen-token history with prompt ids for repetition penalty
-            for rid, inp in zip(request_ids, per_request_inputs):
+            for rid, inp in zip(request_ids, per_request_inputs, strict=True):
                 self._seen_ids[rid] = inp["text_inputs"][0].tolist()
         elif graph_walk == "decode":
             result = {
@@ -60,7 +60,7 @@ class OrpheusLLMSubmodule(NodeSubmodule):
             }
             seq_lens = [1] * len(per_request_inputs)
             # Append incoming token to seen history and expose to sampler
-            for rid, inp in zip(request_ids, per_request_inputs):
+            for rid, inp in zip(request_ids, per_request_inputs, strict=True):
                 token_ids = inp["text_inputs"][0].tolist()
                 self._seen_ids.setdefault(rid, []).extend(
                     token_ids if isinstance(token_ids, list) else [token_ids]

@@ -2,9 +2,10 @@
 
 import base64
 import json
-import requests
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import requests
 
 URL = "http://0.0.0.0:8000/generate"
 

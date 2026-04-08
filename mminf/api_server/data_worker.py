@@ -4,7 +4,7 @@ import logging
 import queue
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 
 import torch
 import torchvision
@@ -98,7 +98,7 @@ class PreprocessWorker:
 
     def has_pending_tensors(self, request_id: str):
         return self.per_request_reading_tensors.get(request_id, 0) > 0
-    
+
     def received_final_chunks(
         self, request_id: str,
         final_forward_outputs: dict[str, int],

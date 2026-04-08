@@ -22,7 +22,7 @@ from typing import Any
 import torch
 from torch import nn
 
-from mminf.conductor.request_info import CurrentForwardConductorMetadata, CurrentForwardPassInfo
+from mminf.conductor.request_info import CurrentForwardPassInfo
 from mminf.engine.cache_manager import BatchedCacheManager, WorkspaceBufferManager
 from mminf.engine.kv_store import KVCacheConfig, PagedAllocationManager
 
@@ -273,7 +273,7 @@ class CudaGraphRunner:
                     request_ids=dummy_rids,
                     per_request_info=dummy_metadata,
                 )
-            
+
             torch.cuda.set_device(self.device)
             # Warmup: 2 forward passes
             torch.cuda.synchronize()
@@ -303,7 +303,7 @@ class CudaGraphRunner:
                 with torch.cuda.graph(graph, pool=self.memory_pool):
                     output = run_forward()
             torch.cuda.synchronize()
-            
+
             self.graphs[key] = CudaGraphData(
                 graph=graph,
                 static_inputs={
@@ -390,7 +390,7 @@ class CudaGraphRunner:
             for label in config_labels:
                 real_state = self.alloc_manager.get_state(rid, label)
                 # makes state if it doesn't exist
-                self.alloc_manager.get_state(dummy_rid, label) 
+                self.alloc_manager.get_state(dummy_rid, label)
                 self.alloc_manager.request_states[dummy_rid][label] = real_state
 
         # For padding slots (i >= batch_size), ensure dummy states exist
@@ -408,7 +408,7 @@ class CudaGraphRunner:
         # Pad with dummy inputs for remaining slots (use a dummy token tensor
         # so submodule.preprocess doesn't crash on empty lists)
         dummy_token = torch.zeros(1, dtype=torch.long, device=self.device)
-        for i in range(batch_size, padded_bs):
+        for _i in range(batch_size, padded_bs):
             real_inputs.append(
                 {"text_inputs": [dummy_token]}
             )
