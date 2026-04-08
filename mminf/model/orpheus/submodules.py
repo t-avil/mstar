@@ -217,7 +217,7 @@ class SNACDecoderSubmodule(NodeSubmodule):
 
     def forward(self, request_id: str, audio_token_ids: torch.Tensor, **kwargs) -> NameToTensorList:
         if audio_token_ids is None or audio_token_ids.numel() < 7:
-            logger.debug(
+            logger.warning(
                 "SNAC forward: skipping chunk with %d token IDs (need >=7) for request %s",
                 audio_token_ids.numel() if audio_token_ids is not None else 0, request_id,
             )

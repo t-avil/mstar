@@ -38,6 +38,10 @@ class OrpheusAttention(nn.Module):
         self.head_dim = config.head_dim
         self.num_key_value_heads = config.num_key_value_heads
         self.rope_theta = config.rope_theta
+        self.rope_scale = config.rope_scaling["factor"]
+        self.high_freq = config.rope_scaling["high_freq_factor"]
+        self.low_freq = config.rope_scaling["low_freq_factor"]
+        self.old_context_len = config.rope_scaling["original_max_position_embeddings"]
 
         self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
         self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
@@ -53,7 +57,14 @@ class OrpheusAttention(nn.Module):
         key_states = self.k_proj(query_sequence).view(-1, self.num_key_value_heads, self.head_dim)
         value_states = self.v_proj(query_sequence).view(-1, self.num_key_value_heads, self.head_dim)
 
-        query_states, key_states = cache_handle.apply_rope(query_states, key_states, rope_theta=self.rope_theta)
+        query_states, key_states = cache_handle.apply_rope(
+            query_states, key_states,
+            rope_theta=self.rope_theta,
+            rope_scale=self.rope_scale,
+            low_freq_factor=self.low_freq,
+            high_freq_factor=self.high_freq,
+            old_context_len=self.old_context_len
+        )
 
         attn_output = cache_handle.run_attention(q=query_states, k=key_states, v=value_states)
         attn_output = attn_output.reshape(-1, self.hidden_size)

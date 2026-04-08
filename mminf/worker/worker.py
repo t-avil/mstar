@@ -414,16 +414,13 @@ class Worker:
         """Check all active StreamBuffers; when a chunk is ready, feed it as a normal input."""
         for request_id, req_info in list(self.worker_graphs_manager.per_request_info.items()):
             for edge_name, sbuf in req_info.stream_buffers.items():
-                if sbuf.has_chunk_ready():
+                synthetic_edge = sbuf.pop_waiting_edge()
+                if synthetic_edge is None and sbuf.has_chunk_ready():
                     chunk = sbuf.pop_chunk()
                     chunk_tensor = chunk.data.get("data")
-                    if chunk_tensor is None:
-                        continue
 
                     consumer_node = self._consumer_node_cache.get(edge_name, "")
                     partition_name = self.worker_graphs_manager.get_partition_for_node(consumer_node)
-                    if chunk.is_final:
-                        req_info.per_partition_info[partition_name].stream_partition_done = True
 
                     # Store the chunk tensor so _build_node_batch can retrieve it via uuid
                     tensor_infos = self.tensor_manager.store_and_return_tensor_info(
@@ -434,12 +431,19 @@ class Worker:
                         name=edge_name,
                         tensor_info=tensor_infos.get(edge_name, []),
                     )
+                
+                if synthetic_edge is not None:
                     # Route to all worker graphs (not just current walk) since
                     # streaming chunks arrive cross-partition
-                    self.worker_graphs_manager.process_new_inputs(
+                    ingested = len(self.worker_graphs_manager.process_new_inputs(
                         request_id=request_id, inputs=[synthetic_edge],
                         all_walks=True,
-                    )
+                    )) == 0
+                    if not ingested:
+                        sbuf.store_uningested_edge(synthetic_edge)
+                    elif sbuf.reached_final_chunk:
+                        req_info.per_partition_info[partition_name].stream_partition_done = True
+
 
     def _check_ready_tensors(self) -> None:
         """Poll for completed RDMA transfers, feed ready graph edges to worker graph queues."""

@@ -1,6 +1,7 @@
 from collections import deque
 from dataclasses import dataclass, field
 
+from mminf.graph.base import GraphEdge
 import torch
 
 from mminf.streaming.chunk_policy import ChunkPolicy
@@ -31,11 +32,14 @@ class StreamBuffer:
     from_partition: str
     policy: ChunkPolicy
 
+    _waiting_graph_edges: deque = field(default_factory=deque)
+
     _buffer: list = field(default_factory=list)
     _tensor_ids_in_order: deque = field(default_factory=deque)
     _id_to_tensor: dict = field(default_factory=dict)
     _consumed: int = 0
     _chunks_popped: int = 0
+    reached_final_chunk: bool = False
     producer_done: bool = False
 
     _num_tensors_registered = 0
@@ -63,13 +67,17 @@ class StreamBuffer:
         """Producer signals no more items will arrive."""
         self.producer_done = True
 
-    def producer_done_and_all_read(self) -> bool:
+    def _producer_done_and_all_read(self) -> bool:
         return self.producer_done and self._num_buffer_writes >= self._num_tensors_registered
+
+    def pop_waiting_edge(self) -> GraphEdge | None:
+        if len(self._waiting_graph_edges) > 0:
+            return self._waiting_graph_edges.popleft()
 
     def has_chunk_ready(self) -> bool:
         self._update_buffer()
         buf_len = len(self._buffer)
-        if self.producer_done_and_all_read() and buf_len > 0:
+        if self._producer_done_and_all_read() and buf_len > 0:
             return True
         return self.policy.is_ready(buf_len, self._consumed)
 
@@ -85,7 +93,7 @@ class StreamBuffer:
         window = self.policy.window_size()
         offset = self._consumed  # global position of buffer[0]
 
-        if self.producer_done_and_all_read() and not self.policy.is_ready(buf_len, self._consumed):
+        if self._producer_done_and_all_read() and not self.policy.is_ready(buf_len, self._consumed):
             # Flush remainder — return whatever is left
             items = list(self._buffer)
             self._buffer.clear()
@@ -98,7 +106,8 @@ class StreamBuffer:
             self._buffer = self._buffer[stride:]
             self._consumed += stride
 
-        is_final = self.producer_done_and_all_read() and len(self._buffer) == 0
+        is_final = self._producer_done_and_all_read() and len(self._buffer) == 0
+        self.reached_final_chunk = is_final
 
         chunk = StreamChunk(
             data=self._collate(items),
@@ -108,6 +117,9 @@ class StreamBuffer:
         )
         self._chunks_popped += 1
         return chunk
+    
+    def store_uningested_edge(self, edge: GraphEdge):
+        self._waiting_graph_edges.append(edge)
 
     def _collate(self, items: list) -> dict[str, torch.Tensor]:
         if not items:
