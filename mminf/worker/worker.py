@@ -666,7 +666,8 @@ class Worker:
                 body=InputSignals(
                     request_id=request_id,
                     inputs=edges,
-                    request_info=self.worker_graphs_manager.get_fwd_info(request_id, partition_name)
+                    request_info=self.worker_graphs_manager.get_fwd_info(request_id, partition_name),
+                    partition_name=partition_name
                 ),
             )
             self.communicator.send(worker_id, message)
@@ -729,6 +730,7 @@ class Worker:
                     request_id=request_id,
                     inputs=edges,
                     request_info=self.worker_graphs_manager.get_fwd_info(request_id, partition_name),
+                    partition_name=partition_name
                 ),
             )
             self.communicator.send(worker_id, message)
