@@ -7,6 +7,7 @@ from mminf.communication.tensors import NameToTensorList
 from mminf.engine.ar_engine import BatchedCacheManager
 from mminf.model.base import NodeSubmodule
 from mminf.model.orpheus.config import OrpheusModelConfig
+from mminf.utils.sampling import Sampler
 
 logger = logging.getLogger(__name__)
 
@@ -29,11 +30,6 @@ class OrpheusLLMSubmodule(NodeSubmodule):
         self.embed_tokens = language_model.model.embed_tokens
         self.lm_head = language_model.lm_head
         self.config = config
-        self._seen_ids: dict[str, list[int]] = {}
-
-    def cleanup_request(self, request_id: str):
-        """Clean up per-request repetition penalty state."""
-        self._seen_ids.pop(request_id, None)
 
     def preprocess(
         self,
@@ -45,30 +41,16 @@ class OrpheusLLMSubmodule(NodeSubmodule):
         per_request_metadata: dict | None = None,
     ) -> dict[str, torch.Tensor]:
         seq_lens = []
-
         if graph_walk == "prefill":
             result = {
                 "text_inputs": [inp["text_inputs"][0] for inp in per_request_inputs],
             }
             seq_lens = [inp.shape[0] for inp in result["text_inputs"]]
-            # Seed seen-token history with prompt ids for repetition penalty
-            for rid, inp in zip(request_ids, per_request_inputs, strict=True):
-                self._seen_ids[rid] = inp["text_inputs"][0].tolist()
         elif graph_walk == "decode":
             result = {
                 "text_inputs": [inp["text_inputs"][0] for inp in per_request_inputs],
             }
             seq_lens = [1] * len(per_request_inputs)
-            # Append incoming token to seen history and expose to sampler
-            for rid, inp in zip(request_ids, per_request_inputs, strict=True):
-                token_ids = inp["text_inputs"][0].tolist()
-                self._seen_ids.setdefault(rid, []).extend(
-                    token_ids if isinstance(token_ids, list) else [token_ids]
-                )
-                if per_request_info and rid in per_request_info:
-                    meta = per_request_info[rid].step_metadata
-                    meta["seen_token_ids"] = self._seen_ids[rid]
-                    meta["repetition_penalty"] = self.config.repetition_penalty
         else:
             raise ValueError(f"Unknown graph walk for OrpheusLLM: {graph_walk!r}")
 
@@ -217,7 +199,7 @@ class SNACDecoderSubmodule(NodeSubmodule):
 
     def forward(self, request_id: str, audio_token_ids: torch.Tensor, **kwargs) -> NameToTensorList:
         if audio_token_ids is None or audio_token_ids.numel() < 7:
-            logger.debug(
+            logger.warning(
                 "SNAC forward: skipping chunk with %d token IDs (need >=7) for request %s",
                 audio_token_ids.numel() if audio_token_ids is not None else 0, request_id,
             )

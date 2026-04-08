@@ -14,6 +14,13 @@ class OrpheusModelConfig:
     rms_norm_eps: float = 1e-5
     rope_theta: float = 500000.0
     vocab_size: int = 156940
+    rope_scaling: dict = field(default_factory=lambda: {
+        "factor": 32.0,
+        "high_freq_factor": 4.0,
+        "low_freq_factor": 1.0,
+        "original_max_position_embeddings": 8192,
+        "rope_type": "llama3"
+    })
 
     # Special token IDs
     start_token_id: int = 128259

@@ -9,6 +9,7 @@ from mminf.engine.cpu_page_pool import CPUPagePool
 from mminf.engine.cuda_graph_runner import CudaGraphRunner
 from mminf.engine.kv_store import KVCacheConfig, PagedAllocationManager, TransferEngineInfo
 from mminf.utils.profiler import range_pop, range_push
+from mminf.utils.sampling import Sampler
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ class AREngine(BaseEngine):
         self.alloc_manager: PagedAllocationManager | None = None
         self.buffer_manager = None
         self.cpu_page_pool: CPUPagePool | None = None
+        self.sampler: Sampler = Sampler()
 
         # CUDA graph runners (initialized in warmup())
         self.cuda_graph_runners: dict[str, "CudaGraphRunner"] = {}
@@ -158,6 +160,7 @@ class AREngine(BaseEngine):
                 submodule=self.submodules[node_name],
                 kv_cache_config=self.kv_cache_config,
                 alloc_manager=self.alloc_manager,
+                sampler=self.sampler,
                 buffer_manager=self.buffer_manager,
                 device=self.device,
                 autocast_dtype=self.autocast_dtype
@@ -180,24 +183,14 @@ class AREngine(BaseEngine):
         Called AFTER the model forward (and outside CUDA graph capture).
         Replaces 'logits' with 'new_token' in each request's output.
         """
-        from mminf.utils.sampling import sample_tokens
 
         for rid, tensors in output.per_request_output_tensors.items():
             if "logits" not in tensors:
                 continue
             logits = tensors["logits"][0]  # [1, vocab_size]
-            meta = per_request_info.get(rid).step_metadata
-            temperature = meta.get("temperature", 0.6)
-            top_k = meta.get("top_k", 0)
-            top_p = meta.get("top_p", 1.0)
-            # TODO add random seed here
-            rep_pen = meta.get("repetition_penalty", 1.0)
-            seen_ids = meta.get("seen_token_ids", None)
-            token = sample_tokens(
-                logits, temperature=temperature, top_k=top_k, top_p=top_p,
-                repetition_penalty=rep_pen, seen_token_ids=seen_ids,
-            )
-            tensors["new_token"] = [token]
+            tensors["new_token"] = [self.sampler.sample(
+                request_ids=[rid], logits=logits
+            )[rid]]
             del tensors["logits"]
 
         return output
@@ -359,6 +352,13 @@ class AREngine(BaseEngine):
                         self.alloc_manager.sync_retrieve(
                             req_id, label, seq_info
                         )
+                
+                # TODO: this will have to be refactored because the Qwen thinker and
+                # talker have different sampling parameteters. Probably have a
+                # submodule-level sampler, and a fuction on the submodule to set
+                # the sampler config
+                for rid, info in batch.per_request_info.items():
+                    self.sampler.set_config(rid, **info.step_metadata)
 
                 with torch.no_grad():
                     with torch.amp.autocast("cuda", enabled=True, dtype=self.autocast_dtype):
@@ -452,14 +452,13 @@ class AREngine(BaseEngine):
         self, request_id: str, cache_labels: list[str] | None = None,
     ) -> None:
         self.alloc_manager.add_request(request_id, cache_labels or ["main"])
+        self.sampler.add_request(request_id)
 
     def remove_request(self, request_id: str) -> None:
         if self.cpu_page_pool is not None:
             self.cpu_page_pool.remove_request(request_id)
         self.alloc_manager.remove_request(request_id)
-        for sub in self.submodules.values():
-            if hasattr(sub, 'cleanup_request'):
-                sub.cleanup_request(request_id)
+        self.sampler.remove_request(request_id)
 
     def pause_request(
         self, request_id: str, cache_label: str = "main",

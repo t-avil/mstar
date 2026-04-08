@@ -236,12 +236,13 @@ class WorkerGraphsManager:
         if all_walks:
             worker_graph_ids = self.per_request_info[request_id].worker_graph_ids
             for worker_graph_id in worker_graph_ids:
-                self.queues[worker_graph_id].process_new_inputs(request_id, inputs)
+                inputs = self.queues[worker_graph_id].process_new_inputs(request_id, inputs).for_other_worker_graphs
         else:
             for part_info in self.per_request_info[request_id].per_partition_info.values():
                 worker_graph_ids = part_info.graph_walk_worker_graph_ids
                 for worker_graph_id in worker_graph_ids:
-                    self.queues[worker_graph_id].process_new_inputs(request_id, inputs)
+                    inputs = self.queues[worker_graph_id].process_new_inputs(request_id, inputs).for_other_worker_graphs
+        return inputs
 
 
     def process_node_outputs(

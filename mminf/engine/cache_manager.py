@@ -500,7 +500,8 @@ class BatchedCacheManager:
         interleave: bool = False,
         rope_scale: float = 1,
         rope_theta: float = 10000.0,
-        rope_dtype=None
+        rope_dtype=None,
+        **kwargs
     ):
         """Apply RoPE using the active label's pre-computed position IDs."""
         # Assert all active labels are the same
@@ -519,50 +520,31 @@ class BatchedCacheManager:
             dtype = torch.get_autocast_gpu_dtype()
             q, k = q.to(dtype), k.to(dtype)
 
-        import flashinfer
-        flashinfer.rope.apply_rope_pos_ids_inplace(
-            q, k, ps.pos_ids,
-            rotary_dim=rotary_dim,
-            interleave=interleave,
-            rope_scale=rope_scale,
-            rope_theta=rope_theta,
-        )
-        return q.to(orig_dtype), k.to(orig_dtype)
-
-    @torch.compiler.disable
-    def apply_rope_llama(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        rotary_dim: int | None = None,
-        interleave: bool = False,
-        rope_scale: float = 1,
-        rope_theta: float = 10000.0,
-        rope_dtype=None
-    ):
-        """Apply RoPE using the active label's pre-computed position IDs."""
-        labels = list(self.active_labels.values())
-        assert len(set(labels)) == 1, f"All active labels must be the same, got {labels}"
-        label = next(iter(self.active_labels.values()))
-
-        ps = self._plan_states[label]
-        assert ps.pos_ids is not None
-
-        orig_dtype = q.dtype
-        if rope_dtype is not None:
-            q, k = q.to(rope_dtype), k.to(rope_dtype)
-        elif torch.is_autocast_enabled():
-            dtype = torch.get_autocast_gpu_dtype()
-            q, k = q.to(dtype), k.to(dtype)
+        llama31_params = {}
+        for key, value in kwargs.items():
+            if key in ['low_freq_factor', 'high_freq_factor', 'old_context_len']:
+                llama31_params[key] = value
 
         import flashinfer
-        flashinfer.rope.apply_llama31_rope_pos_ids_inplace(
-            q, k, ps.pos_ids,
-            rotary_dim=rotary_dim,
-            interleave=interleave,
-            rope_scale=rope_scale,
-            rope_theta=rope_theta,
-        )
+
+        if not llama31_params:
+            flashinfer.rope.apply_rope_pos_ids_inplace(
+                q, k, ps.pos_ids,
+                rotary_dim=rotary_dim,
+                interleave=interleave,
+                rope_scale=rope_scale,
+                rope_theta=rope_theta,
+
+            )
+        else:
+            flashinfer.rope.apply_llama31_rope_pos_ids_inplace(
+                q, k, ps.pos_ids,
+                rotary_dim=rotary_dim,
+                interleave=interleave,
+                rope_scale=rope_scale,
+                rope_theta=rope_theta,
+                **llama31_params
+            )
         return q.to(orig_dtype), k.to(orig_dtype)
 
     @torch.compiler.disable
