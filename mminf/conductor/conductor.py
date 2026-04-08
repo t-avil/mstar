@@ -465,52 +465,50 @@ class Conductor:
         # Send NewRequest to each worker with the appropriate partition's inputs
         for worker_id, worker_graph_ids in worker_to_worker_graph_ids.items():
             # Determine which partition this worker serves
-            partition_name, fwd_args = self._resolve_worker_partition(
+            for partition_name, fwd_args in self._resolve_worker_partition(
                 worker_graph_ids, partitions, partition_fwd_args,
-            )
-            pstate = partition_states[partition_name]
-
-            inputs_per_worker = self._split_inputs_to_workers(
-                worker_graph_to_worker=worker_graph_to_worker,
-                inputs=fwd_args.inputs,
-                graph_walk=fwd_args.full_metadata.graph_walk,
-            )
-
-            message = NewRequest(
-                request_id=body.request_id,
-                worker_graph_ids=worker_graph_ids,
-                worker_graph_to_worker=worker_graph_to_worker,
-                initial_inputs=inputs_per_worker.get(worker_id, []),
-                request_info=CurrentForwardPassInfo(
+            ).items():
+                pstate = partition_states[partition_name]
+                inputs_per_worker = self._split_inputs_to_workers(
+                    worker_graph_to_worker=worker_graph_to_worker,
+                    inputs=fwd_args.inputs,
                     graph_walk=fwd_args.full_metadata.graph_walk,
-                    step_metadata=fwd_args.step_metadata,
-                    fwd_index=pstate.fwd_pass_number,
-                    random_seed=pstate.random_seed,
-                    requires_cfg=fwd_args.full_metadata.requires_cfg,
-                    partition_name=partition_name,
-                ),
-            )
-            self.communicator.send(
-                worker_id, WorkerMessage(
-                    message_type=WorkerMessageType.NEW_REQUEST,
-                    body=message,
-                ),
-            )
+                )
+
+                message = NewRequest(
+                    request_id=body.request_id,
+                    worker_graph_ids=worker_graph_ids,
+                    worker_graph_to_worker=worker_graph_to_worker,
+                    initial_inputs=inputs_per_worker.get(worker_id, []),
+                    request_info=CurrentForwardPassInfo(
+                        graph_walk=fwd_args.full_metadata.graph_walk,
+                        step_metadata=fwd_args.step_metadata,
+                        fwd_index=pstate.fwd_pass_number,
+                        random_seed=pstate.random_seed,
+                        requires_cfg=fwd_args.full_metadata.requires_cfg,
+                        partition_name=partition_name,
+                    ),
+                )
+                self.communicator.send(
+                    worker_id, WorkerMessage(
+                        message_type=WorkerMessageType.NEW_REQUEST,
+                        body=message,
+                    ),
+                )
 
     def _resolve_worker_partition(
         self, worker_graph_ids: list[str],
         partitions: list[PartitionDefinition],
         partition_fwd_args: dict[str, ForwardPassArgs],
-    ) -> tuple[str, ForwardPassArgs]:
-        """Find which partition a set of worker graphs belongs to."""
+    ) -> dict[str, ForwardPassArgs]:
+        """Find which partition(s) a set of worker graphs belongs to."""
+        args = {}
         for wg_id in worker_graph_ids:
             wg_walks = self._all_worker_graph_ids_to_graph_walks.get(wg_id, set())
             for p in partitions:
                 if wg_walks & p.graph_walks:
-                    return p.name, partition_fwd_args[p.name]
-        # Fallback: first partition
-        first = partitions[0].name
-        return first, partition_fwd_args[first]
+                    args[p.name] = partition_fwd_args[p.name]
+        return args
 
     def _set_partition_worker_graph_ids(
         self, request_id: str, partition_name: str, graph_walk: str,
@@ -728,6 +726,7 @@ class Conductor:
                         requires_cfg=fwd_args.full_metadata.requires_cfg,
                         partition_name=partition_name,
                     ),
+                    partition_name=partition_name
                 ),
             )
             self.communicator.send(worker, message)

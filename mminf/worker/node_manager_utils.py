@@ -119,6 +119,14 @@ class WorkerGraphQueues:
 
 
 @dataclass
+class PerPartitionInfo:
+    current_fwd_info: CurrentForwardPassInfo
+    # graph_walk_worker_graph_ids = worker graphs for current graph walk
+    graph_walk_worker_graph_ids: list[str] = field(default_factory=list) # for this worker
+    stream_partition_done: bool = False  # set True when last chunk pops with is_final
+
+
+@dataclass
 class PerRequestInfo:
     """
     Information about a request that the worker needs to keep track of:
@@ -140,21 +148,13 @@ class PerRequestInfo:
     """
     node_to_worker: dict[NodeAndGraphWalk, str]  # for all nodes
     worker_graph_ids: list[str] # for this worker
-    current_fwd_info: CurrentForwardPassInfo
-
-    # graph_walk_worker_graph_ids = worker graphs for current graph walk
-    graph_walk_worker_graph_ids: list[str] = field(default_factory=list) # for this worker
-
-    # Per-partition forward info (partition_name -> info). In the colocated case,
-    # a worker has nodes from multiple partitions; this dict lets each partition’s
-    # fwd_info be tracked independently.
-    partition_fwd_infos: dict[str, CurrentForwardPassInfo] = field(default_factory=dict)
 
     pending_persist_signals: list[GraphEdge] = field(default_factory=list)
     pending_new_tokens: dict[str, list[int]] = field(default_factory=dict)
     stream_buffers: dict[str, StreamBuffer] = field(default_factory=dict)  # edge_name -> StreamBuffer
-    stream_partition_done: bool = False  # set True when last chunk pops with is_final
     current_output_chunks: list[str] = field(default_factory=list)
+
+    per_partition_info: dict[str, PerPartitionInfo] = field(default_factory=dict)
 
 
 @dataclass
@@ -179,22 +179,23 @@ class WorkerGraphsManager:
 
     def update_request_info(
         self, request_id: str,
+        partition_name,
         current_fwd_info: CurrentForwardPassInfo | None=None,
         per_label_seq_info: dict | None=None,
-        partition_name: str | None = None,
     ):
         req_info = self.per_request_info[request_id]
+        part_info = req_info.per_partition_info[partition_name]
+
         if current_fwd_info is not None:
             partition_name = partition_name or getattr(current_fwd_info, 'partition_name', 'default')
             graph_walk = current_fwd_info.graph_walk
             if self.get_graph_walk(request_id, partition_name) != graph_walk:
-                req_info.graph_walk_worker_graph_ids = [
+                part_info.graph_walk_worker_graph_ids = [
                     graph_id for graph_id in self.per_request_info[request_id].worker_graph_ids \
                         if graph_walk in self.all_worker_graph_ids_to_graph_walks[graph_id]
                 ]
-            req_info.current_fwd_info = current_fwd_info
-            # Also store per-partition for the colocated case
-            req_info.partition_fwd_infos[partition_name] = current_fwd_info
+            part_info.current_fwd_info = current_fwd_info
+
         if per_label_seq_info is not None:
             fwd_info = self.get_fwd_info(request_id, partition_name)
             fwd_info.per_label_seq_info = {
@@ -202,20 +203,18 @@ class WorkerGraphsManager:
                 **per_label_seq_info
             }
 
-    def get_graph_walk(self, request_id: str, partition_name: str | None = None):
+    def get_graph_walk(self, request_id: str, partition_name: str):
         return self.get_fwd_info(request_id, partition_name).graph_walk
 
-    def get_seq_info(self, request_id: str, partition_name: str | None = None):
+    def get_seq_info(self, request_id: str, partition_name: str):
         return self.get_fwd_info(request_id, partition_name).per_label_seq_info
 
-    def get_fwd_number(self, request_id: str, partition_name: str | None = None):
+    def get_fwd_number(self, request_id: str, partition_name: str):
         return self.get_fwd_info(request_id, partition_name).fwd_index
 
-    def get_fwd_info(self, request_id: str, partition_name: str | None = None):
-        req_info = self.per_request_info[request_id]
-        if partition_name and partition_name in req_info.partition_fwd_infos:
-            return req_info.partition_fwd_infos[partition_name]
-        return req_info.current_fwd_info
+    def get_fwd_info(self, request_id: str, partition_name: str):
+        part_info = self.per_request_info[request_id].per_partition_info[partition_name]
+        return part_info.current_fwd_info
 
     def get_partition_for_node(self, node_name: str) -> str | None:
         """Look up which partition a node belongs to."""
@@ -236,16 +235,19 @@ class WorkerGraphsManager:
         """
         if all_walks:
             worker_graph_ids = self.per_request_info[request_id].worker_graph_ids
+            for worker_graph_id in worker_graph_ids:
+                self.queues[worker_graph_id].process_new_inputs(request_id, inputs)
         else:
-            worker_graph_ids = self.per_request_info[request_id].graph_walk_worker_graph_ids
-        for worker_graph_id in worker_graph_ids:
-            self.queues[worker_graph_id].process_new_inputs(request_id, inputs)
+            for part_info in self.per_request_info[request_id].per_partition_info.values():
+                worker_graph_ids = part_info.graph_walk_worker_graph_ids
+                for worker_graph_id in worker_graph_ids:
+                    self.queues[worker_graph_id].process_new_inputs(request_id, inputs)
 
 
     def process_node_outputs(
         self, request_id: str,
         outputs: list[GraphEdge],
-        graph_walk: str | None = None,
+        graph_walk: str,
     ) -> NodeOutputRouting:
         """
         After a node has finished processing, use its outputs to update
@@ -256,9 +258,6 @@ class WorkerGraphsManager:
         worker, and directs external outputs to worker graphs on the appropriate
         (different) worker.
         """
-        if graph_walk is None:
-            graph_walk = self.get_graph_walk(request_id)
-
         # (0) separate streaming edges — they bypass the queue system
         streaming_edges = [edge for edge in outputs if edge.is_streaming]
         non_streaming_outputs = [edge for edge in outputs if not edge.is_streaming]
@@ -393,16 +392,30 @@ class WorkerGraphsManager:
         graph_walk = current_fwd_info.graph_walk
         my_worker_graph_ids = [gid for gid in worker_graph_ids if gid in self.queues]
         partition_name = getattr(current_fwd_info, 'partition_name', 'default')
-        self.per_request_info[request_id] = PerRequestInfo(
-            node_to_worker=node_to_worker,
-            worker_graph_ids=my_worker_graph_ids,
-            current_fwd_info=current_fwd_info,
-            graph_walk_worker_graph_ids = [
-                graph_id for graph_id in my_worker_graph_ids
-                if graph_walk in self.all_worker_graph_ids_to_graph_walks[graph_id]
-            ],
-            partition_fwd_infos={partition_name: current_fwd_info},
-        )
+
+        if request_id not in self.per_request_info:
+            self.per_request_info[request_id] = PerRequestInfo(
+                node_to_worker=node_to_worker,
+                worker_graph_ids=my_worker_graph_ids,
+                per_partition_info={
+                    partition_name: PerPartitionInfo(
+                        graph_walk_worker_graph_ids=[
+                            graph_id for graph_id in my_worker_graph_ids
+                            if graph_walk in self.all_worker_graph_ids_to_graph_walks[graph_id]
+                        ],
+                        current_fwd_info=current_fwd_info
+                    )
+                }
+            )
+        else:
+            req_info = self.per_request_info[request_id]
+            req_info.per_partition_info[partition_name] = PerPartitionInfo(
+                graph_walk_worker_graph_ids=[
+                    graph_id for graph_id in my_worker_graph_ids
+                    if graph_walk in self.all_worker_graph_ids_to_graph_walks[graph_id]
+                ],
+                current_fwd_info=current_fwd_info
+            )
 
     def remove_request(self, request_id: str):
         if request_id in self.per_request_info:

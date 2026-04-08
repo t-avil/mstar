@@ -327,7 +327,8 @@ class Worker:
         # partition's fwd_info.
         if non_streaming:
             self.worker_graphs_manager.update_request_info(
-                body.request_id, current_fwd_info=body.request_info
+                body.request_id, current_fwd_info=body.request_info,
+                partition_name=body.partition_name
             )
 
         # Start RDMA reads for non-streaming edges with tensor_info
@@ -419,10 +420,10 @@ class Worker:
                     if chunk_tensor is None:
                         continue
 
-                    if chunk.is_final:
-                        req_info.stream_partition_done = True
-
                     consumer_node = self._consumer_node_cache.get(edge_name, "")
+                    partition_name = self.worker_graphs_manager.get_partition_for_node(consumer_node)
+                    if chunk.is_final:
+                        req_info.per_partition_info[partition_name].stream_partition_done = True
 
                     # Store the chunk tensor so _build_node_batch can retrieve it via uuid
                     tensor_infos = self.tensor_manager.store_and_return_tensor_info(
@@ -709,7 +710,11 @@ class Worker:
 
         # Handle streaming edges
         # Local streaming: route to StreamBuffer or legacy buffer
+        req_info = self.worker_graphs_manager.per_request_info[request_id]
         for edge in outputs.streaming_local:
+            stream_buf = req_info.stream_buffers[edge.name]
+            for info in edge.tensor_info:
+                stream_buf.pre_read_register(info.uuid)
             self._route_streaming_tensor(request_id, edge)
 
         # Remote streaming: send to destination workers
@@ -729,7 +734,8 @@ class Worker:
             if partition_name is None:
                 partition_name = getattr(fwd_info, 'partition_name', 'default')
             req_info = self.worker_graphs_manager.per_request_info.get(request_id)
-            p_done = req_info.stream_partition_done if req_info else False
+            p_done = req_info.per_partition_info[partition_name].stream_partition_done \
+                if req_info else False
 
             # Collect stream consumption info
             stream_consumed = {}
