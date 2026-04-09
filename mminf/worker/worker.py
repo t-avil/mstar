@@ -411,9 +411,17 @@ class Worker:
             self.tensor_manager.dereference(request_id, info.uuid)
 
     def _poll_stream_buffers(self) -> None:
-        """Check all active StreamBuffers; when a chunk is ready, feed it as a normal input."""
+        """Check all active StreamBuffers; when a chunk is ready, feed it as a normal input.
+
+        Buffers with ``passive_drain=True`` are skipped -- they are read
+        directly by the consuming submodule via ``drain_available()`` from
+        step_metadata during AR engine execution (e.g., Talker reading
+        Thinker hidden states during talker_decode).
+        """
         for request_id, req_info in list(self.worker_graphs_manager.per_request_info.items()):
             for edge_name, sbuf in req_info.stream_buffers.items():
+                if sbuf.passive_drain:
+                    continue
                 synthetic_edge = sbuf.pop_waiting_edge()
                 consumer_node = self._consumer_node_cache.get(edge_name, "")
                 partition_name = self.worker_graphs_manager.get_partition_for_node(consumer_node)
@@ -618,8 +626,7 @@ class Worker:
             output_edges[request_id] = node.outputs
 
             if not request_output_tensors:
-                # TODO (error handling?): this should not happen
-                continue
+                continue  # Node produced no outputs (e.g., KV-cache-only prefill step)
 
             self.tensor_manager.store_and_populate_graph_edges(
                 request_id=request_id,
@@ -795,6 +802,28 @@ class Worker:
 
                 # 4. Gather input tensors for the batch
                 node_batch = self._build_node_batch(batch)
+
+                # 4b. Inject StreamBuffer references into step_metadata for AR
+                # engines that passively drain streaming buffers (e.g., Talker
+                # reading thinker_states during talker_decode).
+                for rid in node_batch.request_ids:
+                    req_info = self.worker_graphs_manager.per_request_info.get(rid)
+                    if req_info and req_info.stream_buffers:
+                        fwd_info = node_batch.per_request_info.get(rid)
+                        if fwd_info is not None:
+                            fwd_info.step_metadata["_stream_buffers"] = req_info.stream_buffers
+
+                            # Process _set_passive_drain signals: flip the
+                            # passive_drain flag on named StreamBuffers so
+                            # _poll_stream_buffers stops polling them.
+                            drain_edges = fwd_info.step_metadata.pop(
+                                "_set_passive_drain", None
+                            )
+                            if drain_edges:
+                                for edge_name in drain_edges:
+                                    sbuf = req_info.stream_buffers.get(edge_name)
+                                    if sbuf is not None:
+                                        sbuf.passive_drain = True
 
                 # 5. Execute via engine
                 engine = self.engine_manager.get_engine(batch.node_name)
