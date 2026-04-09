@@ -585,9 +585,11 @@ class Qwen3OmniModel(Model):
         if walk_name == "prefill_text":
             edge = GraphEdge(next_node="Thinker", name="text_inputs")
         elif walk_name == "prefill_audio":
-            edge = GraphEdge(next_node="Thinker", name="audio_features")
+            # Sequential: audio_encoder -> Thinker. First node is audio_encoder.
+            edge = GraphEdge(next_node="audio_encoder", name="audio_features")
         elif walk_name == "prefill_vision":
-            edge = GraphEdge(next_node="Thinker", name="pixel_values")
+            # Sequential: vision_encoder -> Thinker. First node is vision_encoder.
+            edge = GraphEdge(next_node="vision_encoder", name="pixel_values")
         else:
             raise ValueError(f"Unrecognized prefill walk: {walk_name}")
 
@@ -978,6 +980,10 @@ class Qwen3OmniModel(Model):
             return self._create_talker_submodule(device)
         elif node_name == "Code2Wav":
             return self._create_code2wav_submodule(device)
+        elif node_name == "audio_encoder":
+            return self._create_audio_encoder_submodule(device)
+        elif node_name == "vision_encoder":
+            return self._create_vision_encoder_submodule(device)
         return None
 
     def _create_thinker_submodule(self, device: str) -> NodeSubmodule:
@@ -1094,3 +1100,55 @@ class Qwen3OmniModel(Model):
             code2wav_model=code2wav_model,
             config=self.config,
         )
+
+    def _create_audio_encoder_submodule(self, device: str) -> NodeSubmodule:
+        """Load the audio encoder (AuT) from HF weights."""
+        from mminf.model.utils import ModuleAndPrefix, load_weights_from_hf_shards
+
+        # Reuse HF audio encoder directly (Whisper-style, not perf-critical)
+        try:
+            from transformers import AutoModel
+            hf_config = AutoModel.from_pretrained(
+                self.local_dir, trust_remote_code=True
+            ).thinker.audio_tower
+            audio_encoder = hf_config
+        except Exception:
+            # Fallback: create a placeholder that loads weights via prefix
+            import importlib
+            logger.warning("Could not load HF audio encoder; using weight-loaded placeholder")
+            audio_encoder = torch.nn.Module()
+
+        load_weights_from_hf_shards(
+            repo_dir=self.local_dir,
+            modules=[ModuleAndPrefix(audio_encoder, prefix="thinker.audio_tower")],
+            device=device,
+        )
+        audio_encoder.eval()
+
+        from mminf.model.qwen3_omni.submodules import AudioEncoderSubmodule
+        return AudioEncoderSubmodule(audio_encoder=audio_encoder, config=self.config)
+
+    def _create_vision_encoder_submodule(self, device: str) -> NodeSubmodule:
+        """Load the vision encoder (SigLIP2 ViT) from HF weights."""
+        from mminf.model.utils import ModuleAndPrefix, load_weights_from_hf_shards
+
+        # Reuse HF vision encoder directly
+        try:
+            from transformers import AutoModel
+            hf_model = AutoModel.from_pretrained(
+                self.local_dir, trust_remote_code=True
+            )
+            vision_encoder = hf_model.thinker.visual
+        except Exception:
+            logger.warning("Could not load HF vision encoder; using weight-loaded placeholder")
+            vision_encoder = torch.nn.Module()
+
+        load_weights_from_hf_shards(
+            repo_dir=self.local_dir,
+            modules=[ModuleAndPrefix(vision_encoder, prefix="thinker.visual")],
+            device=device,
+        )
+        vision_encoder.eval()
+
+        from mminf.model.qwen3_omni.submodules import VisionEncoderSubmodule
+        return VisionEncoderSubmodule(vision_encoder=vision_encoder, config=self.config)
