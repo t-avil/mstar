@@ -57,27 +57,19 @@ class AudioEncoderSubmodule(NodeSubmodule):
     def preprocess(
         self,
         graph_walk: str,
-        cache_manager: BatchedCacheManager,
-        per_request_inputs: list[NameToTensorList],
-        request_ids: list[str],
-        per_request_info: dict[str, CurrentForwardPassInfo],
+        cache_manager: BatchedCacheManager | None = None,
+        per_request_inputs: list[NameToTensorList] | None = None,
+        request_ids: list[str] | None = None,
+        per_request_info: dict[str, CurrentForwardPassInfo] | None = None,
     ) -> dict[str, torch.Tensor]:
-        """Extract mel spectrograms from inputs and pad for the encoder.
-
-        Expects per_request_inputs to contain ``audio_inputs`` with raw
-        audio feature tensors (mel spectrograms or waveforms already
-        preprocessed by the API server's data worker).
-        """
+        """Extract mel spectrograms from inputs and pad for the encoder."""
         assert len(per_request_inputs) == 1, (
             "AudioEncoder processes one request at a time"
         )
         inputs = per_request_inputs[0]
 
-        # audio_inputs: list of mel spectrogram tensors
-        # Typically shape [1, n_mels, seq_len] from HF feature extractor
-        audio_features = inputs["audio_inputs"][0]
-
-        # audio_seqlens: original lengths before padding (for position IDs)
+        # Edge name from graph walk is "audio_features"
+        audio_features = inputs["audio_features"][0]
         audio_seqlens = inputs.get("audio_seqlens", [None])[0]
 
         return {
@@ -136,24 +128,20 @@ class VisionEncoderSubmodule(NodeSubmodule):
     def preprocess(
         self,
         graph_walk: str,
-        cache_manager: BatchedCacheManager,
-        per_request_inputs: list[NameToTensorList],
-        request_ids: list[str],
-        per_request_info: dict[str, CurrentForwardPassInfo],
+        cache_manager: BatchedCacheManager | None = None,
+        per_request_inputs: list[NameToTensorList] | None = None,
+        request_ids: list[str] | None = None,
+        per_request_info: dict[str, CurrentForwardPassInfo] | None = None,
     ) -> dict[str, torch.Tensor]:
-        """Extract pixel_values, grid_thw, and compute cu_seqlens.
-
-        Expects per_request_inputs to contain:
-          - ``image_inputs``: list of pixel_values tensors
-          - ``image_grid_thw``: temporal/height/width grid sizes per image
-        """
+        """Extract pixel_values, grid_thw, and compute cu_seqlens."""
         assert len(per_request_inputs) == 1, (
             "VisionEncoder processes one request at a time"
         )
         inputs = per_request_inputs[0]
 
-        pixel_values = inputs["image_inputs"][0]      # (N_patches, C, patch_H, patch_W)
-        grid_thw = inputs["image_grid_thw"][0]         # (num_images, 3)
+        # Edge name from graph walk is "pixel_values"
+        pixel_values = inputs["pixel_values"][0]       # (N_patches, C, patch_H, patch_W)
+        grid_thw = inputs.get("image_grid_thw", inputs.get("grid_thw", [None]))[0]
 
         device = pixel_values.device
         spatial_merge_size = self.config.vision.spatial_merge_size
@@ -309,7 +297,7 @@ class ThinkerSubmodule(NodeSubmodule):
 
         for inp, rid in zip(per_request_inputs, request_ids):
             text_ids = inp["text_inputs"][0].to(device)  # (seq_len,)
-            embeds = self.model.embed_tokens(text_ids)
+            embeds = self.model.model.embed_tokens(text_ids)
             all_embeds.append(embeds)
             seq_len = text_ids.shape[0]
             seq_lens.append(seq_len)
@@ -543,7 +531,7 @@ class ThinkerSubmodule(NodeSubmodule):
             token_id = inp["text_inputs"][0].to(device)  # (1,) or scalar
             if token_id.dim() == 0:
                 token_id = token_id.unsqueeze(0)
-            embeds = self.model.embed_tokens(token_id)
+            embeds = self.model.model.embed_tokens(token_id)
             all_embeds.append(embeds)
             seq_lens.append(1)
 
@@ -719,6 +707,7 @@ class TalkerSubmodule(NodeSubmodule):
         # Per-request state
         self._trailing_text_hidden: dict[str, list[torch.Tensor]] = {}
         self._trailing_text_index: dict[str, int] = {}
+        self._thinker_eos_appended: dict[str, bool] = {}
 
         # W3: Pre-computed TTS special embeddings.  These are produced by
         # running the THINKER's embed_tokens through the Talker's
@@ -783,9 +772,10 @@ class TalkerSubmodule(NodeSubmodule):
         """
         if self._tts_bos_embed_cached is not None:
             return self._tts_bos_embed_cached.to(device).unsqueeze(0)
-        # Fallback: Talker embed_tokens (incorrect, but avoids crash)
-        return self.model.model.embed_tokens(
-            torch.tensor([self.config.tts_bos_token_id], device=device)
+        # Fallback: zero vector (init_tts_embeds should be called during setup)
+        return torch.zeros(
+            1, self.config.talker_hidden_size, device=device,
+            dtype=next(self.model.parameters()).dtype,
         )
 
     def preprocess(
@@ -1030,6 +1020,7 @@ class TalkerSubmodule(NodeSubmodule):
             # "thinker_states" buffer and call drain_available().
             stream_bufs = info.step_metadata.get("_stream_buffers")
             new_items: list[torch.Tensor] = []
+            thinker_buf = None
             if stream_bufs is not None:
                 thinker_buf = stream_bufs.get("thinker_states")
                 if thinker_buf is not None and hasattr(thinker_buf, 'drain_available'):
@@ -1052,6 +1043,19 @@ class TalkerSubmodule(NodeSubmodule):
                     # Append each token individually
                     for t in range(projected.shape[0]):
                         self._trailing_text_hidden[rid].append(projected[t])
+
+            # Append tts_eos_embed when the Thinker has finished producing
+            # tokens (producer_done). This signals "end of text" to the Talker.
+            if (stream_bufs is not None
+                    and thinker_buf is not None
+                    and getattr(thinker_buf, 'producer_done', False)
+                    and not self._thinker_eos_appended.get(rid, False)):
+                eos_embed = self._tts_eos_embed_cached
+                if eos_embed is not None:
+                    if rid not in self._trailing_text_hidden:
+                        self._trailing_text_hidden[rid] = []
+                    self._trailing_text_hidden[rid].append(eos_embed.to(device))
+                self._thinker_eos_appended[rid] = True
 
             # 3. Get trailing_text_hidden[step] or tts_pad_embed
             step_idx = self._trailing_text_index.get(rid, 0)
@@ -1286,6 +1290,7 @@ class TalkerSubmodule(NodeSubmodule):
         """Remove per-request state when a request completes."""
         self._trailing_text_hidden.pop(request_id, None)
         self._trailing_text_index.pop(request_id, None)
+        self._thinker_eos_appended.pop(request_id, None)
 
 
 # ===================================================================
@@ -1312,10 +1317,10 @@ class Code2WavSubmodule(NodeSubmodule):
     def preprocess(
         self,
         graph_walk: str,
-        cache_manager: BatchedCacheManager,
-        per_request_inputs: list[NameToTensorList],
-        request_ids: list[str],
-        per_request_info: dict[str, CurrentForwardPassInfo],
+        cache_manager: BatchedCacheManager | None = None,
+        per_request_inputs: list[NameToTensorList] | None = None,
+        request_ids: list[str] | None = None,
+        per_request_info: dict[str, CurrentForwardPassInfo] | None = None,
     ) -> dict[str, torch.Tensor]:
         """Unpack codec_tokens from StreamBuffer chunk.
 
@@ -1346,6 +1351,16 @@ class Code2WavSubmodule(NodeSubmodule):
             else:
                 # Single frame
                 codec_tokens = codec_tokens.unsqueeze(0)
+
+        # Filter out codec_eos frames — the vocoder should not decode EOS tokens.
+        # EOS is identified by the layer-0 code (first column).
+        codec_eos = self.config.talker.codec_eos_token_id
+        if codec_tokens.dim() == 2 and codec_tokens.shape[0] > 0:
+            eos_mask = codec_tokens[:, 0] == codec_eos
+            if eos_mask.any():
+                codec_tokens = codec_tokens[~eos_mask]
+                if codec_tokens.shape[0] == 0:
+                    return {"request_id": rid, "codec_tokens": torch.empty(0)}
 
         # Select first num_quantizers codebook layers
         if codec_tokens.shape[-1] > num_quantizers:
@@ -1406,7 +1421,8 @@ class Code2WavSubmodule(NodeSubmodule):
             context_samples = sliding_window * upsample_rate
 
             if wav.shape[-1] > context_samples:
-                trimmed_wav = wav[:, :, context_samples // 2:]
+                # Trim the full overlap region (matching sglang-omni pattern)
+                trimmed_wav = wav[:, :, context_samples:]
             else:
                 trimmed_wav = wav
         else:
