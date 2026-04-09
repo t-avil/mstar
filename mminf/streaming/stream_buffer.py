@@ -143,5 +143,10 @@ class StreamBuffer:
         if not items:
             return {"data": torch.tensor([])}
         if isinstance(items[0], torch.Tensor):
+            if len(items) == 1:
+                # Single item: return as-is without adding a batch dimension.
+                # This avoids shape issues with FixedChunkPolicy(1) where
+                # torch.stack([tensor]) would add a spurious leading dim.
+                return {"data": items[0]}
             return {"data": torch.stack(items)}
         return {"data": items}
