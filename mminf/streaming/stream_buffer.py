@@ -32,6 +32,12 @@ class StreamBuffer:
     from_partition: str
     policy: ChunkPolicy
 
+    # When True, this buffer is drained passively by the consumer submodule
+    # (via drain_available()) rather than being polled by _poll_stream_buffers.
+    # Set during the transition from prefill to decode for streaming edges
+    # that the AR engine reads directly from step_metadata.
+    passive_drain: bool = False
+
     _waiting_graph_edges: deque = field(default_factory=deque)
 
     _buffer: list = field(default_factory=list)
@@ -120,6 +126,18 @@ class StreamBuffer:
 
     def store_uningested_edge(self, edge: GraphEdge):
         self._waiting_graph_edges.append(edge)
+
+    def drain_available(self) -> list[torch.Tensor]:
+        """Return all buffered items without chunk policy gating.
+
+        Used by submodules that passively read from the buffer during
+        conductor-driven decode (e.g., Talker reading Thinker hidden states).
+        Does not affect chunk policy state or consumed count.
+        """
+        self._update_buffer()
+        items = list(self._buffer)
+        self._buffer.clear()
+        return items
 
     def _collate(self, items: list) -> dict[str, torch.Tensor]:
         if not items:
