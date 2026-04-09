@@ -50,3 +50,23 @@ class SlidingWindowChunkPolicy(ChunkPolicy):
 
     def window_size(self) -> int:
         return self._window
+
+
+class FixedChunkPolicy(ChunkPolicy):
+    """Release non-overlapping chunks of fixed size.
+
+    Each pop_chunk returns exactly `chunk_size` items and advances by
+    `chunk_size`. No overlap, no sliding window.
+    """
+
+    def __init__(self, chunk_size: int):
+        self._chunk_size = chunk_size
+
+    def is_ready(self, buffer_len: int, items_consumed: int) -> bool:
+        return buffer_len >= self._chunk_size
+
+    def next_chunk_size(self, buffer_len: int, items_consumed: int) -> int:
+        return self._chunk_size
+
+    def window_size(self) -> int:
+        return self._chunk_size
