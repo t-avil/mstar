@@ -1,0 +1,390 @@
+"""Configuration dataclass for Qwen3-Omni-Moe.
+
+Wraps the HF ``Qwen3OmniMoeConfig`` layout so every sub-component of the
+model can be configured from a single ``Qwen3OmniModelConfig`` instance.
+All values are loaded at runtime from a local HF checkpoint directory --
+nothing is hard-coded except the dataclass defaults which mirror the
+published HF defaults for easy reference / fallback.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+
+# ---------------------------------------------------------------------------
+# Thinker text backbone
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ThinkerTextConfig:
+    vocab_size: int = 3584
+    hidden_size: int = 2048
+    intermediate_size: int = 18944
+    num_hidden_layers: int = 28
+    num_attention_heads: int = 28
+    num_key_value_heads: int = 4
+    max_position_embeddings: int = 32768
+    rope_theta: float = 1_000_000.0
+    rms_norm_eps: float = 1e-6
+
+    # MoE
+    num_experts: int = 128
+    num_experts_per_tok: int = 8
+    moe_intermediate_size: int = 768
+    norm_topk_prob: bool = True
+    mlp_only_layers: list[int] = field(default_factory=list)
+    decoder_sparse_step: int = 1
+
+    # Computed -- not stored in HF config
+    head_dim: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.head_dim is None:
+            self.head_dim = self.hidden_size // self.num_attention_heads
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> ThinkerTextConfig:
+        fnames = {f.name for f in cls.__dataclass_fields__.values()}
+        return cls(**{k: v for k, v in d.items() if k in fnames})
+
+
+# ---------------------------------------------------------------------------
+# Thinker (top-level wrapper around text + encoders)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ThinkerConfig:
+    audio_token_id: int = 151646
+    image_token_id: int = 151655
+    video_token_id: int = 151656
+    audio_start_token_id: int = 151647
+    position_id_per_seconds: int = 25
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> ThinkerConfig:
+        fnames = {f.name for f in cls.__dataclass_fields__.values()}
+        return cls(**{k: v for k, v in d.items() if k in fnames})
+
+
+# ---------------------------------------------------------------------------
+# Vision encoder
+# ---------------------------------------------------------------------------
+
+@dataclass
+class VisionEncoderConfig:
+    depth: int = 27
+    hidden_size: int = 1152
+    num_heads: int = 16
+    spatial_merge_size: int = 2
+    out_hidden_size: int = 3584
+    deepstack_visual_indexes: tuple[int, ...] = (8, 16, 24)
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> VisionEncoderConfig:
+        fnames = {f.name for f in cls.__dataclass_fields__.values()}
+        filtered = {k: v for k, v in d.items() if k in fnames}
+        # HF may store tuple fields as lists
+        if "deepstack_visual_indexes" in filtered and isinstance(
+            filtered["deepstack_visual_indexes"], list
+        ):
+            filtered["deepstack_visual_indexes"] = tuple(
+                filtered["deepstack_visual_indexes"]
+            )
+        return cls(**filtered)
+
+
+# ---------------------------------------------------------------------------
+# Audio encoder
+# ---------------------------------------------------------------------------
+
+@dataclass
+class AudioEncoderConfig:
+    d_model: int = 1280
+    encoder_layers: int = 32
+    encoder_attention_heads: int = 20
+    output_dim: int = 3584
+    max_source_positions: int = 1500
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> AudioEncoderConfig:
+        fnames = {f.name for f in cls.__dataclass_fields__.values()}
+        return cls(**{k: v for k, v in d.items() if k in fnames})
+
+
+# ---------------------------------------------------------------------------
+# Talker text backbone
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TalkerTextConfig:
+    vocab_size: int = 3072
+    hidden_size: int = 1024
+    intermediate_size: int = 2048
+    num_hidden_layers: int = 20
+    num_attention_heads: int = 16
+    num_key_value_heads: int = 2
+    rms_norm_eps: float = 1e-6
+
+    # MoE
+    moe_intermediate_size: int = 384
+    num_experts: int = 128
+    num_experts_per_tok: int = 8
+    norm_topk_prob: bool = False
+    shared_expert_intermediate_size: int | None = None
+
+    # Computed
+    head_dim: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.head_dim is None:
+            self.head_dim = self.hidden_size // self.num_attention_heads
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> TalkerTextConfig:
+        fnames = {f.name for f in cls.__dataclass_fields__.values()}
+        return cls(**{k: v for k, v in d.items() if k in fnames})
+
+
+# ---------------------------------------------------------------------------
+# Talker (top-level wrapper)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TalkerConfig:
+    accept_hidden_layer: int = 18
+    num_code_groups: int = 32
+    thinker_hidden_size: int = 2048
+
+    # Codec special token IDs
+    codec_eos_token_id: int = 4198
+    codec_nothink_id: int = 4203
+    codec_think_bos_id: int = 4204
+    codec_think_eos_id: int = 4205
+    codec_pad_id: int = 4196
+    codec_bos_id: int = 4197
+
+    audio_start_token_id: int = 151669
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> TalkerConfig:
+        fnames = {f.name for f in cls.__dataclass_fields__.values()}
+        return cls(**{k: v for k, v in d.items() if k in fnames})
+
+
+# ---------------------------------------------------------------------------
+# Code Predictor
+# ---------------------------------------------------------------------------
+
+@dataclass
+class CodePredictorConfig:
+    vocab_size: int = 2048
+    hidden_size: int = 1024
+    intermediate_size: int = 3072
+    num_hidden_layers: int = 5
+    num_attention_heads: int = 16
+    num_key_value_heads: int = 8
+    head_dim: int = 128
+    num_code_groups: int = 32
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> CodePredictorConfig:
+        fnames = {f.name for f in cls.__dataclass_fields__.values()}
+        return cls(**{k: v for k, v in d.items() if k in fnames})
+
+
+# ---------------------------------------------------------------------------
+# Code2Wav (vocoder)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Code2WavConfig:
+    codebook_size: int = 2048
+    num_quantizers: int = 16
+    sliding_window: int = 72
+    hidden_size: int = 1024
+    num_hidden_layers: int = 8
+    upsample_rates: tuple[int, ...] = (8, 5, 4, 3)
+    upsampling_ratios: tuple[int, ...] = (2, 2)
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> Code2WavConfig:
+        fnames = {f.name for f in cls.__dataclass_fields__.values()}
+        filtered = {k: v for k, v in d.items() if k in fnames}
+        for tup_field in ("upsample_rates", "upsampling_ratios"):
+            if tup_field in filtered and isinstance(filtered[tup_field], list):
+                filtered[tup_field] = tuple(filtered[tup_field])
+        return cls(**filtered)
+
+
+# ---------------------------------------------------------------------------
+# Top-level model config
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Qwen3OmniModelConfig:
+    """Unified config for Qwen3-Omni-Moe loaded from a local HF checkpoint."""
+
+    # Path to the local HF checkpoint directory (for weight loading)
+    local_dir: str = ""
+
+    # --- Top-level special tokens ----------------------------------------
+    im_start_token_id: int = 151644
+    im_end_token_id: int = 151645
+    tts_pad_token_id: int = 151671
+    tts_bos_token_id: int = 151672
+    tts_eos_token_id: int = 151673
+    system_token_id: int = 8948
+    user_token_id: int = 872
+    assistant_token_id: int = 77091
+
+    # --- Sub-configs -----------------------------------------------------
+    thinker_text: ThinkerTextConfig = field(default_factory=ThinkerTextConfig)
+    thinker: ThinkerConfig = field(default_factory=ThinkerConfig)
+    vision: VisionEncoderConfig = field(default_factory=VisionEncoderConfig)
+    audio_encoder: AudioEncoderConfig = field(default_factory=AudioEncoderConfig)
+    talker_text: TalkerTextConfig = field(default_factory=TalkerTextConfig)
+    talker: TalkerConfig = field(default_factory=TalkerConfig)
+    code_predictor: CodePredictorConfig = field(default_factory=CodePredictorConfig)
+    code2wav: Code2WavConfig = field(default_factory=Code2WavConfig)
+
+    # ------------------------------------------------------------------
+    # Convenience properties
+    # ------------------------------------------------------------------
+
+    @property
+    def thinker_hidden_size(self) -> int:
+        return self.thinker_text.hidden_size
+
+    @property
+    def thinker_num_layers(self) -> int:
+        return self.thinker_text.num_hidden_layers
+
+    @property
+    def thinker_head_dim(self) -> int:
+        assert self.thinker_text.head_dim is not None
+        return self.thinker_text.head_dim
+
+    @property
+    def thinker_num_kv_heads(self) -> int:
+        return self.thinker_text.num_key_value_heads
+
+    @property
+    def talker_hidden_size(self) -> int:
+        return self.talker_text.hidden_size
+
+    @property
+    def talker_num_layers(self) -> int:
+        return self.talker_text.num_hidden_layers
+
+    @property
+    def talker_head_dim(self) -> int:
+        assert self.talker_text.head_dim is not None
+        return self.talker_text.head_dim
+
+    @property
+    def talker_num_kv_heads(self) -> int:
+        return self.talker_text.num_key_value_heads
+
+    @property
+    def accept_hidden_layer(self) -> int:
+        return self.talker.accept_hidden_layer
+
+    @property
+    def num_code_groups(self) -> int:
+        return self.talker.num_code_groups
+
+    # ------------------------------------------------------------------
+    # Construction helpers
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def from_pretrained(cls, local_dir: str | os.PathLike[str]) -> Qwen3OmniModelConfig:
+        """Load configuration from a local HF checkpoint directory.
+
+        Reads ``config.json`` from *local_dir*, parses the nested
+        sub-config dicts (``thinker_config``, ``talker_config``, etc.),
+        and populates every sub-dataclass accordingly.
+        """
+        local_dir = str(local_dir)
+        config_path = Path(local_dir) / "config.json"
+        if not config_path.exists():
+            raise FileNotFoundError(
+                f"config.json not found in {local_dir}"
+            )
+
+        with open(config_path, "r") as f:
+            raw: dict[str, Any] = json.load(f)
+
+        return cls._from_raw_dict(raw, local_dir=local_dir)
+
+    @classmethod
+    def _from_raw_dict(
+        cls, raw: dict[str, Any], *, local_dir: str = ""
+    ) -> Qwen3OmniModelConfig:
+        """Build config from the parsed JSON dict.
+
+        The HF ``Qwen3OmniMoeConfig`` nests sub-configs under keys like
+        ``thinker_config``, ``talker_config``, etc.  Each of those in turn
+        may have further nesting (e.g. ``thinker_config.text_config``,
+        ``thinker_config.audio_config``, ``thinker_config.vision_config``).
+        """
+
+        # --- Thinker --------------------------------------------------
+        thinker_raw = raw.get("thinker_config", {})
+        thinker_text_raw = thinker_raw.get("text_config", {})
+        vision_raw = thinker_raw.get("vision_config", {})
+        audio_enc_raw = thinker_raw.get("audio_config", {})
+
+        thinker_text = ThinkerTextConfig.from_dict(thinker_text_raw)
+        thinker = ThinkerConfig.from_dict(thinker_raw)
+        vision = VisionEncoderConfig.from_dict(vision_raw)
+        audio_encoder = AudioEncoderConfig.from_dict(audio_enc_raw)
+
+        # --- Talker ---------------------------------------------------
+        talker_raw = raw.get("talker_config", {})
+        talker_text_raw = talker_raw.get("text_config", {})
+        code_predictor_raw = talker_raw.get("code_predictor_config", {})
+        # code2wav_config is at the TOP LEVEL of Qwen3OmniMoeConfig,
+        # not nested under talker_config.
+        code2wav_raw = raw.get("code2wav_config", {})
+
+        talker_text = TalkerTextConfig.from_dict(talker_text_raw)
+        talker = TalkerConfig.from_dict(talker_raw)
+        code_predictor = CodePredictorConfig.from_dict(code_predictor_raw)
+        code2wav = Code2WavConfig.from_dict(code2wav_raw)
+
+        # --- Top-level fields -----------------------------------------
+        top_fields = {
+            f.name
+            for f in cls.__dataclass_fields__.values()
+            if f.name not in {
+                "local_dir",
+                "thinker_text",
+                "thinker",
+                "vision",
+                "audio_encoder",
+                "talker_text",
+                "talker",
+                "code_predictor",
+                "code2wav",
+            }
+        }
+        top_kwargs = {k: v for k, v in raw.items() if k in top_fields}
+
+        return cls(
+            local_dir=local_dir,
+            thinker_text=thinker_text,
+            thinker=thinker,
+            vision=vision,
+            audio_encoder=audio_encoder,
+            talker_text=talker_text,
+            talker=talker,
+            code_predictor=code_predictor,
+            code2wav=code2wav,
+            **top_kwargs,
+        )
