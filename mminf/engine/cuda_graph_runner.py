@@ -232,6 +232,8 @@ class CudaGraphRunner:
             )
 
             # Build dummy per-request inputs
+            # TODO: Use submodule.get_cuda_graph_capture_inputs() instead of hardcoded
+            # text_inputs. Also copy ALL tensor inputs to static buffers, not just text_inputs.
             dummy_inputs = [
                 {"text_inputs": [torch.zeros(1, dtype=torch.long,
                                              device=self.device)]}
@@ -434,6 +436,8 @@ class CudaGraphRunner:
         )
 
         # --- Step 3: Copy real embeddings to static buffer ---
+        # TODO: Use submodule.get_cuda_graph_capture_inputs() instead of hardcoded
+        # text_inputs. Also copy ALL tensor inputs to static buffers, not just text_inputs.
         real_text = real_inputs["text_inputs"]
         preprocessed["text_inputs"][:real_text.shape[0]].copy_(real_text)
 
