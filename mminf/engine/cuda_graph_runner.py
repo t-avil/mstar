@@ -231,14 +231,32 @@ class CudaGraphRunner:
                 auto_write_store=False
             )
 
-            # Build dummy per-request inputs
-            # TODO: Use submodule.get_cuda_graph_capture_inputs() instead of hardcoded
-            # text_inputs. Also copy ALL tensor inputs to static buffers, not just text_inputs.
-            dummy_inputs = [
-                {"text_inputs": [torch.zeros(1, dtype=torch.long,
-                                             device=self.device)]}
-                for _ in dummy_rids
-            ]
+            # Build dummy per-request inputs via the submodule's own
+            # capture-input generator. This lets each submodule declare what
+            # dummy tensors its preprocess() needs (e.g., Thinker decode needs
+            # a dummy token, Talker decode needs dummy all_codes).
+            capture_templates = submodule.get_cuda_graph_capture_inputs(
+                graph_walk=config.graph_walk, device=self.device,
+            )
+            if capture_templates is None:
+                # Submodule opts out of CUDA graphs for this walk.
+                continue
+
+            def _clone_template(tpl):
+                """Deep-copy a capture template (dict of input_name -> list[Tensor])."""
+                out = {}
+                for k, v in tpl.items():
+                    if isinstance(v, list):
+                        out[k] = [t.clone() if isinstance(t, torch.Tensor) else t for t in v]
+                    elif isinstance(v, torch.Tensor):
+                        out[k] = v.clone()
+                    else:
+                        out[k] = v
+                return out
+
+            # Use the first template for each dummy request slot
+            template = capture_templates[0]
+            dummy_inputs = [_clone_template(template) for _ in dummy_rids]
 
             # Build per-request metadata
             dummy_metadata = {
@@ -260,8 +278,14 @@ class CudaGraphRunner:
                 per_request_info=dummy_metadata,
             )
 
-            # Static input buffer for the concatenated embeddings
-            static_text_inputs = preprocessed["text_inputs"].clone()
+            # Static input buffers for ALL tensor inputs in the preprocessed
+            # dict. These are the slots that will be overwritten with real
+            # inputs during replay. Non-tensor values (lists, ints) are kept
+            # in `preprocessed` as-is since they're fixed at capture time.
+            static_input_keys = [
+                k for k, v in preprocessed.items()
+                if isinstance(v, torch.Tensor)
+            ]
 
             forward = torch.compile(
                 submodule.forward_batched,
@@ -313,7 +337,8 @@ class CudaGraphRunner:
                 graph=graph,
                 static_inputs={
                     "preprocessed": preprocessed,
-                    "static_text_inputs": static_text_inputs,
+                    "static_input_keys": static_input_keys,
+                    "capture_template": template,
                     "dummy_rids": dummy_rids,
                     "dummy_metadata": dummy_metadata,
                 },
@@ -386,6 +411,8 @@ class CudaGraphRunner:
 
         preprocessed = static["preprocessed"]
         dummy_rids = static["dummy_rids"]
+        static_input_keys = static["static_input_keys"]
+        capture_template = static["capture_template"]
         config_labels = graph_data.config.labels
 
         # --- Step 1: Set up real request states on dummy request IDs ---
@@ -410,13 +437,22 @@ class CudaGraphRunner:
         real_inputs = []
         for i in range(batch_size):
             real_inputs.append(per_request_inputs[i])
-        # Pad with dummy inputs for remaining slots (use a dummy token tensor
-        # so submodule.preprocess doesn't crash on empty lists)
-        dummy_token = torch.zeros(1, dtype=torch.long, device=self.device)
+        # Pad with dummy inputs for remaining slots using the same capture
+        # template that was used during capture. This ensures submodule.preprocess
+        # doesn't crash on empty lists for any input key the submodule expects.
+        def _clone_template_for_padding(tpl):
+            out = {}
+            for k, v in tpl.items():
+                if isinstance(v, list):
+                    out[k] = [t.clone() if isinstance(t, torch.Tensor) else t for t in v]
+                elif isinstance(v, torch.Tensor):
+                    out[k] = v.clone()
+                else:
+                    out[k] = v
+            return out
+
         for _i in range(batch_size, padded_bs):
-            real_inputs.append(
-                {"text_inputs": [dummy_token]}
-            )
+            real_inputs.append(_clone_template_for_padding(capture_template))
 
         # Update metadata for real requests
         real_metadata = {}
@@ -435,11 +471,18 @@ class CudaGraphRunner:
             per_request_info=real_metadata,
         )
 
-        # --- Step 3: Copy real embeddings to static buffer ---
-        # TODO: Use submodule.get_cuda_graph_capture_inputs() instead of hardcoded
-        # text_inputs. Also copy ALL tensor inputs to static buffers, not just text_inputs.
-        real_text = real_inputs["text_inputs"]
-        preprocessed["text_inputs"][:real_text.shape[0]].copy_(real_text)
+        # --- Step 3: Copy real tensor inputs into static buffers ---
+        # The static buffers were captured from the output of preprocess() at
+        # capture time. At runtime, preprocess() produces fresh tensors for the
+        # real inputs; we copy each tensor field into its corresponding static
+        # buffer so the CUDA graph's captured pointers see the new data.
+        for key in static_input_keys:
+            real_val = real_inputs.get(key)
+            if real_val is None or not isinstance(real_val, torch.Tensor):
+                continue
+            static_buf = preprocessed[key]
+            # Copy into the leading slice that matches real_val's shape.
+            static_buf[:real_val.shape[0]].copy_(real_val)
 
         # --- Step 4: Replay ---
         graph.replay()
