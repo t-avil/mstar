@@ -680,12 +680,20 @@ class Worker:
         batch: ScheduledBatch,
         output: "NodeOutput",
         routing_per_request: dict[str, NodeOutputRouting],
+        filtered_outputs_per_request: dict[str, list[GraphEdge]],
     ) -> dict[str, list[GraphEdge]]:
         """
         For outputs going to other workers: register tensors for RDMA send
         and populate tensor_info on the GraphEdges.
         For outputs staying local: store tensors in tensor_manager.
         Returns the output edges per request (with tensor_info filled in).
+
+        ``filtered_outputs_per_request`` contains, for each request, only the
+        GraphNode output edges whose names are actually present in the
+        submodule's returned output dict. Edges absent from the output dict
+        (e.g., Talker non-last prefill which returns {}, or Thinker with
+        audio_output=False which omits thinker_states) are excluded so that
+        empty-tensor_info edges are not routed downstream.
         """
         output_edges: dict[str, list[GraphEdge]] = {}
 
@@ -694,7 +702,8 @@ class Worker:
             request_output_tensors = output.per_request_output_tensors.get(
                 request_id, {}
             ) # name -> list of tensors
-            output_edges[request_id] = node.outputs
+            filtered_outputs = filtered_outputs_per_request.get(request_id, [])
+            output_edges[request_id] = filtered_outputs
 
             if not request_output_tensors:
                 continue  # Node produced no outputs (e.g., KV-cache-only prefill step)
@@ -702,7 +711,7 @@ class Worker:
             self.tensor_manager.store_and_populate_graph_edges(
                 request_id=request_id,
                 tensors=request_output_tensors,
-                graph_edges=node.outputs
+                graph_edges=filtered_outputs
             )
 
             routing = routing_per_request[request_id]
@@ -935,16 +944,31 @@ class Worker:
                 # 5b. Free consumed input tensors
                 self._cleanup_consumed_inputs(batch)
 
-                # 6. Route outputs through WorkerGraphsManager first to determine routing
+                # 6. Route outputs through WorkerGraphsManager first to determine routing.
+                # Filter each node's output edges to only those the submodule actually
+                # produced. This matters for cases like Talker non-last prefill (which
+                # returns {} -> no edges routed) or Thinker with audio_output=False
+                # (which omits thinker_states). Without filtering, edges whose names are
+                # absent from the output dict would be routed with empty tensor_info.
+                filtered_outputs_per_request: dict[str, list[GraphEdge]] = {}
                 routing_per_request: dict[str, NodeOutputRouting] = {}
                 for request_id, node in batch.node_objects.items():
+                    request_output_tensors = output.per_request_output_tensors.get(
+                        request_id, {}
+                    )
+                    filtered_outputs = [
+                        e for e in node.outputs if e.name in request_output_tensors
+                    ]
+                    filtered_outputs_per_request[request_id] = filtered_outputs
                     routing = self.worker_graphs_manager.process_node_outputs(
-                        request_id, node.outputs, graph_walk=batch.graph_walk
+                        request_id, filtered_outputs, graph_walk=batch.graph_walk
                     )
                     routing_per_request[request_id] = routing
 
                 # 7. Store output tensors, register RDMA if needed
-                self._store_outputs(batch, output, routing_per_request)
+                self._store_outputs(
+                    batch, output, routing_per_request, filtered_outputs_per_request
+                )
 
                 # 8. Send outputs to other workers / conductor
                 for request_id in batch.node_objects.keys():
