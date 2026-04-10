@@ -125,6 +125,9 @@ class VisionEncoderSubmodule(NodeSubmodule):
         self.vision_encoder = vision_encoder
         self.config = config
 
+    # TODO: image_grid_thw, video_grid_thw, audio_seqlens are not yet
+    # produced by process_prompt / data_worker. These need to be computed
+    # during prompt processing and passed through as input signals.
     def preprocess(
         self,
         graph_walk: str,
@@ -681,14 +684,11 @@ class TalkerSubmodule(NodeSubmodule):
       - talker_prefill: extend KV cache with projected Thinker states
         (multiple chunks), then on the LAST chunk build the assistant
         prefix and sample the first codec token.
-      - talker_decode: re-embed previous all_codes, drain StreamBuffer
-        for new Thinker hidden states, produce next codec token + 31
+      - talker_decode: re-embed previous all_codes, receive thinker_states
+        as normal graph input, produce next codec token + 31
         residual codebook tokens via Code Predictor.
 
     The TalkerSubmodule manages per-request state:
-      - _trailing_text_hidden: projected Thinker embeddings for temporal
-        alignment during decode
-      - _trailing_text_index: next index into trailing_text_hidden
       - _tts_pad_embed: lazy-initialized fallback embedding when Thinker
         hasn't generated enough tokens
     """
@@ -703,11 +703,6 @@ class TalkerSubmodule(NodeSubmodule):
         self.model = talker_model    # Qwen3OmniTalkerModel
         self.code_predictor = code_predictor  # HF Code Predictor (float32)
         self.config = config
-
-        # Per-request state
-        self._trailing_text_hidden: dict[str, list[torch.Tensor]] = {}
-        self._trailing_text_index: dict[str, int] = {}
-        self._thinker_eos_appended: dict[str, bool] = {}
 
         # W3: Pre-computed TTS special embeddings.  These are produced by
         # running the THINKER's embed_tokens through the Talker's
@@ -886,10 +881,6 @@ class TalkerSubmodule(NodeSubmodule):
         conv_projected = projected[:-1]  # user conversation states
         first_decode_projected = projected[-1:]  # first Thinker decode token
 
-        # Initialize trailing_text_hidden with the first decode state
-        self._trailing_text_hidden[rid] = [first_decode_projected.squeeze(0)]
-        self._trailing_text_index[rid] = 0
-
         # Build assistant prefix (matching HF/sglang-omni/vllm-omni pattern):
         # Text hidden: [proj[0], proj[1], proj[2], pad*4, bos, proj[3]] (9 tokens)
         # Codec hidden: [zeros*3, codec_embed(nothink, think_bos, think_eos,
@@ -971,122 +962,66 @@ class TalkerSubmodule(NodeSubmodule):
 
     # ---- talker_decode ----
 
-    def _preprocess_decode(
-        self,
-        cache_manager: BatchedCacheManager,
-        per_request_inputs: list[NameToTensorList],
-        request_ids: list[str],
-        per_request_info: dict[str, CurrentForwardPassInfo],
-    ) -> dict[str, torch.Tensor]:
-        """Build next decode step: re-embed all_codes + trailing_text_hidden.
+    def _preprocess_decode(self, cache_manager, per_request_inputs, request_ids, per_request_info):
+        """Build next decode step: re-embed all_codes + thinker_states.
 
         1. Re-embed all_codes (32 code IDs) -> codec_embed_sum
-        2. Drain StreamBuffer for new Thinker hidden states
-        3. Get trailing_text_hidden[step] or tts_pad_embed
+        2. Get thinker_states from normal graph input (may be empty after Thinker EOS)
+        3. Project thinker_states via text_projection, or use tts_pad_embed if empty
         4. input_embed = codec_embed_sum + text_hidden
         """
         device = next(self.model.parameters()).device
-
         all_embeds = []
         seq_lens = []
 
         for inp, rid in zip(per_request_inputs, request_ids):
-            info = per_request_info[rid]
-
-            # 1. Re-embed all_codes (32 code IDs from previous step)
-            all_codes = inp["all_codes"][0].to(device)  # (32,) or (1, 32)
+            # 1. Re-embed all_codes
+            all_codes = inp["all_codes"][0].to(device)
             if all_codes.dim() == 2:
                 all_codes = all_codes.squeeze(0)
-
-            # Layer-0 codec token: use Talker's codec_embedding
             layer0_code = all_codes[0:1]
-            codec_embed_sum = self.model.model.codec_embedding(layer0_code)  # (1, hidden)
-
-            # Layers 1-31: use Code Predictor's codec embeddings if available
+            codec_embed_sum = self.model.model.codec_embedding(layer0_code)
+            # Sum layers 1-31 from Code Predictor embeddings
             if hasattr(self.code_predictor, 'codec_embedding') and all_codes.shape[0] > 1:
                 for i in range(1, min(all_codes.shape[0], self.config.num_code_groups)):
                     code_i = all_codes[i:i+1]
-                    if hasattr(self.code_predictor, 'codec_embeddings'):
-                        emb_i = self.code_predictor.codec_embeddings[i - 1](code_i)
-                    elif hasattr(self.code_predictor, 'codec_embedding'):
-                        emb_i = self.code_predictor.codec_embedding(code_i)
-                    else:
-                        break
+                    emb_i = self.code_predictor.codec_embedding[i - 1](code_i)
                     codec_embed_sum = codec_embed_sum + emb_i
 
-            # 2. Passively drain StreamBuffer for new Thinker hidden states.
-            # The worker injects the full stream_buffers dict into
-            # step_metadata["_stream_buffers"] (W1 fix).  We read the
-            # "thinker_states" buffer and call drain_available().
-            stream_bufs = info.step_metadata.get("_stream_buffers")
-            new_items: list[torch.Tensor] = []
-            thinker_buf = None
-            if stream_bufs is not None:
-                thinker_buf = stream_bufs.get("thinker_states")
-                if thinker_buf is not None and hasattr(thinker_buf, 'drain_available'):
-                    new_items = thinker_buf.drain_available()
-
-            if new_items:
-                # Project new items and append to trailing_text_hidden
-                for item in new_items:
-                    if item.numel() == 0:
-                        continue
-                    # item: (tokens, 2 * thinker_hidden)
-                    if item.dim() == 1:
-                        item = item.unsqueeze(0)
-                    thinker_hidden = self.config.thinker_hidden_size
-                    layer_0 = item[..., :thinker_hidden]
-                    # Project via text_projection for decode-phase tokens
-                    projected = self.model.text_projection(layer_0)
-                    if rid not in self._trailing_text_hidden:
-                        self._trailing_text_hidden[rid] = []
-                    # Append each token individually
-                    for t in range(projected.shape[0]):
-                        self._trailing_text_hidden[rid].append(projected[t])
-
-            # Append tts_eos_embed when the Thinker has finished producing
-            # tokens (producer_done). This signals "end of text" to the Talker.
-            if (stream_bufs is not None
-                    and thinker_buf is not None
-                    and getattr(thinker_buf, 'producer_done', False)
-                    and not self._thinker_eos_appended.get(rid, False)):
-                eos_embed = self._tts_eos_embed_cached
-                if eos_embed is not None:
-                    if rid not in self._trailing_text_hidden:
-                        self._trailing_text_hidden[rid] = []
-                    self._trailing_text_hidden[rid].append(eos_embed.to(device))
-                self._thinker_eos_appended[rid] = True
-
-            # 3. Get trailing_text_hidden[step] or tts_pad_embed
-            step_idx = self._trailing_text_index.get(rid, 0)
-            trailing = self._trailing_text_hidden.get(rid, [])
-
-            if step_idx < len(trailing):
-                text_hidden = trailing[step_idx].unsqueeze(0)  # (1, hidden)
+            # 2. Get thinker_states from normal graph input
+            thinker_states_list = inp.get("thinker_states", [])
+            if thinker_states_list and thinker_states_list[0] is not None:
+                thinker_state = thinker_states_list[0].to(device)
+                # Split into layer_0 and layer_n, project layer_0
+                thinker_hidden = self.config.thinker_hidden_size
+                if thinker_state.dim() >= 1 and thinker_state.shape[-1] >= thinker_hidden:
+                    layer_0 = thinker_state[..., :thinker_hidden]
+                    if layer_0.dim() == 1:
+                        layer_0 = layer_0.unsqueeze(0)
+                    text_hidden = self.model.text_projection(layer_0)
+                    # Take last token if multiple
+                    if text_hidden.shape[0] > 1:
+                        text_hidden = text_hidden[-1:]
+                else:
+                    text_hidden = self._get_tts_pad_embed(device)
             else:
+                # Empty thinker_states (Thinker has finished, or no data yet)
                 text_hidden = self._get_tts_pad_embed(device)
 
-            self._trailing_text_index[rid] = step_idx + 1
+            # Ensure text_hidden is (1, hidden)
+            if text_hidden.dim() == 1:
+                text_hidden = text_hidden.unsqueeze(0)
 
-            # 4. input_embed = codec_embed_sum + text_hidden
-            input_embed = codec_embed_sum + text_hidden  # (1, hidden)
+            # 3. input_embed = codec_embed_sum + text_hidden
+            input_embed = codec_embed_sum + text_hidden
             all_embeds.append(input_embed)
             seq_lens.append(1)
 
         input_embeds = torch.cat(all_embeds, dim=0)
+        cache_manager.plan_attention(seq_lens=seq_lens, is_causal=True, label="main")
+        cache_manager.plan_rope(seq_lens=seq_lens, pos_ids=None, label="main")
 
-        # Plan FlashInfer decode attention (seq_len=1 per request)
-        cache_manager.plan_attention(
-            seq_lens=seq_lens, is_causal=True, label="main"
-        )
-        cache_manager.plan_rope(
-            seq_lens=seq_lens, pos_ids=None, label="main"
-        )
-
-        return {
-            "input_embeds": input_embeds,
-            "seq_lens": seq_lens,
-        }
+        return {"input_embeds": input_embeds, "seq_lens": seq_lens}
 
     # ---- forward ----
 
@@ -1288,9 +1223,7 @@ class TalkerSubmodule(NodeSubmodule):
 
     def cleanup_request(self, request_id: str) -> None:
         """Remove per-request state when a request completes."""
-        self._trailing_text_hidden.pop(request_id, None)
-        self._trailing_text_index.pop(request_id, None)
-        self._thinker_eos_appended.pop(request_id, None)
+        pass
 
 
 # ===================================================================
