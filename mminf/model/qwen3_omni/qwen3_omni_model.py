@@ -177,7 +177,10 @@ class Qwen3OmniModel(Model):
         prefill_audio = Sequential([
             GraphNode(
                 name="audio_encoder",
-                input_ids=["audio_features"],
+                # audio_seqlens carries the original (pre-padding) length of
+                # each audio clip, used by the encoder to compute attention
+                # masks and output position IDs.
+                input_ids=["audio_features", "audio_seqlens"],
                 outputs=[GraphEdge(next_node="Thinker", name="audio_embeds")],
             ),
             GraphNode(
@@ -196,7 +199,10 @@ class Qwen3OmniModel(Model):
         prefill_vision = Sequential([
             GraphNode(
                 name="vision_encoder",
-                input_ids=["pixel_values"],
+                # image_grid_thw / video_grid_thw carries the (T, H, W) grid
+                # dimensions per image/video, used by the encoder to compute
+                # spatial position IDs and patch counts.
+                input_ids=["pixel_values", "image_grid_thw"],
                 outputs=[GraphEdge(next_node="Thinker", name="vision_embeds")],
             ),
             GraphNode(
@@ -561,33 +567,63 @@ class Qwen3OmniModel(Model):
         self,
         input_modalities: list[str],
         input_signals: dict[str, list[TensorPointerInfo]],
-    ) -> list[tuple[str, TensorPointerInfo]]:
+    ) -> list[tuple[str, dict[str, TensorPointerInfo]]]:
         """Build the sequential prefill schedule for the Thinker.
 
         Order: [prefill_text] + [prefill_audio if audio inputs] + [prefill_vision if vision inputs]
-        The schedule records which graph walk to run and the corresponding
-        tensor pointer for each step.
+
+        Each schedule entry is ``(walk_name, {input_name: tensor_info})``,
+        capturing all tensors needed by that step's first node.  For audio
+        and vision walks, this includes auxiliary tensors like
+        ``audio_seqlens`` and ``image_grid_thw`` that the encoder nodes
+        require alongside the primary feature tensor.
         """
-        schedule: list[tuple[str, TensorPointerInfo]] = []
+        schedule: list[tuple[str, dict[str, TensorPointerInfo]]] = []
 
         texts = input_signals.get("text_inputs", [])
         audio_features = input_signals.get("audio_features", [])
+        audio_seqlens = input_signals.get("audio_seqlens", [])
         pixel_values = input_signals.get("pixel_values", [])
+        image_grid_thws = input_signals.get("image_grid_thw", [])
+        # video uses pixel_values_videos in HF; we accept both keys here
+        pixel_values_videos = input_signals.get("pixel_values_videos", [])
+        video_grid_thws = input_signals.get("video_grid_thw", [])
 
-        text_idx, audio_idx, vision_idx = 0, 0, 0
+        text_idx = audio_idx = vision_idx = video_idx = 0
         for mod in input_modalities:
             if mod == "text":
                 if text_idx < len(texts):
-                    schedule.append(("prefill_text", texts[text_idx]))
+                    schedule.append((
+                        "prefill_text",
+                        {"text_inputs": texts[text_idx]},
+                    ))
                     text_idx += 1
             elif mod == "audio":
                 if audio_idx < len(audio_features):
-                    schedule.append(("prefill_audio", audio_features[audio_idx]))
+                    entry: dict[str, TensorPointerInfo] = {
+                        "audio_features": audio_features[audio_idx],
+                    }
+                    if audio_idx < len(audio_seqlens):
+                        entry["audio_seqlens"] = audio_seqlens[audio_idx]
+                    schedule.append(("prefill_audio", entry))
                     audio_idx += 1
-            elif mod in ("image", "video"):
+            elif mod == "image":
                 if vision_idx < len(pixel_values):
-                    schedule.append(("prefill_vision", pixel_values[vision_idx]))
+                    entry = {"pixel_values": pixel_values[vision_idx]}
+                    if vision_idx < len(image_grid_thws):
+                        entry["image_grid_thw"] = image_grid_thws[vision_idx]
+                    schedule.append(("prefill_vision", entry))
                     vision_idx += 1
+            elif mod == "video":
+                # Video uses pixel_values_videos + video_grid_thw, but the
+                # graph node still consumes them under the "pixel_values" /
+                # "image_grid_thw" input names (the vision encoder is shared).
+                if video_idx < len(pixel_values_videos):
+                    entry = {"pixel_values": pixel_values_videos[video_idx]}
+                    if video_idx < len(video_grid_thws):
+                        entry["image_grid_thw"] = video_grid_thws[video_idx]
+                    schedule.append(("prefill_vision", entry))
+                    video_idx += 1
 
         return schedule
 
@@ -596,24 +632,34 @@ class Qwen3OmniModel(Model):
         metadata: CurrentForwardConductorMetadata,
         input_signals: dict[str, list[TensorPointerInfo]],
     ) -> list[GraphEdge]:
-        """Construct input GraphEdges for the current Thinker prefill step."""
+        """Construct input GraphEdges for the current Thinker prefill step.
+
+        Each schedule entry maps an ``(walk_name, {input_name: tensor_info})``.
+        We emit one GraphEdge per input so that auxiliary tensors like
+        ``audio_seqlens`` and ``image_grid_thw`` reach the encoder node
+        alongside the primary feature tensor.
+        """
         schedule = metadata.kwargs["prefill_schedule"]
         step = metadata.kwargs["prefill_step"]
-        walk_name, tensor_info = schedule[step]
+        walk_name, tensor_dict = schedule[step]
 
+        # Determine the target node — for audio/vision, the first node in
+        # the Sequential walk is the encoder (not the Thinker).
         if walk_name == "prefill_text":
-            edge = GraphEdge(next_node="Thinker", name="text_inputs")
+            target_node = "Thinker"
         elif walk_name == "prefill_audio":
-            # Sequential: audio_encoder -> Thinker. First node is audio_encoder.
-            edge = GraphEdge(next_node="audio_encoder", name="audio_features")
+            target_node = "audio_encoder"
         elif walk_name == "prefill_vision":
-            # Sequential: vision_encoder -> Thinker. First node is vision_encoder.
-            edge = GraphEdge(next_node="vision_encoder", name="pixel_values")
+            target_node = "vision_encoder"
         else:
             raise ValueError(f"Unrecognized prefill walk: {walk_name}")
 
-        edge.tensor_info = [tensor_info]
-        return [edge]
+        edges: list[GraphEdge] = []
+        for input_name, tensor_info in tensor_dict.items():
+            edge = GraphEdge(next_node=target_node, name=input_name)
+            edge.tensor_info = [tensor_info]
+            edges.append(edge)
+        return edges
 
     # -----------------------------------------------------------------------
     # Model ABC: partition forward pass args (STATE MACHINE)
