@@ -45,6 +45,7 @@ from mminf.engine.kv_store import KVCacheConfig
 from mminf.graph.base import GraphEdge, GraphNode, Sequential, TensorPointerInfo
 from mminf.graph.special_destinations import EMIT_TO_CLIENT, EMPTY_DESTINATION
 from mminf.model.base import ForwardPassArgs, Model, NodeSubmodule
+from mminf.model.utils import Operation, WeightConverter
 from mminf.streaming.chunk_policy import FixedChunkPolicy, SlidingWindowChunkPolicy
 from mminf.streaming.topology import Connection, PartitionTopology, StreamingGraphEdge
 
@@ -86,6 +87,25 @@ class Qwen3OmniModel(Model):
     ):
         self.cache_dir = cache_dir
         self.model_path_hf = model_path_hf
+
+        self.CONVERTER = [
+            WeightConverter(
+                source_patterns=[
+                    "mlp.experts.*.gate_proj.weight",
+                    "mlp.experts.*.up_proj.weight",
+                ],
+                target_patterns="mlp.experts.gate_up_proj",
+                operations=[
+                    Operation("MergeModulelist",  dim=0),
+                    Operation("Concatenate", dim=1)
+                ]        
+            ),
+            WeightConverter(
+                source_patterns=["mlp.experts.*.down_proj.weight"],
+                target_patterns="mlp.experts.down_proj",
+                operations=[Operation("MergeModulelist",  dim=0)],
+            ),
+        ]
 
         # Load config from pretrained checkpoint
         from mminf.model.qwen3_omni.config import Qwen3OmniModelConfig
@@ -1138,6 +1158,7 @@ class Qwen3OmniModel(Model):
                 ModuleAndPrefix(thinker_model, prefix="thinker"),
             ],
             device=device,
+            conv=self.CONVERTER
         )
 
         thinker_model.eval()
@@ -1165,6 +1186,7 @@ class Qwen3OmniModel(Model):
                 ModuleAndPrefix(talker_model, prefix="talker"),
             ],
             device=device,
+            conv=self.CONVERTER
         )
 
         # Code Predictor is a separate small model loaded under "talker.code_predictor."
@@ -1227,7 +1249,7 @@ class Qwen3OmniModel(Model):
         load_weights_from_hf_shards(
             repo_dir=self.local_dir,
             modules=[
-                ModuleAndPrefix(code2wav_model, prefix="code2wav"),
+                ModuleAndPrefix(code2wav_model._hf_model, prefix="code2wav"),
             ],
             device=device,
         )
@@ -1245,17 +1267,22 @@ class Qwen3OmniModel(Model):
         from mminf.model.utils import ModuleAndPrefix, load_weights_from_hf_shards
 
         # Reuse HF audio encoder directly (Whisper-style, not perf-critical)
-        try:
-            from transformers import AutoModel
-            hf_config = AutoModel.from_pretrained(
-                self.local_dir, trust_remote_code=True
-            ).thinker.audio_tower
-            audio_encoder = hf_config
-        except Exception:
-            # Fallback: create a placeholder that loads weights via prefix
-            import importlib
-            logger.warning("Could not load HF audio encoder; using weight-loaded placeholder")
-            audio_encoder = torch.nn.Module()
+        from transformers import AutoConfig
+        from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
+            Qwen3OmniMoeAudioEncoder,
+        )
+
+        # Load config only (no weights)
+        config = AutoConfig.from_pretrained(
+            self.local_dir,
+            trust_remote_code=True,
+        )
+
+        # This should be a Qwen3OmniMoeConfig
+        audio_config = config.thinker_config.audio_config
+
+        # Build the audio encoder from config
+        audio_encoder = Qwen3OmniMoeAudioEncoder._from_config(audio_config)
 
         load_weights_from_hf_shards(
             repo_dir=self.local_dir,
@@ -1272,15 +1299,22 @@ class Qwen3OmniModel(Model):
         from mminf.model.utils import ModuleAndPrefix, load_weights_from_hf_shards
 
         # Reuse HF vision encoder directly
-        try:
-            from transformers import AutoModel
-            hf_model = AutoModel.from_pretrained(
-                self.local_dir, trust_remote_code=True
-            )
-            vision_encoder = hf_model.thinker.visual
-        except Exception:
-            logger.warning("Could not load HF vision encoder; using weight-loaded placeholder")
-            vision_encoder = torch.nn.Module()
+        from transformers import AutoConfig
+        from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
+            Qwen3OmniMoeVisionEncoder,
+        )
+
+        # Load full config (no weights)
+        config = AutoConfig.from_pretrained(
+            self.local_dir,
+            trust_remote_code=True,
+        )
+
+        # Extract the vision sub-config
+        vision_config = config.thinker_config.vision_config
+
+        # Build the vision encoder
+        vision_encoder = Qwen3OmniMoeVisionEncoder._from_config(vision_config)
 
         load_weights_from_hf_shards(
             repo_dir=self.local_dir,

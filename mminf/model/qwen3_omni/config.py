@@ -13,7 +13,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -39,6 +39,7 @@ class ThinkerTextConfig:
     norm_topk_prob: bool = True
     mlp_only_layers: list[int] = field(default_factory=list)
     decoder_sparse_step: int = 1
+    rope_parameters: dict = field(default_factory=dict)
 
     # Computed -- not stored in HF config
     head_dim: int | None = None
@@ -193,6 +194,7 @@ class TalkerConfig:
 
 @dataclass
 class CodePredictorConfig:
+    # === Existing fields ===
     vocab_size: int = 2048
     hidden_size: int = 1024
     intermediate_size: int = 3072
@@ -201,6 +203,25 @@ class CodePredictorConfig:
     num_key_value_heads: int = 8
     head_dim: int = 128
     num_code_groups: int = 32
+
+    attention_bias: bool = False
+    attention_dropout: float = 0.0
+    codebook_dim: int = 512
+    codebook_size: int = 2048
+    decoder_dim: int = 1536
+    hidden_act: str = "silu"
+    layer_scale_initial_scale: float = 0.01
+    max_position_embeddings: int = 8000
+    model_type: str = ""
+    num_quantizers: int = 16
+    num_semantic_quantizers: int = 1
+    rms_norm_eps: float = 1e-5
+    rope_theta: float = 10000.0
+    semantic_codebook_size: int = 4096
+    sliding_window: int = 72
+    upsample_rates: Tuple[int, ...] = (8, 5, 4, 3)
+    upsampling_ratios: Tuple[int, ...] = (2, 2)
+    vector_quantization_hidden_dimension: int = 512
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> CodePredictorConfig:
@@ -214,15 +235,32 @@ class CodePredictorConfig:
 
 @dataclass
 class Code2WavConfig:
+    # === Existing fields ===
     codebook_size: int = 2048
     num_quantizers: int = 16
     sliding_window: int = 72
     hidden_size: int = 1024
     num_hidden_layers: int = 8
-    upsample_rates: tuple[int, ...] = (8, 5, 4, 3)
-    upsampling_ratios: tuple[int, ...] = (2, 2)
+    upsample_rates: Tuple[int, ...] = (8, 5, 4, 3)
+    upsampling_ratios: Tuple[int, ...] = (2, 2)
     chunk_size: int = 300
     left_context_size: int = 25
+    attention_bias: bool = False
+    attention_dropout: float = 0.0
+    codebook_dim: int = 512
+    decoder_dim: int = 1536
+    hidden_act: str = "silu"
+    intermediate_size: int = 3072
+    layer_scale_initial_scale: float = 0.01
+    max_position_embeddings: int = 8000
+    model_type: str = ""
+    num_attention_heads: int = 16
+    num_key_value_heads: int = 16
+    num_semantic_quantizers: int = 1
+    rms_norm_eps: float = 1e-5
+    rope_theta: float = 10000.0
+    semantic_codebook_size: int = 4096
+    vector_quantization_hidden_dimension: int = 512
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> Code2WavConfig:

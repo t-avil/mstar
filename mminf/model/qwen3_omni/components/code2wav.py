@@ -121,7 +121,6 @@ class Qwen3OmniCode2Wav(torch.nn.Module):
         self._hf_model = HFQwen3OmniMoeCode2Wav._from_config(hf_cfg)
 
         # Expose attributes the submodule reads directly
-        self.total_upsample = self._hf_model.total_upsample
         self.config = hf_cfg
 
     def forward(self, codes: torch.Tensor, **kwargs) -> torch.Tensor:
