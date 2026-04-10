@@ -10,7 +10,7 @@ from mminf.streaming.chunk_policy import ChunkPolicy
 @dataclass
 class StreamChunk:
     """A chunk of data popped from a StreamBuffer."""
-    data: dict[str, torch.Tensor]
+    data: dict[str, torch.Tensor | None]
     chunk_index: int
     start_offset: int = 0  # global position of the first item in this chunk
     is_final: bool = False
@@ -31,12 +31,6 @@ class StreamBuffer:
     edge_name: str
     from_partition: str
     policy: ChunkPolicy
-
-    # When True, this buffer is drained passively by the consumer submodule
-    # (via drain_available()) rather than being polled by _poll_stream_buffers.
-    # Set during the transition from prefill to decode for streaming edges
-    # that the AR engine reads directly from step_metadata.
-    passive_drain: bool = False
 
     _waiting_graph_edges: deque = field(default_factory=deque)
 
@@ -85,6 +79,14 @@ class StreamBuffer:
         buf_len = len(self._buffer)
         if self._producer_done_and_all_read() and buf_len > 0:
             return True
+        # When continue_after_producer_done is set, keep producing empty
+        # chunks after the producer finishes and all items are consumed.
+        # This allows the consumer to keep running (e.g., Talker continues
+        # generating codec tokens after the Thinker hits text EOS).
+        if (self._producer_done_and_all_read()
+                and buf_len == 0
+                and self.policy.continue_after_producer_done()):
+            return True
         return self.policy.is_ready(buf_len, self._consumed)
 
     def pop_chunk(self) -> StreamChunk:
@@ -100,7 +102,7 @@ class StreamBuffer:
         offset = self._consumed  # global position of buffer[0]
 
         if self._producer_done_and_all_read() and not self.policy.is_ready(buf_len, self._consumed):
-            # Flush remainder — return whatever is left
+            # Flush remainder — return whatever is left (may be empty)
             items = list(self._buffer)
             self._buffer.clear()
             self._consumed += len(items)
@@ -113,6 +115,10 @@ class StreamBuffer:
             self._consumed += stride
 
         is_final = self._producer_done_and_all_read() and len(self._buffer) == 0
+        # When continue_after_producer_done, never mark as final — the
+        # consumer decides when it's done via its own model logic.
+        if self.policy.continue_after_producer_done():
+            is_final = False
         self.reached_final_chunk = is_final
 
         chunk = StreamChunk(
@@ -127,26 +133,11 @@ class StreamBuffer:
     def store_uningested_edge(self, edge: GraphEdge):
         self._waiting_graph_edges.append(edge)
 
-    def drain_available(self) -> list[torch.Tensor]:
-        """Return all buffered items without chunk policy gating.
-
-        Used by submodules that passively read from the buffer during
-        conductor-driven decode (e.g., Talker reading Thinker hidden states).
-        Does not affect chunk policy state or consumed count.
-        """
-        self._update_buffer()
-        items = list(self._buffer)
-        self._buffer.clear()
-        return items
-
-    def _collate(self, items: list) -> dict[str, torch.Tensor]:
+    def _collate(self, items: list) -> dict[str, torch.Tensor | None]:
         if not items:
-            return {"data": torch.tensor([])}
+            return {"data": None}
         if isinstance(items[0], torch.Tensor):
             if len(items) == 1:
-                # Single item: return as-is without adding a batch dimension.
-                # This avoids shape issues with FixedChunkPolicy(1) where
-                # torch.stack([tensor]) would add a spurious leading dim.
                 return {"data": items[0]}
             return {"data": torch.stack(items)}
         return {"data": items}
