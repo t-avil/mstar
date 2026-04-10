@@ -63,6 +63,17 @@ class ThinkerConfig:
     image_token_id: int = 151655
     video_token_id: int = 151656
     audio_start_token_id: int = 151647
+    # NOTE: Qwen3-Omni's HF config explicitly omits ``audio_end_token_id``
+    # (it is marked as ``AttributeError()`` in the modular file), but the
+    # tokenizer still defines ``<|audio_eos|>`` which has the same id as
+    # in Qwen2.5-Omni (151648).  We track it here so we can wrap audio
+    # spans in their sentinel BOS/EOS tokens during prefill.
+    audio_end_token_id: int = 151648
+    vision_start_token_id: int = 151652
+    # NOTE: Qwen3-Omni's HF config exposes ``vision_start_token_id`` but
+    # not ``vision_end_token_id``; we use the same value as Qwen3-VL /
+    # Qwen2.5-Omni (151653) which corresponds to ``<|vision_eos|>``.
+    vision_end_token_id: int = 151653
     position_id_per_seconds: int = 25
 
     @classmethod
