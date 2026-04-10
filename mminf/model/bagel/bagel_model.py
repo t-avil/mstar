@@ -412,7 +412,7 @@ class BagelModel(Model):
             max_seq_len=self.config.max_position_embeddings,
             num_qo_heads=self.config.num_attention_heads,
         )
-        return {"LLM": cfg}
+        return {"LLM": cfg, "LLM_cfg_text": cfg, "LLM_cfg_img": cfg}
 
     def get_submodule(self, node_name: str, device: str="cpu") -> torch.nn.Module | None:
         if node_name in self._submodule_cache:
