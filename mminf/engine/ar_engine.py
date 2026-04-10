@@ -277,6 +277,9 @@ class AREngine(BaseEngine):
 
     def _can_use_cuda_graph(self, batch: NodeBatch) -> bool:
         """Check if CUDA graph replay is available for this batch."""
+        # TODO: Delegate CUDA graph eligibility to the submodule via a method like
+        # `submodule.can_use_cuda_graphs(graph_walk)` instead of string-matching.
+        # This will also need changes to cuda_graph_runner.py for capture inputs.
         if batch.graph_walk != "decode" and not batch.graph_walk.endswith("_decode"):
             return False
         runner = self.cuda_graph_runners.get(batch.node_name)
@@ -353,17 +356,6 @@ class AREngine(BaseEngine):
                             req_id, label, seq_info
                         )
                 
-                # Inject streaming buffers into step_metadata so submodules
-                # can passively read from StreamBuffers during decode
-                # (same pattern as AudioCodecEngine).
-                if self._streaming_buffers:
-                    for rid, info in batch.per_request_info.items():
-                        if rid in self._streaming_buffers:
-                            info.step_metadata = {
-                                **info.step_metadata,
-                                "_streaming_buffer": self._streaming_buffers[rid],
-                            }
-
                 for rid, info in batch.per_request_info.items():
                     self.sampler.set_config(rid, **info.step_metadata)
 
