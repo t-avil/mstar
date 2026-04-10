@@ -221,6 +221,8 @@ class Code2WavConfig:
     num_hidden_layers: int = 8
     upsample_rates: tuple[int, ...] = (8, 5, 4, 3)
     upsampling_ratios: tuple[int, ...] = (2, 2)
+    chunk_size: int = 300
+    left_context_size: int = 25
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> Code2WavConfig:

@@ -240,7 +240,7 @@ class CudaGraphRunner:
             )
             if capture_templates is None:
                 # Submodule opts out of CUDA graphs for this walk.
-                continue
+                return
 
             def _clone_template(tpl):
                 """Deep-copy a capture template (dict of input_name -> list[Tensor])."""

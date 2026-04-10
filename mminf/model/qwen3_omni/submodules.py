@@ -1371,9 +1371,6 @@ class Code2WavSubmodule(NodeSubmodule):
         self.code2wav = code2wav_model
         self.config = config
 
-        # Per-request left-context buffer for streaming overlap
-        self._left_context: dict[str, torch.Tensor] = {}
-
     def preprocess(
         self,
         graph_walk: str,
@@ -1385,8 +1382,7 @@ class Code2WavSubmodule(NodeSubmodule):
         """Unpack codec_tokens from StreamBuffer chunk.
 
         Selects the first ``num_quantizers`` (16) of the 32 code groups,
-        transposes to [1, num_quantizers, num_frames], and prepends any
-        left_context from the previous chunk for streaming overlap.
+        transposes to [1, num_quantizers, num_frames]
         """
         assert len(per_request_inputs) == 1, (
             "Code2Wav processes one request at a time"
@@ -1400,7 +1396,6 @@ class Code2WavSubmodule(NodeSubmodule):
         if isinstance(codec_tokens, dict):
             codec_tokens = codec_tokens.get("data", codec_tokens)
 
-        device = codec_tokens.device
         num_quantizers = self.config.code2wav.num_quantizers  # 16
 
         # Reshape to (num_frames, num_code_groups) if flat
@@ -1428,11 +1423,6 @@ class Code2WavSubmodule(NodeSubmodule):
 
         # Transpose to [1, num_quantizers, num_frames] for Code2Wav
         codec_tokens = codec_tokens.T.unsqueeze(0)  # (1, Q, T)
-
-        # Prepend left_context for streaming overlap
-        left_ctx = self._left_context.get(rid)
-        if left_ctx is not None:
-            codec_tokens = torch.cat([left_ctx, codec_tokens], dim=-1)
 
         return {
             "request_id": rid,
@@ -1465,13 +1455,8 @@ class Code2WavSubmodule(NodeSubmodule):
         # Run the ConvNet vocoder
         wav = self.code2wav(codec_tokens)
 
-        # Store new left-context for next chunk (sliding window overlap)
         sliding_window = self.config.code2wav.sliding_window
         if codec_tokens.shape[-1] > sliding_window:
-            self._left_context[request_id] = codec_tokens[
-                :, :, -sliding_window:
-            ].clone()
-
             # Trim the overlap region from the output waveform
             # The overlap in waveform samples corresponds to the context frames
             # processed by the upsampling ConvNet
@@ -1487,7 +1472,6 @@ class Code2WavSubmodule(NodeSubmodule):
                 trimmed_wav = wav
         else:
             # First chunk or short chunk: no trimming needed, store full context
-            self._left_context[request_id] = codec_tokens.clone()
             trimmed_wav = wav
 
         # Convert to int16 PCM
@@ -1499,7 +1483,3 @@ class Code2WavSubmodule(NodeSubmodule):
 
     def can_batch(self, batch: NodeBatch) -> bool:
         return False
-
-    def cleanup_request(self, request_id: str) -> None:
-        """Remove per-request left-context buffer when request completes."""
-        self._left_context.pop(request_id, None)

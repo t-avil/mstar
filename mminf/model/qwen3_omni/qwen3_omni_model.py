@@ -45,7 +45,7 @@ from mminf.engine.kv_store import KVCacheConfig
 from mminf.graph.base import GraphEdge, GraphNode, Sequential, TensorPointerInfo
 from mminf.graph.special_destinations import EMIT_TO_CLIENT, EMPTY_DESTINATION
 from mminf.model.base import ForwardPassArgs, Model, NodeSubmodule
-from mminf.streaming.chunk_policy import FixedChunkPolicy
+from mminf.streaming.chunk_policy import FixedChunkPolicy, SlidingWindowChunkPolicy
 from mminf.streaming.topology import Connection, PartitionTopology, StreamingGraphEdge
 
 logger = logging.getLogger(__name__)
@@ -351,7 +351,10 @@ class Qwen3OmniModel(Model):
                     from_partition="Talker",
                     to_partition="Code2Wav",
                     edge_name="codec_tokens",
-                    chunk_policy_factory=lambda: FixedChunkPolicy(chunk_size=25),
+                    chunk_policy_factory=lambda: SlidingWindowChunkPolicy(
+                        chunk_size=self.config.code2wav.chunk_size + self.config.code2wav.left_context_size,
+                        stride=self.config.code2wav.chunk_size
+                    ),
                 ),
             ],
         )
@@ -904,7 +907,7 @@ class Qwen3OmniModel(Model):
         Same pattern as Orpheus SNAC -- the conductor just tracks whether
         there are more codec tokens to process.
         """
-        chunk_size = 25
+        chunk_size = self.config.code2wav.chunk_size
         token_count = conn.token_count if conn else 0
         consumed = conn.consumed_count if conn else 0
         producer_done = conn.producer_done if conn else False
