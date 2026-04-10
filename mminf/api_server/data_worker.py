@@ -178,22 +178,8 @@ class PreprocessWorkerThread:
         tensors: NameToTensorList = {}
         input_metadata = {}
 
-        # Tokenize prompt via model (model-specific tokenization + system prompt)
-        if self.model is not None:
-            prompt_tensors = self.model.process_prompt(
-                input.text,
-                input.input_modalities,
-                input.output_modalities,
-                **(input.model_kwargs or {}),
-            )
-            tensors.update(prompt_tensors)
-        elif input.text is not None:
-            # Fallback: encode as UTF-8 bytes -> uint8 tensor
-            byte_data = input.text.encode("utf-8")
-            tensors["text_inputs"] = [torch.tensor(
-                list(byte_data), dtype=torch.uint8, device=self.device
-            )]
-
+        # First, load raw modality tensors from file_paths (images, audio, video)
+        # so they can be passed to process_prompt() below.
         if input.file_paths is not None:
             for modality in input.file_paths:
                 key = f"{modality}_inputs"
@@ -228,6 +214,28 @@ class PreprocessWorkerThread:
                         video = torch.stack([frame for frame in decoder]).float() / 255.0
                         tensors[key].append(video)
                         input_metadata[key].append(asdict(decoder.metadata))
+
+        # Then, tokenize the prompt and let the model augment/transform the
+        # tensors dict (e.g., Qwen3-Omni needs to compute pixel_values,
+        # image_grid_thw, audio_features, audio_seqlens from the raw tensors
+        # loaded above).  process_prompt receives the raw multimodal tensors
+        # and returns any additional tensors to merge into the final dict.
+        if self.model is not None:
+            prompt_tensors = self.model.process_prompt(
+                input.text,
+                input.input_modalities,
+                input.output_modalities,
+                tensors=tensors,
+                **(input.model_kwargs or {}),
+            )
+            if prompt_tensors:
+                tensors.update(prompt_tensors)
+        elif input.text is not None:
+            # Fallback: encode as UTF-8 bytes -> uint8 tensor
+            byte_data = input.text.encode("utf-8")
+            tensors["text_inputs"] = [torch.tensor(
+                list(byte_data), dtype=torch.uint8, device=self.device
+            )]
 
         initial_signals = self.tensor_manager.store_and_return_tensor_info(
             request_id=input.request_id,
