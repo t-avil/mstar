@@ -350,6 +350,7 @@ class BagelModel(Model):
         prompt: str | None,
         input_modalities: list[str],
         output_modalities: list[str],
+        tensors: NameToTensorList | None = None,
         **kwargs,
     ) -> NameToTensorList:
         """Tokenize user prompt and system prompt (if think_mode).
@@ -357,6 +358,9 @@ class BagelModel(Model):
         Returns model-specific keys matching get_forward_pass_inputs:
             "text_inputs"    - tokenized user prompt
             "system_prompt"  - tokenized system prompt (think_mode only)
+
+        Bagel doesn't need the raw multimodal tensors for process_prompt;
+        images are loaded and handled as ``image_inputs`` by the data worker.
         """
         result: NameToTensorList = {}
 
