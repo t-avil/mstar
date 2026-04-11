@@ -1418,6 +1418,24 @@ class Code2WavSubmodule(NodeSubmodule):
         super().__init__()
         self.code2wav = code2wav_model
         self.config = config
+        # Per-request set of request_ids that have already emitted their first
+        # audio chunk. The first chunk has no prior audio to overlap with, so
+        # its output must NOT be trimmed — the left-context trim only applies
+        # to subsequent chunks. Matches HF chunked_decode's ``context_size =
+        # left_context_size if start_index - left_context_size > 0 else start_index``
+        # logic, where the first iteration has context_size=0.
+        self._first_chunk_emitted: set[str] = set()
+
+        # Pre-compute the total upsample factor. HF defines this as
+        # ``np.prod(upsample_rates + upsampling_ratios)`` — both tuples
+        # contribute (upsample_rates via the decoder blocks, upsampling_ratios
+        # via the upsample stack). For Qwen3-Omni this is 8*5*4*3*2*2 = 1920.
+        total_upsample = 1
+        for r in self.config.code2wav.upsample_rates:
+            total_upsample *= r
+        for r in self.config.code2wav.upsampling_ratios:
+            total_upsample *= r
+        self._total_upsample = total_upsample
 
     def preprocess(
         self,
@@ -1479,13 +1497,26 @@ class Code2WavSubmodule(NodeSubmodule):
 
     def forward(
         self,
+        request_id: str | None = None,
         codec_tokens: torch.Tensor | None = None,
         **kwargs,
     ) -> NameToTensorList:
-        """Run Code2Wav vocoder, trim context overlap, return audio chunk.
+        """Run Code2Wav vocoder, trim left-context overlap, return audio chunk.
+
+        The Talker→Code2Wav StreamBuffer uses a sliding-window policy with
+        ``window=chunk_size + left_context_size`` (325) and ``stride=chunk_size``
+        (300), so every popped chunk contains ``left_context_size`` (25) frames
+        of overlap from the previous chunk. This overlap acts as the
+        convolutional vocoder's "warmup" region and must be trimmed from the
+        output of every chunk EXCEPT the first (which has no prior audio to
+        overlap with).
+
+        Mirrors HF's ``Qwen3OmniMoeCode2Wav.chunked_decode``:
+            context_size = left_context_size if start_index - left_context_size > 0 else start_index
+            wavs.append(wav_chunk[..., context_size * self.total_upsample :])
 
         Returns:
-            {"audio_chunk": [int16 PCM tensor]} or {} if input too short.
+            {"audio_chunk": [int16 PCM tensor]} or {} if input empty.
         """
         if codec_tokens is None or codec_tokens.numel() == 0:
             return {}
@@ -1493,24 +1524,25 @@ class Code2WavSubmodule(NodeSubmodule):
         # Run the ConvNet vocoder
         wav = self.code2wav(codec_tokens)
 
-        sliding_window = self.config.code2wav.sliding_window
-        if codec_tokens.shape[-1] > sliding_window:
-            # Trim the overlap region from the output waveform
-            # The overlap in waveform samples corresponds to the context frames
-            # processed by the upsampling ConvNet
-            upsample_rate = 1
-            for r in self.config.code2wav.upsample_rates:
-                upsample_rate *= r
-            context_samples = sliding_window * upsample_rate
+        is_first_chunk = (
+            request_id is None or request_id not in self._first_chunk_emitted
+        )
+        if request_id is not None:
+            self._first_chunk_emitted.add(request_id)
 
+        if is_first_chunk:
+            # First chunk: no left context to discard — emit the full waveform.
+            trimmed_wav = wav
+        else:
+            # Subsequent chunk: trim the ``left_context_size`` warmup frames
+            # from the front of the output (they were already emitted by the
+            # previous chunk).
+            left_context_size = self.config.code2wav.left_context_size  # 25
+            context_samples = left_context_size * self._total_upsample  # 25 * 1920 = 48000
             if wav.shape[-1] > context_samples:
-                # Trim the full overlap region (matching sglang-omni pattern)
                 trimmed_wav = wav[:, :, context_samples:]
             else:
                 trimmed_wav = wav
-        else:
-            # First chunk or short chunk: no trimming needed, store full context
-            trimmed_wav = wav
 
         # Convert to int16 PCM
         audio_int16 = (
