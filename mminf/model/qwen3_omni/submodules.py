@@ -216,10 +216,13 @@ class VisionEncoderSubmodule(NodeSubmodule):
         else:
             vision_embeds = encoder_output.pooler_output
             deepstack = encoder_output.deepstack_features
+        
+        if isinstance(deepstack, torch.Tensor):
+            deepstack = [deepstack]
 
         return {
             "vision_embeds": [vision_embeds],
-            "deepstack": [deepstack] if deepstack is not None else [torch.tensor([])],
+            "deepstack": deepstack if deepstack is not None else [torch.tensor([])],
         }
 
     def can_batch(self, batch: NodeBatch) -> bool:
