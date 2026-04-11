@@ -922,7 +922,7 @@ class Qwen3OmniModel(Model):
             # Decode loop: check only the layer-0 code (first element) for
             # codec EOS.  Higher codebook layers (1-31) are residual codes
             # and should not be compared against the EOS token ID.
-            tokens = new_tokens.get("all_codes", [])
+            tokens = new_tokens["new_token"]
             codec_eos = self.config.talker.codec_eos_token_id
             if tokens and tokens[0] == codec_eos:
                 request_done = True
