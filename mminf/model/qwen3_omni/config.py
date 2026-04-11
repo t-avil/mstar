@@ -47,6 +47,22 @@ class ThinkerTextConfig:
     def __post_init__(self) -> None:
         if self.head_dim is None:
             self.head_dim = self.hidden_size // self.num_attention_heads
+        # Sanity check: the published Qwen3-Omni Thinker uses head_dim=128.
+        # The fallback ``hidden_size // num_attention_heads = 2048 // 28 = 73``
+        # is wrong and would silently break the MRoPE interleave layout
+        # (which assumes head_dim // 2 == sum(mrope_section) == 64).
+        # Fail loudly if this happens so we don't waste time chasing
+        # downstream gibberish.
+        if self.head_dim * self.num_attention_heads != self.hidden_size and self.head_dim != 128:
+            import logging
+            logging.getLogger(__name__).warning(
+                "ThinkerTextConfig: unusual head_dim=%d "
+                "(hidden_size=%d, num_attention_heads=%d). "
+                "Expected head_dim=128 for Qwen3-Omni. "
+                "Verify the checkpoint config.json contains 'head_dim': 128 "
+                "under thinker_config.text_config.",
+                self.head_dim, self.hidden_size, self.num_attention_heads,
+            )
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> ThinkerTextConfig:
