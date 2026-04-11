@@ -188,13 +188,25 @@ class TalkerConfig:
     num_code_groups: int = 32
     thinker_hidden_size: int = 2048
 
-    # Codec special token IDs
-    codec_eos_token_id: int = 4198
-    codec_nothink_id: int = 4203
-    codec_think_bos_id: int = 4204
-    codec_think_eos_id: int = 4205
-    codec_pad_id: int = 4196
-    codec_bos_id: int = 4197
+    # Codec special token IDs.
+    #
+    # IMPORTANT: HF's ``Qwen3OmniMoeTalkerConfig`` class declares the
+    # defaults for these fields in the 4196-4205 range, but those are
+    # placeholders — the Talker's ``codec_embedding`` is an
+    # ``nn.Embedding`` sized by the talker text vocab (``vocab_size=3072``
+    # in HF defaults), so IDs ≥ 3072 are out-of-range and cause a
+    # CUDA device-side assert when the assistant-prefix builder tries
+    # to embed them.  The ACTUAL published Qwen3-Omni checkpoint uses
+    # the 2148-2157 range (matching sglang-omni's values and the
+    # model's tokenizer).  We use those as our defaults here and also
+    # load from the checkpoint's ``config.json`` via ``from_dict`` if
+    # the keys are present.
+    codec_eos_token_id: int = 2150
+    codec_nothink_id: int = 2155
+    codec_think_bos_id: int = 2156
+    codec_think_eos_id: int = 2157
+    codec_pad_id: int = 2148
+    codec_bos_id: int = 2149
 
     audio_start_token_id: int = 151669
 
@@ -341,6 +353,41 @@ class Qwen3OmniModelConfig:
     talker: TalkerConfig = field(default_factory=TalkerConfig)
     code_predictor: CodePredictorConfig = field(default_factory=CodePredictorConfig)
     code2wav: Code2WavConfig = field(default_factory=Code2WavConfig)
+
+    def __post_init__(self) -> None:
+        # Sanity check: all codec special token IDs must be < the Talker's
+        # codec_embedding vocab size (talker_text.vocab_size, typically 3072).
+        # HF's class-level defaults for Qwen3OmniMoeTalkerConfig put these
+        # in the 4196-4205 range, but the actual published checkpoint uses
+        # the 2148-2157 range.  If the loaded values are out-of-range, the
+        # Talker's codec_embedding lookups would trigger a CUDA device-side
+        # assert — fail loudly here instead.
+        vocab = self.talker_text.vocab_size
+        ids = {
+            "codec_pad_id": self.talker.codec_pad_id,
+            "codec_bos_id": self.talker.codec_bos_id,
+            "codec_eos_token_id": self.talker.codec_eos_token_id,
+            "codec_nothink_id": self.talker.codec_nothink_id,
+            "codec_think_bos_id": self.talker.codec_think_bos_id,
+            "codec_think_eos_id": self.talker.codec_think_eos_id,
+        }
+        bad = [(k, v) for k, v in ids.items() if v < 0 or v >= vocab]
+        if bad:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(
+                "Qwen3OmniModelConfig: codec special token IDs are out of "
+                "range for talker_text.vocab_size=%d. Bad IDs: %s. "
+                "This will cause CUDA device-side asserts when the Talker "
+                "assistant-prefix builder calls codec_embedding() on these "
+                "IDs. Check that your checkpoint's config.json provides the "
+                "correct codec_*_id fields under talker_config, or that the "
+                "TalkerConfig defaults match the actual model.",
+                vocab, bad,
+            )
+            raise ValueError(
+                f"Codec special token IDs out of range for vocab_size={vocab}: {bad}"
+            )
 
     # ------------------------------------------------------------------
     # Convenience properties
