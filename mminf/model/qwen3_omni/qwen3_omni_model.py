@@ -1323,13 +1323,39 @@ class Qwen3OmniModel(Model):
             conv=self.CONVERTER
         )
 
-        # Code Predictor is a separate small model loaded under "talker.code_predictor."
-        # It is used inside the TalkerSubmodule for multi-step codec prediction.
-        from mminf.model.qwen3_omni.components.talker import Qwen3OmniCodePredictor
+        # Code Predictor: small (5-layer) transformer that runs inline in
+        # the Talker's forward to predict residual RVQ codebook layers.
+        #
+        # We REUSE HF's `Qwen3OmniMoeTalkerCodePredictorModelForConditionalGeneration`
+        # directly (matching sglang-omni's approach for Code2Wav).  Our
+        # earlier wrapper (`Qwen3OmniCodePredictor` in components/talker.py)
+        # was a structural skeleton mirroring HF's weight layout but with
+        # no functional forward path -- the inner decoder layers required
+        # a FlashInfer cache_handle and could not be called standalone.
+        #
+        # The HF model has a working `.forward(inputs_embeds, generation_steps=...)`
+        # that handles the AR loop correctly, plus the right
+        # `codec_embedding` (ModuleList of Embeddings) and `lm_head`
+        # (ModuleList of Linears) accessible at the canonical paths.
+        #
+        # Init on CPU (NOT meta device) to populate non-persistent buffers
+        # like RoPE inv_freq -- same reasoning as Code2Wav.  Then load
+        # weights and move to the target device.
+        from transformers import AutoConfig
+        from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
+            Qwen3OmniMoeTalkerCodePredictorModelForConditionalGeneration,
+        )
 
-        with torch.device("meta"):
-            code_predictor = Qwen3OmniCodePredictor(self.config)
-
+        hf_full_config = AutoConfig.from_pretrained(
+            self.local_dir, trust_remote_code=True,
+        )
+        cp_hf_config = (
+            hf_full_config.talker_config.code_predictor_config
+        )
+        code_predictor = (
+            Qwen3OmniMoeTalkerCodePredictorModelForConditionalGeneration
+            ._from_config(cp_hf_config)
+        )
         load_weights_from_hf_shards(
             repo_dir=self.local_dir,
             modules=[
