@@ -293,13 +293,13 @@ class Pi05LLMSubmodule(NodeSubmodule):
 
         time_emb = sincos_timestep_embedding(
             t,
-            dim=config.hidden_size,
+            dim=config.action_hidden_size,
             min_period=config.timestep_min_period,
             max_period=config.timestep_max_period,
         ).squeeze(0)
-        adarms_cond = self.time_mlp(time_emb)  # [hidden]
+        adarms_cond = self.time_mlp(time_emb)  # [action_hidden]
 
-        suffix = self.action_in_proj(noisy_actions)  # [horizon, hidden]
+        suffix = self.action_in_proj(noisy_actions)  # [horizon, action_hidden]
 
         if cache_handle is not None:
             cache_handle.set_active_label("main")

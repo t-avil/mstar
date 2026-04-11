@@ -27,9 +27,10 @@ class Pi05Config:
     tokens_per_image: int = 256  # (224 / 14) ** 2
     num_cameras: int = 3  # base, left wrist, right wrist (typical)
 
-    # ----- Shared transformer dimensions (PaliGemma + action expert) -----
-    # Shared between the two experts so a single KV cache works for both.
-    hidden_size: int = 2048
+    # ----- Shared attention dimensions (PaliGemma + action expert) -----
+    # Both experts share num_kv_heads and head_dim so the action expert can
+    # read PaliGemma's KV cache; only the per-expert hidden_size and MLP
+    # dimensions differ.
     num_layers: int = 18
     num_qo_heads: int = 8
     num_kv_heads: int = 1
@@ -37,15 +38,17 @@ class Pi05Config:
     rms_norm_eps: float = 1e-6
     rope_theta: float = 10000.0
 
-    # ----- PaliGemma expert (Gemma-2B) -----
+    # ----- PaliGemma expert (Gemma-2B by default) -----
+    hidden_size: int = 2048  # paligemma hidden / "width"
     pali_intermediate_size: int = 16384
     vocab_size: int = 257152
     pad_token_id: int = 0
 
-    # ----- Action expert -----
-    # Defaults to gemma_2b dimensions; gemma_300m users can override
-    # action_intermediate_size to 4096.
-    action_intermediate_size: int = 16384
+    # ----- Action expert (Gemma-300m by default to match lerobot/pi05_base) -----
+    # The production Pi0.5 release uses gemma_300m (1024 hidden, 4096 mlp).
+    # gemma_2b dimensions are also valid; override these to use that variant.
+    action_hidden_size: int = 1024
+    action_intermediate_size: int = 4096
 
     # ----- Flow matching -----
     num_flow_steps: int = 10

@@ -380,12 +380,12 @@ class Pi05Model(Model):
             self.paligemma = Pi05PaliGemmaExpert(self.config)
             self.action_expert = Pi05ActionExpert(self.config)
             self.action_in_proj = nn.Linear(
-                self.config.action_dim, self.config.hidden_size, bias=True
+                self.config.action_dim, self.config.action_hidden_size, bias=True
             )
             self.action_out_proj = nn.Linear(
-                self.config.hidden_size, self.config.action_dim, bias=True
+                self.config.action_hidden_size, self.config.action_dim, bias=True
             )
-            self.time_mlp = Pi05TimeMLP(hidden_size=self.config.hidden_size)
+            self.time_mlp = Pi05TimeMLP(hidden_size=self.config.action_hidden_size)
 
         if self.skip_weight_loading:
             for mod in (

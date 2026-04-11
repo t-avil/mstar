@@ -40,15 +40,23 @@ class Pi05GemmaMLP(nn.Module):
 
 
 class Pi05PaliGemmaAttention(nn.Module):
-    """GQA self-attention with RoPE, integrated with the FlashInfer cache_handle."""
+    """GQA self-attention with RoPE, integrated with the FlashInfer cache_handle.
 
-    def __init__(self, config: Pi05Config):
+    The input/output hidden size is parameterized so the same attention module
+    can be reused for the action expert (which has a different ``hidden_size``
+    than PaliGemma) while sharing num_kv_heads and head_dim so both experts
+    can read/write the same KV cache layout.
+    """
+
+    def __init__(self, config: Pi05Config, input_hidden_size: int | None = None):
         super().__init__()
         self.config = config
         self.num_heads = config.num_qo_heads
         self.num_kv_heads = config.num_kv_heads
         self.head_dim = config.head_dim
-        self.hidden_size = config.hidden_size
+        self.hidden_size = (
+            input_hidden_size if input_hidden_size is not None else config.hidden_size
+        )
         self.rope_theta = config.rope_theta
 
         self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
@@ -67,7 +75,11 @@ class Pi05PaliGemmaAttention(nn.Module):
 
         q, k = cache_handle.apply_rope(q, k, rope_theta=self.rope_theta)
         attn_output = cache_handle.run_attention(q=q, k=k, v=v)
-        attn_output = attn_output.reshape(-1, self.hidden_size)
+        # attn_output is [seq, num_heads, head_dim]; flatten the head dimension
+        # to feed o_proj (in_features = num_heads * head_dim, which may differ
+        # from hidden_size when paligemma and action expert use different
+        # widths sharing the same num_kv_heads / head_dim).
+        attn_output = attn_output.reshape(-1, self.num_heads * self.head_dim)
         return self.o_proj(attn_output)
 
 

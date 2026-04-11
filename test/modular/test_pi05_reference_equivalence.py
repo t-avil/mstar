@@ -301,6 +301,7 @@ class MockCacheHandle:
 
 TINY_CONFIG = Pi05Config(
     hidden_size=32,
+    action_hidden_size=32,  # symmetric for the small test
     num_layers=1,
     num_qo_heads=4,
     num_kv_heads=2,
@@ -325,7 +326,6 @@ def _copy_linear(dst: nn.Linear, src: nn.Linear) -> None:
 
 def _copy_adarms(dst: Pi05AdaRMSNorm, src: RefAdaRMSNorm) -> None:
     with torch.no_grad():
-        dst.weight.copy_(src.weight)
         dst.dense.weight.copy_(src.dense.weight)
         dst.dense.bias.copy_(src.dense.bias)
 
@@ -343,12 +343,13 @@ def _copy_layer(dst: Pi05ActionExpertLayer, src: RefActionExpertLayer) -> None:
 
 
 def _randomize_adarms(mod: RefAdaRMSNorm) -> None:
-    """Make the modulation nontrivially affect the norm. The zero-init in
-    both reference and mminf means the cond path is a no-op unless we fill
-    the Dense layer with random values for the test.
+    """Make the modulation nontrivially affect the norm. Both reference and
+    mminf zero-init the Dense projection so the cond path is a no-op until we
+    fill it. The plain ``weight`` parameter on ``RefAdaRMSNorm`` is unused in
+    the cond path (matches lerobot's PiGemmaRMSNorm + openpi GemmaRMSNorm),
+    so we don't randomize it.
     """
     with torch.no_grad():
-        mod.weight.uniform_(-0.1, 0.1)
         mod.dense.weight.normal_(mean=0.0, std=0.02)
         mod.dense.bias.normal_(mean=0.0, std=0.01)
 
