@@ -12,20 +12,32 @@ from torch import nn
 
 from mminf.engine.cache_manager import BatchedCacheManager
 from mminf.model.pi05.config import Pi05Config
-from mminf.utils.flashinfer_utils import run_rms_norm
 
 
 class Pi05GemmaRMSNorm(nn.Module):
-    """RMSNorm with a learned weight; computation is delegated to FlashInfer."""
+    """Gemma-style RMSNorm: ``normed * (1 + weight)``.
+
+    Matches HF Gemma's ``GemmaRMSNorm`` and lerobot's ``PiGemmaRMSNorm`` (in
+    its non-conditional path). The ``1 +`` shift is the load-bearing
+    difference vs Llama's RMSNorm — using the wrong convention silently
+    produces incorrect outputs when loading Gemma weights, since the stored
+    weight values are centered around zero (not one).
+
+    The variance is computed in float32 to match the reference exactly.
+    """
 
     def __init__(self, hidden_size: int, eps: float = 1e-6):
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.weight = nn.Parameter(torch.zeros(hidden_size))
         self.variance_epsilon = eps
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:  # pragma: no cover
-        # Replaced by run_rms_norm at call sites.
-        return run_rms_norm(hidden_states, self.weight, eps=self.variance_epsilon)
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        orig_dtype = hidden_states.dtype
+        x = hidden_states.to(torch.float32)
+        var = x.square().mean(dim=-1, keepdim=True)
+        normed = x * torch.rsqrt(var + self.variance_epsilon)
+        normed = normed * (1.0 + self.weight.to(torch.float32))
+        return normed.to(orig_dtype)
 
 
 class Pi05GemmaMLP(nn.Module):
@@ -97,22 +109,14 @@ class Pi05PaliGemmaLayer(nn.Module):
         cache_handle: BatchedCacheManager,
     ) -> torch.Tensor:
         residual = query_sequence
-        query_sequence = run_rms_norm(
-            query_sequence,
-            self.input_layernorm.weight,
-            eps=self.input_layernorm.variance_epsilon,
-        )
+        query_sequence = self.input_layernorm(query_sequence)
         query_sequence = self.self_attn(
             query_sequence=query_sequence, cache_handle=cache_handle
         )
         query_sequence = residual + query_sequence
 
         residual = query_sequence
-        query_sequence = run_rms_norm(
-            query_sequence,
-            self.post_attention_layernorm.weight,
-            eps=self.post_attention_layernorm.variance_epsilon,
-        )
+        query_sequence = self.post_attention_layernorm(query_sequence)
         query_sequence = self.mlp(query_sequence)
         return residual + query_sequence
 
@@ -147,6 +151,4 @@ class Pi05PaliGemmaExpert(nn.Module):
         if write_cache:
             cache_handle.advance_seq_lens()
 
-        return run_rms_norm(
-            query_sequence, self.norm.weight, eps=self.norm.variance_epsilon
-        )
+        return self.norm(query_sequence)

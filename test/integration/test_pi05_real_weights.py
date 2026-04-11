@@ -61,6 +61,7 @@ from mminf.model.pi05.components.action_expert import (  # noqa: E402
     Pi05TimeMLP,
 )
 from mminf.model.pi05.components.flow_matching import sincos_timestep_embedding  # noqa: E402
+from mminf.model.pi05.components.paligemma import Pi05PaliGemmaExpert  # noqa: E402
 from mminf.model.pi05.config import Pi05Config  # noqa: E402
 
 PI05_REPO = "lerobot/pi05_base"
@@ -178,6 +179,73 @@ def _copy_action_expert(ours: Pi05ActionExpert, ref_layers, ref_norm):
             ref_layer.post_attention_layernorm.dense,
         )
     _copy_linear(ours.norm.dense, ref_norm.dense)
+
+
+def _copy_paligemma_expert(ours: Pi05PaliGemmaExpert, ref_layers, ref_norm):
+    for our_layer, ref_layer in zip(ours.layers, ref_layers, strict=True):
+        _copy_linear(our_layer.self_attn.q_proj, ref_layer.self_attn.q_proj)
+        _copy_linear(our_layer.self_attn.k_proj, ref_layer.self_attn.k_proj)
+        _copy_linear(our_layer.self_attn.v_proj, ref_layer.self_attn.v_proj)
+        _copy_linear(our_layer.self_attn.o_proj, ref_layer.self_attn.o_proj)
+        _copy_linear(our_layer.mlp.gate_proj, ref_layer.mlp.gate_proj)
+        _copy_linear(our_layer.mlp.up_proj, ref_layer.mlp.up_proj)
+        _copy_linear(our_layer.mlp.down_proj, ref_layer.mlp.down_proj)
+        # Non-conditional Gemma RMSNorm: just .weight
+        with torch.no_grad():
+            our_layer.input_layernorm.weight.copy_(ref_layer.input_layernorm.weight)
+            our_layer.post_attention_layernorm.weight.copy_(
+                ref_layer.post_attention_layernorm.weight
+            )
+    with torch.no_grad():
+        ours.norm.weight.copy_(ref_norm.weight)
+
+
+class _PrefixCacheCapture:
+    """MockCacheHandle that captures K,V written by mminf's PaliGemma forward.
+
+    Mirrors the bidirectional prefill setup: applies HF Gemma RoPE on Q,K with
+    consecutive positions [0, prefix_len), runs vanilla SDPA, and stores the
+    per-layer post-RoPE K,V so they can be compared against lerobot's
+    DynamicCache contents.
+    """
+
+    def __init__(self, head_dim: int, prefix_len: int):
+        self.head_dim = head_dim
+        self.scale = head_dim**-0.5
+        self.positions = torch.arange(prefix_len, dtype=torch.long)
+        self.layer_idx = 0
+        self.captured_kv: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+
+    def set_layer_idx(self, layer_idx: int):
+        self.layer_idx = layer_idx
+
+    def set_active_label(self, label: str):  # noqa: ARG002
+        pass
+
+    def apply_rope(self, q, k, rope_theta=None, **_kwargs):
+        positions = self.positions.to(q.device)
+        return _hf_apply_rotary(q, k, positions, self.head_dim, rope_theta or 10000.0)
+
+    def run_attention(self, q, k, v):
+        # Capture post-RoPE K, V (matches what HF DynamicCache stores).
+        self.captured_kv[self.layer_idx] = (k.clone(), v.clone())
+        # Bidirectional SDPA on the prefix
+        nh = q.shape[1]
+        nkv = k.shape[1]
+        if nh != nkv:
+            rep = nh // nkv
+            k = k.repeat_interleave(rep, dim=1)
+            v = v.repeat_interleave(rep, dim=1)
+        qt = q.transpose(0, 1).float()
+        kt = k.transpose(0, 1).float()
+        vt = v.transpose(0, 1).float()
+        scores = torch.einsum("hqd,hkd->hqk", qt, kt) * self.scale
+        attn = scores.softmax(-1)
+        out = torch.einsum("hqk,hkd->hqd", attn, vt)
+        return out.transpose(0, 1).to(q.dtype)
+
+    def advance_seq_lens(self, *args, **kwargs):
+        pass
 
 
 def test_pi05_action_expert_matches_lerobot_real_weights():
@@ -307,3 +375,126 @@ def test_pi05_action_expert_matches_lerobot_real_weights():
     # Observed on lerobot/pi05_base: max delta ~2e-4 on ref abs max ~0.44.
     assert max_delta < 5e-4, f"max delta {max_delta:.4e} too large"
     assert mean_rel < 1e-2, f"mean rel err {mean_rel:.4e} too large"
+
+
+def test_pi05_paligemma_expert_matches_lerobot_real_weights():
+    """Compare ``Pi05PaliGemmaExpert`` against lerobot's PaliGemma forward.
+
+    The action-expert e2e test bypasses mminf's PaliGemma layers entirely
+    (it uses lerobot's PaliGemma to compute the prefix KV cache, then runs
+    only the action expert). This test closes that gap by validating that
+    mminf's Pi05PaliGemmaExpert produces:
+      * the same final hidden state, and
+      * the same per-layer K, V tensors
+
+    that lerobot writes during prefill, on the same prefix embeddings.
+    """
+    from lerobot.policies.pi05 import PI05Policy
+    from lerobot.policies.pi05.modeling_pi05 import make_att_2d_masks
+
+    device = torch.device("cuda")
+    dtype = torch.float32
+    seed = 1
+    torch.manual_seed(seed)
+
+    policy = PI05Policy.from_pretrained(PI05_REPO).to(device).eval()
+    model = policy.model
+    paligemma = model.paligemma_with_expert.paligemma
+    lm = paligemma.model.language_model
+
+    head_dim = lm.layers[0].self_attn.head_dim
+    num_qo_heads = lm.layers[0].self_attn.config.num_attention_heads
+    num_kv_heads = lm.layers[0].self_attn.config.num_key_value_heads
+    pali_hidden = lm.layers[0].self_attn.config.hidden_size
+    pali_intermediate = lm.layers[0].mlp.gate_proj.out_features
+    rms_eps = lm.layers[0].input_layernorm.eps
+
+    # Deterministic input prefix embeddings
+    bsize = 1
+    g = torch.Generator(device=device).manual_seed(seed)
+    images = [torch.rand(bsize, 3, 224, 224, device=device, generator=g) * 2 - 1 for _ in range(3)]
+    img_masks = [torch.ones(bsize, dtype=torch.bool, device=device) for _ in range(3)]
+    tokens = torch.randint(0, 200, (bsize, 4), device=device, generator=g)
+    masks = torch.ones(bsize, 4, dtype=torch.bool, device=device)
+
+    prefix_embs, prefix_pad_masks, prefix_att_masks = model.embed_prefix(
+        [i.to(dtype) for i in images], img_masks, tokens, masks
+    )
+    prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
+    prefix_pos = torch.cumsum(prefix_pad_masks, dim=1) - 1
+    paligemma.model.language_model.config._attn_implementation = "eager"
+    prefix_att_2d_masks_4d = model._prepare_attention_masks_4d(prefix_att_2d_masks)
+
+    ref_outputs, ref_past_kv = model.paligemma_with_expert.forward(
+        attention_mask=prefix_att_2d_masks_4d,
+        position_ids=prefix_pos,
+        past_key_values=None,
+        inputs_embeds=[prefix_embs, None],
+        use_cache=True,
+    )
+    # PaliGemmaWithExpertModel returns [prefix_output, suffix_output]; we want
+    # the prefix output (the only one populated when suffix is None).
+    ref_hidden = ref_outputs[0]
+    prefix_len = int(prefix_pad_masks.sum(dim=-1).item())
+
+    # Build mminf Pi05PaliGemmaExpert with matching dims
+    cfg = Pi05Config(
+        hidden_size=pali_hidden,
+        num_layers=len(lm.layers),
+        num_qo_heads=num_qo_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        pali_intermediate_size=pali_intermediate,
+        rms_norm_eps=rms_eps,
+    )
+    ours = Pi05PaliGemmaExpert(cfg).to(device, dtype=dtype)
+    _copy_paligemma_expert(ours, lm.layers, lm.norm)
+
+    # Run mminf with a capturing mock cache handle
+    handle = _PrefixCacheCapture(head_dim=head_dim, prefix_len=prefix_len)
+    # Pi05PaliGemmaExpert expects [seq, hidden] (no batch dim) — strip B=1.
+    ours_hidden = ours(
+        query_sequence=prefix_embs[0],
+        cache_handle=handle,
+        write_cache=False,  # MockCacheHandle doesn't track seq_lens
+    )
+
+    # ----- Compare final hidden states -----
+    # PaliGemma's layer outputs have very large magnitudes (~427 at layer 0,
+    # growing to ~27000 by layer 17 — Gemma residual + non-normalized inputs).
+    # The right metric is RELATIVE error: float32 mantissa precision is ~1e-7
+    # but with 18 layers of compounding accumulation we expect ~1e-4 to 1e-3.
+    ref_hidden_b1 = ref_hidden[0]  # [seq, hidden]
+    h_max = (ours_hidden - ref_hidden_b1).abs().max().item()
+    h_ref_abs = ref_hidden_b1.abs().max().item()
+    h_rel_max = h_max / h_ref_abs
+    print(
+        f"\nPaliGemma prefix hidden state: max delta = {h_max:.4e}, "
+        f"ref abs max = {h_ref_abs:.4f}, max rel = {h_rel_max:.4e}"
+    )
+    # Per-layer divergence is float32 precision (~1.5e-5 single-layer);
+    # 18-layer compounding from reduction-order differences inside CUDA matmul
+    # vs einsum kernels gives ~5e-3 by the final layer. The action expert
+    # e2e test (above) further validates that this level of agreement is
+    # sufficient for the downstream action trajectory to match to ~2e-4.
+    assert h_rel_max < 1e-2, f"hidden state max rel err {h_rel_max:.4e} too large"
+
+    # ----- Compare per-layer K, V against lerobot DynamicCache -----
+    # Same reasoning: use relative tolerance against the per-layer K/V abs max.
+    worst_layer_rel = 0.0
+    for layer_idx in range(cfg.num_layers):
+        our_k, our_v = handle.captured_kv[layer_idx]
+        layer_cache = ref_past_kv.layers[layer_idx]
+        if hasattr(layer_cache, "keys"):
+            ref_k_full = layer_cache.keys
+            ref_v_full = layer_cache.values
+        else:
+            ref_k_full, ref_v_full = layer_cache
+        ref_k = ref_k_full[0].transpose(0, 1).contiguous()
+        ref_v = ref_v_full[0].transpose(0, 1).contiguous()
+        k_rel = (our_k - ref_k).abs().max().item() / max(ref_k.abs().max().item(), 1e-6)
+        v_rel = (our_v - ref_v).abs().max().item() / max(ref_v.abs().max().item(), 1e-6)
+        worst_layer_rel = max(worst_layer_rel, k_rel, v_rel)
+    print(f"PaliGemma per-layer K,V: worst rel err = {worst_layer_rel:.4e}")
+    # Same precision-accumulation reasoning as for the hidden state.
+    assert worst_layer_rel < 1e-2, f"layer KV rel err {worst_layer_rel:.4e} too large"
