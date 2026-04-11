@@ -1,5 +1,6 @@
 
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 import re
@@ -7,6 +8,8 @@ from typing import Any
 
 import torch
 from safetensors.torch import safe_open
+
+logger = logging.getLogger(__name__)
 
 
 def load_weights(
@@ -193,6 +196,19 @@ def _apply_operations(
 
         # sort by expert index
         matched.sort(key=lambda x: x[0])
+
+        # Diagnostic: log how many keys this pattern matched, and the
+        # range of indices.  Useful for confirming that the converter is
+        # actually being applied to the checkpoint (rather than the
+        # identity load path) and that experts are in 0..N-1 order.
+        if matched:
+            indices = [idx for idx, _ in matched]
+            logger.debug(
+                "WeightConverter pattern %r matched %d keys, "
+                "indices range [%d..%d], expected sequential 0..N-1: %s",
+                pattern, len(matched), indices[0], indices[-1],
+                "OK" if indices == list(range(len(indices))) else "GAPS/UNORDERED",
+            )
 
         # keep only tensors
         pattern_to_tensors.append([t for _, t in matched])
