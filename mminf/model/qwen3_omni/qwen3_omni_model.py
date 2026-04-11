@@ -536,6 +536,7 @@ class Qwen3OmniModel(Model):
                 full_metadata=full_metadata,
                 inputs=[],
                 unpersist_tensors=[],
+                request_done="audio" not in output_modalities,
             )
         elif partition_name == "Code2Wav":
             # Code2Wav starts with code2wav_chunk walk but no inputs --
@@ -550,6 +551,7 @@ class Qwen3OmniModel(Model):
                 full_metadata=full_metadata,
                 inputs=[],
                 unpersist_tensors=[],
+                request_done="audio" not in output_modalities,
             )
         raise ValueError(f"Unknown partition: {partition_name!r}")
 

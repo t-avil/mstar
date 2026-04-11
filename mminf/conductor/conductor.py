@@ -476,6 +476,9 @@ class Conductor:
                 model_kwargs=body.model_kwargs,
             )
             pstate = partition_states[p.name]
+            # if a partition is not active at all in the request, register that here
+            pstate.is_done = fwd_args.request_done
+
             pstate.metadata = fwd_args.full_metadata
             self._set_partition_worker_graph_ids(
                 body.request_id, p.name, fwd_args.full_metadata.graph_walk,
