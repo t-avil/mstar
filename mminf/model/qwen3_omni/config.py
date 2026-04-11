@@ -185,7 +185,10 @@ class TalkerTextConfig:
 @dataclass
 class TalkerConfig:
     accept_hidden_layer: int = 18
-    num_code_groups: int = 32
+    # Qwen3-Omni-30B-A3B-Instruct has 16 code groups (verified against the
+    # published config.json on HF Hub).  The HF class-level default was 32
+    # but that's not what the published checkpoint uses.
+    num_code_groups: int = 16
     thinker_hidden_size: int = 2048
 
     # Codec special token IDs.
@@ -230,7 +233,9 @@ class CodePredictorConfig:
     num_attention_heads: int = 16
     num_key_value_heads: int = 8
     head_dim: int = 128
-    num_code_groups: int = 32
+    # Qwen3-Omni uses 16 code groups (verified against the published HF
+    # config.json — code_predictor_config.num_code_groups = 16).
+    num_code_groups: int = 16
 
     attention_bias: bool = False
     attention_dropout: float = 0.0
