@@ -1229,65 +1229,71 @@ class TalkerSubmodule(NodeSubmodule):
         if num_groups <= 1:
             return all_codes
 
-        # Disable autocast for float32 Code Predictor inference
+        # Disable autocast for float32 Code Predictor inference.  HF and
+        # vllm-omni found that fused/autocast kernels degrade audio quality
+        # for the small (5-layer) Code Predictor.
         with torch.amp.autocast(device_type="cuda", enabled=False):
-            last_hidden_f32 = last_hidden.float()
+            cp = self.code_predictor
 
-            # Build initial Code Predictor input: [last_hidden, codec_embed(layer0)]
-            if hasattr(self.code_predictor, 'codec_embedding'):
-                code_embed = self.code_predictor.codec_embedding(layer0_code).float()
-            elif hasattr(self.code_predictor, 'codec_embeddings'):
-                code_embed = self.code_predictor.codec_embeddings[0](layer0_code).float()
-            else:
-                # Fallback: use Talker codec_embedding
-                code_embed = self.model.model.codec_embedding(layer0_code).float()
+            # The Code Predictor has TWO ModuleLists indexed by residual
+            # layer (1..num_groups-1, length = num_groups - 1):
+            #   cp.model.codec_embedding[k] = nn.Embedding for layer (k+1)
+            #   cp.lm_head[k]               = nn.Linear  for layer (k+1)
+            #
+            # IMPORTANT: codec_embedding is a ModuleList of Embeddings, NOT
+            # a single Embedding.  Calling it directly raises
+            # NotImplementedError (ModuleList has no forward).  We must
+            # index into it first, e.g. codec_embedding[k](codes).
+            codec_embeddings = cp.model.codec_embedding
+            lm_heads = cp.lm_head
 
-            # Project Talker hidden into Code Predictor space if needed
-            if hasattr(self.code_predictor, 'input_projection'):
-                cp_hidden = self.code_predictor.input_projection(last_hidden_f32)
-            else:
-                cp_hidden = last_hidden_f32
+            # Build initial input: [last_hidden, layer0_embed].  The layer-0
+            # code uses codec_embeddings[0] (the first residual embedder);
+            # HF stores it under codec_embedding.0 in the checkpoint.  We
+            # add a batch dimension so the HF inner model sees a 3-D
+            # ``(batch, seq, hidden)`` tensor.
+            cp_dtype = next(cp.parameters()).dtype
+            last_hidden_cp = last_hidden.to(cp_dtype).unsqueeze(0)  # (1, 1, H)
+            layer0_embed = codec_embeddings[0](
+                layer0_code.unsqueeze(0)
+            )  # (1, 1, H)
+            cp_input = torch.cat(
+                [last_hidden_cp, layer0_embed], dim=1,
+            )  # (1, 2, H)
 
-            cp_input = torch.cat([cp_hidden, code_embed], dim=0)  # (2, hidden)
-
-            # AR loop for layers 1 through (num_groups - 1)
+            # AR loop for layers 1 through (num_groups - 1).  At step
+            # ``group_idx``, lm_heads[group_idx - 1] predicts the layer-
+            # ``group_idx`` residual code, and codec_embeddings[group_idx]
+            # embeds it for the next iteration.
+            #
+            # We re-prefill the entire growing sequence each step (no
+            # persistent KV cache).  This is O(N^2) but the predictor is
+            # tiny (5 layers, ~80M params, max 31 steps), and matches
+            # vllm-omni's reference implementation for numerical fidelity.
             for group_idx in range(1, num_groups):
-                # Run Code Predictor forward (no persistent KV cache)
-                if hasattr(self.code_predictor, 'forward'):
-                    cp_output = self.code_predictor(cp_input)
-                else:
-                    cp_output = cp_input
+                # Forward through the Code Predictor's inner model.
+                # ``cp.model`` is a Qwen3OmniMoeTalkerCodePredictorModel
+                # which accepts ``inputs_embeds`` and returns a
+                # BaseModelOutputWithPast.
+                outputs = cp.model(
+                    inputs_embeds=cp_input,
+                    use_cache=False,
+                )
+                hidden_states = outputs.last_hidden_state  # (1, seq, H)
 
-                # Get logits for this codebook layer
-                if hasattr(self.code_predictor, 'codec_heads'):
-                    cp_logits = self.code_predictor.codec_heads[group_idx - 1](
-                        cp_output[-1:]
-                    )
-                elif hasattr(self.code_predictor, 'codec_head'):
-                    cp_logits = self.code_predictor.codec_head(cp_output[-1:])
-                else:
-                    # Fallback: use a linear head if available
-                    cp_logits = cp_output[-1:]
-
-                code_i = cp_logits.argmax(dim=-1).squeeze()
+                # Logits for this residual layer (only the last position)
+                cp_logits = lm_heads[group_idx - 1](
+                    hidden_states[:, -1:, :]
+                )  # (1, 1, vocab)
+                code_i = cp_logits.argmax(dim=-1).squeeze()  # scalar
                 all_codes[group_idx] = code_i
 
-                # Embed the newly sampled code for next iteration
+                # Embed the sampled code for the next iteration
                 if group_idx < num_groups - 1:
-                    if hasattr(self.code_predictor, 'codec_embeddings'):
-                        next_embed = self.code_predictor.codec_embeddings[group_idx](
-                            code_i.unsqueeze(0)
-                        ).float()
-                    elif hasattr(self.code_predictor, 'codec_embedding'):
-                        next_embed = self.code_predictor.codec_embedding(
-                            code_i.unsqueeze(0)
-                        ).float()
-                    else:
-                        next_embed = self.model.model.codec_embedding(
-                            code_i.unsqueeze(0)
-                        ).float()
-
-                    cp_input = torch.cat([cp_input, next_embed], dim=0)
+                    next_embed = codec_embeddings[group_idx](
+                        code_i.view(1, 1)
+                    )  # (1, 1, H)
+                    cp_input = torch.cat([cp_input, next_embed], dim=1)
 
         return all_codes
 
