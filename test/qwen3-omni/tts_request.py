@@ -85,6 +85,13 @@ def main():
             except json.JSONDecodeError:
                 continue
 
+            if msg.get("modality") == "text":
+                data_b64 = msg.get("data", "")
+                decoded = base64.b64decode(data_b64)
+
+                sys.stdout.write(decoded.decode("utf-8", errors="replace"))
+                sys.stdout.flush()
+
             if msg.get("modality") != "audio":
                 continue
 
