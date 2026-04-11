@@ -758,6 +758,9 @@ def test_pi05_siglip_encoder_matches_hf_reference():
         num_channels=3,
         image_size=config.vit_image_size,
         patch_size=config.vit_patch_size,
+        # Match Pi05SiglipEncoder, which disables the pooling head to match
+        # the production lerobot/pi05_base checkpoint key set.
+        vision_use_head=False,
     )
     ref_vision = SiglipVisionModel(siglip_cfg).to(DEVICE).eval()
     ref_vision.load_state_dict(ours.vision_model.state_dict())

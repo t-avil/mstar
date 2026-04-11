@@ -304,3 +304,117 @@ def test_pi05_process_prompt_without_state_uses_plain_text():
     )
     assert "text_inputs" in result
     assert stub.last_prompt == "hello world"
+
+
+# ----------------------------------------------------------------------
+# Lerobot -> mminf weight remap (pure-function unit tests)
+# ----------------------------------------------------------------------
+
+
+def test_remap_lerobot_state_dict_buckets_keys_correctly():
+    """Verify that ``remap_lerobot_state_dict`` routes each lerobot key to
+    the right mminf submodule with the right inner key. Uses tiny tensors
+    so we can run on CPU without weights."""
+    from mminf.model.pi05.weight_loader import remap_lerobot_state_dict
+
+    def t(*shape):
+        return torch.zeros(*shape)
+
+    pali = "paligemma_with_expert.paligemma.model"
+    ge = "paligemma_with_expert.gemma_expert.model"
+    sd = {
+        # Top-level
+        "action_in_proj.weight": t(1024, 32),
+        "action_in_proj.bias": t(1024),
+        "action_out_proj.weight": t(32, 1024),
+        "action_out_proj.bias": t(32),
+        "time_mlp_in.weight": t(1024, 1024),
+        "time_mlp_in.bias": t(1024),
+        "time_mlp_out.weight": t(1024, 1024),
+        "time_mlp_out.bias": t(1024),
+        # PaliGemma side
+        "paligemma_with_expert.paligemma.lm_head.weight": t(257152, 2048),
+        f"{pali}.language_model.norm.weight": t(2048),
+        f"{pali}.language_model.layers.0.input_layernorm.weight": t(2048),
+        f"{pali}.language_model.layers.0.self_attn.q_proj.weight": t(2048, 2048),
+        f"{pali}.language_model.layers.0.mlp.gate_proj.weight": t(16384, 2048),
+        # Vision tower
+        f"{pali}.vision_tower.vision_model.embeddings.patch_embedding.weight": t(1152, 3, 14, 14),
+        f"{pali}.vision_tower.vision_model.encoder.layers.0.layer_norm1.weight": t(1152),
+        # Multi-modal projector -> connector
+        f"{pali}.multi_modal_projector.linear.weight": t(2048, 1152),
+        f"{pali}.multi_modal_projector.linear.bias": t(2048),
+        # Action expert side
+        f"{ge}.layers.0.self_attn.q_proj.weight": t(2048, 1024),
+        f"{ge}.layers.0.input_layernorm.dense.weight": t(3072, 1024),
+        f"{ge}.layers.0.input_layernorm.dense.bias": t(3072),
+        f"{ge}.norm.dense.weight": t(3072, 1024),
+        f"{ge}.norm.dense.bias": t(3072),
+        "paligemma_with_expert.gemma_expert.lm_head.weight": t(257152, 1024),  # dropped
+    }
+    buckets = remap_lerobot_state_dict(sd)
+
+    # action_in_proj
+    assert set(buckets["action_in_proj"].keys()) == {"weight", "bias"}
+    assert buckets["action_in_proj"]["weight"].shape == (1024, 32)
+
+    # action_out_proj
+    assert set(buckets["action_out_proj"].keys()) == {"weight", "bias"}
+
+    # time_mlp -> linear_in / linear_out
+    assert set(buckets["time_mlp"].keys()) == {
+        "linear_in.weight", "linear_in.bias",
+        "linear_out.weight", "linear_out.bias",
+    }
+
+    # embed_tokens — pulled from PaliGemma's lm_head
+    assert "weight" in buckets["embed_tokens"]
+    assert buckets["embed_tokens"]["weight"].shape == (257152, 2048)
+
+    # paligemma transformer — language_model.* prefix stripped
+    pali = buckets["paligemma"]
+    assert "norm.weight" in pali
+    assert "layers.0.input_layernorm.weight" in pali
+    assert "layers.0.self_attn.q_proj.weight" in pali
+    assert "layers.0.mlp.gate_proj.weight" in pali
+
+    # siglip — vision_tower replaced with vision_model (Pi05SiglipEncoder owns
+    # self.vision_model = SiglipVisionModel which itself has an inner
+    # .vision_model attribute, so the resulting key has the double prefix).
+    # multi_modal_projector.linear.* -> connector.*
+    siglip = buckets["siglip"]
+    assert "vision_model.vision_model.embeddings.patch_embedding.weight" in siglip
+    assert "vision_model.vision_model.encoder.layers.0.layer_norm1.weight" in siglip
+    assert "connector.weight" in siglip
+    assert "connector.bias" in siglip
+    assert not any("multi_modal_projector" in k for k in siglip.keys())
+
+    # action_expert — gemma_expert.model.* prefix stripped, dense.* preserved
+    ae = buckets["action_expert"]
+    assert "layers.0.self_attn.q_proj.weight" in ae
+    assert "layers.0.input_layernorm.dense.weight" in ae
+    assert "layers.0.input_layernorm.dense.bias" in ae
+    assert "norm.dense.weight" in ae
+    assert "norm.dense.bias" in ae
+
+    # gemma_expert.lm_head is intentionally dropped
+    for bucket in buckets.values():
+        assert not any("lm_head" in k for k in bucket.keys())
+
+
+def test_remap_lerobot_state_dict_returns_known_top_level_buckets():
+    """Sanity check on the bucket schema."""
+    from mminf.model.pi05.weight_loader import remap_lerobot_state_dict
+
+    buckets = remap_lerobot_state_dict({})
+    assert set(buckets.keys()) == {
+        "siglip",
+        "embed_tokens",
+        "paligemma",
+        "action_expert",
+        "action_in_proj",
+        "action_out_proj",
+        "time_mlp",
+    }
+    for v in buckets.values():
+        assert v == {}

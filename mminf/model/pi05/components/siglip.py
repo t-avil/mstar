@@ -29,6 +29,11 @@ class Pi05SiglipEncoder(nn.Module):
             num_channels=3,
             image_size=config.vit_image_size,
             patch_size=config.vit_patch_size,
+            # Pi0.5 / lerobot's PaliGemma SigLIP does NOT use the pooling
+            # head — only ``last_hidden_state`` is consumed downstream by the
+            # multi_modal_projector. Disabling the head matches the
+            # production checkpoint key set (no ``vision_model.head.*`` keys).
+            vision_use_head=False,
         )
         self.vision_model = SiglipVisionModel(siglip_cfg)
         self.connector = nn.Linear(

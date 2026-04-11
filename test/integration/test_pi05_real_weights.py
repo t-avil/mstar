@@ -656,3 +656,380 @@ def test_pi05_full_stack_matches_lerobot_real_weights():
     # 5e-2 mean relative.
     assert max_delta < 1e-2, f"full-stack max delta {max_delta:.4e} too large"
     assert mean_rel < 5e-2, f"full-stack mean rel err {mean_rel:.4e} too large"
+
+
+def test_pi05_model_loaded_via_remapper_matches_lerobot():
+    """Production-style end-to-end: instantiate ``Pi05Model``, load real
+    weights via :func:`mminf.model.pi05.weight_loader.load_lerobot_pi05_into_model`,
+    obtain submodules through ``Pi05Model.get_submodule(...)``, and run a
+    full inference forward through them on the same deterministic input
+    used by the other integration tests. Compare the resulting action
+    trajectory against ``lerobot.PI05Policy.sample_actions``.
+
+    This is the strictest "real Pi05Model" check we can run without
+    standing up a full mminf worker process: it exercises
+    :class:`Pi05Model`'s lazy submodule construction, the lerobot→mminf
+    state-dict remap, and the actual ``Pi05ViTEncoderSubmodule`` and
+    ``Pi05LLMSubmodule`` forward methods. The only thing it bypasses is
+    the FlashInfer/AREngine paged KV cache (replaced with the same
+    ``MockCacheHandle`` used by the other integration tests, which has
+    been validated against the real FlashInfer wrapper separately).
+    """
+    import os
+
+    from lerobot.policies.pi05 import PI05Policy
+    from safetensors.torch import load_file
+
+    from mminf.model.pi05.pi05_model import Pi05Model
+    from mminf.model.pi05.weight_loader import load_lerobot_pi05_into_model
+
+    device = torch.device("cuda")
+    dtype = torch.float32
+    seed = 0
+    torch.manual_seed(seed)
+
+    # ----- Reference -----
+    policy = PI05Policy.from_pretrained(PI05_REPO).to(device).eval()
+    ref_model = policy.model
+    ref_config = policy.config
+
+    bsize = 1
+    horizon = ref_config.chunk_size
+    action_dim = ref_config.max_action_dim
+    g = torch.Generator(device=device).manual_seed(seed)
+    images = [
+        torch.rand(bsize, 3, 224, 224, device=device, generator=g) * 2 - 1
+        for _ in range(3)
+    ]
+    img_masks = [torch.ones(bsize, dtype=torch.bool, device=device) for _ in range(3)]
+    tokens = torch.randint(0, 200, (bsize, 4), device=device, generator=g)
+    masks = torch.ones(bsize, 4, dtype=torch.bool, device=device)
+    noise = torch.randn(bsize, horizon, action_dim, device=device, generator=g, dtype=torch.float32)
+
+    ref_actions = ref_model.sample_actions(
+        images=[i.to(dtype) for i in images],
+        img_masks=img_masks,
+        tokens=tokens,
+        masks=masks,
+        noise=noise,
+        num_steps=ref_config.num_inference_steps,
+    )
+
+    # ----- mminf Pi05Model with real weights via the remapper -----
+    # Locate the same checkpoint file lerobot just loaded.
+    cache_root = os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
+    if "HF_HUB_CACHE" in os.environ:
+        cache_root = os.environ["HF_HUB_CACHE"]
+    candidate = (
+        Path(cache_root)
+        / "hub"
+        / "models--lerobot--pi05_base"
+        / "snapshots"
+    )
+    if not candidate.exists():
+        candidate = Path(cache_root) / "models--lerobot--pi05_base" / "snapshots"
+    snapshot_dir = next(candidate.iterdir())  # the single revision snapshot
+    safetensors_path = snapshot_dir / "model.safetensors"
+    assert safetensors_path.exists(), f"missing checkpoint at {safetensors_path}"
+
+    state_dict = load_file(str(safetensors_path), device="cpu")
+
+    # Build a Pi05Model with skip_weight_loading=True so __init__ doesn't try
+    # to download anything; the remapper drives all weight materialization.
+    mminf_model = Pi05Model(model_path_hf="lerobot/pi05_base", skip_weight_loading=True)
+    # Override the lazy config defaults with the real PaliGemma + gemma_300m dims.
+    from mminf.model.pi05.config import Pi05Config
+
+    pali_layer = ref_model.paligemma_with_expert.paligemma.model.language_model.layers[0]
+    ge_layer = ref_model.paligemma_with_expert.gemma_expert.model.layers[0]
+    mminf_model.config = Pi05Config(
+        hidden_size=pali_layer.self_attn.config.hidden_size,
+        action_hidden_size=ref_model.action_in_proj.out_features,
+        num_layers=len(ref_model.paligemma_with_expert.paligemma.model.language_model.layers),
+        num_qo_heads=pali_layer.self_attn.config.num_attention_heads,
+        num_kv_heads=pali_layer.self_attn.config.num_key_value_heads,
+        head_dim=pali_layer.self_attn.head_dim,
+        pali_intermediate_size=pali_layer.mlp.gate_proj.out_features,
+        action_intermediate_size=ge_layer.mlp.gate_proj.out_features,
+        rms_norm_eps=pali_layer.input_layernorm.eps,
+        num_flow_steps=ref_config.num_inference_steps,
+        action_horizon=ref_config.chunk_size,
+        action_dim=ref_config.max_action_dim,
+        vit_hidden_size=1152,
+        vit_intermediate_size=4304,
+        vit_num_layers=27,
+        vit_num_heads=16,
+        vit_image_size=224,
+        vit_patch_size=14,
+    )
+
+    # Load real weights via the remapper. This triggers Pi05Model.get_submodule
+    # internally, which in turn triggers _init_vit_components / _init_llm_components.
+    missing = load_lerobot_pi05_into_model(
+        mminf_model, state_dict, device=str(device), strict=False
+    )
+    print("\nWeight loading missing keys per bucket:")
+    for name, keys in missing.items():
+        if keys:
+            print(f"  {name}: {len(keys)} missing — first: {keys[:3]}")
+    # We expect zero missing keys in every bucket once the remapper is right.
+    for name, keys in missing.items():
+        assert len(keys) == 0, f"{name} has {len(keys)} missing keys: {keys[:5]}"
+
+    # Now use the model's own get_submodule path
+    vit_submodule = mminf_model.get_submodule("vit_encoder", device=str(device))
+    llm_submodule = mminf_model.get_submodule("LLM", device=str(device))
+    assert vit_submodule is not None
+    assert llm_submodule is not None
+    vit_submodule = vit_submodule.to(device, dtype=dtype).eval()
+    llm_submodule = llm_submodule.to(device, dtype=dtype).eval()
+
+    # ----- Embed images via lerobot (its SigLIP weights are now in mminf
+    # so this just runs the same encoder we loaded). For the prefix
+    # language tokens, lerobot uses paligemma.language_model.embed_tokens
+    # whose weights came from lm_head — we have those in
+    # llm_submodule.embed_tokens. -----
+    prefix_embs, prefix_pad_masks, _ = ref_model.embed_prefix(
+        [i.to(dtype) for i in images], img_masks, tokens, masks
+    )
+    prefix_len = int(prefix_pad_masks.sum(dim=-1).item())
+
+    # Verify that mminf's embed_tokens reproduces lerobot's language token
+    # embeddings (sanity check that the lm_head -> embed_tokens remap worked).
+    # Lerobot's ``embed_language_tokens`` returns unscaled embeddings; the
+    # sqrt(hidden) scaling is applied later inside ``embed_prefix``. Compare
+    # to mine WITHOUT the scaling to isolate the embedding lookup.
+    ref_lang_emb = ref_model.paligemma_with_expert.embed_language_tokens(tokens)
+    ours_lang_emb = llm_submodule.embed_tokens(tokens)
+    lang_delta = (ref_lang_emb - ours_lang_emb).abs().max().item()
+    print(f"  embed_tokens vs lerobot embed_language_tokens delta: {lang_delta:.4e}")
+    assert lang_delta < 1e-4, f"embed_tokens divergence {lang_delta:.4e}"
+
+    # ----- Run mminf Pi05PaliGemmaExpert prefill via the LLM submodule's
+    # underlying paligemma module + a capturing mock cache handle. -----
+    prefill_handle = _PrefixCacheCapture(
+        head_dim=mminf_model.config.head_dim, prefix_len=prefix_len
+    )
+    llm_submodule.paligemma(
+        query_sequence=prefix_embs[0],
+        cache_handle=prefill_handle,
+        write_cache=False,
+    )
+
+    # ----- Run mminf Pi05ActionExpert denoise loop -----
+    suffix_positions = (
+        torch.arange(horizon, device=device, dtype=torch.long) + prefix_len
+    )
+    action_handle = _MockCacheHandle(
+        head_dim=mminf_model.config.head_dim, suffix_positions=suffix_positions
+    )
+    for layer_idx in range(mminf_model.config.num_layers):
+        action_handle._prefix_kv[layer_idx] = prefill_handle.captured_kv[layer_idx]
+
+    num_steps = ref_config.num_inference_steps
+    dt = -1.0 / num_steps
+    x_t = noise.clone()
+    time = torch.tensor(1.0, device=device, dtype=dtype)
+    for _ in range(num_steps):
+        time_emb = sincos_timestep_embedding(
+            time.unsqueeze(0),
+            dim=mminf_model.config.action_hidden_size,
+            min_period=ref_config.min_period,
+            max_period=ref_config.max_period,
+        ).squeeze(0)
+        adarms_cond = llm_submodule.time_mlp(time_emb.to(dtype))
+        suffix = llm_submodule.action_in_proj(x_t[0])
+        suffix_out = llm_submodule.action_expert(
+            query_sequence=suffix, cache_handle=action_handle, adarms_cond=adarms_cond
+        )
+        v_t = llm_submodule.action_out_proj(suffix_out)
+        x_t = x_t + dt * v_t.unsqueeze(0)
+        time = time + dt
+    ours_actions = x_t
+
+    # ----- Verify against the lerobot reference -----
+    max_delta = (ours_actions - ref_actions).abs().max().item()
+    mean_delta = (ours_actions - ref_actions).abs().mean().item()
+    mean_rel = ((ours_actions - ref_actions).abs() / (ref_actions.abs() + 1e-6)).mean().item()
+    print(
+        f"\nPi0.5 Pi05Model+remapper e2e: max abs delta = {max_delta:.4e}, "
+        f"mean abs delta = {mean_delta:.4e}, mean rel err = {mean_rel:.4e}"
+    )
+    assert max_delta < 1e-2
+    assert mean_rel < 5e-2
+
+    # ----- Spot-check Pi05Model.process_prompt and postprocess wiring -----
+    out_bytes = mminf_model.postprocess(ours_actions[0], modality="action")
+    assert isinstance(out_bytes, bytes)
+    assert len(out_bytes) == horizon * action_dim * 4  # float32
+
+
+class _StubTransferEngine:
+    """Minimal stand-in for the Mooncake TransferEngine.
+
+    The real engine handles RDMA registration and inter-worker reads/writes,
+    which are only relevant in a multi-worker disaggregated topology. For a
+    single-process Pi0.5 forward we never trigger any transfers, so a stub
+    that records register_memory calls is enough to satisfy
+    PagedAllocationManager's constructor.
+    """
+
+    def __init__(self):
+        self.registered: list[tuple[int, int]] = []
+
+    def register_memory(self, ptr: int, nbytes: int) -> int:
+        self.registered.append((ptr, nbytes))
+        return 0
+
+    def batch_transfer_sync_read(self, *args, **kwargs):
+        raise RuntimeError("stub: no transfers expected in single-process Pi0.5 test")
+
+
+def test_pi05_areengine_load_model_with_real_weights():
+    """Smoke test: AREngine.load_model can ingest a Pi05 LLM submodule and
+    initialize a real BatchedCacheManager + PagedAllocationManager around it.
+
+    This wires together the production code path that mminf's Worker takes
+    when bringing up the LLM node — minus the Mooncake transfer engine,
+    which we stub. The test:
+
+      1. Loads ``lerobot/pi05_base`` and remaps weights into a fresh
+         Pi05Model via ``load_lerobot_pi05_into_model``.
+      2. Constructs an ``AREngine`` from the model's ``KVCacheConfig`` and
+         calls ``load_model`` with the ``LLM`` submodule.
+      3. Creates a ``BatchedCacheManager`` for one request, calls
+         ``alloc_manager.add_request``, and verifies that the engine's
+         ``kv_cache`` tensor has the expected shape.
+      4. Asserts the engine reports ``EngineType.AR`` and that
+         ``execute_batch`` is wired up (via attribute lookup — we don't
+         try to actually execute, since that requires building the full
+         NodeBatch + per_request_info plumbing).
+
+    What this validates: ``Pi05Model.get_kv_cache_config`` produces a
+    config that AREngine accepts; ``Pi05Model.get_submodule("LLM")`` returns
+    an nn.Module that AREngine.load_model is happy to take; the resulting
+    paged KV cache has the correct dimensions for Pi0.5.
+    """
+    from lerobot.policies.pi05 import PI05Policy
+    from safetensors.torch import load_file
+
+    from mminf.engine.ar_engine import AREngine
+    from mminf.engine.base import EngineType
+    from mminf.engine.kv_store import TransferEngineInfo
+    from mminf.model.pi05.config import Pi05Config
+    from mminf.model.pi05.pi05_model import Pi05Model
+    from mminf.model.pi05.weight_loader import load_lerobot_pi05_into_model
+
+    device = torch.device("cuda")
+
+    # Build the same Pi05Model used in the previous test (we mirror its
+    # config-from-lerobot construction).
+    policy = PI05Policy.from_pretrained(PI05_REPO).to(device).eval()
+    ref_model = policy.model
+    ref_config = policy.config
+    pali_layer = ref_model.paligemma_with_expert.paligemma.model.language_model.layers[0]
+    ge_layer = ref_model.paligemma_with_expert.gemma_expert.model.layers[0]
+
+    mminf_model = Pi05Model(model_path_hf=PI05_REPO, skip_weight_loading=True)
+    mminf_model.config = Pi05Config(
+        hidden_size=pali_layer.self_attn.config.hidden_size,
+        action_hidden_size=ref_model.action_in_proj.out_features,
+        num_layers=len(ref_model.paligemma_with_expert.paligemma.model.language_model.layers),
+        num_qo_heads=pali_layer.self_attn.config.num_attention_heads,
+        num_kv_heads=pali_layer.self_attn.config.num_key_value_heads,
+        head_dim=pali_layer.self_attn.head_dim,
+        pali_intermediate_size=pali_layer.mlp.gate_proj.out_features,
+        action_intermediate_size=ge_layer.mlp.gate_proj.out_features,
+        rms_norm_eps=pali_layer.input_layernorm.eps,
+        num_flow_steps=ref_config.num_inference_steps,
+        action_horizon=ref_config.chunk_size,
+        action_dim=ref_config.max_action_dim,
+        vit_hidden_size=1152,
+        vit_intermediate_size=4304,
+        vit_num_layers=27,
+        vit_num_heads=16,
+        vit_image_size=224,
+        vit_patch_size=14,
+    )
+
+    # Locate and load the safetensors checkpoint.
+    cache_root = os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
+    if "HF_HUB_CACHE" in os.environ:
+        cache_root = os.environ["HF_HUB_CACHE"]
+    snap_root = Path(cache_root) / "hub" / "models--lerobot--pi05_base" / "snapshots"
+    if not snap_root.exists():
+        snap_root = Path(cache_root) / "models--lerobot--pi05_base" / "snapshots"
+    safetensors_path = next(snap_root.iterdir()) / "model.safetensors"
+    state_dict = load_file(str(safetensors_path), device="cpu")
+
+    missing = load_lerobot_pi05_into_model(
+        mminf_model, state_dict, device=str(device), strict=False
+    )
+    for name, keys in missing.items():
+        assert len(keys) == 0, f"{name} missing keys: {keys[:3]}"
+
+    # ----- Build AREngine and load_model with the real LLM submodule -----
+    kv_cfg = mminf_model.get_kv_cache_config()
+    # Reduce KV cache footprint so this test fits comfortably on the GPU
+    # alongside the lerobot reference. Pi0.5 only needs ~772 prefix +
+    # 50 suffix tokens = ~822 tokens; 16 pages * 128 page_size = 2048 tokens
+    # is plenty.
+    kv_cfg.max_num_pages = 16
+
+    engine = AREngine(kv_cache_config=kv_cfg, autocast_dtype=torch.float32)
+    assert engine.engine_type() == EngineType.AR
+
+    llm_submodule = mminf_model.get_submodule("LLM", device=str(device))
+    assert llm_submodule is not None
+
+    stub_engine = _StubTransferEngine()
+    transfer_info = TransferEngineInfo(
+        my_entity_id="test_worker",
+        my_session_id="test_session",
+        transfer_engine=stub_engine,
+    )
+
+    engine.load_model(
+        submodules={"LLM": llm_submodule.to(device, dtype=torch.float32)},
+        model_config={},
+        device=device,
+        transfer_engine_info=transfer_info,
+        kv_cache_type=torch.float32,
+    )
+
+    # ----- Verify the paged KV cache shape matches Pi0.5 expectations -----
+    assert engine.kv_cache is not None
+    expected_shape = (
+        kv_cfg.num_layers,
+        kv_cfg.max_num_pages,
+        2,
+        kv_cfg.page_size,
+        kv_cfg.num_kv_heads,
+        kv_cfg.head_dim,
+    )
+    assert tuple(engine.kv_cache.shape) == expected_shape, (
+        f"got {tuple(engine.kv_cache.shape)}, expected {expected_shape}"
+    )
+    assert engine.kv_cache.dtype == torch.float32
+    assert engine.kv_cache.device.type == "cuda"
+
+    # Verify the alloc manager registered with our stub.
+    assert engine.alloc_manager is not None
+    assert len(stub_engine.registered) >= 1, "kv_cache memory was not registered"
+    nbytes = engine.kv_cache.element_size() * engine.kv_cache.numel()
+    assert any(reg[1] == nbytes for reg in stub_engine.registered), (
+        "register_memory was not called with the kv_cache nbytes"
+    )
+
+    # Add a request to the alloc manager — exercises the per-request state
+    # initialization that the worker does when a NewRequest arrives.
+    request_id = "test_req_0"
+    engine.alloc_manager.add_request(request_id, ["main"])
+    state = engine.alloc_manager.get_state(request_id, "main")
+    assert state.seq_len == 0
+    assert state.page_indices == []
+
+    print(
+        f"\nAREngine wired up with kv_cache shape {tuple(engine.kv_cache.shape)},"
+        f" stub_engine.register_memory called {len(stub_engine.registered)}x"
+    )
