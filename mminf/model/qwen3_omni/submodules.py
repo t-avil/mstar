@@ -154,6 +154,19 @@ class VisionEncoderSubmodule(NodeSubmodule):
         device = pixel_values.device
         spatial_merge_size = self.config.vision.spatial_merge_size
 
+        # Normalize grid_thw to shape (num_images, 3).  Single-image requests
+        # store grid_thw as a 1-D tensor [T, H, W] (after process_prompt
+        # indexes proc_out["image_grid_thw"][0] to strip the batch dim);
+        # the per-image iteration logic below requires 2-D.
+        if grid_thw is None:
+            raise ValueError(
+                "VisionEncoder: 'image_grid_thw' input is None. "
+                "Make sure process_prompt is producing image_grid_thw via the "
+                "HF AutoImageProcessor."
+            )
+        if grid_thw.dim() == 1:
+            grid_thw = grid_thw.unsqueeze(0)  # (1, 3)
+
         # Compute number of tokens per image after spatial merge
         # Each image: (t * h * w) / (spatial_merge_size^2)
         tokens_per_image = (
