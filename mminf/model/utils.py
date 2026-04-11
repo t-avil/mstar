@@ -153,7 +153,7 @@ def _apply_operations(
     pattern_to_tensors: list[list[tuple[int, torch.Tensor]]] = []
 
     for pattern in converter.source_patterns:
-        regex = re.compile(f".*{pattern}.*")
+        regex = re.compile(f".*({pattern}).*")
 
         matched: list[tuple[int, torch.Tensor]] = []
 

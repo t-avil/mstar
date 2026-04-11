@@ -306,6 +306,7 @@ class ThinkerSubmodule(NodeSubmodule):
         for inp, rid in zip(per_request_inputs, request_ids):
             text_ids = inp["text_inputs"][0].to(device)  # (seq_len,)
             embeds = self.model.model.embed_tokens(text_ids)
+
             all_embeds.append(embeds)
             seq_len = text_ids.shape[0]
             seq_lens.append(seq_len)
