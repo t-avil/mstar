@@ -207,15 +207,15 @@ class VisionEncoderSubmodule(NodeSubmodule):
         # HF vision encoder returns (hidden_states, deepstack_features)
         # depending on the model variant; handle both cases
         encoder_output = self.vision_encoder(
-            pixel_values=pixel_values,
+            pixel_values,
             grid_thw=grid_thw,
         )
 
         if isinstance(encoder_output, tuple):
             vision_embeds, deepstack = encoder_output
         else:
-            vision_embeds = encoder_output
-            deepstack = None
+            vision_embeds = encoder_output.pooler_output
+            deepstack = encoder_output.deepstack_features
 
         return {
             "vision_embeds": [vision_embeds],
