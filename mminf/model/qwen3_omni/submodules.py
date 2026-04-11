@@ -1235,36 +1235,51 @@ class TalkerSubmodule(NodeSubmodule):
         with torch.amp.autocast(device_type="cuda", enabled=False):
             cp = self.code_predictor
 
-            # The Code Predictor has TWO ModuleLists indexed by residual
-            # layer (1..num_groups-1, length = num_groups - 1):
-            #   cp.model.codec_embedding[k] = nn.Embedding for layer (k+1)
-            #   cp.lm_head[k]               = nn.Linear  for layer (k+1)
+            # IMPORTANT: Two DIFFERENT embedding tables are involved here.
             #
-            # IMPORTANT: codec_embedding is a ModuleList of Embeddings, NOT
-            # a single Embedding.  Calling it directly raises
-            # NotImplementedError (ModuleList has no forward).  We must
-            # index into it first, e.g. codec_embedding[k](codes).
-            codec_embeddings = cp.model.codec_embedding
+            #   1. The TALKER's ``codec_embedding`` is an ``nn.Embedding``
+            #      with ``vocab_size = talker_text.vocab_size = 3072``.
+            #      It's used to embed the LAYER-0 codec token that the
+            #      Talker's ``codec_head`` sampled (in [0, 3072)).
+            #
+            #   2. The CODE PREDICTOR's ``codec_embedding`` is an
+            #      ``nn.ModuleList`` of (num_code_groups - 1) = 31
+            #      ``nn.Embedding`` instances, each with
+            #      ``vocab_size = code_predictor.vocab_size = 2048``.
+            #      These embed the RESIDUAL codes for layers 1..31, which
+            #      the Code Predictor AR-samples from its per-layer
+            #      ``lm_head[k]`` (each with vocab=2048).
+            #
+            # We previously used ``code_predictor.codec_embedding[0]`` to
+            # embed the layer-0 code, but the layer-0 code is from the
+            # Talker's 3072-vocab and can be >= 2048, which triggers an
+            # out-of-range embedding lookup and a CUDA device-side assert.
+            # The fix: use the TALKER's codec_embedding for layer-0, and
+            # the Code Predictor's codec_embedding[k] only for residual
+            # layers.  Both hidden_sizes are 1024 so the tensors are
+            # compatible for concatenation.
+            talker_codec_embedding = self.model.model.codec_embedding
+            cp_residual_embeddings = cp.model.codec_embedding
             lm_heads = cp.lm_head
 
-            # Build initial input: [last_hidden, layer0_embed].  The layer-0
-            # code uses codec_embeddings[0] (the first residual embedder);
-            # HF stores it under codec_embedding.0 in the checkpoint.  We
-            # add a batch dimension so the HF inner model sees a 3-D
-            # ``(batch, seq, hidden)`` tensor.
+            # Build initial input: [last_hidden, layer0_embed], shape (1, 2, H).
             cp_dtype = next(cp.parameters()).dtype
             last_hidden_cp = last_hidden.to(cp_dtype).unsqueeze(0)  # (1, 1, H)
-            layer0_embed = codec_embeddings[0](
+            # Layer-0 is embedded via the Talker's codec_embedding (vocab=3072).
+            layer0_embed = talker_codec_embedding(
                 layer0_code.unsqueeze(0)
-            )  # (1, 1, H)
+            ).to(cp_dtype)  # (1, 1, H)
             cp_input = torch.cat(
                 [last_hidden_cp, layer0_embed], dim=1,
             )  # (1, 2, H)
 
-            # AR loop for layers 1 through (num_groups - 1).  At step
-            # ``group_idx``, lm_heads[group_idx - 1] predicts the layer-
-            # ``group_idx`` residual code, and codec_embeddings[group_idx]
-            # embeds it for the next iteration.
+            # AR loop for residual layers 1 through (num_groups - 1).  At
+            # step ``group_idx``, ``lm_heads[group_idx - 1]`` predicts the
+            # layer-``group_idx`` residual code, and
+            # ``cp_residual_embeddings[group_idx - 1]`` embeds it for the
+            # next iteration.  Note: residual layer k uses index (k - 1)
+            # into the ModuleList (layer 1 -> index 0, layer 2 -> index 1,
+            # ..., layer 31 -> index 30).
             #
             # We re-prefill the entire growing sequence each step (no
             # persistent KV cache).  This is O(N^2) but the predictor is
@@ -1284,15 +1299,17 @@ class TalkerSubmodule(NodeSubmodule):
                 # Logits for this residual layer (only the last position)
                 cp_logits = lm_heads[group_idx - 1](
                     hidden_states[:, -1:, :]
-                )  # (1, 1, vocab)
-                code_i = cp_logits.argmax(dim=-1).squeeze()  # scalar
+                )  # (1, 1, vocab=2048)
+                code_i = cp_logits.argmax(dim=-1).squeeze()  # scalar in [0, 2048)
                 all_codes[group_idx] = code_i
 
-                # Embed the sampled code for the next iteration
+                # Embed the sampled residual code for the next iteration.
+                # Residual layer ``group_idx`` uses index ``group_idx - 1``
+                # in the Code Predictor's ModuleList.
                 if group_idx < num_groups - 1:
-                    next_embed = codec_embeddings[group_idx](
+                    next_embed = cp_residual_embeddings[group_idx - 1](
                         code_i.view(1, 1)
-                    )  # (1, 1, H)
+                    ).to(cp_dtype)  # (1, 1, H)
                     cp_input = torch.cat([cp_input, next_embed], dim=1)
 
         return all_codes
