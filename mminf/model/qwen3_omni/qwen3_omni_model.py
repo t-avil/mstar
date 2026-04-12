@@ -518,6 +518,11 @@ class Qwen3OmniModel(Model):
                     "is_last_prefill": is_last_prefill,
                     "sample_token": is_last_prefill,
                     "walk_name": projection_walk_name,
+                    # Pass system section boundary so the Talker can
+                    # skip system tokens (matching vllm-omni behavior).
+                    "_talker_user_start": getattr(
+                        self, "_talker_user_start", 0
+                    ),
                 },
             ),
         }
@@ -1123,6 +1128,20 @@ class Qwen3OmniModel(Model):
                     text, return_tensors="pt"
                 )["input_ids"][0]
                 result["text_inputs"] = [input_ids]
+
+                # Compute where the user section starts in the tokenized
+                # prompt.  vllm-omni skips the system section entirely
+                # when building the Talker's KV cache (``if role_token ==
+                # system_token_id: continue``).  We pass this boundary
+                # so the Talker can replicate that behavior.
+                im_starts = (
+                    input_ids == self.config.im_start_token_id
+                ).nonzero(as_tuple=True)[0]
+                # Second <|im_start|> marks start of user section
+                # (first is system).
+                self._talker_user_start = (
+                    im_starts[1].item() if len(im_starts) >= 2 else 0
+                )
 
                 # Run image_processor / feature_extractor SEPARATELY for the
                 # modality outputs.  These don't touch text_inputs.
