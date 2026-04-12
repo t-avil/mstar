@@ -894,14 +894,12 @@ class TalkerSubmodule(NodeSubmodule):
         # text_hidden positions in the last prefill step.
         self._prefill_conv_tail: dict[str, torch.Tensor] = {}
 
-        # NOTE: no delay buffer needed for thinker_states alignment.
-        # In vllm-omni, trailing_text_hidden starts at assistant_hidden[4:]
-        # (= second generated token), NOT assistant_hidden[3:] (first).
-        # The first generated token goes into prefix position 8.  So our
-        # stream naturally aligns: last prefill consumes thinker_decode_0
-        # (first generated token) for the prefix, and decode step 0 gets
-        # thinker_decode_1 (second generated token) from the stream —
-        # matching vllm's trailing_text_hidden[0].
+        # No delay buffer needed for thinker_states alignment — verified
+        # against vllm-omni.  trailing_text_hidden = assistant_hidden[4:]
+        # starts at the second generated token.  Our stream naturally
+        # delivers thinker_decode_1 for decode step 0 (matching vllm's
+        # trailing_text_hidden[0]) because thinker_decode_0 was consumed
+        # by the last prefill for prefix position 8.
 
     # ---- Stochastic sampling helpers -------------------------------------
 
@@ -1142,13 +1140,6 @@ class TalkerSubmodule(NodeSubmodule):
 
         # 1. Unpack thinker_states -> split into layer_0 and layer_n
         thinker_states = inputs["thinker_states"][0].to(device)
-
-        # Save the raw thinker_state from the last prefill step so it can
-        # be replayed as the first Talker decode step's conditioning.
-        # Without this, the first decode step sees thinker_decode_1's state
-        # instead of thinker_decode_0's (off-by-one).
-        if is_last_prefill:
-            self._prefill_consumed_state[rid] = thinker_states.detach().clone()
         thinker_hidden = self.config.thinker_hidden_size
         layer_0_embed = thinker_states[..., :thinker_hidden]
         layer_n_hidden = thinker_states[..., thinker_hidden:]
