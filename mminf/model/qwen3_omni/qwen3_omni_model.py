@@ -216,6 +216,14 @@ class Qwen3OmniModel(Model):
                     name="thinker_states",
                     target_partition="Talker",
                 ),
+                # The thinker_mask tensor includes two masks: one for multimodal inputs,
+                # and one for text inputs (allowing us to cut out the system prompt and
+                # assistant history from the talker input)
+                StreamingGraphEdge(
+                    next_node="Talker",
+                    name="thinker_mask",
+                    target_partition="Talker",
+                ),
             ],
         )
 
@@ -242,6 +250,11 @@ class Qwen3OmniModel(Model):
                     StreamingGraphEdge(
                         next_node="Talker",
                         name="thinker_states",
+                        target_partition="Talker",
+                    ),
+                    StreamingGraphEdge(
+                        next_node="Talker",
+                        name="thinker_mask",
                         target_partition="Talker",
                     ),
                 ],
@@ -273,6 +286,11 @@ class Qwen3OmniModel(Model):
                         name="thinker_states",
                         target_partition="Talker",
                     ),
+                    StreamingGraphEdge(
+                        next_node="Talker",
+                        name="thinker_mask",
+                        target_partition="Talker",
+                    ),
                 ],
             ),
         ])
@@ -295,6 +313,11 @@ class Qwen3OmniModel(Model):
                     name="thinker_states",
                     target_partition="Talker",
                 ),
+                StreamingGraphEdge(
+                    next_node="Talker",
+                    name="thinker_mask",
+                    target_partition="Talker",
+                ),
             ],
         )
 
@@ -304,7 +327,7 @@ class Qwen3OmniModel(Model):
         # present for a prefill step.
         talker_prefill = GraphNode(
             name="Talker",
-            input_ids=["thinker_states", "talker_trigger"],
+            input_ids=["thinker_states", "thinker_mask", "talker_trigger"],
             outputs=[
                 GraphEdge(
                     next_node=EMPTY_DESTINATION,
@@ -328,7 +351,7 @@ class Qwen3OmniModel(Model):
         # -- Talker decode: autoregressive codec token generation --
         talker_decode = GraphNode(
             name="Talker",
-            input_ids=["all_codes", "thinker_states"],
+            input_ids=["all_codes", "thinker_states", "thinker_mask"],
             outputs=[
                 GraphEdge(
                     next_node=EMPTY_DESTINATION,
@@ -412,6 +435,12 @@ class Qwen3OmniModel(Model):
                     chunk_policy_factory=lambda: FixedChunkPolicy(chunk_size=1, continue_after_done=True),
                 ),
                 Connection(
+                    from_partition="Thinker",
+                    to_partition="Talker",
+                    edge_name="thinker_mask",
+                    chunk_policy_factory=lambda: FixedChunkPolicy(chunk_size=1, continue_after_done=True),
+                ),
+                Connection(
                     from_partition="Talker",
                     to_partition="Code2Wav",
                     edge_name="codec_tokens",
@@ -454,6 +483,7 @@ class Qwen3OmniModel(Model):
                     "talker_prefill_done": False,
                     "num_thinker_prefill_steps": len(input_modalities),
                     "prefill_chunks_processed": 0,
+                    "voice": model_kwargs.get("voice", "Ethan")
                 },
             )
             return ForwardPassArgs(
@@ -461,6 +491,9 @@ class Qwen3OmniModel(Model):
                 inputs=[GraphEdge(next_node="Talker", name="talker_trigger")],
                 unpersist_tensors=[],
                 request_done="audio" not in output_modalities,
+                step_metadata={
+                    "voice": model_kwargs.get("voice", "Ethan")
+                }
             )
         elif partition_name == "Code2Wav":
             # Code2Wav starts with code2wav_chunk walk but no inputs --
@@ -811,6 +844,8 @@ class Qwen3OmniModel(Model):
                 step_metadata={
                     "is_prefill": True,
                     "is_last_prefill": is_last_prefill,
+                    # voice is used for the last prefill
+                    "voice": metadata.kwargs.get("voice", "Ethan")
                 },
             )
 
@@ -1019,20 +1054,6 @@ class Qwen3OmniModel(Model):
                     text, return_tensors="pt"
                 )["input_ids"][0]
                 result["text_inputs"] = [input_ids]
-
-                # Compute where the user section starts in the tokenized
-                # prompt.  vllm-omni skips the system section entirely
-                # when building the Talker's KV cache (``if role_token ==
-                # system_token_id: continue``).  We pass this boundary
-                # so the Talker can replicate that behavior.
-                im_starts = (
-                    input_ids == self.config.im_start_token_id
-                ).nonzero(as_tuple=True)[0]
-                # Second <|im_start|> marks start of user section
-                # (first is system).
-                self._talker_user_start = (
-                    im_starts[1].item() if len(im_starts) >= 2 else 0
-                )
 
                 # Run image_processor / feature_extractor SEPARATELY for the
                 # modality outputs.  These don't touch text_inputs.

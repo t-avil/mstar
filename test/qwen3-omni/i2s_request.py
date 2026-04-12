@@ -11,6 +11,7 @@ import argparse
 import base64
 import io
 import json
+from pathlib import Path
 import struct
 import sys
 
@@ -49,8 +50,9 @@ def write_wav(pcm_data: bytes, path: str):
 
 def main():
     parser = argparse.ArgumentParser(description="Orpheus TTS client")
-    parser.add_argument("--text", default="Hello, how are you doing today?", help="Text to synthesize")
-    parser.add_argument("--voice", default="tara", help="Voice name")
+    parser.add_argument("--text", default="Describe this image.", help="Text to synthesize")
+    parser.add_argument("--image", default="test/bagel/bagel.png", help="Image input")
+    parser.add_argument("--voice", default="ethan", help="Voice name")
     parser.add_argument("--output", default="output.wav", help="Output WAV file path")
     parser.add_argument("--port", type=int, default=20001, help="Port number to connect to (localhost only)")
     args = parser.parse_args()
@@ -66,48 +68,54 @@ def main():
     chunk_count = 0
 
     try:
-        with requests.post(
-            args.url,
-            data={
-                "text": args.text,
-                "output_modalities": "audio",
-                "model_kwargs": json.dumps({"voice": args.voice}),
-            },
-            stream=True,
-        ) as resp:
-            resp.raise_for_status()
+        image_path = Path(args.image)
+        with open(image_path, "rb") as f:
+            files = [
+                ("files", (image_path.name, f, "application/octet-stream")),
+            ]
+            with requests.post(
+                args.url,
+                files=files,
+                data={
+                    "text": args.text,
+                    "output_modalities": "audio",
+                    "model_kwargs": json.dumps({"voice": args.voice}),
+                },
+                stream=True,
+            ) as resp:
+                resp.raise_for_status()
 
-            for line in resp.iter_lines():
-                if not line:
-                    continue
+                for line in resp.iter_lines():
+                    if not line:
+                        continue
 
-                try:
-                    msg = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
+                    try:
+                        msg = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
 
-                if msg.get("modality") == "text":
+                    if msg.get("modality") == "text":
+                        data_b64 = msg.get("data", "")
+                        decoded = base64.b64decode(data_b64)
+
+                        sys.stdout.write(decoded.decode("utf-8", errors="replace"))
+                        sys.stdout.flush()
+
+                    if msg.get("modality") != "audio":
+                        continue
+
                     data_b64 = msg.get("data", "")
+                    if not data_b64:
+                        continue
+
                     decoded = base64.b64decode(data_b64)
+                    if len(decoded) == 0:
+                        continue
 
-                    sys.stdout.write(decoded.decode("utf-8", errors="replace"))
+                    pcm_buffer.write(decoded)
+                    chunk_count += 1
+                    sys.stdout.write(f"\rReceived {chunk_count} audio chunks ({pcm_buffer.tell()} bytes)")
                     sys.stdout.flush()
-
-                if msg.get("modality") != "audio":
-                    continue
-
-                data_b64 = msg.get("data", "")
-                if not data_b64:
-                    continue
-
-                decoded = base64.b64decode(data_b64)
-                if len(decoded) == 0:
-                    continue
-
-                pcm_buffer.write(decoded)
-                chunk_count += 1
-                sys.stdout.write(f"\rReceived {chunk_count} audio chunks ({pcm_buffer.tell()} bytes)")
-                sys.stdout.flush()
     except BaseException as e:
         print("Exception: ", e)
 
