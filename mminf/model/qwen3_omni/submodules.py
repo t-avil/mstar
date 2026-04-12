@@ -1192,16 +1192,18 @@ class TalkerSubmodule(NodeSubmodule):
             # Strip the last 3 tokens (assistant header) from the KV-cache
             # input and save them for the prefix in the last prefill step.
             #
-            # NOTE: vllm-omni also skips the system section entirely
-            # (``if role_token == system_token_id: continue``).  We
-            # currently still include it.  This is a known mismatch that
-            # can be addressed by passing the system section boundary via
-            # step_metadata in a follow-up.
+            # Also skip the system section — vllm-omni skips it entirely
+            # (``if role_token == system_token_id: continue``).  The
+            # ``_talker_user_start`` index comes from process_prompt via
+            # step_metadata: it's the token position of the second
+            # ``<|im_start|>`` (start of user section).
+            user_start = info.step_metadata.get("_talker_user_start", 0)
+
             if projected.shape[0] >= 3:
                 self._prefill_conv_tail[rid] = projected[-3:].detach().clone()
 
-            # Strip assistant header — only user/system tokens go to KV cache
-            projected_for_cache = projected[:-3]
+            # Only user section tokens go to KV cache (skip system, strip assistant header)
+            projected_for_cache = projected[user_start:-3]
 
             seq_len = projected_for_cache.shape[0]
             cache_manager.plan_attention(
