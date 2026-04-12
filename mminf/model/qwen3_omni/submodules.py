@@ -890,9 +890,21 @@ class TalkerSubmodule(NodeSubmodule):
         self._seen_layer0_mask: dict[str, torch.Tensor] = {}
 
         # Per-request saved tail of projected conversation tokens from
-        # non-last prefill step(s).  Currently unused — kept as a hook for
-        # future assistant-prefix improvements.
+        # non-last prefill step(s), used to fill the assistant prefix's
+        # text_hidden positions in the last prefill step.
         self._prefill_conv_tail: dict[str, torch.Tensor] = {}
+
+        # Per-request: the raw thinker_state consumed by the last prefill
+        # step.  In our 2-step prefill flow, the last prefill trigger
+        # fires on thinker_decode step 0's completion, so it consumes
+        # thinker_decode_0's state from the stream.  But in HF, that
+        # state is trailing_text_hidden[0] — the FIRST Talker decode
+        # step's conditioning.  If we don't save+replay it, the first
+        # Talker decode step gets thinker_decode_1's state instead,
+        # creating an off-by-one in thinker-state alignment that causes
+        # periodic audio artifacts wherever the hidden state changes
+        # abruptly (sentence boundaries, markdown, etc.).
+        self._prefill_consumed_state: dict[str, torch.Tensor] = {}
 
     # ---- Stochastic sampling helpers -------------------------------------
 
@@ -1133,6 +1145,13 @@ class TalkerSubmodule(NodeSubmodule):
 
         # 1. Unpack thinker_states -> split into layer_0 and layer_n
         thinker_states = inputs["thinker_states"][0].to(device)
+
+        # Save the raw thinker_state from the last prefill step so it can
+        # be replayed as the first Talker decode step's conditioning.
+        # Without this, the first decode step sees thinker_decode_1's state
+        # instead of thinker_decode_0's (off-by-one).
+        if is_last_prefill:
+            self._prefill_consumed_state[rid] = thinker_states.detach().clone()
         thinker_hidden = self.config.thinker_hidden_size
         layer_0_embed = thinker_states[..., :thinker_hidden]
         layer_n_hidden = thinker_states[..., thinker_hidden:]
@@ -1354,18 +1373,49 @@ class TalkerSubmodule(NodeSubmodule):
                 emb_i = cp_residual_embeddings[i - 1](code_i).to(codec_embed_sum.dtype)
                 codec_embed_sum = codec_embed_sum + emb_i
 
-            # 2. Get thinker_states from normal graph input
+            # 2. Get thinker_states — with off-by-one correction.
+            #
+            # In our streaming model the Talker's last prefill consumes
+            # thinker_decode_0's state from the stream (because the last
+            # prefill trigger fires on thinker_decode_0's completion).
+            # But in HF/sglang/vllm, trailing_text_hidden[0] (=
+            # thinker_decode_0) feeds the FIRST decode step, not prefill.
+            #
+            # To correct this, we maintain a 1-step delay buffer: each
+            # decode step uses the PREVIOUS step's buffered state and
+            # saves the current stream state for the next step.
+            #   Step 0: use saved thinker_decode_0, buffer thinker_decode_1
+            #   Step 1: use buffered thinker_decode_1, buffer thinker_decode_2
+            #   Step N: use buffered thinker_decode_N, buffer thinker_decode_{N+1}
+            # This exactly matches HF's trailing_text_hidden[N] at every step.
+            buffered_state = self._prefill_consumed_state.pop(rid, None)
             thinker_states_list = inp.get("thinker_states", [])
-            if thinker_states_list and thinker_states_list[0] is not None:
-                thinker_state = thinker_states_list[0].to(device)
-                # Split into layer_0 and layer_n, project layer_0
+            stream_state = (
+                thinker_states_list[0] if thinker_states_list and thinker_states_list[0] is not None
+                else None
+            )
+
+            if buffered_state is not None:
+                # Use the buffered state for THIS step's conditioning.
+                thinker_state = buffered_state.to(device)
+                # Save the stream state for the NEXT step's conditioning.
+                if stream_state is not None:
+                    self._prefill_consumed_state[rid] = stream_state.detach().clone()
+                # else: stream empty (Thinker finished) — next step will
+                # see no buffered_state and fall through to the tts_pad path.
+            elif stream_state is not None:
+                thinker_state = stream_state.to(device)
+            else:
+                thinker_state = None
+
+            # Project thinker_state → text_hidden via text_projection.
+            if thinker_state is not None:
                 thinker_hidden = self.config.thinker_hidden_size
                 if thinker_state.dim() >= 1 and thinker_state.shape[-1] >= thinker_hidden:
                     layer_0 = thinker_state[..., :thinker_hidden]
                     if layer_0.dim() == 1:
                         layer_0 = layer_0.unsqueeze(0)
                     text_hidden = self.model.text_projection(layer_0)
-                    # Take last token if multiple
                     if text_hidden.shape[0] > 1:
                         text_hidden = text_hidden[-1:]
                 else:
@@ -1693,6 +1743,7 @@ class TalkerSubmodule(NodeSubmodule):
         """Remove per-request state when a request completes."""
         self._seen_layer0_mask.pop(request_id, None)
         self._prefill_conv_tail.pop(request_id, None)
+        self._prefill_consumed_state.pop(request_id, None)
 
 
 # ===================================================================
