@@ -390,7 +390,7 @@ class Qwen3OmniModel(Model):
             PartitionDefinition(
                 name="Talker",
                 graph_walks={"talker_prefill", "talker_decode"},
-                initial_walk=None,  # triggered by conductor after Thinker walks
+                initial_walk="talker_prefill",
                 producer_partitions=["Thinker"],
             ),
             PartitionDefinition(
@@ -424,110 +424,6 @@ class Qwen3OmniModel(Model):
         )
 
     # -----------------------------------------------------------------------
-    # Conductor-triggered pipelined prefill (Approach C)
-    # -----------------------------------------------------------------------
-
-    def get_consumer_partition_triggers(
-        self,
-        completed_partition: str,
-        completed_walk: str,
-        all_partition_states: dict,
-        persist_signals: dict[str, list[TensorPointerInfo]],
-    ) -> dict[str, ForwardPassArgs]:
-        """Send talker_trigger to Talker after each Thinker walk completes.
-
-        Called by the conductor after _process_done_forward for the completed
-        partition.  While the Talker is still in prefill mode, each Thinker
-        walk completion triggers a Talker prefill step:
-
-        - prefill_text / prefill_audio / prefill_vision completions:
-          is_last_prefill=False  (extend KV cache, no codec output)
-        - thinker_decode start (first decode step completion):
-          is_last_prefill=True   (sample first codec token, transition to decode)
-
-        Once the Talker transitions to decode, no more triggers are sent
-        (the Talker self-drives via its own decode loop).
-        """
-        if completed_partition != "Thinker":
-            return {}
-
-        # Only trigger Talker while it is still in prefill mode
-        talker_state = all_partition_states.get("Talker")
-        if talker_state is None or talker_state.is_done:
-            return {}
-
-        talker_metadata = talker_state.metadata
-        if not talker_metadata.is_prefill:
-            # Talker has already transitioned to decode -- no more triggers
-            return {}
-
-        # Check if the Talker partition has audio output enabled
-        if "audio" not in talker_metadata.output_modalities:
-            return {}
-
-        # Race condition guard (Comment 11): once we've already sent the
-        # "last prefill" trigger, don't send another.  This handles the
-        # case where the Thinker finishes multiple decode steps before the
-        # Talker transitions from prefill to decode.  Without this guard,
-        # each additional thinker_decode completion would fire another
-        # is_last_prefill=True trigger, causing duplicate codec sampling.
-        if talker_metadata.kwargs.get("_last_prefill_sent", False):
-            return {}
-
-        # Determine if this is the last prefill trigger.
-        # The last prefill trigger is sent when the Thinker's first decode
-        # step completes (completed_walk == "thinker_decode").
-        is_last_prefill = (completed_walk == "thinker_decode")
-
-        # Persist the "last prefill sent" flag into the Talker's own
-        # metadata so subsequent triggers skip (handled by the conductor,
-        # which updates target_pstate.metadata from trigger_fwd_args).
-        new_talker_kwargs = {
-            **talker_metadata.kwargs,
-            "is_last_prefill": is_last_prefill,
-        }
-        if is_last_prefill:
-            new_talker_kwargs["_last_prefill_sent"] = True
-
-        trigger_metadata = CurrentForwardConductorMetadata(
-            input_modalities=talker_metadata.input_modalities,
-            output_modalities=talker_metadata.output_modalities,
-            graph_walk="talker_prefill",
-            is_prefill=True,
-            kwargs=new_talker_kwargs,
-        )
-
-        trigger_edge = GraphEdge(next_node="Talker", name="talker_trigger")
-
-        # Determine projection walk_name for the Talker (W2):
-        # The Talker uses walk_name to decide text_projection vs
-        # hidden_projection for the incoming Thinker states.
-        #   - "prefill_text"    -> all text tokens    -> text_projection
-        #   - "prefill_audio"   -> audio embeddings   -> hidden_projection
-        #   - "prefill_vision"  -> vision embeddings   -> hidden_projection
-        #   - "thinker_decode"  -> text decode tokens  -> text_projection
-        projection_walk_name = completed_walk
-
-        return {
-            "Talker": ForwardPassArgs(
-                full_metadata=trigger_metadata,
-                inputs=[trigger_edge],
-                unpersist_tensors=[],
-                step_metadata={
-                    "is_prefill": True,
-                    "is_last_prefill": is_last_prefill,
-                    "sample_token": is_last_prefill,
-                    "walk_name": projection_walk_name,
-                    # Pass system section boundary so the Talker can
-                    # skip system tokens (matching vllm-omni behavior).
-                    "_talker_user_start": getattr(
-                        self, "_talker_user_start", 0
-                    ),
-                },
-            ),
-        }
-
-    # -----------------------------------------------------------------------
     # Model ABC: initial forward pass args
     # -----------------------------------------------------------------------
 
@@ -547,8 +443,7 @@ class Qwen3OmniModel(Model):
                 input_signals, model_kwargs or {},
             )
         elif partition_name == "Talker":
-            # Talker starts in prefill mode, waiting for cross-partition trigger.
-            # No initial inputs -- the conductor triggers it after each Thinker walk.
+            # Talker starts in prefill mode
             full_metadata = CurrentForwardConductorMetadata(
                 input_modalities=input_modalities,
                 output_modalities=output_modalities,
@@ -557,11 +452,13 @@ class Qwen3OmniModel(Model):
                 kwargs={
                     "audio_output": audio_output,
                     "talker_prefill_done": False,
+                    "num_thinker_prefill_steps": len(input_modalities),
+                    "prefill_chunks_processed": 0,
                 },
             )
             return ForwardPassArgs(
                 full_metadata=full_metadata,
-                inputs=[],
+                inputs=[GraphEdge(next_node="Talker", name="talker_trigger")],
                 unpersist_tensors=[],
                 request_done="audio" not in output_modalities,
             )
@@ -879,14 +776,10 @@ class Qwen3OmniModel(Model):
 
         if metadata.is_prefill:
             # Talker is in prefill mode, waiting for conductor triggers.
-            # The actual work happens when get_consumer_partition_triggers()
-            # fires from the Thinker side.  Here we just check if the
-            # last prefill has been completed (the trigger sets this flag).
-            is_last_prefill = metadata.kwargs.get("is_last_prefill", False)
 
-            if is_last_prefill and persist_signals.get("all_codes", []):
-                # Last prefill done AND all_codes has been produced.
-                # Transition to talker_decode.
+            metadata.kwargs["prefill_chunks_processed"] += 1           
+            if persist_signals.get("all_codes", []):
+                # Produced all_codes, so can trasition to decode
                 metadata.is_prefill = False
                 metadata.graph_walk = "talker_decode"
                 metadata.kwargs["talker_prefill_done"] = True
@@ -908,34 +801,18 @@ class Qwen3OmniModel(Model):
                         "is_last_prefill": False,
                     },
                 )
-            elif is_last_prefill:
-                # Race condition: the last-prefill trigger has already
-                # overwritten our metadata with is_last_prefill=True, but
-                # the actual last prefill hasn't run yet (the NON-last
-                # prefill just completed).  Wait — the queued trigger will
-                # drive the last prefill forward.
-                return ForwardPassArgs(
-                    full_metadata=metadata,
-                    inputs=[],
-                    unpersist_tensors=[],
-                    step_metadata={
-                        "is_prefill": True,
-                        "is_last_prefill": True,
-                    },
-                )
-            else:
-                # Not the last prefill -- just extend KV cache.
-                # Return empty inputs; the trigger ForwardPassArgs from
-                # get_consumer_partition_triggers() drives the actual work.
-                return ForwardPassArgs(
-                    full_metadata=metadata,
-                    inputs=[],
-                    unpersist_tensors=[],
-                    step_metadata={
-                        "is_prefill": True,
-                        "is_last_prefill": False,
-                    },
-                )
+
+            is_last_prefill = metadata.kwargs["num_thinker_prefill_steps"] == \
+                 metadata.kwargs["prefill_chunks_processed"]
+            return ForwardPassArgs(
+                full_metadata=metadata,
+                inputs=[GraphEdge(next_node="Talker", name="talker_trigger")],
+                unpersist_tensors=[],
+                step_metadata={
+                    "is_prefill": True,
+                    "is_last_prefill": is_last_prefill,
+                },
+            )
 
         elif metadata.graph_walk == "talker_decode":
             # Decode loop: check only the layer-0 code (first element) for

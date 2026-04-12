@@ -666,14 +666,6 @@ class Conductor:
         if incoming_connections and partition_done_from_worker:
             pstate.is_done = True
 
-        # Capture the CURRENT walk BEFORE get_partition_forward_pass_args,
-        # which may mutate pstate.metadata.graph_walk (e.g., Thinker
-        # transitioning from prefill_text to thinker_decode).  The old code
-        # captured prev_walk AFTER the call, so completed_walk passed to
-        # get_consumer_partition_triggers was the NEW walk, not the one that
-        # just completed — causing is_last_prefill to trigger one step early.
-        prev_walk = pstate.metadata.graph_walk
-
         fwd_args = self.model.get_partition_forward_pass_args(
             partition_name=partition_name,
             partition_metadata=pstate.metadata,
@@ -723,27 +715,6 @@ class Conductor:
         self._set_partition_worker_graph_ids(
             request_id, partition_name, fwd_args.full_metadata.graph_walk,
         )
-
-        # Cross-partition triggers: notify consumer partitions when a
-        # producer completes a step (e.g., Thinker triggers Talker prefill).
-        if not fwd_args.request_done:
-            triggers = self.model.get_consumer_partition_triggers(
-                completed_partition=partition_name,
-                completed_walk=prev_walk,
-                all_partition_states=request_data.partition_states,
-                persist_signals=request_data.persist_signals,
-            )
-            for target_partition, trigger_fwd_args in triggers.items():
-                target_pstate = request_data.partition_states[target_partition]
-                # Update metadata if the trigger provides new metadata
-                if trigger_fwd_args.full_metadata is not None:
-                    target_pstate.metadata = trigger_fwd_args.full_metadata
-                self._set_partition_worker_graph_ids(
-                    request_id, target_partition, target_pstate.metadata.graph_walk,
-                )
-                self._send_partition_inputs(
-                    request_id, target_partition, trigger_fwd_args,
-                )
 
         # Request done when ALL partitions are done
         return all(ps.is_done for ps in request_data.partition_states.values())
