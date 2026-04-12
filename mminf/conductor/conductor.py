@@ -666,6 +666,7 @@ class Conductor:
         if incoming_connections and partition_done_from_worker:
             pstate.is_done = True
 
+        prev_walk =  pstate.metadata.graph_walk
         fwd_args = self.model.get_partition_forward_pass_args(
             partition_name=partition_name,
             partition_metadata=pstate.metadata,
