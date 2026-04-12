@@ -884,10 +884,9 @@ class Qwen3OmniModel(Model):
             # last prefill has been completed (the trigger sets this flag).
             is_last_prefill = metadata.kwargs.get("is_last_prefill", False)
 
-            if is_last_prefill:
-                # Last prefill done -- transition to talker_decode.
-                # The talker_prefill walk should have produced all_codes
-                # as its first codec token output.
+            if is_last_prefill and persist_signals.get("all_codes", []):
+                # Last prefill done AND all_codes has been produced.
+                # Transition to talker_decode.
                 metadata.is_prefill = False
                 metadata.graph_walk = "talker_decode"
                 metadata.kwargs["talker_prefill_done"] = True
@@ -907,6 +906,21 @@ class Qwen3OmniModel(Model):
                     step_metadata={
                         "is_prefill": False,
                         "is_last_prefill": False,
+                    },
+                )
+            elif is_last_prefill:
+                # Race condition: the last-prefill trigger has already
+                # overwritten our metadata with is_last_prefill=True, but
+                # the actual last prefill hasn't run yet (the NON-last
+                # prefill just completed).  Wait — the queued trigger will
+                # drive the last prefill forward.
+                return ForwardPassArgs(
+                    full_metadata=metadata,
+                    inputs=[],
+                    unpersist_tensors=[],
+                    step_metadata={
+                        "is_prefill": True,
+                        "is_last_prefill": True,
                     },
                 )
             else:
