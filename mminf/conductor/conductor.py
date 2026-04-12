@@ -666,6 +666,14 @@ class Conductor:
         if incoming_connections and partition_done_from_worker:
             pstate.is_done = True
 
+        # Capture the CURRENT walk BEFORE get_partition_forward_pass_args,
+        # which may mutate pstate.metadata.graph_walk (e.g., Thinker
+        # transitioning from prefill_text to thinker_decode).  The old code
+        # captured prev_walk AFTER the call, so completed_walk passed to
+        # get_consumer_partition_triggers was the NEW walk, not the one that
+        # just completed — causing is_last_prefill to trigger one step early.
+        prev_walk = pstate.metadata.graph_walk
+
         fwd_args = self.model.get_partition_forward_pass_args(
             partition_name=partition_name,
             partition_metadata=pstate.metadata,
@@ -673,8 +681,6 @@ class Conductor:
             new_tokens=pstate.new_tokens,
             incoming_connections=incoming_connections,
         )
-
-        prev_walk = pstate.metadata.graph_walk
         pstate.metadata = fwd_args.full_metadata
         pstate.metadata.kwargs.update(fwd_args.step_metadata)
 
