@@ -417,114 +417,12 @@ class Worker:
             stream_buf.put(info.uuid, tensor.clone())
             self.tensor_manager.dereference(request_id, info.uuid)
 
-    def _find_waiting_node(
-        self,
-        request_id: str,
-        node_name: str,
-        partition_name: str | None = None,
-    ) -> "GraphNode | None":
-        """Find the GraphNode with *node_name* in this request's ACTIVE worker graph queues.
-
-        If ``partition_name`` is given, only worker graphs that are active
-        for that partition's currently-running walk are searched.  This is
-        critical for partitions with multiple walks sharing a node name
-        (e.g., the Talker has ``talker_prefill`` AND ``talker_decode``, both
-        with ``name="Talker"`` but different ``input_ids``).  Without this
-        filter, an inactive walk's stale queue could be returned, and the
-        non-streaming gating logic would check the wrong node's input_ids.
-
-        Searches both the ``waiting`` section and the ``ready`` list so that we
-        can inspect ``input_ids`` and ``ready_inputs`` before deciding whether
-        to ingest streaming data.
-        """
-        from mminf.graph.base import GraphNode as _GN
-        req_info = self.worker_graphs_manager.per_request_info.get(request_id)
-        if req_info is None:
-            return None
-
-        # Narrow the search to only the active worker graphs for the
-        # consumer partition if one was provided.  Otherwise fall back to
-        # all worker graphs for the request (backwards-compatible).
-        if partition_name is not None:
-            part_info = req_info.per_partition_info.get(partition_name)
-            if part_info is None:
-                return None
-            candidate_wg_ids = part_info.graph_walk_worker_graph_ids
-        else:
-            candidate_wg_ids = req_info.worker_graph_ids
-
-        for wg_id in candidate_wg_ids:
-            queue = self.worker_graphs_manager.queues.get(wg_id)
-            if queue is None:
-                continue
-            per_req = queue.per_request_queues.get(request_id)
-            if per_req is None:
-                continue
-            # Check ready list first
-            for node in per_req.ready:
-                if node.name == node_name:
-                    return node
-            # Check waiting section
-            if per_req.waiting is not None:
-                for name in per_req.waiting.get_node_names():
-                    if name == node_name:
-                        # Retrieve the actual GraphNode from the waiting section
-                        # by walking its structure
-                        found = self._extract_node_from_section(per_req.waiting, node_name)
-                        if found is not None:
-                            return found
-        return None
-
-    def _extract_node_from_section(self, section, node_name: str):
-        """Recursively extract a GraphNode by name from a GraphSection tree."""
-        from mminf.graph.base import GraphNode as _GN
-        if isinstance(section, _GN):
-            return section if section.name == node_name else None
-        # Sequential, Parallel, Loop — they all have a `sections` or `section` attr
-        if hasattr(section, 'sections'):
-            for child in section.sections:
-                result = self._extract_node_from_section(child, node_name)
-                if result is not None:
-                    return result
-        if hasattr(section, 'section') and section.section is not None:
-            result = self._extract_node_from_section(section.section, node_name)
-            if result is not None:
-                return result
-        # Loop has curr_iter_section and nxt_iter_section
-        for attr in ('curr_iter_section', 'nxt_iter_section'):
-            child = getattr(section, attr, None)
-            if child is not None:
-                result = self._extract_node_from_section(child, node_name)
-                if result is not None:
-                    return result
-        return None
-
     def _poll_stream_buffers(self) -> None:
         """Check all active StreamBuffers; when a chunk is ready, feed it as a normal input."""
         for request_id, req_info in list(self.worker_graphs_manager.per_request_info.items()):
             for edge_name, sbuf in req_info.stream_buffers.items():
                 consumer_node = self._consumer_node_cache.get(edge_name, "")
                 partition_name = self.worker_graphs_manager.get_partition_for_node(consumer_node)
-
-                # Only ingest streaming data when the target node's non-streaming
-                # inputs are already satisfied. This prevents the race condition
-                # where streaming data lands in the wrong graph walk during
-                # transitions.  We must pass ``partition_name`` so that
-                # _find_waiting_node only searches the CURRENTLY ACTIVE walk's
-                # worker graphs -- otherwise, for partitions with multiple walks
-                # that share a node name (e.g., Talker: talker_prefill AND
-                # talker_decode both have name="Talker" but different input_ids),
-                # we might inspect the stale inactive walk's node and get
-                # incorrect non-streaming gate decisions.
-                target_graph_node = self._find_waiting_node(
-                    request_id, consumer_node, partition_name=partition_name,
-                )
-                if target_graph_node is not None:
-                    non_streaming_inputs = target_graph_node.input_ids - self._streaming_edge_names
-                    if non_streaming_inputs and not non_streaming_inputs.issubset(
-                        set(target_graph_node.ready_inputs.keys())
-                    ):
-                        continue  # conductor hasn't activated this node yet
 
                 synthetic_edge = sbuf.pop_waiting_edge()
 
@@ -551,7 +449,7 @@ class Worker:
                         )
 
                 if synthetic_edge is not None:
-                    ingested = len(self.worker_graphs_manager.process_new_inputs(
+                    ingested = len(self.worker_graphs_manager.process_new_streaming_inputs(
                         request_id=request_id, inputs=[synthetic_edge],
                     )) == 0
                     if not ingested:

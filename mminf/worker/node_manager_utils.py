@@ -55,6 +55,13 @@ class WorkerGraphQueues:
         Returns any signals that should be sent to other worker graphs.
         """
         return self.per_request_queues[request_id].process_new_inputs(inputs)
+    
+    def process_new_streaming_inputs(self, request_id: str, inputs: list[GraphEdge]) -> ProcessedInputs:
+        """
+        Add new inputs for a request, and update waiting/ready nodes accordingly.
+        Returns any signals that should be sent to other worker graphs.
+        """
+        return self.per_request_queues[request_id].process_streaming_input(inputs)
 
     def is_done(self, request_id) -> bool:
         q = self.per_request_queues[request_id]
@@ -236,7 +243,23 @@ class WorkerGraphsManager:
             for worker_graph_id in worker_graph_ids:
                 inputs = self.queues[worker_graph_id].process_new_inputs(request_id, inputs).for_other_worker_graphs
         return inputs
+    
+    def process_new_streaming_inputs(
+        self,
+        request_id: str,
+        inputs: list[GraphEdge],
+    ):
+        """
+        Updates queues with new inputs for a request.
 
+        Routes inputs to the worker graphs of the currently-active walks
+        for each partition this request participates in.
+        """
+        for part_info in self.per_request_info[request_id].per_partition_info.values():
+            worker_graph_ids = part_info.graph_walk_worker_graph_ids
+            for worker_graph_id in worker_graph_ids:
+                inputs = self.queues[worker_graph_id].process_new_streaming_inputs(request_id, inputs).for_other_worker_graphs
+        return inputs
 
     def process_node_outputs(
         self, request_id: str,
