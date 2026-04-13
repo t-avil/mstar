@@ -53,6 +53,8 @@ class PerRequestNodeQueues:
         new_inputs: DestToGraphEdges = get_node_to_inputs_mapping(new_inputs)
         ingested = []
 
+        self._update_ready_waiting()
+
         new_waiting_for_stream = []
         for node in self.waiting_for_stream:
             ingested.extend(node.ingest_inputs(new_inputs))

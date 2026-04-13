@@ -151,15 +151,16 @@ def _divide_into_worker_graphs(
     graph_walk: str,
     node_to_group_idx: dict[str, int],
     node_groups: list[dict],
-    node_to_input_streams: dict[str, set[str]],
+    input_streams: set[str],
 ) -> list[WorkerGraph]:
     """
     Given a graph, break it into worker graphs
     """
     if isinstance(graph, GraphNode):
-        if graph.name in node_to_input_streams:
+        graph._streaming_inputs = input_streams.intersection(graph.input_ids)
+        if len(graph._streaming_inputs) > 0:
             graph.consumes_stream = True
-            graph._streaming_inputs = node_to_input_streams[graph.name]
+            
         return [WorkerGraph(
             section=graph,
             graph_walks=set([graph_walk]),
@@ -174,7 +175,7 @@ def _divide_into_worker_graphs(
             graph_walk=graph_walk,
             node_to_group_idx=node_to_group_idx,
             node_groups=node_groups,
-            node_to_input_streams=node_to_input_streams
+            input_streams=input_streams
         )
 
         for i in range(1, len(graph.sections)):
@@ -185,7 +186,7 @@ def _divide_into_worker_graphs(
                 graph_walk=graph_walk,
                 node_to_group_idx=node_to_group_idx,
                 node_groups=node_groups,
-                node_to_input_streams=node_to_input_streams
+                input_streams=input_streams
             )
             if new_worker_graphs[0]._group_id == worker_graphs[-1]._group_id and \
                     not new_worker_graphs[0].consumes_stream:
@@ -202,7 +203,7 @@ def _divide_into_worker_graphs(
                 s, graph_walk=graph_walk,
                 node_to_group_idx=node_to_group_idx,
                 node_groups=node_groups,
-                node_to_input_streams=node_to_input_streams
+                input_streams=input_streams
             ) for s in graph.sections
         ]
         # parallel sections that are all on the same worker can be merged
@@ -230,7 +231,7 @@ def _divide_into_worker_graphs(
             graph_walk=graph_walk,
             node_to_group_idx=node_to_group_idx,
             node_groups=node_groups,
-            node_to_input_streams=node_to_input_streams
+            input_streams=input_streams
         )
         if len(loop_section_worker_graphs) == 1:
             # fully colocated case
@@ -284,18 +285,22 @@ class Model(ABC):
                 name: i for name in group["node_names"]
             })
 
-        node_to_input_streams = {}
+        partition = "default"
+        for part in self.get_partitions():
+            if graph_walk in part.graph_walks:
+                partition = part.name
+                break
+        input_streams = set()
         for conn in self.get_partition_topology().connections:
-            node_to_input_streams.setdefault(
-                conn.to_partition, set()
-            ).add(conn.edge_name)
+            if conn.to_partition == partition:
+                input_streams.add(conn.edge_name)
 
         return _divide_into_worker_graphs(
             graph,
             graph_walk=graph_walk,
             node_to_group_idx=node_to_group_idx,
             node_groups=node_groups,
-            node_to_input_streams=node_to_input_streams
+            input_streams=input_streams
         )
 
     def get_worker_graphs(self, config_path: str) -> list[WorkerGraph]:

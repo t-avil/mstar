@@ -419,7 +419,7 @@ class Qwen3OmniModel(Model):
             PartitionDefinition(
                 name="Code2Wav",
                 graph_walks={"code2wav_chunk"},
-                initial_walk=None,  # self-triggered via StreamBuffer
+                initial_walk="code2wav_chunk",
                 producer_partitions=["Talker"],
             ),
         ]

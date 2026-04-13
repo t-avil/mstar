@@ -449,6 +449,7 @@ class Worker:
                         )
 
                 if synthetic_edge is not None:
+                    print(consumer_node)
                     ingested = len(self.worker_graphs_manager.process_new_streaming_inputs(
                         request_id=request_id, inputs=[synthetic_edge],
                     )) == 0
