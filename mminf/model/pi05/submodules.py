@@ -254,8 +254,14 @@ class Pi05LLMSubmodule(NodeSubmodule):
         - ``action_gen``: all requests in a batch are at the same Euler
           iteration (guaranteed by the Loop primitive), so their suffix tokens
           can be concatenated and processed in a single action expert forward.
+
+        NOTE: Batching is disabled for now pending investigation of a
+        deadlock in the batched prefill path. The forward_batched()
+        implementation is ready and tested in-process; the issue is in
+        the interaction with the AREngine's _execute_batched flow.
         """
-        return batch.graph_walk in ("prefill", "action_gen")
+        # TODO: re-enable once the deadlock is resolved.
+        return False
 
     def get_needed_cache_labels(
         self,
