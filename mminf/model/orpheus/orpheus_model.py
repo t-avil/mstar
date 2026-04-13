@@ -83,15 +83,14 @@ class OrpheusModel(Model):
     # Model ABC: KV cache config
     # -------------------------------------------------------------------
 
-    def get_kv_cache_config(self) -> dict[str, KVCacheConfig]:
-        cfg = KVCacheConfig(
+    def get_kv_cache_config(self) -> list[KVCacheConfig]:
+        return [KVCacheConfig(
             num_layers=self.config.num_hidden_layers,
             num_kv_heads=self.config.num_key_value_heads,
             head_dim=self.config.head_dim,
             max_seq_len=self.config.max_position_embeddings,
             num_qo_heads=self.config.num_attention_heads,
-        )
-        return {"LLM": cfg}
+        )]
 
     # -------------------------------------------------------------------
     # Model ABC: node engine types

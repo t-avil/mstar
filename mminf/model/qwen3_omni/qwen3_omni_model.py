@@ -144,7 +144,7 @@ class Qwen3OmniModel(Model):
     # Model ABC: KV cache config
     # -----------------------------------------------------------------------
 
-    def get_kv_cache_config(self) -> dict[str, KVCacheConfig]:
+    def get_kv_cache_config(self) -> list[KVCacheConfig]:
         """Return separate KV cache configs for Thinker and Talker."""
         thinker_cfg = KVCacheConfig(
             num_layers=self.config.thinker_text.num_hidden_layers,
@@ -152,6 +152,7 @@ class Qwen3OmniModel(Model):
             head_dim=self.config.thinker_head_dim,
             max_seq_len=self.config.thinker_text.max_position_embeddings,
             num_qo_heads=self.config.thinker_text.num_attention_heads,
+            nodes=["Thinker"]
         )
         talker_cfg = KVCacheConfig(
             num_layers=self.config.talker_text.num_hidden_layers,
@@ -159,11 +160,9 @@ class Qwen3OmniModel(Model):
             head_dim=self.config.talker_head_dim,
             max_seq_len=self.config.thinker_text.max_position_embeddings,
             num_qo_heads=self.config.talker_text.num_attention_heads,
+            nodes=["Talker"]
         )
-        return {
-            "Thinker": thinker_cfg,
-            "Talker": talker_cfg,
-        }
+        return [thinker_cfg, talker_cfg]
 
     # -----------------------------------------------------------------------
     # Model ABC: node engine types

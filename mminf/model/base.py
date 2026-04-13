@@ -317,7 +317,7 @@ class Model(ABC):
         ], start=[])
 
     @abstractmethod
-    def get_kv_cache_config(self) -> dict[str, KVCacheConfig]:
+    def get_kv_cache_config(self) -> list[KVCacheConfig]:
         """Return per-node KV cache configs.
 
         Maps AR node name -> KVCacheConfig. Nodes not in the dict
