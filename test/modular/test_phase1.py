@@ -164,7 +164,7 @@ class TestEngineManager:
                 "model_config": {},
             },
         ]
-        mgr = EngineManager.from_config(configs, device="cpu")
+        mgr = EngineManager.build(configs, device="cpu")
         assert mgr.get_engine("LLM").engine_type() == EngineType.AR
         assert mgr.get_engine("flow").engine_type() == EngineType.FLOW
         assert mgr.get_engine("text_emb").engine_type() == EngineType.ENC_DEC
@@ -177,7 +177,7 @@ class TestEngineManager:
             {"engine_type": "ar", "node_names": ["LLM"], "model_config": {}},
             {"engine_type": "flow", "node_names": ["flow"], "model_config": {}},
         ]
-        mgr = EngineManager.from_config(configs, device="cpu")
+        mgr = EngineManager.build(configs, device="cpu")
         mgr.add_request("req1")
         ar_engine = mgr.get_engine("LLM")
         assert isinstance(ar_engine, AREngine)
@@ -367,7 +367,7 @@ class TestImageGenLoop:
                 "model_config": {},
             },
         ]
-        engine_mgr = EngineManager.from_config(engine_configs, device="cpu")
+        engine_mgr = EngineManager.build(engine_configs, device="cpu")
         scheduler = MicroScheduler(engine_mgr)
 
         manager = WorkerGraphsManager(

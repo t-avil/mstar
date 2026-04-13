@@ -267,11 +267,14 @@ class Qwen3OmniModel(Model):
                 # dimensions per image/video, used by the encoder to compute
                 # spatial position IDs and patch counts.
                 input_ids=["pixel_values", "image_grid_thw"],
-                outputs=[GraphEdge(next_node="Thinker", name="vision_embeds")],
+                outputs=[
+                    GraphEdge(next_node="Thinker", name="vision_embeds"),
+                    GraphEdge(next_node="Thinker", name="deepstack")
+                ],
             ),
             GraphNode(
                 name="Thinker",
-                input_ids=["vision_embeds"],
+                input_ids=["vision_embeds", "deepstack"],
                 outputs=[
                     GraphEdge(
                         next_node=EMIT_TO_CLIENT,
@@ -464,6 +467,9 @@ class Qwen3OmniModel(Model):
         model_kwargs: dict | None = None,
     ) -> ForwardPassArgs:
         audio_output = "audio" in output_modalities
+
+        if model_kwargs is None:
+            model_kwargs = {}
 
         if partition_name == "Thinker":
             return self._get_thinker_initial_args(
@@ -994,12 +1000,7 @@ class Qwen3OmniModel(Model):
 
         np_audios: list = []
         for waveform in raw_audio_inputs:
-            wave = waveform
-            if wave.dim() == 2 and wave.shape[0] > 1:
-                wave = wave.mean(dim=0)  # mix channels to mono
-            elif wave.dim() == 2:
-                wave = wave.squeeze(0)
-            np_audios.append(wave.cpu().numpy())
+            np_audios.append(waveform.cpu().numpy())
 
         # ----- Preferred path: text-only chat template + separate modality processors -----
         #
@@ -1068,14 +1069,19 @@ class Qwen3OmniModel(Model):
                     feat_extractor = self._processor.feature_extractor
                     sr = getattr(feat_extractor, "sampling_rate", 16000)
                     aud_out = feat_extractor(
-                        np_audios, sampling_rate=sr, return_tensors="pt",
+                        np_audios, sampling_rate=sr,
+                        padding=True,
+                        truncation=False,
+                        return_attention_mask=True,
+                        return_tensors="pt"
                     )
-                    if "input_features" in aud_out:
-                        result["audio_features"] = [aud_out["input_features"]]
-                    if "attention_mask" in aud_out:
+                    if "attention_mask" in aud_out  and "input_features" in aud_out:
+                        aud_out["input_features"] = aud_out["input_features"].permute(0, 2, 1)[aud_out["attention_mask"].bool()].permute(1, 0)
                         result["audio_seqlens"] = [
                             aud_out["attention_mask"].sum(-1).to(torch.long)
                         ]
+                    if "input_features" in aud_out:
+                        result["audio_features"] = [aud_out["input_features"]]
 
                 # Video uses the video_processor; left as TODO since our
                 # prefill_vision walk doesn't yet handle video frame stacks.

@@ -96,7 +96,11 @@ class AudioEncoderSubmodule(NodeSubmodule):
             "Running AudioEncoder with audio_features shape=%s",
             audio_features.shape,
         )
-        audio_embeds = self.audio_encoder(audio_features)
+        audio_embeds = self.audio_encoder(
+            audio_features,
+            feature_lens=audio_seqlens,
+            return_dict=True,
+        ).last_hidden_state
 
         # Flatten to (num_audio_tokens, hidden_size) if needed
         if audio_embeds.dim() == 3:
@@ -528,6 +532,9 @@ class ThinkerSubmodule(NodeSubmodule):
         # second row: text inclusion mask (bos and eos)
         masks_for_talker = {}
 
+        deepstack = []
+        visual_pos_masks = []
+
         vision_start_id = self.config.thinker.vision_start_token_id
         vision_end_id = self.config.thinker.vision_end_token_id
         spatial_merge = self.config.vision.spatial_merge_size
@@ -542,6 +549,7 @@ class ThinkerSubmodule(NodeSubmodule):
                 mm_mask,
                 ~mm_mask
             ])
+            visual_pos_masks.append(mm_mask)
 
             # Wrap the vision span in ``<|vision_bos|>`` / ``<|vision_eos|>``
             # sentinel token embeddings.
@@ -600,8 +608,12 @@ class ThinkerSubmodule(NodeSubmodule):
                 end_pos_base + 1, device=device
             )
 
+            deepstack.append(inp["deepstack"][0])
+
         input_embeds = torch.cat(all_embeds, dim=0)
         position_ids_3d = torch.cat(all_pos_ids_3d, dim=1)
+        deepstack = torch.cat(deepstack, dim=0)
+        visual_pos_masks = torch.cat(visual_pos_masks, dim=0)
 
         inv_freq = self._get_inv_freq(device)
         cos_sin_3d = compute_3d_cos_sin(
@@ -614,20 +626,17 @@ class ThinkerSubmodule(NodeSubmodule):
         )
         cache_manager.plan_rope(seq_lens=seq_lens, pos_ids=None, label="main")
 
-        # Pass deepstack through if available (for Thinker layers that need it)
-        deepstack = None
-        if per_request_inputs and "deepstack" in per_request_inputs[0]:
-            deepstack = per_request_inputs[0]["deepstack"][0]
+        deepstack 
 
         result = {
             "input_embeds": input_embeds,
             "cos_sin_3d": cos_sin_3d,
             "mrope_section": self.MROPE_SECTION,
             "seq_lens": seq_lens,
-            "masks_for_talker": masks_for_talker
+            "masks_for_talker": masks_for_talker,
+            "visual_pos_masks": visual_pos_masks,
+            "deepstack": deepstack
         }
-        if deepstack is not None:
-            result["deepstack"] = deepstack
 
         return result
 
@@ -713,6 +722,8 @@ class ThinkerSubmodule(NodeSubmodule):
         cos_sin_3d: tuple[torch.Tensor, torch.Tensor] | None = None,
         mrope_section: list[int] | None = None,
         masks_for_talker: dict[str, torch.Tensor] | None = None,
+        deepstack: torch.Tensor | None = None,
+        visual_pos_masks: torch.Tensor | None = None,
         **kwargs,
     ) -> NameToTensorList:
         """Run Thinker transformer, produce logits (decode) and thinker_states.
@@ -738,6 +749,8 @@ class ThinkerSubmodule(NodeSubmodule):
             cache_handle=cache_handle,
             cos_sin_3d=cos_sin_3d,
             mrope_section=mrope_section,
+            deepstack_visual_embeds=deepstack,
+            visual_pos_masks=visual_pos_masks
         )
 
         result: NameToTensorList = {

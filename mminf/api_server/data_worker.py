@@ -197,16 +197,12 @@ class PreprocessWorkerThread:
 
                     # ---- Audio ----
                     elif modality == "audio":
-                        waveform, sample_rate = torchaudio.load_with_torchcodec(
-                            filepath,
-                            channels_first=True
-                        )
-                        # waveform: (channels, time)
-                        tensors[key].append(waveform)
-                        input_metadata[key].append(dict(
-                            sample_rate=sample_rate,
-                            channels_first=True
-                        ))
+                        from torchcodec.decoders import AudioDecoder
+                        # Set `num_channels` to `1` which is what most models expects and the default in librosa
+                        # TODO: make sample rate configurable
+                        decoder = AudioDecoder(filepath, sample_rate=16000, num_channels=1)
+                        audio = decoder.get_all_samples().data[0]
+                        tensors[key].append(audio)
 
                     # ---- Video ----
                     elif modality == "video":
