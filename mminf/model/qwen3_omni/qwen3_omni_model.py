@@ -144,7 +144,7 @@ class Qwen3OmniModel(Model):
     # Model ABC: KV cache config
     # -----------------------------------------------------------------------
 
-    def get_kv_cache_config(self) -> dict[str, KVCacheConfig]:
+    def get_kv_cache_config(self) -> list[KVCacheConfig]:
         """Return separate KV cache configs for Thinker and Talker."""
         thinker_cfg = KVCacheConfig(
             num_layers=self.config.thinker_text.num_hidden_layers,
@@ -152,6 +152,7 @@ class Qwen3OmniModel(Model):
             head_dim=self.config.thinker_head_dim,
             max_seq_len=self.config.thinker_text.max_position_embeddings,
             num_qo_heads=self.config.thinker_text.num_attention_heads,
+            nodes=["Thinker"]
         )
         talker_cfg = KVCacheConfig(
             num_layers=self.config.talker_text.num_hidden_layers,
@@ -159,11 +160,9 @@ class Qwen3OmniModel(Model):
             head_dim=self.config.talker_head_dim,
             max_seq_len=self.config.thinker_text.max_position_embeddings,
             num_qo_heads=self.config.talker_text.num_attention_heads,
+            nodes=["Talker"]
         )
-        return {
-            "Thinker": thinker_cfg,
-            "Talker": talker_cfg,
-        }
+        return [thinker_cfg, talker_cfg]
 
     # -----------------------------------------------------------------------
     # Model ABC: node engine types
@@ -216,6 +215,14 @@ class Qwen3OmniModel(Model):
                     name="thinker_states",
                     target_partition="Talker",
                 ),
+                # The thinker_mask tensor includes two masks: one for multimodal inputs,
+                # and one for text inputs (allowing us to cut out the system prompt and
+                # assistant history from the talker input)
+                StreamingGraphEdge(
+                    next_node="Talker",
+                    name="thinker_mask",
+                    target_partition="Talker",
+                ),
             ],
         )
 
@@ -244,6 +251,11 @@ class Qwen3OmniModel(Model):
                         name="thinker_states",
                         target_partition="Talker",
                     ),
+                    StreamingGraphEdge(
+                        next_node="Talker",
+                        name="thinker_mask",
+                        target_partition="Talker",
+                    ),
                 ],
             ),
         ])
@@ -255,11 +267,14 @@ class Qwen3OmniModel(Model):
                 # dimensions per image/video, used by the encoder to compute
                 # spatial position IDs and patch counts.
                 input_ids=["pixel_values", "image_grid_thw"],
-                outputs=[GraphEdge(next_node="Thinker", name="vision_embeds")],
+                outputs=[
+                    GraphEdge(next_node="Thinker", name="vision_embeds"),
+                    GraphEdge(next_node="Thinker", name="deepstack")
+                ],
             ),
             GraphNode(
                 name="Thinker",
-                input_ids=["vision_embeds"],
+                input_ids=["vision_embeds", "deepstack"],
                 outputs=[
                     GraphEdge(
                         next_node=EMIT_TO_CLIENT,
@@ -271,6 +286,11 @@ class Qwen3OmniModel(Model):
                     StreamingGraphEdge(
                         next_node="Talker",
                         name="thinker_states",
+                        target_partition="Talker",
+                    ),
+                    StreamingGraphEdge(
+                        next_node="Talker",
+                        name="thinker_mask",
                         target_partition="Talker",
                     ),
                 ],
@@ -295,6 +315,11 @@ class Qwen3OmniModel(Model):
                     name="thinker_states",
                     target_partition="Talker",
                 ),
+                StreamingGraphEdge(
+                    next_node="Talker",
+                    name="thinker_mask",
+                    target_partition="Talker",
+                ),
             ],
         )
 
@@ -304,7 +329,7 @@ class Qwen3OmniModel(Model):
         # present for a prefill step.
         talker_prefill = GraphNode(
             name="Talker",
-            input_ids=["thinker_states", "talker_trigger"],
+            input_ids=["thinker_states", "thinker_mask", "talker_trigger"],
             outputs=[
                 GraphEdge(
                     next_node=EMPTY_DESTINATION,
@@ -328,7 +353,7 @@ class Qwen3OmniModel(Model):
         # -- Talker decode: autoregressive codec token generation --
         talker_decode = GraphNode(
             name="Talker",
-            input_ids=["all_codes", "thinker_states"],
+            input_ids=["all_codes", "thinker_states", "thinker_mask"],
             outputs=[
                 GraphEdge(
                     next_node=EMPTY_DESTINATION,
@@ -390,13 +415,13 @@ class Qwen3OmniModel(Model):
             PartitionDefinition(
                 name="Talker",
                 graph_walks={"talker_prefill", "talker_decode"},
-                initial_walk=None,  # triggered by conductor after Thinker walks
+                initial_walk="talker_prefill",
                 producer_partitions=["Thinker"],
             ),
             PartitionDefinition(
                 name="Code2Wav",
                 graph_walks={"code2wav_chunk"},
-                initial_walk=None,  # self-triggered via StreamBuffer
+                initial_walk="code2wav_chunk",
                 producer_partitions=["Talker"],
             ),
         ]
@@ -412,6 +437,12 @@ class Qwen3OmniModel(Model):
                     chunk_policy_factory=lambda: FixedChunkPolicy(chunk_size=1, continue_after_done=True),
                 ),
                 Connection(
+                    from_partition="Thinker",
+                    to_partition="Talker",
+                    edge_name="thinker_mask",
+                    chunk_policy_factory=lambda: FixedChunkPolicy(chunk_size=1, continue_after_done=True),
+                ),
+                Connection(
                     from_partition="Talker",
                     to_partition="Code2Wav",
                     edge_name="codec_tokens",
@@ -422,110 +453,6 @@ class Qwen3OmniModel(Model):
                 ),
             ],
         )
-
-    # -----------------------------------------------------------------------
-    # Conductor-triggered pipelined prefill (Approach C)
-    # -----------------------------------------------------------------------
-
-    def get_consumer_partition_triggers(
-        self,
-        completed_partition: str,
-        completed_walk: str,
-        all_partition_states: dict,
-        persist_signals: dict[str, list[TensorPointerInfo]],
-    ) -> dict[str, ForwardPassArgs]:
-        """Send talker_trigger to Talker after each Thinker walk completes.
-
-        Called by the conductor after _process_done_forward for the completed
-        partition.  While the Talker is still in prefill mode, each Thinker
-        walk completion triggers a Talker prefill step:
-
-        - prefill_text / prefill_audio / prefill_vision completions:
-          is_last_prefill=False  (extend KV cache, no codec output)
-        - thinker_decode start (first decode step completion):
-          is_last_prefill=True   (sample first codec token, transition to decode)
-
-        Once the Talker transitions to decode, no more triggers are sent
-        (the Talker self-drives via its own decode loop).
-        """
-        if completed_partition != "Thinker":
-            return {}
-
-        # Only trigger Talker while it is still in prefill mode
-        talker_state = all_partition_states.get("Talker")
-        if talker_state is None or talker_state.is_done:
-            return {}
-
-        talker_metadata = talker_state.metadata
-        if not talker_metadata.is_prefill:
-            # Talker has already transitioned to decode -- no more triggers
-            return {}
-
-        # Check if the Talker partition has audio output enabled
-        if "audio" not in talker_metadata.output_modalities:
-            return {}
-
-        # Race condition guard (Comment 11): once we've already sent the
-        # "last prefill" trigger, don't send another.  This handles the
-        # case where the Thinker finishes multiple decode steps before the
-        # Talker transitions from prefill to decode.  Without this guard,
-        # each additional thinker_decode completion would fire another
-        # is_last_prefill=True trigger, causing duplicate codec sampling.
-        if talker_metadata.kwargs.get("_last_prefill_sent", False):
-            return {}
-
-        # Determine if this is the last prefill trigger.
-        # The last prefill trigger is sent when the Thinker's first decode
-        # step completes (completed_walk == "thinker_decode").
-        is_last_prefill = (completed_walk == "thinker_decode")
-
-        # Persist the "last prefill sent" flag into the Talker's own
-        # metadata so subsequent triggers skip (handled by the conductor,
-        # which updates target_pstate.metadata from trigger_fwd_args).
-        new_talker_kwargs = {
-            **talker_metadata.kwargs,
-            "is_last_prefill": is_last_prefill,
-        }
-        if is_last_prefill:
-            new_talker_kwargs["_last_prefill_sent"] = True
-
-        trigger_metadata = CurrentForwardConductorMetadata(
-            input_modalities=talker_metadata.input_modalities,
-            output_modalities=talker_metadata.output_modalities,
-            graph_walk="talker_prefill",
-            is_prefill=True,
-            kwargs=new_talker_kwargs,
-        )
-
-        trigger_edge = GraphEdge(next_node="Talker", name="talker_trigger")
-
-        # Determine projection walk_name for the Talker (W2):
-        # The Talker uses walk_name to decide text_projection vs
-        # hidden_projection for the incoming Thinker states.
-        #   - "prefill_text"    -> all text tokens    -> text_projection
-        #   - "prefill_audio"   -> audio embeddings   -> hidden_projection
-        #   - "prefill_vision"  -> vision embeddings   -> hidden_projection
-        #   - "thinker_decode"  -> text decode tokens  -> text_projection
-        projection_walk_name = completed_walk
-
-        return {
-            "Talker": ForwardPassArgs(
-                full_metadata=trigger_metadata,
-                inputs=[trigger_edge],
-                unpersist_tensors=[],
-                step_metadata={
-                    "is_prefill": True,
-                    "is_last_prefill": is_last_prefill,
-                    "sample_token": is_last_prefill,
-                    "walk_name": projection_walk_name,
-                    # Pass system section boundary so the Talker can
-                    # skip system tokens (matching vllm-omni behavior).
-                    "_talker_user_start": getattr(
-                        self, "_talker_user_start", 0
-                    ),
-                },
-            ),
-        }
 
     # -----------------------------------------------------------------------
     # Model ABC: initial forward pass args
@@ -541,14 +468,16 @@ class Qwen3OmniModel(Model):
     ) -> ForwardPassArgs:
         audio_output = "audio" in output_modalities
 
+        if model_kwargs is None:
+            model_kwargs = {}
+
         if partition_name == "Thinker":
             return self._get_thinker_initial_args(
                 input_modalities, output_modalities,
                 input_signals, model_kwargs or {},
             )
         elif partition_name == "Talker":
-            # Talker starts in prefill mode, waiting for cross-partition trigger.
-            # No initial inputs -- the conductor triggers it after each Thinker walk.
+            # Talker starts in prefill mode
             full_metadata = CurrentForwardConductorMetadata(
                 input_modalities=input_modalities,
                 output_modalities=output_modalities,
@@ -557,13 +486,19 @@ class Qwen3OmniModel(Model):
                 kwargs={
                     "audio_output": audio_output,
                     "talker_prefill_done": False,
+                    "num_thinker_prefill_steps": len(input_modalities),
+                    "prefill_chunks_processed": 0,
+                    "voice": model_kwargs.get("voice", "Ethan")
                 },
             )
             return ForwardPassArgs(
                 full_metadata=full_metadata,
-                inputs=[],
+                inputs=[GraphEdge(next_node="Talker", name="talker_trigger")] if audio_output else [],
                 unpersist_tensors=[],
                 request_done="audio" not in output_modalities,
+                step_metadata={
+                    "voice": model_kwargs.get("voice", "Ethan")
+                }
             )
         elif partition_name == "Code2Wav":
             # Code2Wav starts with code2wav_chunk walk but no inputs --
@@ -879,14 +814,10 @@ class Qwen3OmniModel(Model):
 
         if metadata.is_prefill:
             # Talker is in prefill mode, waiting for conductor triggers.
-            # The actual work happens when get_consumer_partition_triggers()
-            # fires from the Thinker side.  Here we just check if the
-            # last prefill has been completed (the trigger sets this flag).
-            is_last_prefill = metadata.kwargs.get("is_last_prefill", False)
 
-            if is_last_prefill and persist_signals.get("all_codes", []):
-                # Last prefill done AND all_codes has been produced.
-                # Transition to talker_decode.
+            metadata.kwargs["prefill_chunks_processed"] += 1
+            if persist_signals.get("all_codes", []):
+                # Produced all_codes, so can transition to decode
                 metadata.is_prefill = False
                 metadata.graph_walk = "talker_decode"
                 metadata.kwargs["talker_prefill_done"] = True
@@ -908,34 +839,20 @@ class Qwen3OmniModel(Model):
                         "is_last_prefill": False,
                     },
                 )
-            elif is_last_prefill:
-                # Race condition: the last-prefill trigger has already
-                # overwritten our metadata with is_last_prefill=True, but
-                # the actual last prefill hasn't run yet (the NON-last
-                # prefill just completed).  Wait — the queued trigger will
-                # drive the last prefill forward.
-                return ForwardPassArgs(
-                    full_metadata=metadata,
-                    inputs=[],
-                    unpersist_tensors=[],
-                    step_metadata={
-                        "is_prefill": True,
-                        "is_last_prefill": True,
-                    },
-                )
-            else:
-                # Not the last prefill -- just extend KV cache.
-                # Return empty inputs; the trigger ForwardPassArgs from
-                # get_consumer_partition_triggers() drives the actual work.
-                return ForwardPassArgs(
-                    full_metadata=metadata,
-                    inputs=[],
-                    unpersist_tensors=[],
-                    step_metadata={
-                        "is_prefill": True,
-                        "is_last_prefill": False,
-                    },
-                )
+
+            is_last_prefill = metadata.kwargs["num_thinker_prefill_steps"] == \
+                 metadata.kwargs["prefill_chunks_processed"]
+            return ForwardPassArgs(
+                full_metadata=metadata,
+                inputs=[GraphEdge(next_node="Talker", name="talker_trigger")],
+                unpersist_tensors=[],
+                step_metadata={
+                    "is_prefill": True,
+                    "is_last_prefill": is_last_prefill,
+                    # voice is used for the last prefill
+                    "voice": metadata.kwargs.get("voice", "Ethan")
+                },
+            )
 
         elif metadata.graph_walk == "talker_decode":
             # Decode loop: check only the layer-0 code (first element) for
@@ -1083,12 +1000,7 @@ class Qwen3OmniModel(Model):
 
         np_audios: list = []
         for waveform in raw_audio_inputs:
-            wave = waveform
-            if wave.dim() == 2 and wave.shape[0] > 1:
-                wave = wave.mean(dim=0)  # mix channels to mono
-            elif wave.dim() == 2:
-                wave = wave.squeeze(0)
-            np_audios.append(wave.cpu().numpy())
+            np_audios.append(waveform.cpu().numpy())
 
         # ----- Preferred path: text-only chat template + separate modality processors -----
         #
@@ -1114,144 +1026,139 @@ class Qwen3OmniModel(Model):
         # Functionally, both approaches end up with the same set of
         # embeddings in the KV cache (text + modality content).  Stripping
         # the placeholders avoids noise from the unfilled embeddings.
-        if self._processor is not None and prompt is not None:
-            try:
-                messages = [
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are Qwen, a virtual human developed by the "
-                            "Qwen team, Alibaba Group, capable of perceiving "
-                            "auditory and visual inputs, as well as generating "
-                            "text and speech."
-                        ),
-                    },
-                    {"role": "user", "content": prompt},
-                ]
-
-                # apply_chat_template with TEXT-ONLY content -> no modality
-                # placeholders are inserted.  add_generation_prompt=True
-                # appends the trailing ``<|im_start|>assistant\n`` so the
-                # model knows to start the assistant response.
-                text = self._processor.apply_chat_template(
-                    messages,
-                    tokenize=False,
-                    add_generation_prompt=True,
-                )
-                input_ids = self.tokenizer(
-                    text, return_tensors="pt"
-                )["input_ids"][0]
-                result["text_inputs"] = [input_ids]
-
-                # Compute where the user section starts in the tokenized
-                # prompt.  vllm-omni skips the system section entirely
-                # when building the Talker's KV cache (``if role_token ==
-                # system_token_id: continue``).  We pass this boundary
-                # so the Talker can replicate that behavior.
-                im_starts = (
-                    input_ids == self.config.im_start_token_id
-                ).nonzero(as_tuple=True)[0]
-                # Second <|im_start|> marks start of user section
-                # (first is system).
-                self._talker_user_start = (
-                    im_starts[1].item() if len(im_starts) >= 2 else 0
-                )
-
-                # Run image_processor / feature_extractor SEPARATELY for the
-                # modality outputs.  These don't touch text_inputs.
-                if pil_images:
-                    img_proc = self._processor.image_processor
-                    img_out = img_proc(images=pil_images, return_tensors="pt")
-                    if "pixel_values" in img_out:
-                        result["pixel_values"] = [img_out["pixel_values"]]
-                    if "image_grid_thw" in img_out:
-                        result["image_grid_thw"] = [img_out["image_grid_thw"]]
-
-                if np_audios:
-                    feat_extractor = self._processor.feature_extractor
-                    sr = getattr(feat_extractor, "sampling_rate", 16000)
-                    aud_out = feat_extractor(
-                        np_audios, sampling_rate=sr, return_tensors="pt",
-                    )
-                    if "input_features" in aud_out:
-                        result["audio_features"] = [aud_out["input_features"]]
-                    if "attention_mask" in aud_out:
-                        result["audio_seqlens"] = [
-                            aud_out["attention_mask"].sum(-1).to(torch.long)
-                        ]
-
-                # Video uses the video_processor; left as TODO since our
-                # prefill_vision walk doesn't yet handle video frame stacks.
-                if raw_video_inputs:
-                    result["pixel_values_videos"] = list(raw_video_inputs)
-
-                return result
-            except Exception as e:
-                logger.warning(
-                    "Qwen3-Omni text-only chat template path failed (%s); "
-                    "falling back to per-modality processing without chat "
-                    "template.",
-                    e,
-                )
-
-        # ----- Fallback path: per-modality processing without chat template -----
-        # (Used when AutoProcessor fails to load or prompt is None.)
+        # if self._processor is not None:
+            # try:
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are Qwen, a virtual human developed by the "
+                    "Qwen team, Alibaba Group, capable of perceiving "
+                    "auditory and visual inputs, as well as generating "
+                    "text and speech."
+                ),
+            },
+        ]
         if prompt is not None:
-            tokens = self.tokenizer.encode(prompt)
-            result["text_inputs"] = [torch.tensor(tokens, dtype=torch.long)]
+            messages.append(
+                {"role": "user", "content": prompt},
+            )
 
+        # apply_chat_template with TEXT-ONLY content -> no modality
+        # placeholders are inserted.  add_generation_prompt=True
+        # appends the trailing ``<|im_start|>assistant\n`` so the
+        # model knows to start the assistant response.
+        text = self._processor.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        input_ids = self.tokenizer(
+            text, return_tensors="pt"
+        )["input_ids"][0]
+        result["text_inputs"] = [input_ids]
+
+        # Run image_processor / feature_extractor SEPARATELY for the
+        # modality outputs.  These don't touch text_inputs.
         if pil_images:
-            try:
-                processor = getattr(self, "_image_processor", None)
-                if processor is None:
-                    from transformers import AutoImageProcessor
-                    processor = AutoImageProcessor.from_pretrained(
-                        self.local_dir, trust_remote_code=True,
-                    )
-                    self._image_processor = processor
-                pixel_values_list = []
-                grid_thw_list = []
-                for img_np in pil_images:
-                    proc_out = processor(images=img_np, return_tensors="pt")
-                    pixel_values_list.append(proc_out["pixel_values"][0])
-                    if "image_grid_thw" in proc_out:
-                        grid_thw_list.append(proc_out["image_grid_thw"][0])
-                if pixel_values_list:
-                    result["pixel_values"] = pixel_values_list
-                if grid_thw_list:
-                    result["image_grid_thw"] = grid_thw_list
-            except Exception as e:
-                logger.warning("Image processor failed: %s", e)
-                result["pixel_values"] = list(raw_image_inputs)
+            img_proc = self._processor.image_processor
+            img_out = img_proc(images=pil_images, return_tensors="pt")
+            if "pixel_values" in img_out:
+                result["pixel_values"] = [img_out["pixel_values"]]
+            if "image_grid_thw" in img_out:
+                result["image_grid_thw"] = [img_out["image_grid_thw"]]
 
         if np_audios:
-            try:
-                processor = getattr(self, "_audio_processor", None)
-                if processor is None:
-                    from transformers import AutoFeatureExtractor
-                    processor = AutoFeatureExtractor.from_pretrained(
-                        self.local_dir, trust_remote_code=True,
-                    )
-                    self._audio_processor = processor
-                feats = []
-                seqlens = []
-                for wave_np in np_audios:
-                    sr = getattr(processor, "sampling_rate", 16000)
-                    proc_out = processor(
-                        wave_np, sampling_rate=sr, return_tensors="pt",
-                    )
-                    feats.append(proc_out["input_features"][0])
-                    seqlens.append(torch.tensor(wave_np.shape[-1], dtype=torch.long))
-                if feats:
-                    result["audio_features"] = feats
-                    result["audio_seqlens"] = seqlens
-            except Exception as e:
-                logger.warning("Audio processor failed: %s", e)
-                result["audio_features"] = list(raw_audio_inputs)
+            feat_extractor = self._processor.feature_extractor
+            sr = getattr(feat_extractor, "sampling_rate", 16000)
+            aud_out = feat_extractor(
+                np_audios, sampling_rate=sr,
+                padding=True,
+                truncation=False,
+                return_attention_mask=True,
+                return_tensors="pt"
+            )
+            if "attention_mask" in aud_out  and "input_features" in aud_out:
+                aud_out["input_features"] = aud_out["input_features"].permute(0, 2, 1)[aud_out["attention_mask"].bool()].permute(1, 0)
+                result["audio_seqlens"] = [
+                    aud_out["attention_mask"].sum(-1).to(torch.long)
+                ]
+            if "input_features" in aud_out:
+                result["audio_features"] = [aud_out["input_features"]]
 
+        # Video uses the video_processor; left as TODO since our
+        # prefill_vision walk doesn't yet handle video frame stacks.
         if raw_video_inputs:
-            # TODO: proper video frame extraction + grid via AutoVideoProcessor.
             result["pixel_values_videos"] = list(raw_video_inputs)
+
+        return result
+            # except Exception as e:
+            #     logger.warning(
+            #         "Qwen3-Omni text-only chat template path failed (%s); "
+            #         "falling back to per-modality processing without chat "
+            #         "template.",
+            #         e,
+            #     )
+
+        # Fallback in its current state will crash the system downstream, so commenting it out
+        # # ----- Fallback path: per-modality processing without chat template -----
+        # # (Used when AutoProcessor fails to load or prompt is None.)
+        # if prompt is not None:
+        #     tokens = self.tokenizer.encode(prompt)
+        #     result["text_inputs"] = [torch.tensor(tokens, dtype=torch.long)]
+
+        # if pil_images:
+        #     try:
+        #         processor = getattr(self, "_image_processor", None)
+        #         if processor is None:
+        #             from transformers import AutoImageProcessor
+        #             processor = AutoImageProcessor.from_pretrained(
+        #                 self.local_dir, trust_remote_code=True,
+        #             )
+        #             self._image_processor = processor
+        #         pixel_values_list = []
+        #         grid_thw_list = []
+        #         for img_np in pil_images:
+        #             proc_out = processor(images=img_np, return_tensors="pt")
+        #             pixel_values_list.append(proc_out["pixel_values"][0])
+        #             if "image_grid_thw" in proc_out:
+        #                 grid_thw_list.append(proc_out["image_grid_thw"][0])
+        #         if pixel_values_list:
+        #             result["pixel_values"] = pixel_values_list
+        #         if grid_thw_list:
+        #             result["image_grid_thw"] = grid_thw_list
+        #     except Exception as e:
+        #         logger.warning("Image processor failed: %s", e)
+        #         result["pixel_values"] = list(raw_image_inputs)
+
+        # if np_audios:
+        #     try:
+        #         processor = getattr(self, "_audio_processor", None)
+        #         if processor is None:
+        #             from transformers import AutoFeatureExtractor
+        #             processor = AutoFeatureExtractor.from_pretrained(
+        #                 self.local_dir, trust_remote_code=True,
+        #             )
+        #             self._audio_processor = processor
+        #         feats = []
+        #         seqlens = []
+        #         for wave_np in np_audios:
+        #             sr = getattr(processor, "sampling_rate", 16000)
+        #             proc_out = processor(
+        #                 wave_np, sampling_rate=sr, return_tensors="pt",
+        #             )
+        #             feats.append(proc_out["input_features"][0])
+        #             seqlens.append(torch.tensor(wave_np.shape[-1], dtype=torch.long))
+        #         if feats:
+        #             result["audio_features"] = feats
+        #             result["audio_seqlens"] = seqlens
+        #     except Exception as e:
+        #         logger.warning("Audio processor failed: %s", e)
+        #         result["audio_features"] = list(raw_audio_inputs)
+
+        # if raw_video_inputs:
+        #     # TODO: proper video frame extraction + grid via AutoVideoProcessor.
+        #     result["pixel_values_videos"] = list(raw_video_inputs)
 
         return result
 

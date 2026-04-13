@@ -213,6 +213,8 @@ class TalkerConfig:
 
     audio_start_token_id: int = 151669
 
+    speaker_id: dict | None = None
+
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> TalkerConfig:
         fnames = {f.name for f in cls.__dataclass_fields__.values()}

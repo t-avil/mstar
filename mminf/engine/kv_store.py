@@ -56,10 +56,16 @@ class KVCacheConfig:
     page_size: int = 128
     num_qo_heads: int | None = None  # Optional, defaults to num_kv_heads
     cpu_offload_pages: int = 0  # >0 enables CPU offloading with this many CPU pages
+    nodes: list[str] = None # defaults to all AR nodes
 
     def __post_init__(self):
         if self.num_qo_heads is None:
             self.num_qo_heads = self.num_kv_heads
+    
+    def get_node_str(self):
+        if self.nodes is None:
+            return "ALL_NODES"
+        return "///".join(self.nodes)
 
 
 @dataclass
@@ -98,16 +104,6 @@ class StoreAllocInfo:
     key: str
     ptr: list[int]
     nbytes: list[int]
-
-
-@dataclass
-class MooncakeStoreConfig:
-    hostname: str
-    metadata_server: str="http://localhost:8080/metadata"
-    segment_size=4 * 1024*1024*1024
-    local_buff_size=4 * 1024*1024*1024
-    protocol: CommProtocol=CommProtocol.RDMA
-    master_service: str="localhost:50051"
 
 
 @dataclass

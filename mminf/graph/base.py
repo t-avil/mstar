@@ -25,17 +25,10 @@ class TensorPointerInfo:
     source_session_id: str # "{HOSTNAME}:{client_engine.get_rpc_port()}"
     source_entity: str # which {worker, api_server} the tensor is on
 
-# class ConnectionType(Enum):
-#     STREAM = "stream" # thinker-talker
-#     BLOCKING = "blocking" # we need to wait for all tensors in the list to finish
-
-# assume blocking case for all nodes for now.
 
 @dataclass
 class GraphEdge:
     next_node: str
-    # connection_type: ConnectionType
-    # wait_for_next_tensor : bool = True
     name: str
     tensor_info: list[TensorPointerInfo] = field(default_factory=list)
 
@@ -105,6 +98,7 @@ class GraphNode(GraphSection):
     input_ids: set[str]
     outputs: list[GraphEdge]
     consumes_stream: bool = field(default=False)
+    _streaming_inputs: set[str] = field(default_factory=set)
 
     # Populated as previous nodes complete
     # This will also include, e.g., tensor UUIDs associated with these inputs
@@ -115,6 +109,9 @@ class GraphNode(GraphSection):
         self.input_ids = set(self.input_ids)
 
     def is_ready(self):
+        return self.input_ids.issubset(set(self.ready_inputs.keys()).union(self._streaming_inputs))
+    
+    def is_ready_including_streaming(self):
         return self.input_ids.issubset(set(self.ready_inputs.keys()))
 
     def get_node_names(self) -> list[str]:

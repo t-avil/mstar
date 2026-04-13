@@ -150,12 +150,17 @@ def _divide_into_worker_graphs(
     graph: GraphSection,
     graph_walk: str,
     node_to_group_idx: dict[str, int],
-    node_groups: list[dict]
+    node_groups: list[dict],
+    input_streams: set[str],
 ) -> list[WorkerGraph]:
     """
     Given a graph, break it into worker graphs
     """
     if isinstance(graph, GraphNode):
+        graph._streaming_inputs = input_streams.intersection(graph.input_ids)
+        if len(graph._streaming_inputs) > 0:
+            graph.consumes_stream = True
+            
         return [WorkerGraph(
             section=graph,
             graph_walks=set([graph_walk]),
@@ -169,7 +174,8 @@ def _divide_into_worker_graphs(
             graph.sections[0],
             graph_walk=graph_walk,
             node_to_group_idx=node_to_group_idx,
-            node_groups=node_groups
+            node_groups=node_groups,
+            input_streams=input_streams
         )
 
         for i in range(1, len(graph.sections)):
@@ -179,7 +185,8 @@ def _divide_into_worker_graphs(
                 graph.sections[i],
                 graph_walk=graph_walk,
                 node_to_group_idx=node_to_group_idx,
-                node_groups=node_groups
+                node_groups=node_groups,
+                input_streams=input_streams
             )
             if new_worker_graphs[0]._group_id == worker_graphs[-1]._group_id and \
                     not new_worker_graphs[0].consumes_stream:
@@ -195,7 +202,8 @@ def _divide_into_worker_graphs(
             _divide_into_worker_graphs(
                 s, graph_walk=graph_walk,
                 node_to_group_idx=node_to_group_idx,
-                node_groups=node_groups
+                node_groups=node_groups,
+                input_streams=input_streams
             ) for s in graph.sections
         ]
         # parallel sections that are all on the same worker can be merged
@@ -222,7 +230,8 @@ def _divide_into_worker_graphs(
             graph.section,
             graph_walk=graph_walk,
             node_to_group_idx=node_to_group_idx,
-            node_groups=node_groups
+            node_groups=node_groups,
+            input_streams=input_streams
         )
         if len(loop_section_worker_graphs) == 1:
             # fully colocated case
@@ -276,11 +285,22 @@ class Model(ABC):
                 name: i for name in group["node_names"]
             })
 
+        partition = "default"
+        for part in self.get_partitions():
+            if graph_walk in part.graph_walks:
+                partition = part.name
+                break
+        input_streams = set()
+        for conn in self.get_partition_topology().connections:
+            if conn.to_partition == partition:
+                input_streams.add(conn.edge_name)
+
         return _divide_into_worker_graphs(
             graph,
             graph_walk=graph_walk,
             node_to_group_idx=node_to_group_idx,
-            node_groups=node_groups
+            node_groups=node_groups,
+            input_streams=input_streams
         )
 
     def get_worker_graphs(self, config_path: str) -> list[WorkerGraph]:
@@ -297,7 +317,7 @@ class Model(ABC):
         ], start=[])
 
     @abstractmethod
-    def get_kv_cache_config(self) -> dict[str, KVCacheConfig]:
+    def get_kv_cache_config(self) -> list[KVCacheConfig]:
         """Return per-node KV cache configs.
 
         Maps AR node name -> KVCacheConfig. Nodes not in the dict
@@ -417,21 +437,6 @@ class Model(ABC):
             name="default", graph_walks=walks,
             initial_walk=None, producer_partitions=[],
         )]
-
-    def get_consumer_partition_triggers(
-        self,
-        completed_partition: str,
-        completed_walk: str,
-        all_partition_states: dict,
-        persist_signals: dict[str, list[TensorPointerInfo]],
-    ) -> dict[str, "ForwardPassArgs"]:
-        """Return triggers for consumer partitions when a producer completes a step.
-
-        Called by the conductor after _process_done_forward for the completed
-        partition. Returns {partition_name: ForwardPassArgs} for each partition
-        to trigger. Default: empty dict (no cross-partition triggers).
-        """
-        return {}
 
     @abstractmethod
     def get_partition_forward_pass_args(

@@ -7,12 +7,6 @@ from mminf.utils.profiler import range_pop, range_push
 class AudioCodecEngine(BaseEngine):
     """
     Wraps submodules for audio codec forward passes.
-
-    Supports streaming mode: when ``set_streaming_buffers`` is called (via
-    BaseEngine) with a reference to the worker-level streaming buffer dict,
-    the engine exposes the buffer to submodules via
-    ``per_request_info.step_metadata`` during ``execute_batch`` so submodules
-    can read accumulated tokens.
     """
 
     def __init__(
@@ -34,7 +28,6 @@ class AudioCodecEngine(BaseEngine):
     def load_model(
         self,
         submodules: dict[str, torch.nn.Module],
-        model_config: dict,
         device: torch.device,
         **kwargs
     ) -> None:
@@ -65,12 +58,6 @@ class AudioCodecEngine(BaseEngine):
                     inputs = batch.per_request_input_tensors.get(rid, {})
 
                     fwd_info = batch.per_request_info[rid]
-                    # Legacy path: inject streaming buffer into step_metadata
-                    if self._streaming_buffers and rid in self._streaming_buffers:
-                        fwd_info.step_metadata = {
-                            **fwd_info.step_metadata,
-                            "_streaming_buffer": self._streaming_buffers[rid],
-                        }
 
                     if hasattr(submodule, 'preprocess'):
                         preprocessed = submodule.preprocess(

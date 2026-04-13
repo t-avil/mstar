@@ -185,6 +185,16 @@ class Qwen3OmniThinkerModel(nn.Module):
 
         # Language model head (at top level: thinker.lm_head)
         self.lm_head = nn.Linear(tc.hidden_size, tc.vocab_size, bias=False)
+    
+    def _deepstack_process(
+        self, hidden_states: torch.Tensor, visual_pos_masks: torch.Tensor, visual_embeds: torch.Tensor
+    ):
+        visual_pos_masks = visual_pos_masks.to(hidden_states.device)
+        visual_embeds = visual_embeds.to(hidden_states.device, hidden_states.dtype)
+        hidden_states = hidden_states.clone()
+        local_this = hidden_states[visual_pos_masks, :] + visual_embeds
+        hidden_states[visual_pos_masks, :] = local_this
+        return hidden_states
 
     def forward(
         self,
@@ -192,6 +202,8 @@ class Qwen3OmniThinkerModel(nn.Module):
         cache_handle: BatchedCacheManager,
         cos_sin_3d: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         mrope_section: Optional[list[int]] = None,
+        deepstack_visual_embeds: list[torch.Tensor] | None = None,
+        visual_pos_masks: torch.Tensor | None = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         """
         Args:
@@ -224,9 +236,13 @@ class Qwen3OmniThinkerModel(nn.Module):
                 mrope_section=mrope_section,
             )
 
-            # TODO: DeepStack injection at layers matching deepstack_visual_indexes [8, 16, 24]
-            # The HF code injects intermediate ViT features into specific Thinker layers
-            # to improve vision understanding. Full implementation deferred.
+            # add visual features to the hidden states of first several layers
+            if deepstack_visual_embeds is not None and layer_idx in range(len(deepstack_visual_embeds)):
+                hidden_states = self._deepstack_process(
+                    hidden_states,
+                    visual_pos_masks,
+                    deepstack_visual_embeds[layer_idx],
+                )
 
             # Capture hidden states at the accept_hidden_layer for Talker
             if layer_idx == self.accept_hidden_layer:

@@ -96,7 +96,11 @@ class AudioEncoderSubmodule(NodeSubmodule):
             "Running AudioEncoder with audio_features shape=%s",
             audio_features.shape,
         )
-        audio_embeds = self.audio_encoder(audio_features)
+        audio_embeds = self.audio_encoder(
+            audio_features,
+            feature_lens=audio_seqlens,
+            return_dict=True,
+        ).last_hidden_state
 
         # Flatten to (num_audio_tokens, hidden_size) if needed
         if audio_embeds.dim() == 3:
@@ -275,6 +279,26 @@ class ThinkerSubmodule(NodeSubmodule):
                 device=device,
             )
         return self._inv_freq
+    
+    def _get_talker_text_mask(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """
+        Cut system prompt and previous assistant parts out of the talker input
+        """
+        im_start_indexes = (
+            input_ids == self.config.im_start_token_id
+        ).nonzero(as_tuple=True)[0]
+        mask = torch.ones(input_ids.shape, dtype=torch.bool, device=input_ids.device)
+
+        for i in range(len(im_start_indexes) - 1):
+            im_start_index = im_start_indexes[i]
+            segment_end_index = im_start_indexes[i + 1]
+            role_token = input_ids[im_start_index + 1]
+            # Talker should ignore thinker system prompt
+            if role_token == self.config.system_token_id:
+                mask[im_start_index:segment_end_index] = 0
+            elif role_token == self.config.assistant_token_id:
+                mask[im_start_index:segment_end_index] = 0
+        return mask
 
     def preprocess(
         self,
@@ -319,6 +343,10 @@ class ThinkerSubmodule(NodeSubmodule):
         all_pos_ids_3d = []
         seq_lens = []
 
+        # first row: multimodal mask (all zero for text prefill)
+        # second row: text inclusion mask (cuts out system prompt)
+        masks_for_talker = {}
+
         for inp, rid in zip(per_request_inputs, request_ids):
             text_ids = inp["text_inputs"][0].to(device)  # (seq_len,)
             embeds = self.model.model.embed_tokens(text_ids)
@@ -345,6 +373,11 @@ class ThinkerSubmodule(NodeSubmodule):
                 start_pos + seq_len, device=device
             )
 
+            masks_for_talker[rid] = torch.stack([
+                torch.zeros(text_ids.shape, dtype=torch.bool, device=device), # multimodal
+                self._get_talker_text_mask(text_ids) # text inclusion
+            ])
+
         # Concatenate across requests
         input_embeds = torch.cat(all_embeds, dim=0)
         position_ids_3d = torch.cat(all_pos_ids_3d, dim=1)  # (3, total_tokens)
@@ -367,6 +400,7 @@ class ThinkerSubmodule(NodeSubmodule):
             "cos_sin_3d": cos_sin_3d,
             "mrope_section": self.MROPE_SECTION,
             "seq_lens": seq_lens,
+            "masks_for_talker": masks_for_talker
         }
 
     # ---- prefill_audio ----
@@ -385,12 +419,23 @@ class ThinkerSubmodule(NodeSubmodule):
         all_pos_ids_3d = []
         seq_lens = []
 
+        # first row: multimodal mask (ones except bos and eos)
+        # second row: text inclusion mask (bos and eos)
+        masks_for_talker = {}
+
         audio_start_id = self.config.thinker.audio_start_token_id
         audio_end_id = self.config.thinker.audio_end_token_id
 
         for inp, rid in zip(per_request_inputs, request_ids):
             audio_embeds = inp["audio_embeds"][0].to(device)  # (audio_tokens, hidden)
             audio_len = audio_embeds.shape[0]
+
+            mm_mask = torch.ones(audio_len + 2, dtype=torch.bool, device=device)
+            mm_mask[[0, -1]] = 0
+            masks_for_talker[rid] = torch.stack([
+                mm_mask,
+                ~mm_mask
+            ])
 
             # Wrap the audio span in ``<|audio_bos|>`` / ``<|audio_eos|>``
             # sentinel token embeddings so the Thinker sees the same
@@ -461,6 +506,7 @@ class ThinkerSubmodule(NodeSubmodule):
             "cos_sin_3d": cos_sin_3d,
             "mrope_section": self.MROPE_SECTION,
             "seq_lens": seq_lens,
+            "masks_for_talker": masks_for_talker
         }
 
     # ---- prefill_vision ----
@@ -482,6 +528,12 @@ class ThinkerSubmodule(NodeSubmodule):
         all_embeds = []
         all_pos_ids_3d = []
         seq_lens = []
+        # first row: multimodal mask (ones except bos and eos)
+        # second row: text inclusion mask (bos and eos)
+        masks_for_talker = {}
+
+        deepstack = []
+        visual_pos_masks = []
 
         vision_start_id = self.config.thinker.vision_start_token_id
         vision_end_id = self.config.thinker.vision_end_token_id
@@ -490,6 +542,14 @@ class ThinkerSubmodule(NodeSubmodule):
         for inp, rid in zip(per_request_inputs, request_ids):
             vision_embeds = inp["vision_embeds"][0].to(device)
             vision_len = vision_embeds.shape[0]
+
+            mm_mask = torch.ones(vision_len + 2, dtype=torch.bool, device=device)
+            mm_mask[[0, -1]] = 0
+            masks_for_talker[rid] = torch.stack([
+                mm_mask,
+                ~mm_mask
+            ])
+            visual_pos_masks.append(mm_mask)
 
             # Wrap the vision span in ``<|vision_bos|>`` / ``<|vision_eos|>``
             # sentinel token embeddings.
@@ -548,8 +608,11 @@ class ThinkerSubmodule(NodeSubmodule):
                 end_pos_base + 1, device=device
             )
 
+            deepstack.append(inp["deepstack"])
+
         input_embeds = torch.cat(all_embeds, dim=0)
         position_ids_3d = torch.cat(all_pos_ids_3d, dim=1)
+        visual_pos_masks = torch.cat(visual_pos_masks, dim=0)
 
         inv_freq = self._get_inv_freq(device)
         cos_sin_3d = compute_3d_cos_sin(
@@ -562,19 +625,17 @@ class ThinkerSubmodule(NodeSubmodule):
         )
         cache_manager.plan_rope(seq_lens=seq_lens, pos_ids=None, label="main")
 
-        # Pass deepstack through if available (for Thinker layers that need it)
-        deepstack = None
-        if per_request_inputs and "deepstack" in per_request_inputs[0]:
-            deepstack = per_request_inputs[0]["deepstack"][0]
+        deepstack 
 
         result = {
             "input_embeds": input_embeds,
             "cos_sin_3d": cos_sin_3d,
             "mrope_section": self.MROPE_SECTION,
             "seq_lens": seq_lens,
+            "masks_for_talker": masks_for_talker,
+            "visual_pos_masks": visual_pos_masks,
+            "deepstack": deepstack
         }
-        if deepstack is not None:
-            result["deepstack"] = deepstack
 
         return result
 
@@ -593,6 +654,9 @@ class ThinkerSubmodule(NodeSubmodule):
         all_embeds = []
         all_pos_ids_3d = []
         seq_lens = []
+        # first row: multimodal mask (zero for decode)
+        # second row: text inclusion mask (one for decode)
+        masks_for_talker = {}
 
         for inp, rid in zip(per_request_inputs, request_ids):
             # Get previous token ID from text_inputs
@@ -620,6 +684,10 @@ class ThinkerSubmodule(NodeSubmodule):
                 next_pos + 1, device=device
             )
 
+            masks_for_talker[rid] = torch.tensor(
+                [[0], [1]], dtype=torch.bool, device=device
+            )
+
         input_embeds = torch.cat(all_embeds, dim=0)
         position_ids_3d = torch.cat(all_pos_ids_3d, dim=1)
 
@@ -639,6 +707,7 @@ class ThinkerSubmodule(NodeSubmodule):
             "cos_sin_3d": cos_sin_3d,
             "mrope_section": self.MROPE_SECTION,
             "seq_lens": seq_lens,
+            "masks_for_talker": masks_for_talker
         }
 
     # ---- forward ----
@@ -651,6 +720,9 @@ class ThinkerSubmodule(NodeSubmodule):
         input_embeds: torch.Tensor | None = None,
         cos_sin_3d: tuple[torch.Tensor, torch.Tensor] | None = None,
         mrope_section: list[int] | None = None,
+        masks_for_talker: dict[str, torch.Tensor] | None = None,
+        deepstack: list[torch.Tensor] | None = None,
+        visual_pos_masks: torch.Tensor | None = None,
         **kwargs,
     ) -> NameToTensorList:
         """Run Thinker transformer, produce logits (decode) and thinker_states.
@@ -662,6 +734,10 @@ class ThinkerSubmodule(NodeSubmodule):
         the flag (e.g. unit tests).
         """
         cache_handle.set_active_label("main")
+
+        if deepstack is not None:
+            # deepstack was a list of lists...
+            deepstack = deepstack[0]
 
         # Default True for backwards-compat (tests, text-only callers that
         # forgot to set the flag still get the old behaviour).
@@ -676,6 +752,8 @@ class ThinkerSubmodule(NodeSubmodule):
             cache_handle=cache_handle,
             cos_sin_3d=cos_sin_3d,
             mrope_section=mrope_section,
+            deepstack_visual_embeds=deepstack,
+            visual_pos_masks=visual_pos_masks
         )
 
         result: NameToTensorList = {}
@@ -702,6 +780,8 @@ class ThinkerSubmodule(NodeSubmodule):
                     [layer_0_embed, layer_0_embed], dim=-1,
                 )
             result["thinker_states"] = [thinker_states]
+            result["thinker_mask"] = [next(iter(masks_for_talker.values()))] \
+                if masks_for_talker else []
 
         return result
 
@@ -746,6 +826,7 @@ class ThinkerSubmodule(NodeSubmodule):
         input_embeds = packed_inputs["input_embeds"]  # (batch, hidden)
         cos_sin_3d = packed_inputs.get("cos_sin_3d")
         mrope_section = packed_inputs.get("mrope_section")
+        masks_for_talker = packed_inputs.get("masks_for_talker")
 
         cache_manager.set_active_label("main")
 
@@ -795,6 +876,8 @@ class ThinkerSubmodule(NodeSubmodule):
             req_out: NameToTensorList = {"logits": [logits[i : i + 1]]}
             if audio_output_flags[rid] and thinker_states is not None:
                 req_out["thinker_states"] = [thinker_states[i : i + 1]]
+                if rid in masks_for_talker:
+                    req_out["thinker_mask"] = [masks_for_talker[rid]]
             outputs[rid] = req_out
         return outputs
 
@@ -888,11 +971,6 @@ class TalkerSubmodule(NodeSubmodule):
         # request".  Initialized lazily on the first layer-0 sample.  The
         # mask is cleared when the request completes (via ``cleanup_request``).
         self._seen_layer0_mask: dict[str, torch.Tensor] = {}
-
-        # Per-request saved tail of projected conversation tokens from
-        # non-last prefill step(s), used to fill the assistant prefix's
-        # text_hidden positions in the last prefill step.
-        self._prefill_conv_tail: dict[str, torch.Tensor] = {}
 
         # Per-request flag: whether we've already sent tts_eos_embed as
         # the text conditioning for this request.  In HF/vllm/sglang,
@@ -1114,6 +1192,35 @@ class TalkerSubmodule(NodeSubmodule):
             1, self.config.talker_hidden_size, device=device,
             dtype=next(self.model.parameters()).dtype,
         )
+    
+    def _get_talker_embeds(
+        self, layer_0_embed: torch.Tensor, layer_n_hidden: torch.Tensor,
+        multimodal_mask: torch.Tensor, text_inclusion_mask: torch.Tensor
+    ):
+        text_mask = text_inclusion_mask & (~multimodal_mask)
+        inclusion_mask = text_mask | multimodal_mask
+        device = layer_0_embed.device
+
+        projected = torch.zeros(
+            inclusion_mask.sum(), self.config.talker_hidden_size,
+            device=device, dtype=layer_0_embed.dtype,
+        )
+
+        # Compute sub-masks relative to the included positions
+        included_text_mask = text_mask[inclusion_mask]
+        included_multimodal_mask = multimodal_mask[inclusion_mask]
+
+        if included_text_mask.any():
+            projected[included_text_mask] = self.model.text_projection(
+                layer_0_embed[text_mask]
+            )
+        if included_multimodal_mask.any():
+            projected[included_multimodal_mask] = self.model.hidden_projection(
+                layer_n_hidden[multimodal_mask]
+            )
+
+        return projected
+
 
     def preprocess(
         self,
@@ -1133,7 +1240,6 @@ class TalkerSubmodule(NodeSubmodule):
             )
 
     # ---- talker_prefill ----
-
     def _preprocess_prefill(
         self,
         cache_manager: BatchedCacheManager,
@@ -1155,76 +1261,21 @@ class TalkerSubmodule(NodeSubmodule):
         info = per_request_info[rid]
 
         is_last_prefill = info.step_metadata.get("is_last_prefill", False)
-        sample_token = info.step_metadata.get("sample_token", False)
-
         # 1. Unpack thinker_states -> split into layer_0 and layer_n
         thinker_states = inputs["thinker_states"][0].to(device)
         thinker_hidden = self.config.thinker_hidden_size
         layer_0_embed = thinker_states[..., :thinker_hidden]
         layer_n_hidden = thinker_states[..., thinker_hidden:]
 
-        # 2. Determine projection based on walk_name (W2).
-        # The Thinker walk that produced these states determines whether
-        # the tokens are text or multimodal:
-        #   prefill_text   / thinker_decode -> text_projection(layer_0)
-        #   prefill_audio  / prefill_vision -> hidden_projection(layer_n)
-        # This replaces the old multimodal_mask approach which required
-        # passing the full mask across partitions.
-        walk_name = info.step_metadata.get("walk_name", "")
-        multimodal_mask = info.step_metadata.get("multimodal_mask", None)
-
-        # 3. Project Thinker states into Talker space
-        if multimodal_mask is not None:
-            # Legacy path: explicit mask (kept for backward compatibility)
-            multimodal_mask = multimodal_mask.to(device)
-            text_mask = ~multimodal_mask
-            projected = torch.zeros(
-                thinker_states.shape[0], self.config.talker_hidden_size,
-                device=device, dtype=thinker_states.dtype,
-            )
-            if text_mask.any():
-                projected[text_mask] = self.model.text_projection(
-                    layer_0_embed[text_mask]
-                )
-            if multimodal_mask.any():
-                projected[multimodal_mask] = self.model.hidden_projection(
-                    layer_n_hidden[multimodal_mask]
-                )
-        elif walk_name in ("prefill_audio", "prefill_vision"):
-            # Multimodal walk: all tokens are encoder embeddings
-            projected = self.model.hidden_projection(layer_n_hidden)
-        else:
-            # Text walk (prefill_text, thinker_decode) or unknown:
-            # all tokens are text -> text_projection(layer_0)
-            projected = self.model.text_projection(layer_0_embed)
+        mask = inputs["thinker_mask"][0]
+        projected = self._get_talker_embeds(
+            layer_0_embed=layer_0_embed, layer_n_hidden=layer_n_hidden,
+            multimodal_mask=mask[0, :],
+            text_inclusion_mask=mask[1, :]
+        )
 
         if not is_last_prefill:
-            # ---- Non-last prefill: KV-cache-only step ----
-            #
-            # Matching vllm-omni's _get_talker_assistant_parts: the Talker
-            # should NOT see the assistant header tokens (<|im_start|>
-            # assistant \n) as raw projected states — those tokens appear
-            # ONLY inside the 9-token prefix (positions 0-2, summed with
-            # codec_hidden).  If we feed them here AND in the prefix, they
-            # end up in the KV cache twice with different embeddings.
-            #
-            # Strip the last 3 tokens (assistant header) from the KV-cache
-            # input and save them for the prefix in the last prefill step.
-            #
-            # Also skip the system section — vllm-omni skips it entirely
-            # (``if role_token == system_token_id: continue``).  The
-            # ``_talker_user_start`` index comes from process_prompt via
-            # step_metadata: it's the token position of the second
-            # ``<|im_start|>`` (start of user section).
-            user_start = info.step_metadata.get("_talker_user_start", 0)
-
-            if projected.shape[0] >= 3:
-                self._prefill_conv_tail[rid] = projected[-3:].detach().clone()
-
-            # Only user section tokens go to KV cache (skip system, strip assistant header)
-            projected_for_cache = projected[user_start:-3]
-
-            seq_len = projected_for_cache.shape[0]
+            seq_len = projected.shape[0]
             cache_manager.plan_attention(
                 seq_lens=[seq_len], is_causal=True, label="main"
             )
@@ -1233,24 +1284,19 @@ class TalkerSubmodule(NodeSubmodule):
             )
 
             return {
-                "input_embeds": projected_for_cache,
+                "input_embeds": projected,
                 "is_last_prefill": False,
                 "seq_lens": [seq_len],
             }
 
         # ---- Last prefill: build assistant prefix ----
         tc = self.config.talker
-        talker_hidden = self.config.talker_hidden_size
-
-        # Split projected into conversation body vs first decode state
-        # The last token in thinker_states is from thinker_decode step 1
-        conv_projected = projected[:-1]  # user conversation states
-        first_decode_projected = projected[-1:]  # first Thinker decode token
 
         # Build assistant prefix (matching HF/sglang-omni/vllm-omni pattern):
-        # Text hidden: [proj[0], proj[1], proj[2], pad*4, bos, proj[3]] (9 tokens)
-        # Codec hidden: [zeros*3, codec_embed(nothink, think_bos, think_eos,
+        # Text hidden: [pad*4, bos, proj[3]] (9 tokens)
+        # Codec hidden: [codec_embed(nothink, think_bos, think_eos,
         #                speaker, pad, bos)] (9 tokens)
+        # (note that the assistant prefix was handled in the previous prefill stage)
 
         # Text part of assistant prefix
         # W3: pad and bos embeddings use Thinker embed -> text_projection
@@ -1258,71 +1304,31 @@ class TalkerSubmodule(NodeSubmodule):
         pad_embed = self._get_tts_pad_embed(device).expand(4, -1)  # 4 pad tokens
         bos_text_embed = self._get_tts_bos_embed(device)           # 1 bos token
 
-        # W4 (known limitation): The assistant prefix positions use the
-        # last 4 projected Thinker states (conv_projected[-4:]).  This
-        # heuristic is correct for standard ChatML templates where the
-        # assistant role header ``<|im_start|>assistant\n`` occupies the
-        # last 3-4 text tokens before decode starts.  A proper fix would
-        # parse the ChatML structure and pass ``assistant_start_idx`` in
-        # step_metadata, but that requires forwarding input_ids to the
-        # Talker partition.
-        # Verified against vllm-omni's _get_talker_assistant_parts():
-        #   Positions 0-2: assistant_hidden[:3] = text_projection(<|im_start|>assistant\n)
-        #   Position  8:   assistant_hidden[3:4] = text_projection(first generated token)
-        #
-        # In our 2-step flow:
-        #   saved_tail = projected[-3:] from non-last step = <|im_start|>assistant\n
-        #   first_decode_projected = thinker_decode_0's projection = first generated token
-        saved_tail = self._prefill_conv_tail.pop(rid, None)
-
-        # Positions 0-2: the assistant section header tokens
-        if saved_tail is not None and saved_tail.shape[0] >= 3:
-            prefix_proj_start = saved_tail[-3:].to(device)
-        elif saved_tail is not None and saved_tail.shape[0] >= 1:
-            prefix_proj_start = saved_tail[-1:].to(device).expand(3, -1)
-        else:
-            # Fallback: use first_decode_projected repeated
-            prefix_proj_start = first_decode_projected.expand(3, -1)
-
-        # Position 8: the first generated text token (matches vllm's
-        # assistant_hidden[3:4], which is the token AFTER the 3-token header).
-        prefix_proj_end = first_decode_projected
+        speaker = info.step_metadata.get("voice", "Ethan")
+        speaker_id = tc.speaker_id.get(speaker.lower())
+        if speaker_id is None:
+            logger.warning(f"Speaker {speaker} not implemented")
+            speaker_id = tc.codec_pad_id
 
         text_hidden = torch.cat([
-            prefix_proj_start,  # proj[0:3] (3 tokens)
             pad_embed,          # pad * 4   (4 tokens)
             bos_text_embed,     # bos       (1 token)
-            prefix_proj_end,    # proj[3:4] (1 token)
+            projected,          #  (1 token)
         ], dim=0)  # (9, talker_hidden)
 
         # Codec part of assistant prefix
-        codec_zeros = torch.zeros(
-            3, talker_hidden, device=device, dtype=text_hidden.dtype
-        )
         codec_special_ids = torch.tensor([
             tc.codec_nothink_id,
             tc.codec_think_bos_id,
             tc.codec_think_eos_id,
-            tc.codec_pad_id,   # speaker slot
+            speaker_id,
             tc.codec_pad_id,
             tc.codec_bos_id,
         ], device=device, dtype=torch.long)
-        codec_special_embeds = self.model.model.codec_embedding(codec_special_ids)
-
-        codec_hidden = torch.cat([
-            codec_zeros,          # 3 zero tokens
-            codec_special_embeds, # 6 special tokens
-        ], dim=0)  # (9, talker_hidden)
+        codec_hidden = self.model.model.codec_embedding(codec_special_ids)
 
         # Combine text and codec parts
-        assistant_prefix = text_hidden + codec_hidden  # (9, talker_hidden)
-
-        # Full input: conversation body + assistant prefix
-        # (conv_projected was already projected; assistant_prefix includes both)
-        input_embeds = torch.cat([
-            conv_projected,     # user conversation states
-            assistant_prefix,   # 9-token assistant prefix
-        ], dim=0)
+        input_embeds = text_hidden + codec_hidden  # (9, talker_hidden)
 
         seq_len = input_embeds.shape[0]
         cache_manager.plan_attention(
