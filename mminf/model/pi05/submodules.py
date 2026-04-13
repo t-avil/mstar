@@ -244,6 +244,19 @@ class Pi05LLMSubmodule(NodeSubmodule):
                 param.data = param.data.to(torch.float32)
         return result
 
+    def can_batch(self, batch) -> bool:
+        """Pi0.5 supports batched execution for both graph walks.
+
+        - ``prefill``: prefix embeddings are concatenated across requests and
+          processed in a single PaliGemma forward with batched FlashInfer
+          attention. Each request can have a different prefix length (different
+          text prompt lengths).
+        - ``action_gen``: all requests in a batch are at the same Euler
+          iteration (guaranteed by the Loop primitive), so their suffix tokens
+          can be concatenated and processed in a single action expert forward.
+        """
+        return batch.graph_walk in ("prefill", "action_gen")
+
     def get_needed_cache_labels(
         self,
         graph_walk: str,
@@ -329,42 +342,44 @@ class Pi05LLMSubmodule(NodeSubmodule):
         per_request_info: dict[str, CurrentForwardPassInfo],
         cache_manager: BatchedCacheManager,
     ) -> dict[str, torch.Tensor]:
-        if len(per_request_inputs) != 1:
-            raise NotImplementedError("Pi0.5 action_gen does not yet support batching")
-
-        request_id = request_ids[0]
-        inputs = per_request_inputs[0]
-        info = per_request_info[request_id]
-
         device = next(self.parameters()).device
         action_horizon = self.config.action_horizon
         action_dim = self.config.action_dim
 
-        if "noisy_actions" not in inputs or len(inputs["noisy_actions"]) == 0:
-            generator = torch.Generator(device=device).manual_seed(info.random_seed)
-            noisy_actions = torch.randn(
-                action_horizon, action_dim, device=device, generator=generator
-            )
-            timestep_index = torch.zeros((), device=device, dtype=torch.long)
-        else:
-            noisy_actions = inputs["noisy_actions"][0]
-            timestep_index = inputs["timestep_index"][0]
+        all_noisy = []
+        all_ts = []
+        for rid, inputs in zip(request_ids, per_request_inputs, strict=True):
+            info = per_request_info[rid]
+            if "noisy_actions" not in inputs or len(inputs["noisy_actions"]) == 0:
+                generator = torch.Generator(device=device).manual_seed(info.random_seed)
+                noisy = torch.randn(
+                    action_horizon, action_dim, device=device, generator=generator
+                )
+                ts = torch.zeros((), device=device, dtype=torch.long)
+            else:
+                noisy = inputs["noisy_actions"][0]
+                ts = inputs["timestep_index"][0]
+            all_noisy.append(noisy)
+            all_ts.append(ts)
+
+        seq_lens = [action_horizon] * len(request_ids)
 
         # The action suffix attends to the frozen prefix KV cache. We pass
         # write_store=False so the cache is read-only during all 10 iterations.
         cache_manager.plan_attention(
-            seq_lens=[action_horizon],
+            seq_lens=seq_lens,
             is_causal=False,
             label="main",
             write_store=False,
         )
         cache_manager.plan_rope(
-            seq_lens=[action_horizon], pos_ids=None, label="main"
+            seq_lens=seq_lens, pos_ids=None, label="main"
         )
 
         return {
-            "noisy_actions": noisy_actions,
-            "timestep_index": timestep_index,
+            "noisy_actions": all_noisy,
+            "timestep_index": all_ts,
+            "seq_lens": seq_lens,
         }
 
     # ------------------------------------------------------------------
@@ -384,6 +399,84 @@ class Pi05LLMSubmodule(NodeSubmodule):
             return self._forward_action_gen(cache_handle=cache_handle, **kwargs)
         raise ValueError(f"Unknown Pi0.5 LLM graph walk: {graph_walk!r}")
 
+    def forward_batched(
+        self,
+        graph_walk: str,
+        request_ids: list[str],
+        cache_manager: BatchedCacheManager,
+        packed_inputs: dict[str, torch.Tensor],
+        per_request_info: dict[str, CurrentForwardPassInfo] | None = None,
+        **kwargs,
+    ) -> dict[str, NameToTensorList]:
+        """Batched forward: process all requests in a single transformer pass.
+
+        Called by ``AREngine._execute_batched`` when ``can_batch()`` returns
+        True. ``packed_inputs`` comes from ``preprocess()`` which already
+        concatenated per-request tensors and planned attention/RoPE for the
+        full batch.
+        """
+        if graph_walk == "prefill":
+            return self._forward_prefill_batched(
+                cache_manager=cache_manager,
+                request_ids=request_ids,
+                packed_inputs=packed_inputs,
+            )
+        if graph_walk == "action_gen":
+            return self._forward_action_gen_batched(
+                cache_manager=cache_manager,
+                request_ids=request_ids,
+                packed_inputs=packed_inputs,
+            )
+        raise ValueError(f"Batched forward not supported for graph walk: {graph_walk!r}")
+
+    def _forward_prefill_batched(
+        self,
+        cache_manager: BatchedCacheManager,
+        request_ids: list[str],
+        packed_inputs: dict[str, torch.Tensor],
+    ) -> dict[str, NameToTensorList]:
+        """Batched prefill: single PaliGemma forward over concatenated prefixes."""
+        prefix_embs = packed_inputs["prefix_embs"]
+        cache_manager.set_active_label("main")
+        self.paligemma(
+            query_sequence=prefix_embs,
+            cache_handle=cache_manager,
+            write_cache=True,
+        )
+        # Prefill produces no graph-edge outputs.
+        return {rid: {} for rid in request_ids}
+
+    def _forward_action_gen_batched(
+        self,
+        cache_manager: BatchedCacheManager,
+        request_ids: list[str],
+        packed_inputs: dict[str, torch.Tensor],
+    ) -> dict[str, NameToTensorList]:
+        """Batched action_gen: single action expert forward, then split per-request."""
+        all_noisy: list[torch.Tensor] = packed_inputs["noisy_actions"]
+        all_ts: list[torch.Tensor] = packed_inputs["timestep_index"]
+        horizon = self.config.action_horizon
+
+        # All requests share the same timestep (Loop iterates in lockstep).
+        # Concatenate noisy_actions across requests for a single forward.
+        cat_noisy = torch.cat(all_noisy, dim=0)  # [N * horizon, action_dim]
+        timestep_index = all_ts[0]  # scalar, same for all
+
+        next_actions, next_index = self._euler_step(
+            cat_noisy, timestep_index, cache_manager
+        )
+
+        # Split back per-request by horizon.
+        result: dict[str, NameToTensorList] = {}
+        for i, rid in enumerate(request_ids):
+            start = i * horizon
+            end = start + horizon
+            result[rid] = {
+                "noisy_actions": [next_actions[start:end]],
+                "timestep_index": [next_index],
+            }
+        return result
+
     def _forward_prefill(
         self,
         prefix_embs: torch.Tensor,
@@ -401,41 +494,27 @@ class Pi05LLMSubmodule(NodeSubmodule):
 
     def _forward_action_gen(
         self,
-        noisy_actions: torch.Tensor,
-        timestep_index: torch.Tensor,
+        noisy_actions,
+        timestep_index,
         cache_handle: BatchedCacheManager,
         **kwargs,
     ) -> NameToTensorList:
-        config = self.config
-        num_steps = config.num_flow_steps
+        """Single-request action_gen forward (called from _execute_sequential).
 
-        # Map iteration index -> timestep value in [1, 0].
-        idx = timestep_index.to(noisy_actions.dtype)
-        t = 1.0 - idx / num_steps
+        ``noisy_actions`` and ``timestep_index`` arrive as single-element
+        lists from preprocess (to keep the data structure uniform with the
+        batched path). We unpack the first element, run one Euler step, and
+        return the loop-back edges.
+        """
+        # Unpack from list form (preprocess always returns lists now).
+        if isinstance(noisy_actions, list):
+            noisy_actions = noisy_actions[0]
+        if isinstance(timestep_index, list):
+            timestep_index = timestep_index[0]
 
-        time_emb = sincos_timestep_embedding(
-            t,
-            dim=config.action_hidden_size,
-            min_period=config.timestep_min_period,
-            max_period=config.timestep_max_period,
-        ).squeeze(0)
-        adarms_cond = self.time_mlp(time_emb)  # [action_hidden]
-
-        suffix = self.action_in_proj(noisy_actions)  # [horizon, action_hidden]
-
-        if cache_handle is not None:
-            cache_handle.set_active_label("main")
-        suffix_out = self.action_expert(
-            query_sequence=suffix,
-            cache_handle=cache_handle,
-            adarms_cond=adarms_cond,
+        next_actions, next_index = self._euler_step(
+            noisy_actions, timestep_index, cache_handle
         )
-
-        velocity = self.action_out_proj(suffix_out)  # [horizon, action_dim]
-        dt = -1.0 / num_steps
-        next_actions = noisy_actions + dt * velocity
-        next_index = timestep_index + 1
-
         # We ALWAYS return both loop-back edges, even on the final iteration.
         # The Loop primitive (mminf/graph/base.py:Loop) handles the final-iter
         # swap automatically: it matches the section's output ``noisy_actions``
@@ -447,3 +526,50 @@ class Pi05LLMSubmodule(NodeSubmodule):
             "noisy_actions": [next_actions],
             "timestep_index": [next_index],
         }
+
+    def _euler_step(
+        self,
+        noisy_actions: torch.Tensor,
+        timestep_index: torch.Tensor,
+        cache_handle: BatchedCacheManager,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """One Euler flow-matching step. Shared by sequential and batched paths.
+
+        Args:
+            noisy_actions: [horizon, action_dim] (or [total_horizon, action_dim]
+                when batched across multiple requests).
+            timestep_index: scalar long.
+            cache_handle: BatchedCacheManager with attention already planned.
+
+        Returns:
+            (next_actions, next_timestep_index) with same shapes as inputs.
+        """
+        config = self.config
+        num_steps = config.num_flow_steps
+
+        idx = timestep_index.to(noisy_actions.dtype)
+        t = 1.0 - idx / num_steps
+
+        time_emb = sincos_timestep_embedding(
+            t,
+            dim=config.action_hidden_size,
+            min_period=config.timestep_min_period,
+            max_period=config.timestep_max_period,
+        ).squeeze(0)
+        adarms_cond = self.time_mlp(time_emb)
+
+        suffix = self.action_in_proj(noisy_actions)
+
+        if cache_handle is not None:
+            cache_handle.set_active_label("main")
+        suffix_out = self.action_expert(
+            query_sequence=suffix,
+            cache_handle=cache_handle,
+            adarms_cond=adarms_cond,
+        )
+
+        velocity = self.action_out_proj(suffix_out)
+        dt = -1.0 / num_steps
+        next_actions = noisy_actions + dt * velocity
+        next_index = timestep_index + 1
+        return next_actions, next_index
