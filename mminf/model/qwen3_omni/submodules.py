@@ -608,11 +608,10 @@ class ThinkerSubmodule(NodeSubmodule):
                 end_pos_base + 1, device=device
             )
 
-            deepstack.append(inp["deepstack"][0])
+            deepstack.append(inp["deepstack"])
 
         input_embeds = torch.cat(all_embeds, dim=0)
         position_ids_3d = torch.cat(all_pos_ids_3d, dim=1)
-        deepstack = torch.cat(deepstack, dim=0)
         visual_pos_masks = torch.cat(visual_pos_masks, dim=0)
 
         inv_freq = self._get_inv_freq(device)
@@ -722,7 +721,7 @@ class ThinkerSubmodule(NodeSubmodule):
         cos_sin_3d: tuple[torch.Tensor, torch.Tensor] | None = None,
         mrope_section: list[int] | None = None,
         masks_for_talker: dict[str, torch.Tensor] | None = None,
-        deepstack: torch.Tensor | None = None,
+        deepstack: list[torch.Tensor] | None = None,
         visual_pos_masks: torch.Tensor | None = None,
         **kwargs,
     ) -> NameToTensorList:
@@ -735,6 +734,10 @@ class ThinkerSubmodule(NodeSubmodule):
         the flag (e.g. unit tests).
         """
         cache_handle.set_active_label("main")
+
+        if deepstack is not None:
+            # deepstack was a list of lists...
+            deepstack = deepstack[0]
 
         # Default True for backwards-compat (tests, text-only callers that
         # forgot to set the flag still get the old behaviour).

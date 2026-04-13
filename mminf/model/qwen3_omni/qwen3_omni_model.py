@@ -1026,135 +1026,139 @@ class Qwen3OmniModel(Model):
         # Functionally, both approaches end up with the same set of
         # embeddings in the KV cache (text + modality content).  Stripping
         # the placeholders avoids noise from the unfilled embeddings.
-        if self._processor is not None and prompt is not None:
-            try:
-                messages = [
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are Qwen, a virtual human developed by the "
-                            "Qwen team, Alibaba Group, capable of perceiving "
-                            "auditory and visual inputs, as well as generating "
-                            "text and speech."
-                        ),
-                    },
-                    {"role": "user", "content": prompt},
-                ]
-
-                # apply_chat_template with TEXT-ONLY content -> no modality
-                # placeholders are inserted.  add_generation_prompt=True
-                # appends the trailing ``<|im_start|>assistant\n`` so the
-                # model knows to start the assistant response.
-                text = self._processor.apply_chat_template(
-                    messages,
-                    tokenize=False,
-                    add_generation_prompt=True,
-                )
-                input_ids = self.tokenizer(
-                    text, return_tensors="pt"
-                )["input_ids"][0]
-                result["text_inputs"] = [input_ids]
-
-                # Run image_processor / feature_extractor SEPARATELY for the
-                # modality outputs.  These don't touch text_inputs.
-                if pil_images:
-                    img_proc = self._processor.image_processor
-                    img_out = img_proc(images=pil_images, return_tensors="pt")
-                    if "pixel_values" in img_out:
-                        result["pixel_values"] = [img_out["pixel_values"]]
-                    if "image_grid_thw" in img_out:
-                        result["image_grid_thw"] = [img_out["image_grid_thw"]]
-
-                if np_audios:
-                    feat_extractor = self._processor.feature_extractor
-                    sr = getattr(feat_extractor, "sampling_rate", 16000)
-                    aud_out = feat_extractor(
-                        np_audios, sampling_rate=sr,
-                        padding=True,
-                        truncation=False,
-                        return_attention_mask=True,
-                        return_tensors="pt"
-                    )
-                    if "attention_mask" in aud_out  and "input_features" in aud_out:
-                        aud_out["input_features"] = aud_out["input_features"].permute(0, 2, 1)[aud_out["attention_mask"].bool()].permute(1, 0)
-                        result["audio_seqlens"] = [
-                            aud_out["attention_mask"].sum(-1).to(torch.long)
-                        ]
-                    if "input_features" in aud_out:
-                        result["audio_features"] = [aud_out["input_features"]]
-
-                # Video uses the video_processor; left as TODO since our
-                # prefill_vision walk doesn't yet handle video frame stacks.
-                if raw_video_inputs:
-                    result["pixel_values_videos"] = list(raw_video_inputs)
-
-                return result
-            except Exception as e:
-                logger.warning(
-                    "Qwen3-Omni text-only chat template path failed (%s); "
-                    "falling back to per-modality processing without chat "
-                    "template.",
-                    e,
-                )
-
-        # ----- Fallback path: per-modality processing without chat template -----
-        # (Used when AutoProcessor fails to load or prompt is None.)
+        # if self._processor is not None:
+            # try:
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are Qwen, a virtual human developed by the "
+                    "Qwen team, Alibaba Group, capable of perceiving "
+                    "auditory and visual inputs, as well as generating "
+                    "text and speech."
+                ),
+            },
+        ]
         if prompt is not None:
-            tokens = self.tokenizer.encode(prompt)
-            result["text_inputs"] = [torch.tensor(tokens, dtype=torch.long)]
+            messages.append(
+                {"role": "user", "content": prompt},
+            )
 
+        # apply_chat_template with TEXT-ONLY content -> no modality
+        # placeholders are inserted.  add_generation_prompt=True
+        # appends the trailing ``<|im_start|>assistant\n`` so the
+        # model knows to start the assistant response.
+        text = self._processor.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        input_ids = self.tokenizer(
+            text, return_tensors="pt"
+        )["input_ids"][0]
+        result["text_inputs"] = [input_ids]
+
+        # Run image_processor / feature_extractor SEPARATELY for the
+        # modality outputs.  These don't touch text_inputs.
         if pil_images:
-            try:
-                processor = getattr(self, "_image_processor", None)
-                if processor is None:
-                    from transformers import AutoImageProcessor
-                    processor = AutoImageProcessor.from_pretrained(
-                        self.local_dir, trust_remote_code=True,
-                    )
-                    self._image_processor = processor
-                pixel_values_list = []
-                grid_thw_list = []
-                for img_np in pil_images:
-                    proc_out = processor(images=img_np, return_tensors="pt")
-                    pixel_values_list.append(proc_out["pixel_values"][0])
-                    if "image_grid_thw" in proc_out:
-                        grid_thw_list.append(proc_out["image_grid_thw"][0])
-                if pixel_values_list:
-                    result["pixel_values"] = pixel_values_list
-                if grid_thw_list:
-                    result["image_grid_thw"] = grid_thw_list
-            except Exception as e:
-                logger.warning("Image processor failed: %s", e)
-                result["pixel_values"] = list(raw_image_inputs)
+            img_proc = self._processor.image_processor
+            img_out = img_proc(images=pil_images, return_tensors="pt")
+            if "pixel_values" in img_out:
+                result["pixel_values"] = [img_out["pixel_values"]]
+            if "image_grid_thw" in img_out:
+                result["image_grid_thw"] = [img_out["image_grid_thw"]]
 
         if np_audios:
-            try:
-                processor = getattr(self, "_audio_processor", None)
-                if processor is None:
-                    from transformers import AutoFeatureExtractor
-                    processor = AutoFeatureExtractor.from_pretrained(
-                        self.local_dir, trust_remote_code=True,
-                    )
-                    self._audio_processor = processor
-                feats = []
-                seqlens = []
-                for wave_np in np_audios:
-                    sr = getattr(processor, "sampling_rate", 16000)
-                    proc_out = processor(
-                        wave_np, sampling_rate=sr, return_tensors="pt",
-                    )
-                    feats.append(proc_out["input_features"][0])
-                    seqlens.append(torch.tensor(wave_np.shape[-1], dtype=torch.long))
-                if feats:
-                    result["audio_features"] = feats
-                    result["audio_seqlens"] = seqlens
-            except Exception as e:
-                logger.warning("Audio processor failed: %s", e)
-                result["audio_features"] = list(raw_audio_inputs)
+            feat_extractor = self._processor.feature_extractor
+            sr = getattr(feat_extractor, "sampling_rate", 16000)
+            aud_out = feat_extractor(
+                np_audios, sampling_rate=sr,
+                padding=True,
+                truncation=False,
+                return_attention_mask=True,
+                return_tensors="pt"
+            )
+            if "attention_mask" in aud_out  and "input_features" in aud_out:
+                aud_out["input_features"] = aud_out["input_features"].permute(0, 2, 1)[aud_out["attention_mask"].bool()].permute(1, 0)
+                result["audio_seqlens"] = [
+                    aud_out["attention_mask"].sum(-1).to(torch.long)
+                ]
+            if "input_features" in aud_out:
+                result["audio_features"] = [aud_out["input_features"]]
 
+        # Video uses the video_processor; left as TODO since our
+        # prefill_vision walk doesn't yet handle video frame stacks.
         if raw_video_inputs:
-            # TODO: proper video frame extraction + grid via AutoVideoProcessor.
             result["pixel_values_videos"] = list(raw_video_inputs)
+
+        return result
+            # except Exception as e:
+            #     logger.warning(
+            #         "Qwen3-Omni text-only chat template path failed (%s); "
+            #         "falling back to per-modality processing without chat "
+            #         "template.",
+            #         e,
+            #     )
+
+        # Fallback in its current state will crash the system downstream, so commenting it out
+        # # ----- Fallback path: per-modality processing without chat template -----
+        # # (Used when AutoProcessor fails to load or prompt is None.)
+        # if prompt is not None:
+        #     tokens = self.tokenizer.encode(prompt)
+        #     result["text_inputs"] = [torch.tensor(tokens, dtype=torch.long)]
+
+        # if pil_images:
+        #     try:
+        #         processor = getattr(self, "_image_processor", None)
+        #         if processor is None:
+        #             from transformers import AutoImageProcessor
+        #             processor = AutoImageProcessor.from_pretrained(
+        #                 self.local_dir, trust_remote_code=True,
+        #             )
+        #             self._image_processor = processor
+        #         pixel_values_list = []
+        #         grid_thw_list = []
+        #         for img_np in pil_images:
+        #             proc_out = processor(images=img_np, return_tensors="pt")
+        #             pixel_values_list.append(proc_out["pixel_values"][0])
+        #             if "image_grid_thw" in proc_out:
+        #                 grid_thw_list.append(proc_out["image_grid_thw"][0])
+        #         if pixel_values_list:
+        #             result["pixel_values"] = pixel_values_list
+        #         if grid_thw_list:
+        #             result["image_grid_thw"] = grid_thw_list
+        #     except Exception as e:
+        #         logger.warning("Image processor failed: %s", e)
+        #         result["pixel_values"] = list(raw_image_inputs)
+
+        # if np_audios:
+        #     try:
+        #         processor = getattr(self, "_audio_processor", None)
+        #         if processor is None:
+        #             from transformers import AutoFeatureExtractor
+        #             processor = AutoFeatureExtractor.from_pretrained(
+        #                 self.local_dir, trust_remote_code=True,
+        #             )
+        #             self._audio_processor = processor
+        #         feats = []
+        #         seqlens = []
+        #         for wave_np in np_audios:
+        #             sr = getattr(processor, "sampling_rate", 16000)
+        #             proc_out = processor(
+        #                 wave_np, sampling_rate=sr, return_tensors="pt",
+        #             )
+        #             feats.append(proc_out["input_features"][0])
+        #             seqlens.append(torch.tensor(wave_np.shape[-1], dtype=torch.long))
+        #         if feats:
+        #             result["audio_features"] = feats
+        #             result["audio_seqlens"] = seqlens
+        #     except Exception as e:
+        #         logger.warning("Audio processor failed: %s", e)
+        #         result["audio_features"] = list(raw_audio_inputs)
+
+        # if raw_video_inputs:
+        #     # TODO: proper video frame extraction + grid via AutoVideoProcessor.
+        #     result["pixel_values_videos"] = list(raw_video_inputs)
 
         return result
 
