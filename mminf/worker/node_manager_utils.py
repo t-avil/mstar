@@ -286,14 +286,15 @@ class WorkerGraphsManager:
 
 
     def complete_loops(
-        self, request_id: str, worker_graph_id: str
+        self, request_id: str, worker_graph_id: str,
+        output_edges: list[GraphEdge]
     ) -> list[GraphEdge]:
         queue = self.queues[worker_graph_id].per_request_queues[request_id]
         if queue.waiting is None:
             return []
         out = queue.waiting.complete_loops()
         queue.waiting = out.new_waiting
-        return out.outputs
+        return out.outputs + out.filter_out_loop_back(output_edges)
 
 
     def process_node_outputs(

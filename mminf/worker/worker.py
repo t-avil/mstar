@@ -665,7 +665,9 @@ class Worker:
             waiting_node = self.worker_graphs_manager.get_waiting_node(request_id, worker_graph_id)
             if waiting_node is not None:
                 waiting_node.cache_outputs(output_tensor_info)
-            output_edges[request_id] += self.worker_graphs_manager.complete_loops(request_id, worker_graph_id)
+            output_edges[request_id] = self.worker_graphs_manager.complete_loops(
+                request_id, worker_graph_id, output_edges[request_id]
+            )
         return output_edges
         
 

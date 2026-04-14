@@ -11,6 +11,13 @@ logger = logging.getLogger(__name__)
 class LoopCompletionOutput:
     new_waiting: "GraphSection"
     outputs: list["GraphEdge"] = field(default_factory=list)
+    loop_back_name_dests_to_remove: set[tuple[str, str]] = field(default_factory=set)
+
+    def filter_out_loop_back(self, edges: list["GraphEdge"]) -> list["GraphEdge"]:
+        return [
+            edge for edge in edges \
+                if (edge.name, edge.next_node) not in self.loop_back_name_dests_to_remove
+        ]
 
 
 def update_list_dicts(signals: dict[str, list], new_signals: dict[str, list]):
@@ -323,21 +330,25 @@ class Parallel(GraphSection):
     
     def complete_loops(self) -> LoopCompletionOutput:
         outputs = []
+        loop_back_name_dests = set()
         waiting = []
         for sec in self.sections:
             out = sec.complete_loops()
             outputs += out.outputs
+            loop_back_name_dests.update(out.loop_back_name_dests_to_remove)
             if out.new_waiting is not None:
                 waiting.append(out.new_waiting)
         
         if len(waiting) > 0:
             return LoopCompletionOutput(
                 new_waiting=Parallel(sections=waiting),
-                outputs=outputs
+                outputs=outputs,
+                loop_back_name_dests_to_remove=loop_back_name_dests
             )
         return LoopCompletionOutput(
             new_waiting=None,
-            outputs=outputs
+            outputs=outputs,
+            loop_back_name_dests_to_remove=loop_back_name_dests
         )
     
     def register_communication_info(
@@ -467,28 +478,28 @@ class Loop(GraphSection):
             edge for edge in outputs if (edge.name, edge.next_node) in input_names_dests
         ]
 
-    def _replace_outputs_for_final_iter(
-        self, section: GraphSection,
-    ):
-        """
-        For the final iteration, we want to: remove all loop-back signals
-        from the graph.
-        """
-        loop_back_signals = self._loop_back_signals
-        loop_back_name_dests = set([
-            (edge.name, edge.next_node) for edge in loop_back_signals
-        ])
+    # def _replace_outputs_for_final_iter(
+    #     self, section: GraphSection,
+    # ):
+    #     """
+    #     For the final iteration, we want to: remove all loop-back signals
+    #     from the graph.
+    #     """
+    #     loop_back_signals = self._loop_back_signals
+    #     loop_back_name_dests = set([
+    #         (edge.name, edge.next_node) for edge in loop_back_signals
+    #     ])
 
-        def replace_outputs(node_outputs: list[GraphEdge]):
-            return [
-                edge for edge in node_outputs \
-                    if (edge.name, edge.next_node) not in loop_back_name_dests
-            ]
-        if isinstance(section, GraphNode) or isinstance(section, Loop):
-            section.outputs = replace_outputs(section.outputs)
-        elif isinstance(section, Sequential) or isinstance(section, Parallel):
-            for sec in section.sections:
-                self._replace_outputs_for_final_iter(sec)
+    #     def replace_outputs(node_outputs: list[GraphEdge]):
+    #         return [
+    #             edge for edge in node_outputs \
+    #                 if (edge.name, edge.next_node) not in loop_back_name_dests
+    #         ]
+    #     if isinstance(section, GraphNode) or isinstance(section, Loop):
+    #         section.outputs = replace_outputs(section.outputs)
+    #     elif isinstance(section, Sequential) or isinstance(section, Parallel):
+    #         for sec in section.sections:
+    #             self._replace_outputs_for_final_iter(sec)
 
     def __post_init__(self):
         # In the disaggregated case, we need filter self.outputs for outputs
@@ -508,8 +519,8 @@ class Loop(GraphSection):
         if self._loop_back_signals is None:
             self._loop_back_signals = self._get_loop_back_signals()
         
-        if self.n_iters == self.curr_iter + 1:
-            self._replace_outputs_for_final_iter(self._curr_iter_section)
+        # if self.n_iters == self.curr_iter + 1:
+        #     self._replace_outputs_for_final_iter(self._curr_iter_section)
 
     def _advance_one_iter(self) -> "Loop":
         self._uncache_outputs()
@@ -538,11 +549,14 @@ class Loop(GraphSection):
             self._external_inputs
         ))
         return loop
+    
+    def _is_done(self):
+        return (self.n_iters == self.curr_iter + 1) and (self._curr_iter_section is None)
 
     def split_off_ready(self):
         loop = self
         if self._curr_iter_section is None:
-            if self.n_iters == self.curr_iter + 1:
+            if self._is_done():
                 return [], None
             loop = self._advance_one_iter()
 
@@ -552,19 +566,22 @@ class Loop(GraphSection):
     
     def complete_loops(self) -> LoopCompletionOutput:
         output_signals = []
+        loop_back_name_dests = set()
 
         # recursive call
         if self._curr_iter_section is not None:
             recursive_output = self._curr_iter_section.complete_loops()
-            output_signals += recursive_output.outputs
+            output_signals = recursive_output.outputs
+            loop_back_name_dests = recursive_output.loop_back_name_dests_to_remove
             self._curr_iter_section = recursive_output.new_waiting
         
         # check if the loop is done after the recursive call updates _curr_iter_section
-        done = (self.n_iters == self.curr_iter + 1) and (self._curr_iter_section is None)
+        done = self._is_done()
         if not done:
             return LoopCompletionOutput(
                 new_waiting=self,
-                outputs=output_signals
+                outputs=output_signals,
+                loop_back_name_dests_to_remove=loop_back_name_dests
             )
         
         # if done, new_waiting is None and also need to collect our outputs
@@ -572,8 +589,14 @@ class Loop(GraphSection):
             if output.name in self._cached_outputs:
                 output.tensor_info = self._cached_outputs[output.name]
                 output_signals.append(output)
+        
+        loop_back_name_dests.update([
+            (edge.name, edge.next_node) for edge in self._loop_back_signals
+        ])
 
         return LoopCompletionOutput(
             new_waiting=None,
-            outputs=output_signals
+            outputs=output_signals,
+            loop_back_name_dests_to_remove=loop_back_name_dests
         )
+
