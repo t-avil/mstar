@@ -1,4 +1,7 @@
 import logging
+import os
+import platform
+import struct
 from abc import ABC, abstractmethod
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -577,3 +580,347 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
                     request_id=request_id
                 )
             )
+
+
+# ---------------------------------------------------------------------------
+# Shared-memory tensor serialization helpers
+# ---------------------------------------------------------------------------
+
+_DTYPE_TO_STR: dict[torch.dtype, str] = {
+    torch.float32: "f32",
+    torch.float64: "f64",
+    torch.float16: "f16",
+    torch.bfloat16: "bf16",
+    torch.int8: "i8",
+    torch.int16: "i16",
+    torch.int32: "i32",
+    torch.int64: "i64",
+    torch.uint8: "u8",
+    torch.bool: "bool",
+}
+_STR_TO_DTYPE: dict[str, torch.dtype] = {v: k for k, v in _DTYPE_TO_STR.items()}
+
+# bfloat16 has no numpy equivalent — we view as uint16 for raw serialization.
+_BF16_VIEW_DTYPE = torch.uint16
+
+
+def _serialize_tensor(tensor: torch.Tensor) -> bytes:
+    """Serialize a tensor to bytes: header + contiguous raw data."""
+    t = tensor.detach().contiguous().cpu()
+    dtype_tag = _DTYPE_TO_STR[t.dtype].encode("ascii")
+
+    # Header: ndim (u32) | dtype_len (u32) | dtype_tag | shape (ndim × i64) | stride (ndim × i64)
+    hdr = struct.pack("<II", t.ndim, len(dtype_tag)) + dtype_tag
+    for s in t.shape:
+        hdr += struct.pack("<q", s)
+    for s in t.stride():
+        hdr += struct.pack("<q", s)
+
+    # Raw data — bfloat16 must be viewed as uint16 for numpy conversion.
+    if t.dtype == torch.bfloat16:
+        raw = t.view(_BF16_VIEW_DTYPE).numpy().tobytes()
+    else:
+        raw = t.numpy().tobytes()
+
+    return hdr + raw
+
+
+def _deserialize_tensor(data: bytes | memoryview, device: str) -> torch.Tensor:
+    """Reconstruct a tensor from bytes produced by ``_serialize_tensor``."""
+    if isinstance(data, memoryview):
+        data = bytes(data)
+    off = 0
+    ndim, dtype_len = struct.unpack_from("<II", data, off); off += 8
+    dtype_tag = data[off:off + dtype_len].decode("ascii"); off += dtype_len
+
+    shape = []
+    for _ in range(ndim):
+        shape.append(struct.unpack_from("<q", data, off)[0]); off += 8
+    stride = []
+    for _ in range(ndim):
+        stride.append(struct.unpack_from("<q", data, off)[0]); off += 8
+
+    dtype = _STR_TO_DTYPE[dtype_tag]
+    raw = data[off:]
+
+    if len(raw) == 0:
+        t = torch.empty(shape, dtype=dtype)
+    elif dtype == torch.bfloat16:
+        t = torch.frombuffer(bytearray(raw), dtype=_BF16_VIEW_DTYPE).view(torch.bfloat16).reshape(shape)
+    else:
+        t = torch.frombuffer(bytearray(raw), dtype=dtype).reshape(shape)
+    if device != "cpu":
+        t = t.to(device)
+    return t
+
+
+def _default_shm_dir() -> str:
+    """Return the default shared-memory directory for the current platform."""
+    if platform.system() == "Linux" and os.path.isdir("/dev/shm"):
+        return "/dev/shm"
+    return "/tmp/mminf_shm"
+
+
+# ---------------------------------------------------------------------------
+# SharedMemoryCommunicationManager
+# ---------------------------------------------------------------------------
+
+class SharedMemoryCommunicationManager(TensorCommunicationManager):
+    """Tensor transport via file I/O to a tmpfs directory (``/dev/shm``)."""
+
+    def __init__(
+        self,
+        my_entity_id: str,
+        hostname: str,
+        device: str,
+        communicator: BaseCommunicator,
+        shm_dir: str | None = None,
+    ):
+        self.my_entity_id = my_entity_id
+        self.my_session_id = hostname
+        self.device = device
+        self.communicator = communicator
+        self.tensor_store = TensorStore()
+        self.engine = None  # no Mooncake engine
+
+        self.shm_dir = shm_dir or _default_shm_dir()
+        os.makedirs(self.shm_dir, exist_ok=True)
+
+        # uuid → file path for sender-side cleanup
+        self._shm_files: dict[str, str] = {}
+
+        # Same pending pattern as Mooncake; future is always None (reads are synchronous).
+        self.pending: list[FutureAndPointers] = []
+
+    def _shm_path(self, entity_id: str, uuid: str) -> str:
+        return os.path.join(self.shm_dir, f"mminf_{entity_id}_{uuid}")
+
+    # ---- store (identical to Mooncake) ----
+
+    def store_and_return_tensor_info(
+        self, request_id: str, tensors: NameToTensorList,
+    ) -> dict[str, list[TensorPointerInfo]]:
+        if torch.cuda.is_available():
+            torch.cuda.default_stream().synchronize()
+        tensor_info: dict[str, list[TensorPointerInfo]] = {}
+        for name, tensor_list in tensors.items():
+            tensor_info[name] = []
+            for tensor in tensor_list:
+                tensor_uuid = str(uuid4())
+                self.tensor_store.put_tensor(
+                    request_id=request_id, uuid=tensor_uuid, tensor=tensor,
+                )
+                logger.debug("SHM: storing tensor name %s uuid %s", name, tensor_uuid)
+                tensor_info[name].append(TensorPointerInfo(
+                    dims=tensor.shape,
+                    dtype=tensor.dtype,
+                    stride=tensor.stride(),
+                    nbytes=tensor.nbytes,
+                    address=tensor.data_ptr(),
+                    uuid=tensor_uuid,
+                    source_session_id=self.my_session_id,
+                    source_entity=self.my_entity_id,
+                ))
+        return tensor_info
+
+    def store_and_populate_graph_edges(
+        self, request_id: str, tensors: NameToTensorList,
+        graph_edges: list[GraphEdge],
+    ):
+        name_to_graph_edges: dict[str, list[GraphEdge]] = {}
+        for edge in graph_edges:
+            name_to_graph_edges.setdefault(edge.name, []).append(edge)
+
+        graph_node_info = self.store_and_return_tensor_info(
+            request_id=request_id, tensors=tensors,
+        )
+        for name in tensors:
+            edges = name_to_graph_edges.get(name, [])
+            for info in graph_node_info[name]:
+                self.tensor_store.increment_ref(
+                    request_id, info.uuid,
+                    n=len([e for e in edges if e.next_node != EMPTY_DESTINATION]),
+                )
+            for edge in edges:
+                edge.tensor_info = graph_node_info[name]
+
+    # ---- register (SHM-specific: serialize tensor to file) ----
+
+    def register_for_send(self, request_id: str, uuids: list[str]):
+        if torch.cuda.is_available():
+            torch.cuda.default_stream().synchronize()
+        for uuid in uuids:
+            if self.tensor_store.is_registered(request_id, uuid):
+                continue
+            tensor = self.tensor_store.get_tensor(request_id, uuid)
+            data = _serialize_tensor(tensor)
+            path = self._shm_path(self.my_entity_id, uuid)
+            with open(path, "wb") as f:
+                f.write(data)
+            self._shm_files[uuid] = path
+            self.tensor_store.set_metadata(request_id, uuid, mem_registered=True)
+            logger.debug("SHM: wrote tensor %s to %s (%d bytes)", uuid, path, len(data))
+
+    # ---- read (SHM-specific: read file, deserialize) ----
+
+    def start_read_tensors(
+        self, request_id: str, graph_edges: list[GraphEdge],
+    ):
+        for graph_edge in graph_edges:
+            if len(graph_edge.tensor_info) == 0:
+                continue
+            logger.debug(
+                "SHM: starting read of %d tensors %s for graph node %s",
+                len(graph_edge.tensor_info), graph_edge.name, graph_edge.next_node,
+            )
+            for info in graph_edge.tensor_info:
+                if info.source_entity == self.my_entity_id or \
+                   self.tensor_store.check_uuid_presence(request_id, info.uuid):
+                    self.tensor_store.increment_ref(request_id, info.uuid, 1)
+                    continue
+                path = self._shm_path(info.source_entity, info.uuid)
+                with open(path, "rb") as f:
+                    data = f.read()
+                tensor = _deserialize_tensor(data, self.device)
+                self.tensor_store.put_tensor(request_id, info.uuid, tensor)
+                self.tensor_store.set_metadata(request_id, info.uuid, mem_registered=False)
+                self.tensor_store.increment_ref(request_id, info.uuid, 1)
+                logger.debug("SHM: read tensor %s from %s", info.uuid, path)
+            self.pending.append(
+                FutureAndPointers(
+                    future=None, graph_edges=[graph_edge],
+                    request_id=request_id,
+                )
+            )
+
+    # ---- poll & ACK (same logic as Mooncake; all reads are instantly ready) ----
+
+    def _collect_and_send_acks(
+        self, request_id: str, graph_edges: list[GraphEdge],
+    ):
+        acks: dict[str, dict[str, int]] = {}
+        for edge in graph_edges:
+            for info in edge.tensor_info:
+                if info.source_entity not in acks:
+                    acks[info.source_entity] = {}
+                acks[info.source_entity][info.uuid] = acks[info.source_entity].get(
+                    info.uuid, 0) + 1
+        for source_entity, tensors in acks.items():
+            if source_entity == self.my_entity_id:
+                continue
+            self.communicator.send(
+                source_entity,
+                WorkerMessage(
+                    message_type=WorkerMessageType.TENSOR_RECEIVED,
+                    body=TensorReceived(
+                        request_id=request_id,
+                        successful_tensors=tensors,
+                        failed_tensor_ids=[],
+                    ),
+                ),
+            )
+
+    def get_ready_tensors(self) -> dict[str, list[GraphEdge]]:
+        ready: dict[str, list[GraphEdge]] = {}
+        still_pending = []
+        for ep in self.pending:
+            if ep.future is None or ep.future.done():
+                if ep.future is not None:
+                    ep.future.result()
+                for edge in ep.graph_edges:
+                    ready.setdefault(ep.request_id, []).append(edge)
+            else:
+                still_pending.append(ep)
+        self.pending = still_pending
+
+        for req_id, edges in ready.items():
+            self._collect_and_send_acks(req_id, edges)
+            for edge in edges:
+                for info in edge.tensor_info:
+                    self.tensor_store.dereference(req_id, info.uuid, 1)
+        return ready
+
+    # ---- cleanup (SHM-specific: unlink file) ----
+
+    def _cleanup_by_uuid(self, request_id: str, uuid: str):
+        logger.debug("SHM: cleaning up tensor uuid %s", uuid)
+        if not self.tensor_store.check_uuid_presence(request_id, uuid):
+            logger.warning("SHM: cleanup tensor %s, uuid not found", uuid)
+            return
+        if uuid in self._shm_files:
+            path = self._shm_files.pop(uuid)
+            try:
+                os.unlink(path)
+                logger.debug("SHM: unlinked %s", path)
+            except FileNotFoundError:
+                pass
+        self.tensor_store.remove_tensor(request_id, uuid)
+
+    # ---- TensorStore delegation (identical to Mooncake) ----
+
+    def get_tensor(self, request_id: str, uuid: str) -> torch.Tensor:
+        return self.tensor_store.get_tensor(request_id=request_id, uuid=uuid)
+
+    def set_persist(self, request_id: str, uuid: str, persist: bool):
+        self.tensor_store.set_metadata(request_id, uuid, persist=persist)
+        if self.tensor_store.can_gc(request_id, uuid):
+            self._cleanup_by_uuid(request_id, uuid)
+
+    def dereference(self, request_id: str, uuid: str, n: int = 1):
+        self.tensor_store.dereference(request_id, uuid, n=n)
+        if self.tensor_store.can_gc(request_id, uuid):
+            self._cleanup_by_uuid(request_id, uuid)
+
+    def increment_ref(self, request_id: str, uuid: str, n: int = 1):
+        self.tensor_store.increment_ref(request_id, uuid, n=n)
+
+    def cleanup_request(self, request_id: str):
+        for uuid in self.tensor_store.get_all_uuids(request_id):
+            self.tensor_store.set_metadata(request_id, uuid, persist=False)
+            if not self.tensor_store.can_gc(request_id, uuid):
+                logger.warning(
+                    "SHM: deferring cleanup of tensor uuid %s "
+                    "(awaiting TENSOR_RECEIVED ACK)", uuid,
+                )
+                continue
+            self._cleanup_by_uuid(request_id, uuid)
+
+        self._collect_and_send_acks(
+            request_id,
+            sum([ep.graph_edges for ep in self.pending if ep.request_id == request_id], start=[]),
+        )
+        self.pending = [ep for ep in self.pending if ep.request_id != request_id]
+
+
+# ---------------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------------
+
+def create_tensor_communication_manager(
+    protocol: CommProtocol,
+    my_entity_id: str,
+    hostname: str,
+    device: str,
+    communicator: BaseCommunicator,
+    metadata_server: str = "P2PHANDSHAKE",
+    tcp_transfer_device: str = "",
+    shm_dir: str | None = None,
+) -> TensorCommunicationManager:
+    """Select tensor transport backend based on protocol."""
+    if protocol == CommProtocol.SHM:
+        return SharedMemoryCommunicationManager(
+            my_entity_id=my_entity_id,
+            hostname=hostname,
+            device=device,
+            communicator=communicator,
+            shm_dir=shm_dir,
+        )
+    return MooncakeCommunicationManager(
+        my_entity_id=my_entity_id,
+        hostname=hostname,
+        device=device,
+        communicator=communicator,
+        protocol=protocol,
+        metadata_server=metadata_server,
+        tcp_transfer_device=tcp_transfer_device,
+    )
