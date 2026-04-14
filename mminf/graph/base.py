@@ -8,16 +8,27 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class FilteredEdges:
+    kept: list["GraphEdge"]
+    filtered_out: list["GraphEdge"]
+
+@dataclass
 class LoopCompletionOutput:
     new_waiting: "GraphSection"
     outputs: list["GraphEdge"] = field(default_factory=list)
     loop_back_name_dests_to_remove: set[tuple[str, str]] = field(default_factory=set)
 
-    def filter_out_loop_back(self, edges: list["GraphEdge"]) -> list["GraphEdge"]:
-        return [
-            edge for edge in edges \
-                if (edge.name, edge.next_node) not in self.loop_back_name_dests_to_remove
-        ]
+    def filter_out_loop_back(self, edges: list["GraphEdge"]) -> FilteredEdges:
+        return FilteredEdges(
+            kept=[
+                edge for edge in edges \
+                    if (edge.name, edge.next_node) not in self.loop_back_name_dests_to_remove
+            ],
+            filtered_out=[
+                edge for edge in edges \
+                    if (edge.name, edge.next_node) in self.loop_back_name_dests_to_remove
+            ]
+        )
 
 
 def update_list_dicts(signals: dict[str, list], new_signals: dict[str, list]):

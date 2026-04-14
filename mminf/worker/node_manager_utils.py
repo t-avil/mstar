@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 
 from mminf.communication.tensors import TensorCommunicationManager
 from mminf.conductor.request_info import CurrentForwardPassInfo, PerLabelSeqInfo
-from mminf.graph.base import GraphEdge, GraphNode, TensorPointerInfo
+from mminf.graph.base import GraphEdge, GraphNode, TensorPointerInfo, FilteredEdges
 from mminf.graph.request_queues import (
     PerRequestNodeQueues,
     ProcessedInputs,
@@ -288,13 +288,19 @@ class WorkerGraphsManager:
     def complete_loops(
         self, request_id: str, worker_graph_id: str,
         output_edges: list[GraphEdge]
-    ) -> list[GraphEdge]:
+    ) -> FilteredEdges:
         queue = self.queues[worker_graph_id].per_request_queues[request_id]
         if queue.waiting is None:
-            return output_edges
+            return FilteredEdges(
+                kept=output_edges,
+                filtered_out=[]
+            )
         out = queue.waiting.complete_loops()
         queue.waiting = out.new_waiting
-        return out.outputs + out.filter_out_loop_back(output_edges)
+
+        filter_result = out.filter_out_loop_back(output_edges)
+        filter_result.kept += out.outputs
+        return filter_result
 
 
     def process_node_outputs(

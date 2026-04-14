@@ -665,9 +665,16 @@ class Worker:
             waiting_node = self.worker_graphs_manager.get_waiting_node(request_id, worker_graph_id)
             if waiting_node is not None:
                 waiting_node.cache_outputs(output_tensor_info)
-            output_edges[request_id] = self.worker_graphs_manager.complete_loops(
+            filter_result = self.worker_graphs_manager.complete_loops(
                 request_id, worker_graph_id, output_edges[request_id]
             )
+            output_edges[request_id] = filter_result.kept
+
+            # if any outputs were filtered out, we must dereference them
+            for edge in filter_result.filtered_out:
+                for info in edge.tensor_info:
+                    self.tensor_manager.dereference(request_id, info.uuid)
+
         return output_edges
         
 
