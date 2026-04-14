@@ -5,7 +5,10 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 import torch
-from mooncake.engine import TransferEngine
+try:
+    from mooncake.engine import TransferEngine
+except Exception:
+    TransferEngine = None
 
 from mminf.communication.communicator import CommProtocol
 from mminf.communication.tensors import AsyncMooncakeReader, TransferReadInfo
@@ -110,7 +113,7 @@ class StoreAllocInfo:
 class TransferEngineInfo:
     my_entity_id: str
     my_session_id: str
-    transfer_engine: TransferEngine
+    transfer_engine: "TransferEngine | None"
 
 
 class StoreWritePolicy(Enum):
@@ -132,13 +135,15 @@ class PagedAllocationManager:
         self.write_policy = StoreWritePolicy.ALWAYS
 
         self.engine = transfer_engine_info.transfer_engine
-        self._async_reader = AsyncMooncakeReader(
-            engine=self.engine, device=kv_cache.device
-        )
-
-        self.engine.register_memory(
-            self.kv_cache.data_ptr(), self.kv_cache.nbytes
-        )
+        if self.engine is not None:
+            self._async_reader = AsyncMooncakeReader(
+                engine=self.engine, device=kv_cache.device
+            )
+            self.engine.register_memory(
+                self.kv_cache.data_ptr(), self.kv_cache.nbytes
+            )
+        else:
+            self._async_reader = None
         self.my_entity_id = transfer_engine_info.my_entity_id
         self.my_session_id = transfer_engine_info.my_session_id
 
@@ -266,6 +271,11 @@ class PagedAllocationManager:
     def start_async_retrieve(
         self, request_id: str, label: str, seq_info: SequenceInfo
     ):
+        if self.engine is None:
+            raise RuntimeError(
+                "KV cache retrieval requires Mooncake TransferEngine. "
+                "SHM protocol does not support disaggregated KV cache transfers."
+            )
         seq_len = seq_info.seq_len
         state = self.get_state(request_id, label)
         if state.seq_len >= seq_len:
@@ -333,11 +343,12 @@ class PagedAllocationManager:
         self.request_states[request_id][label] = self._new_state()
 
     def cleanup(self):
-        # wait for reads to finish before registering memory!
-        self._async_reader.shutdown()
-        self.engine.unregister_memory(
-            self.kv_cache.data_ptr()
-        )
+        if self._async_reader is not None:
+            self._async_reader.shutdown()
+        if self.engine is not None:
+            self.engine.unregister_memory(
+                self.kv_cache.data_ptr()
+            )
 
     def add_request(self, request_id: str, labels: list[str]=None):
         if labels is None:
