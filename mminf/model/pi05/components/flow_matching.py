@@ -27,9 +27,12 @@ def sincos_timestep_embedding(
         t = t[None]
     half = dim // 2
     # Geometric progression of frequencies between min_period and max_period.
-    fraction = torch.linspace(0.0, 1.0, half, device=t.device, dtype=t.dtype)
+    # Use float64 for the frequency computation to match the openpi reference;
+    # bf16 has only ~3 digits of precision and rounds higher-frequency
+    # components, which compounds through time_mlp -> adaRMS -> 18 layers.
+    fraction = torch.linspace(0.0, 1.0, half, device=t.device, dtype=torch.float64)
     period = min_period * (max_period / min_period) ** fraction
-    omega = 2.0 * math.pi / period
+    omega = (2.0 * math.pi / period).to(t.dtype)
     angles = t[..., None] * omega
     return torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1)
 

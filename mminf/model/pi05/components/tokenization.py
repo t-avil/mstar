@@ -4,7 +4,6 @@ import logging
 
 import torch
 
-from mminf.model.pi05.components.flow_matching import discretize_state
 from mminf.model.pi05.config import Pi05Config
 
 logger = logging.getLogger(__name__)
@@ -34,11 +33,3 @@ class Pi05Tokenizer:
         ids = ids[: self.config.max_lang_tokens]
         return torch.tensor(ids, dtype=torch.long)
 
-    def encode_state(self, state: torch.Tensor) -> torch.Tensor:
-        if state.dim() != 1:
-            raise ValueError(f"state must be 1D, got shape {tuple(state.shape)}")
-        bin_indices = discretize_state(
-            state.to(torch.float32),
-            num_bins=self.config.state_token_bins,
-        )
-        return bin_indices + self.config.state_token_offset

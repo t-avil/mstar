@@ -73,26 +73,36 @@ class Pi05Config:
     extra: dict = field(default_factory=dict)
 
 
+# HF config keys whose names differ from the corresponding Pi05Config fields.
+# Any key NOT listed here is auto-mapped if the HF key matches a Pi05Config
+# field name exactly. This keeps the mapping maintainable: only the few
+# exceptions need to be enumerated, rather than every field.
+_HF_KEY_RENAMES: dict[str, str] = {
+    "num_hidden_layers": "num_layers",
+    "num_attention_heads": "num_qo_heads",
+    "num_key_value_heads": "num_kv_heads",
+    "intermediate_size": "pali_intermediate_size",
+}
+
+# Pi05Config field names — computed once from the dataclass.
+_PI05_FIELDS: set[str] = {f.name for f in Pi05Config.__dataclass_fields__.values()}
+
+
 def load_pi05_config(hf_config: dict | None = None) -> Pi05Config:
-    """Build a Pi05Config, optionally overlaying values from an HF config dict."""
+    """Build a Pi05Config, optionally overlaying values from an HF config dict.
+
+    Auto-maps any HF key that matches a Pi05Config field name. For the few
+    HF keys whose names differ (e.g. ``num_hidden_layers`` -> ``num_layers``),
+    an explicit rename dict is used. Unrecognised keys are silently ignored.
+    """
     cfg = Pi05Config()
     if not hf_config:
         return cfg
 
-    # Map HF config keys onto Pi05Config fields where they exist.
-    overlay = {
-        "hidden_size": hf_config.get("hidden_size"),
-        "num_layers": hf_config.get("num_hidden_layers"),
-        "num_qo_heads": hf_config.get("num_attention_heads"),
-        "num_kv_heads": hf_config.get("num_key_value_heads"),
-        "head_dim": hf_config.get("head_dim"),
-        "pali_intermediate_size": hf_config.get("intermediate_size"),
-        "vocab_size": hf_config.get("vocab_size"),
-        "rms_norm_eps": hf_config.get("rms_norm_eps"),
-        "rope_theta": hf_config.get("rope_theta"),
-        "max_position_embeddings": hf_config.get("max_position_embeddings"),
-    }
-    for key, value in overlay.items():
-        if value is not None:
-            setattr(cfg, key, value)
+    for hf_key, value in hf_config.items():
+        if not isinstance(value, (int, float, str, bool)):
+            continue  # skip nested dicts / lists
+        field_name = _HF_KEY_RENAMES.get(hf_key, hf_key)
+        if field_name in _PI05_FIELDS:
+            setattr(cfg, field_name, value)
     return cfg
