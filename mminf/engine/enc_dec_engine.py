@@ -132,7 +132,6 @@ class EncoderDecoderEngine(BaseEngine):
         ViT and VAE models are excellent torch.compile candidates since they
         have fixed computation graphs with no control flow.
         """
-        return # TODO DEBUG REMOVE
         if not torch.cuda.is_available():
             return
 

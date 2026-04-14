@@ -274,7 +274,7 @@ class Qwen3OmniModel(Model):
             ),
             GraphNode(
                 name="Thinker",
-                input_ids=["vision_embeds", "deepstack", "video_second_per_grid"],
+                input_ids=["vision_embeds", "deepstack", "video_second_per_grid", "image_grid_thw"],
                 outputs=[
                     GraphEdge(
                         next_node=EMIT_TO_CLIENT,
@@ -536,8 +536,6 @@ class Qwen3OmniModel(Model):
             input_modalities, input_signals,
         )
 
-        print("PREFILL SCHEDULE", schedule)
-
         first_walk = schedule[0][0] if schedule else "thinker_decode"
 
         full_metadata = CurrentForwardConductorMetadata(
@@ -635,7 +633,7 @@ class Qwen3OmniModel(Model):
                     entry = {"pixel_values": pixel_values_videos[video_idx]}
                     if video_idx < len(video_grid_thws):
                         entry["image_grid_thw"] = video_grid_thws[video_idx]
-                    if video_idx < len(video_grid_thws):
+                    if video_idx < len(video_second_per_grid):
                         entry["video_second_per_grid"] = video_second_per_grid[video_idx]
                     schedule.append(("prefill_vision", entry))
                     video_idx += 1
@@ -678,10 +676,11 @@ class Qwen3OmniModel(Model):
             edges.append(edge)
         
         if walk_name == "prefill_vision":
-            edge = GraphEdge(next_node="Thinker", name="video_second_per_grid")
-            if "video_second_per_grid" in tensor_dict:
-                edge.tensor_info = [tensor_dict["video_second_per_grid"]]
-            edges.append(edge)
+            for key in ["image_grid_thw", "video_second_per_grid"]:
+                edge = GraphEdge(next_node="Thinker", name=key)
+                if key in tensor_dict:
+                    edge.tensor_info = [tensor_dict[key]]
+                edges.append(edge)
         return edges
 
     # -----------------------------------------------------------------------
