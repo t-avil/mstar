@@ -29,6 +29,7 @@ class CommProtocol(Enum):
     IPC = "IPC"
     TCP = "TCP"
     RDMA = "RDMA"
+    SHM = "SHM"
 
 
 class ZMQCommunicator(BaseCommunicator):
