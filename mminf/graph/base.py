@@ -2,8 +2,15 @@ import logging
 from abc import ABC, abstractmethod
 from copy import deepcopy
 from dataclasses import dataclass, field
+from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class LoopCompletionOutput:
+    new_waiting: "GraphSection"
+    outputs: list["GraphEdge"] = field(default_factory=list)
 
 
 def update_list_dicts(signals: dict[str, list], new_signals: dict[str, list]):
@@ -24,7 +31,6 @@ class TensorPointerInfo:
     uuid: str # for indexing storage
     source_session_id: str # "{HOSTNAME}:{client_engine.get_rpc_port()}"
     source_entity: str # which {worker, api_server} the tensor is on
-
 
 @dataclass
 class GraphEdge:
@@ -91,6 +97,27 @@ class GraphSection(ABC):
         """
         pass
 
+    @abstractmethod
+    def cache_outputs(
+        self, tensor_info: dict[str, list[TensorPointerInfo]],
+    ):
+        pass
+
+    @abstractmethod
+    def complete_loops(self) -> LoopCompletionOutput:
+        """
+        Checks if any loops have completed, and returns their cached output edges,
+        if any
+        """
+        pass
+
+    @abstractmethod
+    def register_communication_info(
+        self, communication_manager,
+        request_id: str
+    ):
+        pass
+
 
 @dataclass
 class GraphNode(GraphSection):
@@ -151,6 +178,20 @@ class GraphNode(GraphSection):
         if self.is_ready():
             return [self], None
         return [], self
+    
+    def cache_outputs(
+        self, tensor_info: dict[str, list[TensorPointerInfo]],
+    ):
+        return
+    
+    def complete_loops(self) -> LoopCompletionOutput:
+        return LoopCompletionOutput(self)
+    
+    def register_communication_info(
+        self, communication_manager,
+        request_id: str
+    ):
+        return
 
 
 @dataclass
@@ -208,6 +249,32 @@ class Sequential(GraphSection):
         if len(waiting) == 0:
             return first_ready, None
         return first_ready, Sequential(sections=waiting)
+    
+    def cache_outputs(
+        self, tensor_info: dict[str, list[TensorPointerInfo]],
+    ):
+        for sec in self.sections:
+            sec.cache_outputs(tensor_info)
+    
+    def complete_loops(self) -> LoopCompletionOutput:
+        output = self.sections[0].complete_loops()
+        if output.new_waiting is None:
+            waiting = self.sections[1:]
+        else:
+            waiting = [output.new_waiting] + self.sections[1:]
+        
+        if len(waiting) > 0:
+            output.new_waiting = Sequential(sections=waiting)
+        return output
+    
+    def register_communication_info(
+        self, communication_manager,
+        request_id: str
+    ):
+        for sec in self.sections:
+            sec.register_communication_info(
+                communication_manager, request_id
+            )
 
 
 @dataclass
@@ -248,6 +315,40 @@ class Parallel(GraphSection):
             return ready, None
         return ready, Parallel(sections=waiting)
 
+    def cache_outputs(
+        self, tensor_info: dict[str, list[TensorPointerInfo]],
+    ):
+        for sec in self.sections:
+            sec.cache_outputs(tensor_info)
+    
+    def complete_loops(self) -> LoopCompletionOutput:
+        outputs = []
+        waiting = []
+        for sec in self.sections:
+            out = sec.complete_loops()
+            outputs += out.outputs
+            if out.new_waiting is not None:
+                waiting.append(out.new_waiting)
+        
+        if len(waiting) > 0:
+            return LoopCompletionOutput(
+                new_waiting=Parallel(sections=waiting),
+                outputs=outputs
+            )
+        return LoopCompletionOutput(
+            new_waiting=None,
+            outputs=outputs
+        )
+    
+    def register_communication_info(
+        self, communication_manager,
+        request_id: str
+    ):
+        for sec in self.sections:
+            sec.register_communication_info(
+                communication_manager, request_id
+            )
+
 
 @dataclass
 class Loop(GraphSection):
@@ -256,10 +357,17 @@ class Loop(GraphSection):
     n_iters: int
     outputs: list[GraphEdge]
     curr_iter: int = field(default=0)
-    external_inputs: list[GraphEdge] = field(default=None)
-    loop_back_signals: list[GraphEdge] = field(default=None)
-    curr_iter_section: GraphSection = field(default=None)
-    nxt_iter_section: GraphSection = field(default=None)
+    _external_inputs: list[GraphEdge] = field(default=None)
+    _loop_back_signals: list[GraphEdge] = field(default=None)
+    _curr_iter_section: GraphSection = field(default=None)
+    _nxt_iter_section: GraphSection = field(default=None)
+    _cached_outputs: dict[str, list[TensorPointerInfo]] = field(default_factory=dict)
+    _output_names: set[str] = field(default_factory=set)
+
+    # For handling tensor reference counting of loop outputs
+    _tensor_manager: Any | None = field(default=None) # no type annotation because 
+                                                      # of circular imports
+    _request_id: str | None = field(default=None)
 
     def get_outputs(self):
         return self.outputs
@@ -269,20 +377,48 @@ class Loop(GraphSection):
 
     def get_node_names(self):
         return self.section.get_node_names()
+    
+    def register_communication_info(
+        self, communication_manager,
+        request_id: str
+    ):
+        self._tensor_manager = communication_manager
+        self._request_id = request_id
+        self.section.register_communication_info(
+            communication_manager, request_id
+        )
+    
+    def cache_outputs(
+        self, tensor_info: dict[str, list[TensorPointerInfo]],
+    ):
+        names = [key for key in tensor_info if key in self._output_names]
+        for out_name in names:
+            tensor_infos = tensor_info[out_name]
+            for info in tensor_infos:
+                self._tensor_manager.increment_ref(self._request_id, info.uuid)
+            self._cached_outputs.setdefault(out_name, []).extend(tensor_infos)
+        if self._curr_iter_section is not None:
+            self._curr_iter_section.cache_outputs(tensor_info)
+    
+    def _uncache_outputs(self):
+        for tensor_infos in self._cached_outputs.values():
+            for info in tensor_infos:
+                self._tensor_manager.dereference(self._request_id, info.uuid) 
+        self._cached_outputs.clear()
 
     def ingest_inputs(self, node_to_inputs: DestToGraphEdges):
         # Populate the current iteration first, then populate the next iteration
         # if there are any leftover inputs (which would signal either inputs that
         # are not for this section, or loop-back inputs)
         ingested: list[GraphEdge] = []
-        if self.curr_iter_section is not None:
-            ingested += self.curr_iter_section.ingest_inputs(node_to_inputs)
+        if self._curr_iter_section is not None:
+            ingested += self._curr_iter_section.ingest_inputs(node_to_inputs)
 
         # we should only be populating the nxt_iter_section with loop-back inputs,
         # so exclude external inputs from populating nxt_iter_section. This logic
         # is required to make nested loops work.
         my_external_inputs = {
-            (edge.name, edge.next_node): edge for edge in self.external_inputs
+            (edge.name, edge.next_node): edge for edge in self._external_inputs
         }
         external_inputs = {
             dest: [
@@ -295,7 +431,7 @@ class Loop(GraphSection):
                 if i not in external_inputs[dest]
             ]
 
-        ingested += self.nxt_iter_section.ingest_inputs(node_to_inputs)
+        ingested += self._nxt_iter_section.ingest_inputs(node_to_inputs)
         update_list_dicts(node_to_inputs, external_inputs)
 
         if self.curr_iter != self.n_iters - 1:
@@ -335,24 +471,16 @@ class Loop(GraphSection):
         self, section: GraphSection,
     ):
         """
-        For the final iteration, we want to: (1) remove all loop-back signals
-        from the graph, and (2) add in self.outputs where appropriate
+        For the final iteration, we want to: remove all loop-back signals
+        from the graph.
         """
-        loop_back_signals = self.loop_back_signals
+        loop_back_signals = self._loop_back_signals
         loop_back_name_dests = set([
             (edge.name, edge.next_node) for edge in loop_back_signals
         ])
-        full_outputs = self.outputs
 
         def replace_outputs(node_outputs: list[GraphEdge]):
-            node_output_names = set([
-                edge.name for edge in node_outputs
-            ])
-            outputs_to_add = [
-                edge for edge in full_outputs if edge.name in node_output_names
-            ]
-
-            return outputs_to_add + [
+            return [
                 edge for edge in node_outputs \
                     if (edge.name, edge.next_node) not in loop_back_name_dests
             ]
@@ -363,20 +491,29 @@ class Loop(GraphSection):
                 self._replace_outputs_for_final_iter(sec)
 
     def __post_init__(self):
-        if self.curr_iter_section is None:
-            self.curr_iter_section = deepcopy(self.section)
-        if self.nxt_iter_section is None:
-            self.nxt_iter_section = deepcopy(self.section)
-        if self.external_inputs is None:
-            self.external_inputs = self._get_external_inputs()
-        if self.loop_back_signals is None:
-            self.loop_back_signals = self._get_loop_back_signals()
+        # In the disaggregated case, we need filter self.outputs for outputs
+        # that this subgraph actually produces
+        outputs_we_produce = set([
+            edge.name for edge in self.section.get_outputs()
+        ])
+        self.outputs = [edge for edge in self.outputs if edge.name in outputs_we_produce]
 
+        self._output_names = set([edge.name for edge in self.outputs])
+        if self._curr_iter_section is None:
+            self._curr_iter_section = deepcopy(self.section)
+        if self._nxt_iter_section is None:
+            self._nxt_iter_section = deepcopy(self.section)
+        if self._external_inputs is None:
+            self._external_inputs = self._get_external_inputs()
+        if self._loop_back_signals is None:
+            self._loop_back_signals = self._get_loop_back_signals()
+        
         if self.n_iters == self.curr_iter + 1:
-            self._replace_outputs_for_final_iter(self.curr_iter_section)
+            self._replace_outputs_for_final_iter(self._curr_iter_section)
 
     def _advance_one_iter(self) -> "Loop":
-        curr_iter_section = self.nxt_iter_section
+        self._uncache_outputs()
+        curr_iter_section = self._nxt_iter_section
         nxt_iter_section = deepcopy(self.section)
 
         logger.info(
@@ -387,27 +524,56 @@ class Loop(GraphSection):
 
         loop = Loop(
             section=self.section,
-            curr_iter_section=curr_iter_section,
-            nxt_iter_section=nxt_iter_section,
+            _curr_iter_section=curr_iter_section,
+            _nxt_iter_section=nxt_iter_section,
             curr_iter=self.curr_iter + 1,
             n_iters=self.n_iters,
             outputs=self.outputs,
-            external_inputs=self.external_inputs,
-            loop_back_signals=self.loop_back_signals
+            _external_inputs=self._external_inputs,
+            _loop_back_signals=self._loop_back_signals,
+            _tensor_manager=self._tensor_manager,
+            _request_id=self._request_id,
         )
         loop.ingest_inputs(get_node_to_inputs_mapping(
-            self.external_inputs
+            self._external_inputs
         ))
         return loop
 
     def split_off_ready(self):
-        loop = self if self.curr_iter_section is not None \
-            else self._advance_one_iter()
-        first_ready, first_waiting = loop.curr_iter_section.split_off_ready()
-        loop.curr_iter_section = first_waiting
+        loop = self
+        if self._curr_iter_section is None:
+            if self.n_iters == self.curr_iter + 1:
+                return [], None
+            loop = self._advance_one_iter()
 
-        if loop.n_iters == loop.curr_iter + 1: # last iteration
-            return first_ready, first_waiting
-
-        loop.curr_iter_section = first_waiting
+        first_ready, first_waiting = loop._curr_iter_section.split_off_ready()
+        loop._curr_iter_section = first_waiting
         return first_ready, loop
+    
+    def complete_loops(self) -> LoopCompletionOutput:
+        output_signals = []
+
+        # recursive call
+        if self._curr_iter_section is not None:
+            recursive_output = self._curr_iter_section.complete_loops()
+            output_signals += recursive_output.outputs
+            self._curr_iter_section = recursive_output.new_waiting
+        
+        # check if the loop is done after the recursive call updates _curr_iter_section
+        done = (self.n_iters == self.curr_iter + 1) and (self._curr_iter_section is None)
+        if not done:
+            return LoopCompletionOutput(
+                new_waiting=self,
+                outputs=output_signals
+            )
+        
+        # if done, new_waiting is None and also need to collect our outputs
+        for output in self.outputs:
+            if output.name in self._cached_outputs:
+                output.tensor_info = self._cached_outputs[output.name]
+                output_signals.append(output)
+
+        return LoopCompletionOutput(
+            new_waiting=None,
+            outputs=output_signals
+        )

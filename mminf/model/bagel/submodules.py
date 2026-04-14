@@ -964,7 +964,6 @@ class LLMSubmodule(NodeSubmodule):
 
         result: NameToTensorList = {output_name: [hidden]}
         if self.node_name == "LLM":
-            result["latents"] = [latents]
             result["time_index"] = [time_index]
         return result
 

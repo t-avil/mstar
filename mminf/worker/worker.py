@@ -84,23 +84,6 @@ class Worker:
                         for node_name in section.get_node_names():
                             node_to_partition[node_name] = pdef.name
 
-        self.worker_graphs_manager = WorkerGraphsManager(
-            queues={
-                worker_graph.worker_graph_id: WorkerGraphQueues(
-                    worker_graph_id=worker_graph.worker_graph_id,
-                    graph_walks=worker_graph.graph_walks,
-                    worker_graph=worker_graph,
-                    per_request_queues={},
-                )
-                for worker_graph in my_worker_graphs
-            },
-            per_request_info={},
-            all_worker_graph_ids_to_graph_walks=all_worker_graph_ids_to_graph_walks,
-            all_worker_graph_ids_to_nodes=all_worker_graph_ids_to_nodes,
-            node_to_partition=node_to_partition,
-        )
-
-
         self.communicator = ZMQCommunicator(
             my_id=worker_id,
             push_ids=worker_ids + ["conductor", "api_server", "api_server_preprocess_worker"],
@@ -118,6 +101,7 @@ class Worker:
         node_names = set(sum([
             wg.section.get_node_names() for wg in my_worker_graphs
         ], start=[]))
+
         self.engine_manager = EngineManager.build(
             node_names,
             device=device,
@@ -130,6 +114,24 @@ class Worker:
             model=model,
             enable_nvtx=self.enable_nvtx
         )
+
+        self.worker_graphs_manager = WorkerGraphsManager(
+            queues={
+                worker_graph.worker_graph_id: WorkerGraphQueues(
+                    worker_graph_id=worker_graph.worker_graph_id,
+                    graph_walks=worker_graph.graph_walks,
+                    worker_graph=worker_graph,
+                    per_request_queues={},
+                    tensor_manager=self.tensor_manager
+                )
+                for worker_graph in my_worker_graphs
+            },
+            per_request_info={},
+            all_worker_graph_ids_to_graph_walks=all_worker_graph_ids_to_graph_walks,
+            all_worker_graph_ids_to_nodes=all_worker_graph_ids_to_nodes,
+            node_to_partition=node_to_partition,
+        )
+
         self.scheduler = MicroScheduler(self.engine_manager)
 
         # Determine store write policy based on worker graph topology
@@ -625,19 +627,13 @@ class Worker:
     # Output handling
     # ------------------------------------------------------------------
 
-    def _store_outputs(
+    def _store_outputs_and_finish_loops(
         self,
         batch: ScheduledBatch,
         output: "NodeOutput",
-        routing_per_request: dict[str, NodeOutputRouting],
         filtered_outputs_per_request: dict[str, list[GraphEdge]],
     ) -> dict[str, list[GraphEdge]]:
         """
-        For outputs going to other workers: register tensors for RDMA send
-        and populate tensor_info on the GraphEdges.
-        For outputs staying local: store tensors in tensor_manager.
-        Returns the output edges per request (with tensor_info filled in).
-
         ``filtered_outputs_per_request`` contains, for each request, only the
         GraphNode output edges whose names are actually present in the
         submodule's returned output dict. Edges absent from the output dict
@@ -646,7 +642,6 @@ class Worker:
         empty-tensor_info edges are not routed downstream.
         """
         output_edges: dict[str, list[GraphEdge]] = {}
-
         for request_id, node in batch.node_objects.items():
             # output name to list of tensors
             request_output_tensors = output.per_request_output_tensors.get(
@@ -658,12 +653,34 @@ class Worker:
             if not request_output_tensors:
                 continue  # Node produced no outputs (e.g., KV-cache-only prefill step)
 
-            self.tensor_manager.store_and_populate_graph_edges(
+            output_tensor_info = self.tensor_manager.store_and_populate_graph_edges(
                 request_id=request_id,
                 tensors=request_output_tensors,
                 graph_edges=filtered_outputs
             )
+            
+            worker_graph_id = self.worker_graphs_manager.get_worker_graph_id_for_node(
+                request_id, node_name=node.name
+            )
+            waiting_node = self.worker_graphs_manager.get_waiting_node(request_id, worker_graph_id)
+            if waiting_node is not None:
+                waiting_node.cache_outputs(output_tensor_info)
+            output_edges[request_id] += self.worker_graphs_manager.complete_loops(request_id, worker_graph_id)
+        return output_edges
+        
 
+    def _register_outputs(
+        self,
+        batch: ScheduledBatch,
+        routing_per_request: dict[str, NodeOutputRouting],
+    ):
+        """
+        For outputs going to other workers: register tensors for RDMA send
+        and populate tensor_info on the GraphEdges.
+        For outputs staying local: store tensors in tensor_manager.
+        Returns the output edges per request (with tensor_info filled in).
+        """
+        for request_id, node in batch.node_objects.items():
             routing = routing_per_request[request_id]
             uuids = set()
             for edge in (
@@ -685,7 +702,6 @@ class Worker:
                         request_id=request_id, uuid=info.uuid, persist=True
                     )
 
-        return output_edges
 
     def _send_outputs(
         self, request_id: str, outputs: NodeOutputRouting,
@@ -901,7 +917,6 @@ class Worker:
                 # (which omits thinker_states). Without filtering, edges whose names are
                 # absent from the output dict would be routed with empty tensor_info.
                 filtered_outputs_per_request: dict[str, list[GraphEdge]] = {}
-                routing_per_request: dict[str, NodeOutputRouting] = {}
                 for request_id, node in batch.node_objects.items():
                     request_output_tensors = output.per_request_output_tensors.get(
                         request_id, {}
@@ -910,15 +925,18 @@ class Worker:
                         e for e in node.outputs if e.name in request_output_tensors
                     ]
                     filtered_outputs_per_request[request_id] = filtered_outputs
+
+                node_outputs = self._store_outputs_and_finish_loops(batch, output)
+                
+                routing_per_request: dict[str, NodeOutputRouting] = {}
+                for request_id in batch.node_objects:
                     routing = self.worker_graphs_manager.process_node_outputs(
-                        request_id, filtered_outputs, graph_walk=batch.graph_walk
+                        request_id, node_outputs[request_id], graph_walk=batch.graph_walk
                     )
                     routing_per_request[request_id] = routing
 
                 # 7. Store output tensors, register RDMA if needed
-                self._store_outputs(
-                    batch, output, routing_per_request, filtered_outputs_per_request
-                )
+                self._register_outputs(batch, routing_per_request)
 
                 # 8. Send outputs to other workers / conductor
                 for request_id in batch.node_objects.keys():

@@ -2,6 +2,7 @@ import logging
 from copy import deepcopy
 from dataclasses import dataclass, field
 
+from mminf.communication.tensors import TensorCommunicationManager
 from mminf.conductor.request_info import CurrentForwardPassInfo, PerLabelSeqInfo
 from mminf.graph.base import GraphEdge, GraphNode, TensorPointerInfo
 from mminf.graph.request_queues import (
@@ -48,6 +49,7 @@ class WorkerGraphQueues:
                           # but not the prefill graph walk
     worker_graph: WorkerGraph
     per_request_queues: dict[str, PerRequestNodeQueues] # request_id -> queue
+    tensor_manager: TensorCommunicationManager
 
     def process_new_inputs(self, request_id: str, inputs: list[GraphEdge]) -> ProcessedInputs:
         """
@@ -74,6 +76,9 @@ class WorkerGraphQueues:
         self.per_request_queues[request_id] = PerRequestNodeQueues(
             waiting=deepcopy(self.worker_graph.section),
             worker_graph_id=self.worker_graph_id
+        )
+        self.per_request_queues[request_id].waiting.register_communication_info(
+            self.tensor_manager, request_id
         )
 
     def remove_request(self, request_id: str):
@@ -122,6 +127,9 @@ class WorkerGraphQueues:
         be used for the next full model forward pass.
         """
         self.per_request_queues[request_id].waiting = deepcopy(self.worker_graph.section)
+        self.per_request_queues[request_id].waiting.register_communication_info(
+            self.tensor_manager, request_id
+        )
         self.per_request_queues[request_id].ready = []
 
 
@@ -257,6 +265,36 @@ class WorkerGraphsManager:
             for worker_graph_id in worker_graph_ids:
                 inputs = self.queues[worker_graph_id].process_new_streaming_inputs(request_id, inputs).for_other_worker_graphs
         return inputs
+
+
+    def get_worker_graph_id_for_node(
+        self, request_id: str, node_name: str
+    ) -> str:
+        partition = self.get_partition_for_node(node_name)
+        graph_walk = self.get_graph_walk(request_id, partition)
+        for gid in self.per_request_info[request_id].worker_graph_ids:
+            if (graph_walk in self.all_worker_graph_ids_to_graph_walks[gid]) and \
+                        (node_name in self.all_worker_graph_ids_to_nodes[gid]):
+                return gid
+        raise RuntimeError(f"Could not find worker graph for node {node_name}, request {request_id}")
+    
+
+    def get_waiting_node(
+        self, request_id: str, worker_graph_id: str
+    ):
+        return self.queues[worker_graph_id].per_request_queues[request_id].waiting
+
+
+    def complete_loops(
+        self, request_id: str, worker_graph_id: str
+    ) -> list[GraphEdge]:
+        queue = self.queues[worker_graph_id].per_request_queues[request_id]
+        if queue.waiting is None:
+            return []
+        out = queue.waiting.complete_loops()
+        queue.waiting = out.new_waiting
+        return out.outputs
+
 
     def process_node_outputs(
         self, request_id: str,

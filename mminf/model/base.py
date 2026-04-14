@@ -245,8 +245,8 @@ def _divide_into_worker_graphs(
                 section=s.section,
                 n_iters=graph.n_iters,
                 curr_iter=graph.curr_iter,
-                external_inputs=graph.external_inputs,
-                loop_back_signals=graph.loop_back_signals,
+                _external_inputs=graph._external_inputs,
+                _loop_back_signals=graph._loop_back_signals,
                 outputs=graph.outputs
             )
         return loop_section_worker_graphs

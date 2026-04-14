@@ -77,16 +77,16 @@ if __name__ == "__main__":
                 section=loop.section.sections[0].sections[0],
                 n_iters=loop.n_iters,
                 curr_iter=loop.curr_iter,
-                external_inputs=loop.external_inputs,
-                loop_back_signals=loop.loop_back_signals,
+                _external_inputs=loop._external_inputs,
+                _loop_back_signals=loop._loop_back_signals,
                 outputs=loop.outputs
             ),
             Loop(
                 section=loop.section.sections[0].sections[1],
                 n_iters=loop.n_iters,
                 curr_iter=loop.curr_iter,
-                external_inputs=loop.external_inputs,
-                loop_back_signals=loop.loop_back_signals,
+                _external_inputs=loop._external_inputs,
+                _loop_back_signals=loop._loop_back_signals,
                 outputs=loop.outputs
             )
         ]),
@@ -94,8 +94,8 @@ if __name__ == "__main__":
             section=loop.section.sections[1],
             n_iters=loop.n_iters,
             curr_iter=loop.curr_iter,
-            external_inputs=loop.external_inputs,
-            loop_back_signals=loop.loop_back_signals,
+            _external_inputs=loop._external_inputs,
+            _loop_back_signals=loop._loop_back_signals,
             outputs=loop.outputs
         )
     ])
