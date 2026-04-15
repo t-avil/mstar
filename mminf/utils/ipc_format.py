@@ -28,11 +28,10 @@ class MessageBody:
 class WorkerMessageType(Enum):
     NEW_REQUEST = "new_request"
     REMOVE_REQUEST = "remove_request"
-    KV_TRANSFER_LAYER = "kv_transfer_layer"
-    KV_TRANSFER_META = "kv_transfer_meta"
     INPUT_SIGNALS = "input_signals"
     UNPERSIST_TENSORS = "unpersist"
     TENSOR_RECEIVED = "tensor_received"
+    STOP_LOOPS = "stop_loops"
 
 
 @dataclass
@@ -69,6 +68,13 @@ class TensorReceived(MessageBody):
 class UnpersistTensors(MessageBody):
     request_id: str
     uuid_to_ref_count: dict[str, int]
+
+@dataclass
+class StopLoops(MessageBody):
+    request_id: str
+    loop_names: set[str]
+    fwd_index: int
+    partition_name: str
 
 @dataclass
 class WorkerMessage:

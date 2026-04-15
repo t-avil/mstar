@@ -11,7 +11,7 @@ from mminf.communication.tensors import NameToTensorList, create_tensor_communic
 from mminf.conductor.request_info import CurrentForwardPassInfo
 from mminf.engine.base import EngineType, NodeBatch, NodeOutput
 from mminf.engine.kv_store import KVCacheConfig, StoreWritePolicy, TransferEngineInfo
-from mminf.graph.base import GraphEdge
+from mminf.graph.base import FilteredEdges, GraphEdge
 from mminf.graph.request_queues import format_graph_edge_list
 from mminf.model.base import Model, WorkerGraph
 from mminf.streaming.stream_buffer import StreamBuffer
@@ -21,6 +21,7 @@ from mminf.utils.ipc_format import (
     InputSignals,
     NewRequest,
     RemoveRequest,
+    StopLoops,
     TensorReceived,
     UnpersistTensors,
     WorkerGraphsDone,
@@ -30,6 +31,7 @@ from mminf.utils.ipc_format import (
 from mminf.worker.engine_manager import EngineManager
 from mminf.worker.micro_scheduler import MicroScheduler, ScheduledBatch
 from mminf.worker.node_manager_utils import (
+    NodeAndGraphWalk,
     NodeOutputRouting,
     WorkerGraphQueues,
     WorkerGraphsManager,
@@ -378,11 +380,20 @@ class Worker:
             self.tensor_manager.set_persist(
                 body.request_id, uuid, persist=False
             )
+    
+    def _stop_loops(self, body: StopLoops):
+        fwd_info = self.worker_graphs_manager.get_fwd_info(
+            body.request_id, body.partition_name
+        ) 
+        if fwd_info.fwd_index != body.fwd_index:
+            # new forward pass has started already
+            return
 
     def _process_message_list(self, messages: list[WorkerMessage]):
         msg_types_needing_active_request = [
             WorkerMessageType.REMOVE_REQUEST,
             WorkerMessageType.INPUT_SIGNALS,
+            WorkerMessageType.STOP_LOOPS
         ]
         for message in messages:
             if (
@@ -632,7 +643,8 @@ class Worker:
         batch: ScheduledBatch,
         output: "NodeOutput",
         filtered_outputs_per_request: dict[str, list[GraphEdge]],
-    ) -> dict[str, list[GraphEdge]]:
+        output_edges: dict[str, list[GraphEdge]] = {}
+    ) -> dict[str, FilteredEdges]:
         """
         ``filtered_outputs_per_request`` contains, for each request, only the
         GraphNode output edges whose names are actually present in the
@@ -641,14 +653,18 @@ class Worker:
         audio_output=False which omits thinker_states) are excluded so that
         empty-tensor_info edges are not routed downstream.
         """
-        output_edges: dict[str, list[GraphEdge]] = {}
+        
+        output_edges: dict[str, FilteredEdges] = {}
         for request_id, node in batch.node_objects.items():
             # output name to list of tensors
             request_output_tensors = output.per_request_output_tensors.get(
                 request_id, {}
             ) # name -> list of tensors
             filtered_outputs = filtered_outputs_per_request.get(request_id, [])
-            output_edges[request_id] = filtered_outputs
+            output_edges[request_id] = FilteredEdges(
+                kept=filtered_outputs,
+                filtered_out=[]
+            )
 
             if not request_output_tensors:
                 continue  # Node produced no outputs (e.g., KV-cache-only prefill step)
@@ -665,13 +681,12 @@ class Worker:
             waiting_node = self.worker_graphs_manager.get_waiting_node(request_id, worker_graph_id)
             if waiting_node is not None:
                 waiting_node.cache_outputs(output_tensor_info)
-            filter_result = self.worker_graphs_manager.complete_loops(
-                request_id, worker_graph_id, output_edges[request_id]
+            output_edges[request_id] = self.worker_graphs_manager.complete_loops(
+                request_id, worker_graph_id, output_edges[request_id].kept
             )
-            output_edges[request_id] = filter_result.kept
 
             # if any outputs were filtered out, we must dereference them
-            for edge in filter_result.filtered_out:
+            for edge in output_edges[request_id].filtered_out:
                 for info in edge.tensor_info:
                     self.tensor_manager.dereference(request_id, info.uuid)
 
@@ -857,6 +872,14 @@ class Worker:
 
                 # 4. Gather input tensors for the batch
                 node_batch = self._build_node_batch(batch)
+                batch_partition = self.worker_graphs_manager.get_partition_for_node(batch.node_name)
+
+                for request_id, req_info in node_batch.per_request_info.items():
+                    req_info.dynamic_loop_iter_counts.update(
+                        self.worker_graphs_manager.get_dynamic_loop_iters(
+                            request_id, partition=batch_partition,
+                        )
+                    )
 
                 # 5. Execute via engine
                 engine = self.engine_manager.get_engine(batch.node_name)
@@ -908,13 +931,19 @@ class Worker:
                 for rid in batch.node_objects:
                     self._last_active[(rid, batch.node_name)] = now
 
-                batch_partition = self.worker_graphs_manager.get_partition_for_node(batch.node_name)
-
                 for rid, req_info in node_batch.per_request_info.items():
+                    if req_info.dynamic_loop_stop_signals:                        
+                        self.worker_graphs_manager.stop_loops(
+                            rid, partition=batch_partition,
+                            loop_names=req_info.dynamic_loop_stop_signals
+                        )
+
                     self.worker_graphs_manager.update_request_info(
-                        rid, per_label_seq_info=req_info.per_label_seq_info,
+                        rid, current_fwd_info=req_info,
+                        per_label_seq_info=req_info.per_label_seq_info,
                         partition_name=batch_partition,
                     )
+                    
 
                 # 5b. Free consumed input tensors
                 self._cleanup_consumed_inputs(batch)
@@ -940,9 +969,36 @@ class Worker:
                 routing_per_request: dict[str, NodeOutputRouting] = {}
                 for request_id in batch.node_objects:
                     routing = self.worker_graphs_manager.process_node_outputs(
-                        request_id, node_outputs[request_id], graph_walk=batch.graph_walk
+                        request_id, node_outputs[request_id].kept, graph_walk=batch.graph_walk
                     )
                     routing_per_request[request_id] = routing
+
+                    # 6b. If there are loop-back signals that were filtered out for different
+                    # workers, send "loop done" messages to the corresponding workers
+                    if node_batch.per_request_info[request_id].dynamic_loop_stop_signals:
+                        workers = set()
+                        for edge in node_outputs[request_id].filtered_out:
+                            workers.add(
+                                self.worker_graphs_manager.per_request_info[request_id].node_to_worker[NodeAndGraphWalk(
+                                    node=edge.next_node,
+                                    graph_walk=batch.graph_walk
+                                )]
+                            )
+                        for worker in workers:
+                            if worker == self.worker_id:
+                                continue
+                            self.communicator.send(
+                                entity_id=worker,
+                                msg=WorkerMessage(
+                                    message_type=WorkerMessageType.STOP_LOOPS,
+                                    body=StopLoops(
+                                        request_id=request_id,
+                                        loop_names=node_batch.per_request_info[request_id].dynamic_loop_stop_signals,
+                                        fwd_index=node_batch.per_request_info[request_id].fwd_index,
+                                        partition_name=batch_partition
+                                    )
+                                )
+                            )
 
                 # 7. Store output tensors, register RDMA if needed
                 self._register_outputs(batch, routing_per_request)
@@ -954,6 +1010,9 @@ class Worker:
                         graph_walk=batch.graph_walk,
                         partition_name=batch_partition,
                     )
+                
+                for rid, req_info in node_batch.per_request_info.items():
+                    req_info.dynamic_loop_stop_signals.clear()
             except Exception:
                 logger.exception("Worker %s error in main loop", self.worker_id)
                 sleep(0.01)

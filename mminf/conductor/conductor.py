@@ -487,6 +487,7 @@ class Conductor:
                         random_seed=pstate.random_seed,
                         requires_cfg=fwd_args.full_metadata.requires_cfg,
                         partition_name=partition_name,
+                        max_tokens=request_data.max_output_tokens
                     ),
                 )
                 self.communicator.send(
@@ -721,6 +722,7 @@ class Conductor:
                         per_label_seq_info=pstate.per_label_seq_info,
                         requires_cfg=fwd_args.full_metadata.requires_cfg,
                         partition_name=partition_name,
+                        max_tokens=request_data.max_output_tokens
                     ),
                     partition_name=partition_name
                 ),
@@ -752,6 +754,7 @@ class Conductor:
                         random_seed=pstate.random_seed,
                         requires_cfg=False,
                         partition_name=consumer_partition_name,
+                        max_tokens=request_data.max_output_tokens
                     ),
                     partition_name=consumer_partition_name,
                     producer_done=True,

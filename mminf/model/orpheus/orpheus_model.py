@@ -114,7 +114,7 @@ class OrpheusModel(Model):
                 GraphEdge(
                     next_node=EMPTY_DESTINATION,
                     name="new_token",
-                    is_new_token=True,
+                    conductor_new_token=True,
                     persist=True,
                 ),
                 StreamingGraphEdge(
@@ -132,7 +132,7 @@ class OrpheusModel(Model):
                 GraphEdge(
                     next_node=EMPTY_DESTINATION,
                     name="new_token",
-                    is_new_token=True,
+                    conductor_new_token=True,
                     persist=True,
                 ),
                 StreamingGraphEdge(

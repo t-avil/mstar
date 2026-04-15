@@ -58,7 +58,7 @@ class GraphEdge:
 
     # Flags
     persist: bool = field(default=False) # previously back_to_conductor
-    is_new_token: bool = field(default=False)
+    conductor_new_token: bool = field(default=False)
     is_streaming: bool = field(default=False) # streaming edge: tokens accumulate at destination buffer
     # only for EMIT_TO_CLIENT
     output_modality: str = field(default="") # text | image | video | audio
@@ -376,7 +376,7 @@ class Parallel(GraphSection):
 class Loop(GraphSection):
     section: GraphSection # this is used to populate next_section and
                           # in-progress section; it remains "clean"
-    n_iters: int
+    max_iters: int
     outputs: list[GraphEdge]
     curr_iter: int = field(default=0)
     _external_inputs: list[GraphEdge] = field(default=None)
@@ -456,7 +456,7 @@ class Loop(GraphSection):
         ingested += self._nxt_iter_section.ingest_inputs(node_to_inputs)
         update_list_dicts(node_to_inputs, external_inputs)
 
-        if self.curr_iter != self.n_iters - 1:
+        if self.curr_iter != self.max_iters - 1:
             for graph_edge in ingested:
                 if (graph_edge.name, graph_edge.next_node) in my_external_inputs:
                     my_external_inputs[(
@@ -489,29 +489,6 @@ class Loop(GraphSection):
             edge for edge in outputs if (edge.name, edge.next_node) in input_names_dests
         ]
 
-    # def _replace_outputs_for_final_iter(
-    #     self, section: GraphSection,
-    # ):
-    #     """
-    #     For the final iteration, we want to: remove all loop-back signals
-    #     from the graph.
-    #     """
-    #     loop_back_signals = self._loop_back_signals
-    #     loop_back_name_dests = set([
-    #         (edge.name, edge.next_node) for edge in loop_back_signals
-    #     ])
-
-    #     def replace_outputs(node_outputs: list[GraphEdge]):
-    #         return [
-    #             edge for edge in node_outputs \
-    #                 if (edge.name, edge.next_node) not in loop_back_name_dests
-    #         ]
-    #     if isinstance(section, GraphNode) or isinstance(section, Loop):
-    #         section.outputs = replace_outputs(section.outputs)
-    #     elif isinstance(section, Sequential) or isinstance(section, Parallel):
-    #         for sec in section.sections:
-    #             self._replace_outputs_for_final_iter(sec)
-
     def __post_init__(self):
         # In the disaggregated case, we need filter self.outputs for outputs
         # that this subgraph actually produces
@@ -529,32 +506,36 @@ class Loop(GraphSection):
             self._external_inputs = self._get_external_inputs()
         if self._loop_back_signals is None:
             self._loop_back_signals = self._get_loop_back_signals()
-        
-        # if self.n_iters == self.curr_iter + 1:
-        #     self._replace_outputs_for_final_iter(self._curr_iter_section)
+
+    def _get_advanced_loop(
+        self, curr_iter_section, nxt_iter_section
+    ):
+        return Loop(
+            section=self.section,
+            _curr_iter_section=curr_iter_section,
+            _nxt_iter_section=nxt_iter_section,
+            curr_iter=self.curr_iter + 1,
+            max_iters=self.max_iters,
+            outputs=self.outputs,
+            _external_inputs=self._external_inputs,
+            _loop_back_signals=self._loop_back_signals,
+            _tensor_manager=self._tensor_manager,
+            _request_id=self._request_id,
+        )
 
     def _advance_one_iter(self) -> "Loop":
         self._uncache_outputs()
         curr_iter_section = self._nxt_iter_section
         nxt_iter_section = deepcopy(self.section)
 
-        logger.info(
+        logger.debug(
             "Advancing loop with nodes %s from iter %d -> %d (out of %d)",
             str(self.section.get_node_names()), self.curr_iter,
-            self.curr_iter + 1, self.n_iters
+            self.curr_iter + 1, self.max_iters
         )
 
-        loop = Loop(
-            section=self.section,
-            _curr_iter_section=curr_iter_section,
-            _nxt_iter_section=nxt_iter_section,
-            curr_iter=self.curr_iter + 1,
-            n_iters=self.n_iters,
-            outputs=self.outputs,
-            _external_inputs=self._external_inputs,
-            _loop_back_signals=self._loop_back_signals,
-            _tensor_manager=self._tensor_manager,
-            _request_id=self._request_id,
+        loop = self._get_advanced_loop(
+            curr_iter_section, nxt_iter_section
         )
         loop.ingest_inputs(get_node_to_inputs_mapping(
             self._external_inputs
@@ -562,7 +543,7 @@ class Loop(GraphSection):
         return loop
     
     def _is_done(self):
-        return (self.n_iters == self.curr_iter + 1) and (self._curr_iter_section is None)
+        return (self.max_iters == self.curr_iter + 1) and (self._curr_iter_section is None)
 
     def split_off_ready(self):
         loop = self
@@ -611,3 +592,33 @@ class Loop(GraphSection):
             loop_back_name_dests_to_remove=loop_back_name_dests
         )
 
+
+@dataclass
+class DynamicLoop(Loop):
+    name: str = field(default="loop")
+    _finished: bool = field(default=False)
+
+    def register_finished(self):
+        self._finished = True
+    
+    def _is_done(self):
+        return (
+            (self.max_iters == self.curr_iter + 1) or self._finished) \
+                and (self._curr_iter_section is None)
+
+    def _get_advanced_loop(
+        self, curr_iter_section, nxt_iter_section
+    ):
+        return DynamicLoop(
+            section=self.section,
+            name=self.name,
+            _curr_iter_section=curr_iter_section,
+            _nxt_iter_section=nxt_iter_section,
+            curr_iter=self.curr_iter + 1,
+            max_iters=self.max_iters,
+            outputs=self.outputs,
+            _external_inputs=self._external_inputs,
+            _loop_back_signals=self._loop_back_signals,
+            _tensor_manager=self._tensor_manager,
+            _request_id=self._request_id,
+        )

@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 
 from mminf.communication.tensors import TensorCommunicationManager
 from mminf.conductor.request_info import CurrentForwardPassInfo, PerLabelSeqInfo
-from mminf.graph.base import GraphEdge, GraphNode, TensorPointerInfo, FilteredEdges
+from mminf.graph.base import DynamicLoop, FilteredEdges, GraphEdge, GraphNode, GraphSection, Loop, Parallel, Sequential, TensorPointerInfo
 from mminf.graph.request_queues import (
     PerRequestNodeQueues,
     ProcessedInputs,
@@ -131,6 +131,35 @@ class WorkerGraphQueues:
             self.tensor_manager, request_id
         )
         self.per_request_queues[request_id].ready = []
+    
+    def stop_loops(self, request_id: str, loop_names: set[str]):
+        def _stop_loops(section: GraphSection):
+            if isinstance(section, Sequential) or isinstance(section, Parallel):
+                for sec in section.sections:
+                    _stop_loops(sec)
+                return
+            if isinstance(section, DynamicLoop):
+                if section.name in loop_names:
+                    section.register_finished()
+            if isinstance(section, Loop):
+                # including dynamic loops
+                _stop_loops(section._curr_iter_section)
+        _stop_loops(self.per_request_queues[request_id].waiting)
+    
+    def get_dynamic_loop_iters(self, request_id: str) -> dict[str, int]:
+        iter_dict = {}
+        def _get_iters(section: GraphSection):
+            if isinstance(section, Sequential) or isinstance(section, Parallel):
+                for sec in section.sections:
+                    _get_iters(sec)
+                return
+            if isinstance(section, DynamicLoop):
+                iter_dict[section.name] = section.curr_iter
+            if isinstance(section, Loop):
+                # including dynamic loops
+                _get_iters(section._curr_iter_section)
+        _get_iters(self.per_request_queues[request_id].waiting)
+        return iter_dict
 
 
 @dataclass
@@ -323,7 +352,7 @@ class WorkerGraphsManager:
 
         # (1) find back_to_conductor flags
         to_conductor = [edge for edge in non_streaming_outputs if edge.persist]
-        new_token_outputs = [edge for edge in non_streaming_outputs if edge.is_new_token]
+        new_token_outputs = [edge for edge in non_streaming_outputs if edge.conductor_new_token]
 
         # (2) process all internal-facing outputs
         worker_graph_ids = [
@@ -421,6 +450,31 @@ class WorkerGraphsManager:
             streaming_to_workers=streaming_to_workers,
             streaming_local=streaming_local,
         )
+    
+    def stop_loops(
+        self, request_id: str,
+        partition: str,
+        loop_names: set[str]
+    ):
+        part_info = self.per_request_info[request_id].per_partition_info[partition]
+        worker_graph_ids = part_info.graph_walk_worker_graph_ids
+        for worker_graph_id in worker_graph_ids:
+            self.queues[worker_graph_id].stop_loops(request_id, loop_names)
+    
+
+    def get_dynamic_loop_iters(
+        self, request_id: str,
+        partition: str,
+    ) -> dict[str, int]:
+        part_info = self.per_request_info[request_id].per_partition_info[partition]
+        worker_graph_ids = part_info.graph_walk_worker_graph_ids
+
+        iter_counts: dict[str, int] = {}
+        for worker_graph_id in worker_graph_ids:
+            iter_counts.update(
+                self.queues[worker_graph_id].get_dynamic_loop_iters(request_id)
+            )
+        return iter_counts
 
     def add_request(
         self, request_id: str,

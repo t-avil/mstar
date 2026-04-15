@@ -61,9 +61,21 @@ class CurrentForwardPassInfo:
     requires_cfg: bool
     fwd_index: int
     random_seed: int
+    max_tokens: int
     step_metadata: dict = field(default_factory=dict)
     per_label_seq_info: PerLabelSeqInfo = field(default_factory=PerLabelSeqInfo)
     partition_name: str = field(default="default")
+
+    # set of names of loops to stop
+    dynamic_loop_stop_signals: set[str] = field(default_factory=set)
+    dynamic_loop_iter_counts: dict[str, int] = field(default_factory=dict)
+
+    def register_loop_stop(self, loop_name: str):
+        self.dynamic_loop_stop_signals.add(loop_name)
+    
+    def reset_dyn_loop_info(self):
+        self.dynamic_loop_stop_signals.clear()
+        self.dynamic_loop_iter_counts.clear()
 
 
 # ---------------------------------------------------------------------------
