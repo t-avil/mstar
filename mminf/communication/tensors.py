@@ -105,79 +105,42 @@ class TensorStore:
         info.ref_cnt -= n
 
 
-class TensorCommunicationManager(ABC):
-    @abstractmethod
-    def store_and_return_tensor_info(
-        self, request_id: str, tensors: NameToTensorList,
-    ) -> dict[str, list[TensorPointerInfo]]:
-        """
-        Returns tensor name to TensorPointerInfo (contains addresses, datatypes,
-        num bytes, etc.) for each tensor.
-        """
-        pass
+# ---------------------------------------------------------------------------
+# TensorTransferEngine abstraction
+# ---------------------------------------------------------------------------
+
+class TensorTransferEngine(ABC):
+    """Abstract interface for low-level memory registration and async reads.
+
+    Wraps the transport-specific engine (Mooncake RDMA, local no-op, etc.)
+    so that higher-level code (PagedAllocationManager, TensorCommunicationManager)
+    never imports or depends on a specific transport library.
+    """
 
     @abstractmethod
-    def store_and_populate_graph_edges(
-        self, request_id: str, tensors: NameToTensorList,
-        graph_edges: list[GraphEdge]
-    ):
-        """
-        Updates graph_edges with required tensor info (addresses, datatypes,
-        num bytes, etc.) and UUID.
-        """
-        pass
+    def register_memory(self, ptr: int, nbytes: int) -> int:
+        """Register a memory region for remote access. Returns 0 on success."""
+        ...
 
     @abstractmethod
-    def register_for_send(
-        self, request_id: str, uuids: list[str]
-    ):
-        """
-        If relevant (e.g., mooncake rdma), registers buffers.
-        """
-        pass
+    def unregister_memory(self, ptr: int) -> int:
+        """Unregister a previously registered memory region. Returns 0 on success."""
+        ...
 
     @abstractmethod
-    def get_tensor(self, request_id: str, uuid: str=None) -> torch.Tensor:
-        pass
+    def get_async_reader(self, device) -> "AsyncMooncakeReader | None":
+        """Return an async reader for background transfers, or None if not needed."""
+        ...
 
     @abstractmethod
-    def set_persist(self, request_id: str, uuid: str, persist: bool):
-        pass
+    def get_session_id(self) -> str:
+        """Return the session ID for this engine (e.g., 'hostname:port')."""
+        ...
 
-    @abstractmethod
-    def dereference(self, request_id: str, uuid: str, n: int=1):
-        pass
 
-    @abstractmethod
-    def increment_ref(self, request_id: str, uuid: str, n: int=1):
-        pass
-
-    @abstractmethod
-    def cleanup_request(self, request_id: str):
-        """
-        Removes all tensors for a given request. Unregisters buffers if relevant.
-        """
-        pass
-
-    @abstractmethod
-    def start_read_tensors(
-        self, request_id: str, graph_edges: list[GraphEdge]
-    ) -> list[int]:
-        """
-        Initializes empty buffer, initializes a read. May return immediately.
-        """
-        pass
-
-    @abstractmethod
-    def get_ready_tensors(self) -> dict[str, list[GraphEdge]]: # uuid based
-        """
-        Returns request_id: list of the GraphEdges that are currently
-        ready for that request
-
-        Returns a list of local addresses for the tensors being read.
-        """
-        pass
-
+# ---------------------------------------------------------------------------
+# Mooncake implementation
+# ---------------------------------------------------------------------------
 
 @dataclass
 class TransferReadInfo:
@@ -256,79 +219,122 @@ class AsyncMooncakeReader:
         self._executor.shutdown(wait=True)
 
 
+class MooncakeTransferEngine(TensorTransferEngine):
+    """Wraps mooncake.engine.TransferEngine for RDMA or TCP transport."""
 
-class MooncakeCommunicationManager(TensorCommunicationManager):
+    def __init__(
+        self,
+        hostname: str,
+        protocol: CommProtocol,
+        metadata_server: str = "P2PHANDSHAKE",
+        tcp_transfer_device: str = "",
+    ):
+        if TransferEngine is None:
+            detail = (
+                f"{type(MOONCAKE_IMPORT_ERROR).__name__}: "
+                f"{MOONCAKE_IMPORT_ERROR}"
+                if MOONCAKE_IMPORT_ERROR is not None
+                else "unknown import failure"
+            )
+            raise RuntimeError(
+                "Mooncake TransferEngine is required for RDMA/TCP protocol. "
+                f"Failed to load mooncake: {detail}. "
+                "Install mooncake-transfer-engine or use SHM protocol."
+            )
+
+        if protocol == CommProtocol.RDMA:
+            transfer_device = ""
+        elif protocol == CommProtocol.TCP:
+            transfer_device = tcp_transfer_device
+        else:
+            raise NotImplementedError(f"Unknown protocol {protocol} for mooncake")
+
+        self._engine = TransferEngine()
+        self._engine.initialize(
+            hostname,
+            metadata_server,
+            protocol.value.lower(),
+            transfer_device,
+        )
+        self._session_id = f"{hostname}:{self._engine.get_rpc_port()}"
+
+    def register_memory(self, ptr: int, nbytes: int) -> int:
+        return self._engine.register_memory(ptr, nbytes)
+
+    def unregister_memory(self, ptr: int) -> int:
+        return self._engine.unregister_memory(ptr)
+
+    def get_async_reader(self, device) -> AsyncMooncakeReader:
+        return AsyncMooncakeReader(self._engine, device=device)
+
+    def get_session_id(self) -> str:
+        return self._session_id
+
+
+class LocalTransferEngine(TensorTransferEngine):
+    """No-op engine for SHM / single-node — data is already in local GPU memory."""
+
+    def __init__(self, hostname: str):
+        self._session_id = hostname
+
+    def register_memory(self, ptr: int, nbytes: int) -> int:
+        return 0  # no-op
+
+    def unregister_memory(self, ptr: int) -> int:
+        return 0  # no-op
+
+    def get_async_reader(self, device) -> None:
+        return None  # no remote reads needed
+
+    def get_session_id(self) -> str:
+        return self._session_id
+
+
+# ---------------------------------------------------------------------------
+# TensorCommunicationManager base class (Comment 1: shared methods)
+# ---------------------------------------------------------------------------
+
+class TensorCommunicationManager(ABC):
+    """Base class for inter-worker tensor transport.
+
+    Holds common attributes and shared method implementations. Subclasses
+    only need to override ``__init__``, ``register_for_send``,
+    ``start_read_tensors``, and ``_cleanup_by_uuid``.
+    """
+
     def __init__(
         self,
         my_entity_id: str,
-        hostname: str,
+        my_session_id: str,
         device: str,
         communicator: BaseCommunicator,
-        protocol: CommProtocol=CommProtocol.RDMA,
-        metadata_server: str="P2PHANDSHAKE", # [ETCD_SERVER_URL, P2PHANDSHAKE, ...]
-        tcp_transfer_device="",
-
+        transfer_engine: TensorTransferEngine,
     ):
         self.my_entity_id = my_entity_id
-
-        self.tensor_store = TensorStore()
-
-        self.communicator = communicator
-        self.protocol = protocol
-        self.my_session_id = hostname
+        self.my_session_id = my_session_id
         self.device = device
-
-        if TransferEngine is not None:
-            if self.protocol == CommProtocol.RDMA:
-                transfer_device = ""
-            elif self.protocol == CommProtocol.TCP:
-                transfer_device = tcp_transfer_device
-            else:
-                raise NotImplementedError(f"Unknown protocol {self.protocol} for mooncake")
-            self.engine = TransferEngine()
-            self.engine.initialize(
-                hostname,
-                metadata_server,
-                self.protocol.value.lower(),
-                transfer_device
-            )
-            self.my_session_id =f"{hostname}:{self.engine.get_rpc_port()}"
-        else:
-            if self.protocol == CommProtocol.RDMA:
-                detail = (
-                    f"{type(MOONCAKE_IMPORT_ERROR).__name__}: "
-                    f"{MOONCAKE_IMPORT_ERROR}"
-                    if MOONCAKE_IMPORT_ERROR is not None
-                    else "unknown import failure"
-                )
-                raise RuntimeError(
-                    "Mooncake TransferEngine is required when protocol=RDMA. "
-                    f"Failed to load mooncake: {detail}. "
-                    "Install mooncake-transfer-engine or set tensor protocol to IPC."
-                )
-            self.engine = None
-        self._async_reader = AsyncMooncakeReader(
-            self.engine, device=device
-        )
-        # Per-transfer pending list (allows partial tensor readiness)
+        self.communicator = communicator
+        self.transfer_engine = transfer_engine
+        self.tensor_store = TensorStore()
         self.pending: list[FutureAndPointers] = []
+
+    # ---- shared: store ----
 
     def store_and_return_tensor_info(
         self, request_id: str, tensors: NameToTensorList,
-    ) -> dict[str, list[TensorPointerInfo]]: # name to list[tensorPointerInfo]
-        torch.cuda.default_stream().synchronize()
+    ) -> dict[str, list[TensorPointerInfo]]:
+        if torch.cuda.is_available():
+            torch.cuda.default_stream().synchronize()
         tensor_info: dict[str, list[TensorPointerInfo]] = {}
         for name, tensor_list in tensors.items():
             tensor_info[name] = []
             for tensor in tensor_list:
                 tensor_uuid = str(uuid4())
                 self.tensor_store.put_tensor(
-                    request_id=request_id,
-                    uuid=tensor_uuid,
-                    tensor=tensor
+                    request_id=request_id, uuid=tensor_uuid, tensor=tensor,
                 )
                 logger.debug("Storing tensor name %s uuid %s", name, tensor_uuid)
-                new_tensor_info = TensorPointerInfo(
+                tensor_info[name].append(TensorPointerInfo(
                     dims=tensor.shape,
                     dtype=tensor.dtype,
                     stride=tensor.stride(),
@@ -337,51 +343,20 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
                     uuid=tensor_uuid,
                     source_session_id=self.my_session_id,
                     source_entity=self.my_entity_id,
-                )
-                tensor_info[name].append(new_tensor_info)
+                ))
         return tensor_info
 
-    def register_for_send(self, request_id, uuids):
-        torch.cuda.default_stream().synchronize()
-        for uuid in uuids:
-            if self.protocol == CommProtocol.RDMA:
-                if self.engine is None:
-                    raise RuntimeError(
-                        "Cannot register tensors for RDMA send: TransferEngine is not available."
-                    )
-                if self.tensor_store.is_registered(request_id, uuid):
-                    continue
-                logger.debug("Registering %s for send", uuid)
-                tensor = self.tensor_store.get_tensor(
-                    request_id=request_id, uuid=uuid
-                )
-
-                ret_value = self.engine.register_memory(
-                    tensor.data_ptr(), tensor.nbytes
-                )
-                if ret_value != 0:
-                    # TODO: error handling
-                    raise RuntimeError(f"Mooncake memory registration failed for request id {request_id}, uuid {uuid}.")
-            self.tensor_store.set_metadata(
-                request_id, uuid, mem_registered=True
-            )
-
     def store_and_populate_graph_edges(
-        self, request_id: str,
-        tensors: NameToTensorList,
-        graph_edges: list[GraphEdge]
+        self, request_id: str, tensors: NameToTensorList,
+        graph_edges: list[GraphEdge],
     ):
-        # get tensor name to graph edges
         name_to_graph_edges: dict[str, list[GraphEdge]] = {}
         for edge in graph_edges:
-            if edge.name not in name_to_graph_edges:
-                name_to_graph_edges[edge.name] = []
-            name_to_graph_edges[edge.name].append(edge)
+            name_to_graph_edges.setdefault(edge.name, []).append(edge)
 
         graph_node_info = self.store_and_return_tensor_info(
-            request_id=request_id, tensors=tensors
+            request_id=request_id, tensors=tensors,
         )
-
         for name in tensors:
             logger.debug(
                 "Storing tensor %s (uuids %s) for nodes %s",
@@ -392,61 +367,41 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
             for info in graph_node_info[name]:
                 self.tensor_store.increment_ref(
                     request_id, info.uuid, n=len([
-                        graph_edge for graph_edge in edges if graph_edge.next_node != EMPTY_DESTINATION
-                    ]) # number of nodes it will be sent to
+                        e for e in edges if e.next_node != EMPTY_DESTINATION
+                    ])
                 )
             for edge in edges:
                 edge.tensor_info = graph_node_info[name]
 
-    def _cleanup_by_uuid(
-        self, request_id: str, uuid: str
-    ):
-        logger.debug("Deleting tensor uuid %s", uuid)
-        if not self.tensor_store.check_uuid_presence(request_id, uuid):
-            logger.warning("Trying to cleanup tensor %s, but uuid not found", uuid)
-            return
+    # ---- abstract: transport-specific ----
 
-        if self.protocol == CommProtocol.RDMA and self.engine is not None \
-                and self.tensor_store.is_registered(request_id, uuid):
-            ret_value = self.engine.unregister_memory(
-                self.tensor_store.get_tensor(request_id, uuid).data_ptr()
-            )
-            if ret_value != 0:
-                raise RuntimeError("Mooncake memory unregistration failed.")
-        self.tensor_store.remove_tensor(request_id, uuid)
+    @abstractmethod
+    def register_for_send(self, request_id: str, uuids: list[str]):
+        ...
 
-    def set_persist(self, request_id: str, uuid: str, persist: bool):
-        self.tensor_store.set_metadata(
-            request_id, uuid, persist=persist
-        )
-        if self.tensor_store.can_gc(request_id, uuid):
-            self._cleanup_by_uuid(request_id, uuid)
+    @abstractmethod
+    def start_read_tensors(self, request_id: str, graph_edges: list[GraphEdge]):
+        ...
 
-    def dereference(self, request_id: str, uuid: str, n: int=1):
-        self.tensor_store.dereference(request_id, uuid, n=n)
-        if self.tensor_store.can_gc(request_id, uuid):
-            self._cleanup_by_uuid(request_id, uuid)
+    @abstractmethod
+    def _cleanup_by_uuid(self, request_id: str, uuid: str):
+        ...
 
-    def increment_ref(self, request_id: str, uuid: str, n: int=1):
-        self.tensor_store.increment_ref(request_id, uuid, n=n)
+    # ---- shared: polling & ACKs ----
 
     def _collect_and_send_acks(
-        self, request_id: str, graph_edges: list[GraphEdge]
+        self, request_id: str, graph_edges: list[GraphEdge],
     ):
-        # Collect ACKs to send: entity_id -> {UUID -> count}
-        acks:  dict[str, dict[str, int]] = {}
-
+        acks: dict[str, dict[str, int]] = {}
         for edge in graph_edges:
             for info in edge.tensor_info:
                 if info.source_entity not in acks:
                     acks[info.source_entity] = {}
                 acks[info.source_entity][info.uuid] = acks[info.source_entity].get(
                     info.uuid, 0) + 1
-
-        # Send ACKs to senders
         for source_entity, tensors in acks.items():
             if source_entity == self.my_entity_id:
-                continue  # local transfer, no ACK needed
+                continue
             self.communicator.send(
                 source_entity,
                 WorkerMessage(
@@ -454,48 +409,14 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
                     body=TensorReceived(
                         request_id=request_id,
                         successful_tensors=tensors,
-                        failed_tensor_ids=[], # TODO: handle failed transfers
+                        failed_tensor_ids=[],
                     ),
                 ),
             )
 
-    def cleanup_request(self, request_id: str):
-        for uuid in self.tensor_store.get_all_uuids(request_id):
-            self.tensor_store.set_metadata(request_id, uuid, persist=False)
-            if not self.tensor_store.can_gc(request_id, uuid):
-                logger.warning(
-                    "Deferring cleanup of tensor uuid %s "
-                    "(awaiting TENSOR_RECEIVED ACK)", uuid
-                )
-                continue
-            self._cleanup_by_uuid(request_id, uuid)
-
-        # remove pending transfers but send ACKs
-        self._collect_and_send_acks(
-            request_id, sum([
-                ep.graph_edges for ep in self.pending if ep.request_id == request_id
-            ], start=[])
-        )
-        self.pending = [
-            ep for ep in self.pending if ep.request_id != request_id
-        ]
-
-    def get_tensor(self, request_id: str, uuid: str) -> torch.Tensor:
-        return self.tensor_store.get_tensor(
-            request_id=request_id, uuid=uuid
-        )
-
     def get_ready_tensors(self) -> dict[str, list[GraphEdge]]:
-        """
-        Poll CUDA events. Return {request_id: [ready GraphEdges]}.
-        Remove completed entries from self.pending.
-        Sends TENSOR_RECEIVED ACKs back to senders so they can free buffers.
-        """
-
-        # request_id -> ready graph edges
         ready: dict[str, list[GraphEdge]] = {}
         still_pending = []
-
         for ep in self.pending:
             if ep.future is None or ep.future.done():
                 if ep.future is not None:
@@ -509,28 +430,124 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
             else:
                 still_pending.append(ep)
         self.pending = still_pending
+
         for req_id, edges in ready.items():
             self._collect_and_send_acks(req_id, edges)
             for edge in edges:
                 for info in edge.tensor_info:
-                    self.tensor_store.dereference(
-                        req_id, info.uuid, 1
-                    )
-
+                    self.tensor_store.dereference(req_id, info.uuid, 1)
         return ready
 
-    def start_read_tensors(
-        self, request_id: str,
-        graph_edges: list[GraphEdge],
+    # ---- shared: TensorStore delegation ----
+
+    def get_tensor(self, request_id: str, uuid: str) -> torch.Tensor:
+        return self.tensor_store.get_tensor(request_id=request_id, uuid=uuid)
+
+    def set_persist(self, request_id: str, uuid: str, persist: bool):
+        self.tensor_store.set_metadata(request_id, uuid, persist=persist)
+        if self.tensor_store.can_gc(request_id, uuid):
+            self._cleanup_by_uuid(request_id, uuid)
+
+    def dereference(self, request_id: str, uuid: str, n: int = 1):
+        self.tensor_store.dereference(request_id, uuid, n=n)
+        if self.tensor_store.can_gc(request_id, uuid):
+            self._cleanup_by_uuid(request_id, uuid)
+
+    def increment_ref(self, request_id: str, uuid: str, n: int = 1):
+        self.tensor_store.increment_ref(request_id, uuid, n=n)
+
+    def cleanup_request(self, request_id: str):
+        for uuid in self.tensor_store.get_all_uuids(request_id):
+            self.tensor_store.set_metadata(request_id, uuid, persist=False)
+            if not self.tensor_store.can_gc(request_id, uuid):
+                logger.warning(
+                    "Deferring cleanup of tensor uuid %s "
+                    "(awaiting TENSOR_RECEIVED ACK)", uuid
+                )
+                continue
+            self._cleanup_by_uuid(request_id, uuid)
+
+        self._collect_and_send_acks(
+            request_id,
+            sum([ep.graph_edges for ep in self.pending if ep.request_id == request_id], start=[]),
+        )
+        self.pending = [ep for ep in self.pending if ep.request_id != request_id]
+
+
+# ---------------------------------------------------------------------------
+# MooncakeCommunicationManager
+# ---------------------------------------------------------------------------
+
+class MooncakeCommunicationManager(TensorCommunicationManager):
+    def __init__(
+        self,
+        my_entity_id: str,
+        hostname: str,
+        device: str,
+        communicator: BaseCommunicator,
+        protocol: CommProtocol = CommProtocol.RDMA,
+        metadata_server: str = "P2PHANDSHAKE",
+        tcp_transfer_device: str = "",
     ):
-        """
-        For each edge with tensor_info (RDMA source): allocate dst tensor,
-        register memory, call engine.transfer_read_on_cuda(), record CUDA event.
-        For each edge WITHOUT tensor_info (signal-only): no data to transfer.
-        """
+        engine = MooncakeTransferEngine(
+            hostname=hostname,
+            protocol=protocol,
+            metadata_server=metadata_server,
+            tcp_transfer_device=tcp_transfer_device,
+        )
+        super().__init__(
+            my_entity_id=my_entity_id,
+            my_session_id=engine.get_session_id(),
+            device=device,
+            communicator=communicator,
+            transfer_engine=engine,
+        )
+        self.protocol = protocol
+        self._async_reader = AsyncMooncakeReader(
+            engine._engine, device=device
+        )
+
+    def register_for_send(self, request_id, uuids):
+        torch.cuda.default_stream().synchronize()
+        for uuid in uuids:
+            if self.protocol == CommProtocol.RDMA:
+                if self.tensor_store.is_registered(request_id, uuid):
+                    continue
+                logger.debug("Registering %s for send", uuid)
+                tensor = self.tensor_store.get_tensor(
+                    request_id=request_id, uuid=uuid
+                )
+                ret_value = self.transfer_engine.register_memory(
+                    tensor.data_ptr(), tensor.nbytes
+                )
+                if ret_value != 0:
+                    raise RuntimeError(
+                        f"Mooncake memory registration failed for request id {request_id}, uuid {uuid}."
+                    )
+            self.tensor_store.set_metadata(
+                request_id, uuid, mem_registered=True
+            )
+
+    def _cleanup_by_uuid(self, request_id: str, uuid: str):
+        logger.debug("Deleting tensor uuid %s", uuid)
+        if not self.tensor_store.check_uuid_presence(request_id, uuid):
+            logger.warning("Trying to cleanup tensor %s, but uuid not found", uuid)
+            return
+        if self.protocol == CommProtocol.RDMA \
+                and self.tensor_store.is_registered(request_id, uuid):
+            ret_value = self.transfer_engine.unregister_memory(
+                self.tensor_store.get_tensor(request_id, uuid).data_ptr()
+            )
+            if ret_value != 0:
+                raise RuntimeError("Mooncake memory unregistration failed.")
+        self.tensor_store.remove_tensor(request_id, uuid)
+
+    def start_read_tensors(
+        self, request_id: str, graph_edges: list[GraphEdge],
+    ):
         for graph_edge in graph_edges:
             if len(graph_edge.tensor_info) == 0:
-                continue  # signal-only edge, no data to transfer
+                continue
 
             logger.debug(
                 "Starting to read in %d tensors %s for graph node %s",
@@ -541,9 +558,9 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
             for info in graph_edge.tensor_info:
                 if info.source_entity == self.my_entity_id or self.tensor_store.check_uuid_presence(
                     request_id, info.uuid
-                ): # we already have this tensor!
+                ):
                     self.tensor_store.increment_ref(
-                        request_id, info.uuid, 1 # increment reference while it is being read
+                        request_id, info.uuid, 1
                     )
                     continue
                 buffer = torch.empty(
@@ -562,11 +579,7 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
                 )
 
                 if self.protocol == CommProtocol.RDMA:
-                    if self.engine is None:
-                        raise RuntimeError(
-                            "Cannot start RDMA reads: TransferEngine is not available."
-                        )
-                    self.engine.register_memory(buffer.data_ptr(), info.nbytes)
+                    self.transfer_engine.register_memory(buffer.data_ptr(), info.nbytes)
 
                 read_info.append(TransferReadInfo(
                     source_session_id=info.source_session_id,
@@ -678,12 +691,14 @@ class SharedMemoryCommunicationManager(TensorCommunicationManager):
         communicator: BaseCommunicator,
         shm_dir: str | None = None,
     ):
-        self.my_entity_id = my_entity_id
-        self.my_session_id = hostname
-        self.device = device
-        self.communicator = communicator
-        self.tensor_store = TensorStore()
-        self.engine = None  # no Mooncake engine
+        engine = LocalTransferEngine(hostname=hostname)
+        super().__init__(
+            my_entity_id=my_entity_id,
+            my_session_id=engine.get_session_id(),
+            device=device,
+            communicator=communicator,
+            transfer_engine=engine,
+        )
 
         self.shm_dir = shm_dir or _default_shm_dir()
         os.makedirs(self.shm_dir, exist_ok=True)
@@ -691,62 +706,8 @@ class SharedMemoryCommunicationManager(TensorCommunicationManager):
         # uuid → file path for sender-side cleanup
         self._shm_files: dict[str, str] = {}
 
-        # Same pending pattern as Mooncake; future is always None (reads are synchronous).
-        self.pending: list[FutureAndPointers] = []
-
     def _shm_path(self, entity_id: str, uuid: str) -> str:
         return os.path.join(self.shm_dir, f"mminf_{entity_id}_{uuid}")
-
-    # ---- store (identical to Mooncake) ----
-
-    def store_and_return_tensor_info(
-        self, request_id: str, tensors: NameToTensorList,
-    ) -> dict[str, list[TensorPointerInfo]]:
-        if torch.cuda.is_available():
-            torch.cuda.default_stream().synchronize()
-        tensor_info: dict[str, list[TensorPointerInfo]] = {}
-        for name, tensor_list in tensors.items():
-            tensor_info[name] = []
-            for tensor in tensor_list:
-                tensor_uuid = str(uuid4())
-                self.tensor_store.put_tensor(
-                    request_id=request_id, uuid=tensor_uuid, tensor=tensor,
-                )
-                logger.debug("SHM: storing tensor name %s uuid %s", name, tensor_uuid)
-                tensor_info[name].append(TensorPointerInfo(
-                    dims=tensor.shape,
-                    dtype=tensor.dtype,
-                    stride=tensor.stride(),
-                    nbytes=tensor.nbytes,
-                    address=tensor.data_ptr(),
-                    uuid=tensor_uuid,
-                    source_session_id=self.my_session_id,
-                    source_entity=self.my_entity_id,
-                ))
-        return tensor_info
-
-    def store_and_populate_graph_edges(
-        self, request_id: str, tensors: NameToTensorList,
-        graph_edges: list[GraphEdge],
-    ):
-        name_to_graph_edges: dict[str, list[GraphEdge]] = {}
-        for edge in graph_edges:
-            name_to_graph_edges.setdefault(edge.name, []).append(edge)
-
-        graph_node_info = self.store_and_return_tensor_info(
-            request_id=request_id, tensors=tensors,
-        )
-        for name in tensors:
-            edges = name_to_graph_edges.get(name, [])
-            for info in graph_node_info[name]:
-                self.tensor_store.increment_ref(
-                    request_id, info.uuid,
-                    n=len([e for e in edges if e.next_node != EMPTY_DESTINATION]),
-                )
-            for edge in edges:
-                edge.tensor_info = graph_node_info[name]
-
-    # ---- register (SHM-specific: serialize tensor to file) ----
 
     def register_for_send(self, request_id: str, uuids: list[str]):
         if torch.cuda.is_available():
@@ -762,8 +723,6 @@ class SharedMemoryCommunicationManager(TensorCommunicationManager):
             self._shm_files[uuid] = path
             self.tensor_store.set_metadata(request_id, uuid, mem_registered=True)
             logger.debug("SHM: wrote tensor %s to %s (%d bytes)", uuid, path, len(data))
-
-    # ---- read (SHM-specific: read file, deserialize) ----
 
     def start_read_tensors(
         self, request_id: str, graph_edges: list[GraphEdge],
@@ -797,55 +756,6 @@ class SharedMemoryCommunicationManager(TensorCommunicationManager):
                 )
             )
 
-    # ---- poll & ACK (same logic as Mooncake; all reads are instantly ready) ----
-
-    def _collect_and_send_acks(
-        self, request_id: str, graph_edges: list[GraphEdge],
-    ):
-        acks: dict[str, dict[str, int]] = {}
-        for edge in graph_edges:
-            for info in edge.tensor_info:
-                if info.source_entity not in acks:
-                    acks[info.source_entity] = {}
-                acks[info.source_entity][info.uuid] = acks[info.source_entity].get(
-                    info.uuid, 0) + 1
-        for source_entity, tensors in acks.items():
-            if source_entity == self.my_entity_id:
-                continue
-            self.communicator.send(
-                source_entity,
-                WorkerMessage(
-                    message_type=WorkerMessageType.TENSOR_RECEIVED,
-                    body=TensorReceived(
-                        request_id=request_id,
-                        successful_tensors=tensors,
-                        failed_tensor_ids=[],
-                    ),
-                ),
-            )
-
-    def get_ready_tensors(self) -> dict[str, list[GraphEdge]]:
-        ready: dict[str, list[GraphEdge]] = {}
-        still_pending = []
-        for ep in self.pending:
-            if ep.future is None or ep.future.done():
-                if ep.future is not None:
-                    ep.future.result()
-                for edge in ep.graph_edges:
-                    ready.setdefault(ep.request_id, []).append(edge)
-            else:
-                still_pending.append(ep)
-        self.pending = still_pending
-
-        for req_id, edges in ready.items():
-            self._collect_and_send_acks(req_id, edges)
-            for edge in edges:
-                for info in edge.tensor_info:
-                    self.tensor_store.dereference(req_id, info.uuid, 1)
-        return ready
-
-    # ---- cleanup (SHM-specific: unlink file) ----
-
     def _cleanup_by_uuid(self, request_id: str, uuid: str):
         logger.debug("SHM: cleaning up tensor uuid %s", uuid)
         if not self.tensor_store.check_uuid_presence(request_id, uuid):
@@ -859,41 +769,6 @@ class SharedMemoryCommunicationManager(TensorCommunicationManager):
             except FileNotFoundError:
                 pass
         self.tensor_store.remove_tensor(request_id, uuid)
-
-    # ---- TensorStore delegation (identical to Mooncake) ----
-
-    def get_tensor(self, request_id: str, uuid: str) -> torch.Tensor:
-        return self.tensor_store.get_tensor(request_id=request_id, uuid=uuid)
-
-    def set_persist(self, request_id: str, uuid: str, persist: bool):
-        self.tensor_store.set_metadata(request_id, uuid, persist=persist)
-        if self.tensor_store.can_gc(request_id, uuid):
-            self._cleanup_by_uuid(request_id, uuid)
-
-    def dereference(self, request_id: str, uuid: str, n: int = 1):
-        self.tensor_store.dereference(request_id, uuid, n=n)
-        if self.tensor_store.can_gc(request_id, uuid):
-            self._cleanup_by_uuid(request_id, uuid)
-
-    def increment_ref(self, request_id: str, uuid: str, n: int = 1):
-        self.tensor_store.increment_ref(request_id, uuid, n=n)
-
-    def cleanup_request(self, request_id: str):
-        for uuid in self.tensor_store.get_all_uuids(request_id):
-            self.tensor_store.set_metadata(request_id, uuid, persist=False)
-            if not self.tensor_store.can_gc(request_id, uuid):
-                logger.warning(
-                    "SHM: deferring cleanup of tensor uuid %s "
-                    "(awaiting TENSOR_RECEIVED ACK)", uuid,
-                )
-                continue
-            self._cleanup_by_uuid(request_id, uuid)
-
-        self._collect_and_send_acks(
-            request_id,
-            sum([ep.graph_edges for ep in self.pending if ep.request_id == request_id], start=[]),
-        )
-        self.pending = [ep for ep in self.pending if ep.request_id != request_id]
 
 
 # ---------------------------------------------------------------------------
