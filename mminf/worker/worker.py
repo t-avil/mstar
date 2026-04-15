@@ -125,7 +125,7 @@ class Worker:
             transfer_engine_info=TransferEngineInfo(
                 my_entity_id=worker_id,
                 my_session_id=self.tensor_manager.my_session_id,
-                transfer_engine=self.tensor_manager.engine
+                transfer_engine=self.tensor_manager.transfer_engine
             ),
             model=model,
             enable_nvtx=self.enable_nvtx
