@@ -555,8 +555,10 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
                 self.tensor_store.set_metadata(
                     request_id, info.uuid, mem_registered=True
                 )
+                # +1 for transit (released by get_ready_tensors)
+                # +1 for graph-node usage (released by _cleanup_consumed_inputs)
                 self.tensor_store.increment_ref(
-                    request_id, info.uuid, 1 # increment reference while it is being read
+                    request_id, info.uuid, 2
                 )
 
                 if self.protocol == CommProtocol.RDMA:
@@ -784,7 +786,9 @@ class SharedMemoryCommunicationManager(TensorCommunicationManager):
                 tensor = _deserialize_tensor(data, self.device)
                 self.tensor_store.put_tensor(request_id, info.uuid, tensor)
                 self.tensor_store.set_metadata(request_id, info.uuid, mem_registered=False)
-                self.tensor_store.increment_ref(request_id, info.uuid, 1)
+                # +1 for transit (released by get_ready_tensors)
+                # +1 for graph-node usage (released by _cleanup_consumed_inputs)
+                self.tensor_store.increment_ref(request_id, info.uuid, 2)
                 logger.debug("SHM: read tensor %s from %s", info.uuid, path)
             self.pending.append(
                 FutureAndPointers(
