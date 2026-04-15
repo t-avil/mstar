@@ -94,10 +94,6 @@ class NodeSubmodule(torch.nn.Module):
                 graph_walk="decode", requires_cfg=False, labels=["main"],
                 dummy_capture_inputs=[{"text_inputs": [torch.zeros(1, dtype=torch.long, device=device)]}]
             ),
-            CudaGraphConfig(
-                graph_walk="decode", requires_cfg=True, labels=["main"],
-                dummy_capture_inputs=[{"text_inputs": [torch.zeros(1, dtype=torch.long, device=device)]}]
-            )
         ]
 
     def can_use_cuda_graphs(self, graph_walk: str) -> bool:
