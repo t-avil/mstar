@@ -831,7 +831,12 @@ class Worker:
                     continue
 
                 # 4. Gather input tensors for the batch
+                logger.debug(
+                    "Building node batch for %s walk=%s reqs=%s",
+                    batch.node_name, batch.graph_walk, list(batch.node_objects.keys()),
+                )
                 node_batch = self._build_node_batch(batch)
+                logger.debug("Node batch built successfully")
 
                 # 5. Execute via engine
                 engine = self.engine_manager.get_engine(batch.node_name)
