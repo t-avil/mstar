@@ -40,7 +40,7 @@ class DummyOmniModel(Model):
                 ],
             ),
             Loop(
-                section=GraphNode(
+                curr_section_replica=GraphNode(
                     name="MTP",
                     input_ids=["codec_hidden"],
                     outputs=[

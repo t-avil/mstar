@@ -127,7 +127,7 @@ class OrpheusModel(Model):
 
         decode = DynamicLoop(
             name="decode_loop",
-            section=GraphNode(
+            curr_section_replica=GraphNode(
                 name="LLM",
                 input_ids=["text_inputs"],
                 outputs=[

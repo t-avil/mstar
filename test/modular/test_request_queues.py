@@ -12,7 +12,7 @@ if __name__ == "__main__":
     # show-o2-style graph with weird stuff added to stress-test
 
     loop = Loop(
-        section=Parallel([
+        curr_section_replica=Parallel([
             Sequential([
                 GraphNode(
                     name="LLM",
@@ -23,7 +23,7 @@ if __name__ == "__main__":
                     ]
                 ),
                 Loop(
-                    section=Sequential([
+                    curr_section_replica=Sequential([
                         GraphNode(
                             name="flow",
                             input_ids=["hidden_states", "mystery", "mystery2"],
@@ -74,7 +74,7 @@ if __name__ == "__main__":
     loop = Parallel([
         Sequential([
             Loop(
-                section=loop.section.sections[0].sections[0],
+                curr_section_replica=loop.curr_section_replica.sections[0].sections[0],
                 n_iters=loop.n_iters,
                 curr_iter=loop.curr_iter,
                 _external_inputs=loop._external_inputs,
@@ -82,7 +82,7 @@ if __name__ == "__main__":
                 outputs=loop.outputs
             ),
             Loop(
-                section=loop.section.sections[0].sections[1],
+                curr_section_replica=loop.curr_section_replica.sections[0].sections[1],
                 n_iters=loop.n_iters,
                 curr_iter=loop.curr_iter,
                 _external_inputs=loop._external_inputs,
@@ -91,7 +91,7 @@ if __name__ == "__main__":
             )
         ]),
         Loop(
-            section=loop.section.sections[1],
+            curr_section_replica=loop.curr_section_replica.sections[1],
             n_iters=loop.n_iters,
             curr_iter=loop.curr_iter,
             _external_inputs=loop._external_inputs,
@@ -121,7 +121,7 @@ if __name__ == "__main__":
             )
         ]),
         Loop(
-            section=Parallel([
+            curr_section_replica=Parallel([
                 Sequential([
                     GraphNode(
                         name="LLM",
@@ -132,7 +132,7 @@ if __name__ == "__main__":
                         ]
                     ),
                     Loop(
-                        section=Sequential([
+                        curr_section_replica=Sequential([
                             GraphNode(
                                 name="flow",
                                 input_ids=["hidden_states", "mystery", "mystery2"],

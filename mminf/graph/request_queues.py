@@ -2,6 +2,7 @@
 
 import logging
 from dataclasses import dataclass, field
+import time
 
 from mminf.graph.base import DestToGraphEdges, GraphEdge, GraphNode, GraphSection, get_node_to_inputs_mapping
 
@@ -28,10 +29,16 @@ class PerRequestNodeQueues:
     one of these queues.
     """
     waiting: GraphSection | None
+    full_section: GraphSection
     ready: list[GraphNode] = field(default_factory=list)
     # Nodes that have all non-streaming inputs ready
     waiting_for_stream: list[GraphNode] = field(default_factory=list)
     worker_graph_id: str = field(default="")
+
+    def reset(self):
+        self.full_section.reset()
+        self.waiting = self.full_section
+        self.ready.clear()
 
     def _update_ready_waiting(self):
         """
@@ -99,7 +106,6 @@ class PerRequestNodeQueues:
         external_outputs = sum(
             new_inputs.values(), start=[]
         )
-
         self._update_ready_waiting()
         logger.debug(
             ("Finished processing new graph inputs. Ready nodes: %s, waiting: %s.\n"

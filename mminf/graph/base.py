@@ -141,6 +141,10 @@ class GraphSection(ABC):
     ):
         pass
 
+    @abstractmethod
+    def reset(self):
+        pass
+
 
 @dataclass
 class GraphNode(GraphSection):
@@ -218,6 +222,13 @@ class GraphNode(GraphSection):
         request_id: str
     ):
         return
+    
+    def reset(self):
+        self.ready_inputs.clear()
+    
+    def clear_outputs(self):
+        for edge in self.outputs:
+            edge.tensor_info.clear()
 
 
 @dataclass
@@ -308,13 +319,17 @@ class Sequential(GraphSection):
             sec.register_communication_info(
                 communication_manager, request_id
             )
+    
+    def reset(self):
+        for sec in self.sections:
+            sec.reset()
 
 
 @dataclass
 class Parallel(GraphSection):
     sections: list[GraphSection]
 
-    def get_node_names(self) -> list[str]:
+    def get_node_names(self) -> set[str]:
         res = set()
         for s in self.sections:
             res.update(s.get_node_names())
@@ -392,11 +407,15 @@ class Parallel(GraphSection):
             sec.register_communication_info(
                 communication_manager, request_id
             )
+    
+    def reset(self):
+        for sec in self.sections:
+            sec.reset()
 
 
 @dataclass
 class Loop(GraphSection):
-    section: GraphSection # this is used to populate next_section and
+    curr_section_replica: GraphSection # this is used to populate next_section and
                           # in-progress section; it remains "clean"
     max_iters: int
     outputs: list[GraphEdge]
@@ -418,13 +437,13 @@ class Loop(GraphSection):
         return self.outputs
 
     def get_inputs(self):
-        return self.section.get_inputs()
+        return self.curr_section_replica.get_inputs()
 
     def get_node_names(self):
-        return self.section.get_node_names()
+        return self.curr_section_replica.get_node_names()
 
     def get_dyn_loop_names(self) -> set[str]:
-        return self.section.get_dyn_loop_names()
+        return self.curr_section_replica.get_dyn_loop_names()
     
     def register_communication_info(
         self, communication_manager,
@@ -432,7 +451,7 @@ class Loop(GraphSection):
     ):
         self._tensor_manager = communication_manager
         self._request_id = request_id
-        self.section.register_communication_info(
+        self.curr_section_replica.register_communication_info(
             communication_manager, request_id
         )
     
@@ -492,8 +511,8 @@ class Loop(GraphSection):
         return ingested
 
     def _get_external_inputs(self):
-        inputs = self.section.get_inputs()
-        internal_outputs = self.section.get_outputs()
+        inputs = self.curr_section_replica.get_inputs()
+        internal_outputs = self.curr_section_replica.get_outputs()
         output_names_dests = set([(edge.name, edge.next_node) for edge in internal_outputs])
 
         # compute "external inputs", i.e., ones that don't come from looping
@@ -505,11 +524,11 @@ class Loop(GraphSection):
     def _get_loop_back_signals(self) -> list[GraphEdge]:
         # these inputs and outputs only include external and loop-back signals;
         # they do not include signals that are purely internal to the section
-        inputs = self.section.get_inputs()
+        inputs = self.curr_section_replica.get_inputs()
         input_names_dests = [
             (edge.name, edge.next_node) for edge in inputs
         ]
-        outputs = self.section.get_outputs()
+        outputs = self.curr_section_replica.get_outputs()
 
         return [
             edge for edge in outputs if (edge.name, edge.next_node) in input_names_dests
@@ -519,69 +538,53 @@ class Loop(GraphSection):
         # In the disaggregated case, we need filter self.outputs for outputs
         # that this subgraph actually produces
         outputs_we_produce = set([
-            edge.name for edge in self.section.get_outputs()
+            edge.name for edge in self.curr_section_replica.get_outputs()
         ])
         self.outputs = [edge for edge in self.outputs if edge.name in outputs_we_produce]
 
         self._output_names = set([edge.name for edge in self.outputs])
         if self._curr_iter_section is None:
-            self._curr_iter_section = deepcopy(self.section)
+            self._curr_iter_section = self.curr_section_replica
         if self._nxt_iter_section is None:
-            self._nxt_iter_section = deepcopy(self.section)
+            self._nxt_iter_section = deepcopy(self.curr_section_replica)
         if self._external_inputs is None:
             self._external_inputs = self._get_external_inputs()
         if self._loop_back_signals is None:
             self._loop_back_signals = self._get_loop_back_signals()
 
-    def _get_advanced_loop(
-        self, curr_iter_section, nxt_iter_section
-    ):
-        return Loop(
-            section=self.section,
-            _curr_iter_section=curr_iter_section,
-            _nxt_iter_section=nxt_iter_section,
-            curr_iter=self.curr_iter + 1,
-            max_iters=self.max_iters,
-            outputs=self.outputs,
-            _external_inputs=self._external_inputs,
-            _loop_back_signals=self._loop_back_signals,
-            _tensor_manager=self._tensor_manager,
-            _request_id=self._request_id,
-            _uuid_label=self._uuid_label
-        )
 
     def _advance_one_iter(self) -> "Loop":
         self._uncache_outputs()
-        curr_iter_section = self._nxt_iter_section
-        nxt_iter_section = deepcopy(self.section)
+        self.curr_section_replica.reset()
+
+        new_curr, new_next = self._nxt_iter_section, self.curr_section_replica
+        self._curr_iter_section = new_curr
+        self._nxt_iter_section = new_next
+        self.curr_section_replica = new_curr
+        self.curr_iter += 1
 
         logger.debug(
             "Advancing loop with nodes %s from iter %d -> %d (out of %d)",
-            str(self.section.get_node_names()), self.curr_iter,
+            str(self.curr_section_replica.get_node_names()), self.curr_iter,
             self.curr_iter + 1, self.max_iters
         )
 
-        loop = self._get_advanced_loop(
-            curr_iter_section, nxt_iter_section
-        )
-        loop.ingest_inputs(get_node_to_inputs_mapping(
+        self.ingest_inputs(get_node_to_inputs_mapping(
             self._external_inputs
         ))
-        return loop
     
     def _is_done(self):
         return (self.max_iters == self.curr_iter + 1) and (self._curr_iter_section is None)
 
     def split_off_ready(self):
-        loop = self
         if self._curr_iter_section is None:
             if self._is_done():
                 return [], None
-            loop = self._advance_one_iter()
+            self._advance_one_iter()
 
-        first_ready, first_waiting = loop._curr_iter_section.split_off_ready()
-        loop._curr_iter_section = first_waiting
-        return first_ready, loop
+        first_ready, first_waiting = self._curr_iter_section.split_off_ready()
+        self._curr_iter_section = first_waiting
+        return first_ready, self
     
     def complete_loops(self) -> LoopCompletionOutput:
         output_signals = []
@@ -618,6 +621,12 @@ class Loop(GraphSection):
             outputs=output_signals,
             loop_back_name_dests_to_remove=loop_back_name_dests
         )
+    
+    def reset(self):
+        self.curr_section_replica.reset()
+        self._curr_iter_section = self.curr_section_replica
+        self._nxt_iter_section.reset()
+        self.curr_iter = 0
 
 
 @dataclass
@@ -637,20 +646,7 @@ class DynamicLoop(Loop):
         return (
             (self.max_iters == self.curr_iter + 1) or self._finished) \
                 and (self._curr_iter_section is None)
-
-    def _get_advanced_loop(
-        self, curr_iter_section, nxt_iter_section
-    ):
-        return DynamicLoop(
-            section=self.section,
-            name=self.name,
-            _curr_iter_section=curr_iter_section,
-            _nxt_iter_section=nxt_iter_section,
-            curr_iter=self.curr_iter + 1,
-            max_iters=self.max_iters,
-            outputs=self.outputs,
-            _external_inputs=self._external_inputs,
-            _loop_back_signals=self._loop_back_signals,
-            _tensor_manager=self._tensor_manager,
-            _request_id=self._request_id,
-        )
+    
+    def reset(self):
+        super().reset()
+        self._finished = False

@@ -2,7 +2,6 @@ import logging
 import time as _time
 from enum import Enum
 from time import sleep
-import time
 
 import torch
 
@@ -431,6 +430,8 @@ class Worker:
                 self._handle_tensor_received(message.body)
             elif message.message_type == WorkerMessageType.UNPERSIST_TENSORS:
                 self._unpersist_tensors(message.body)
+            elif message.message_type == WorkerMessageType.STOP_LOOPS:
+                self._stop_loops(message.body)
 
     def _process_messages(self) -> None:
         self._process_message_list(self.communicator.get_all_new_messages())
@@ -895,6 +896,7 @@ class Worker:
                             request_id, partition=batch_partition,
                         )
                     )
+                    batch.node_objects[request_id].clear_outputs()
 
                 # 5. Execute via engine
                 engine = self.engine_manager.get_engine(batch.node_name)

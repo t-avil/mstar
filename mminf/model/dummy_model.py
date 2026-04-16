@@ -83,7 +83,7 @@ class DummyModel(Model):
         image_gen = Sequential([
             Parallel([self._get_text_emb(), self._get_img_emb()]),
             Loop(
-                section=Sequential([
+                curr_section_replica=Sequential([
                     GraphNode(
                         name="LLM",
                         input_ids=["text_emb", "img_emb", "latents"],

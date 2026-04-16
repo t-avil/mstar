@@ -493,7 +493,7 @@ class BagelModel(Model):
         # -- decode: single LLM node (embed + transformer + lm_head) --
         decode = DynamicLoop(
             name="decode_loop",
-            section=GraphNode(
+            curr_section_replica=GraphNode(
                 name="LLM",
                 input_ids=["text_inputs"],
                 outputs=[
@@ -518,7 +518,7 @@ class BagelModel(Model):
         # there are N-1 intervals, so N-1 Euler steps are needed.
         image_gen = Sequential([
             Loop(
-                section=GraphNode(
+                curr_section_replica=GraphNode(
                     name="LLM",
                     input_ids=["latents", "time_index"],
                     outputs=[
@@ -550,7 +550,7 @@ class BagelModel(Model):
         # combine_cfg applies the CFG formula + Euler step after each iteration.
         image_gen_cfg = Sequential([
             Loop(
-                section=Sequential([
+                curr_section_replica=Sequential([
                     Parallel([
                         GraphNode(
                             name="LLM",

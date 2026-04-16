@@ -238,7 +238,7 @@ def _divide_into_worker_graphs(
 
     if isinstance(graph, Loop):
         loop_section_worker_graphs = _divide_into_worker_graphs(
-            graph.section,
+            graph.curr_section_replica,
             graph_walk=graph_walk,
             node_to_group_idx=node_to_group_idx,
             node_groups=node_groups,
@@ -254,7 +254,7 @@ def _divide_into_worker_graphs(
         for s in loop_section_worker_graphs:
             if isinstance(graph, DynamicLoop):
                 s.section = DynamicLoop(
-                    section=s.section,
+                    curr_section_replica=s.section,
                     name=graph.name,
                     max_iters=graph.max_iters,
                     curr_iter=graph.curr_iter,
@@ -265,7 +265,7 @@ def _divide_into_worker_graphs(
                 )
             else:
                 s.section = Loop(
-                    section=s.section,
+                    curr_section_replica=s.section,
                     max_iters=graph.max_iters,
                     curr_iter=graph.curr_iter,
                     _external_inputs=graph._external_inputs,

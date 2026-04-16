@@ -74,12 +74,14 @@ class WorkerGraphQueues:
         """
         Initialize queues for a new request
         """
-        self.per_request_queues[request_id] = PerRequestNodeQueues(
-            waiting=deepcopy(self.worker_graph.section),
-            worker_graph_id=self.worker_graph_id
-        )
-        self.per_request_queues[request_id].waiting.register_communication_info(
+        section_copy = deepcopy(self.worker_graph.section)
+        section_copy.register_communication_info(
             self.tensor_manager, request_id
+        )
+        self.per_request_queues[request_id] = PerRequestNodeQueues(
+            waiting=section_copy,
+            full_section=section_copy,
+            worker_graph_id=self.worker_graph_id
         )
 
     def remove_request(self, request_id: str):
@@ -127,11 +129,7 @@ class WorkerGraphQueues:
         At the end of a worker graph, reset the queues for a request so it can
         be used for the next full model forward pass.
         """
-        self.per_request_queues[request_id].waiting = deepcopy(self.worker_graph.section)
-        self.per_request_queues[request_id].waiting.register_communication_info(
-            self.tensor_manager, request_id
-        )
-        self.per_request_queues[request_id].ready = []
+        self.per_request_queues[request_id].reset()
     
     def stop_loops(self, request_id: str, loop_names: set[str]):
         def _stop_loops(section: GraphSection):
@@ -146,21 +144,6 @@ class WorkerGraphQueues:
                 # including dynamic loops
                 _stop_loops(section._curr_iter_section)
         _stop_loops(self.per_request_queues[request_id].waiting)
-    
-    def get_dynamic_loop_iters(self, request_id: str) -> dict[str, int]:
-        iter_dict = {}
-        def _get_iters(section: GraphSection):
-            if isinstance(section, Sequential) or isinstance(section, Parallel):
-                for sec in section.sections:
-                    _get_iters(sec)
-                return
-            if isinstance(section, DynamicLoop):
-                iter_dict[section.name] = section.curr_iter
-            if isinstance(section, Loop):
-                # including dynamic loops
-                _get_iters(section._curr_iter_section)
-        _get_iters(self.per_request_queues[request_id].waiting)
-        return iter_dict
     
     def get_dynamic_loop_iters(self, request_id: str) -> dict[str, int]:
         iter_dict = {}
@@ -490,7 +473,7 @@ class WorkerGraphsManager:
             ):
                 for name in loop_names:
                     if name in req_info.loop_stop_times:
-                        req_info.loop_stop_times[name] = update_loop_index_tree(
+                        update_loop_index_tree(
                             index_tree=req_info.loop_stop_times[name],
                             graph=waiting,
                             fwd_idx=req_info.fwd_index
@@ -549,7 +532,6 @@ class WorkerGraphsManager:
                         graph_walk=graph_walk
                     ), []).append(worker_id)
 
-                self.all_worker_graph_ids_to_dyn_loops
         graph_walk = current_fwd_info.graph_walk
         my_worker_graph_ids = [gid for gid in worker_graph_ids if gid in self.queues]
         partition_name = getattr(current_fwd_info, 'partition_name', 'default')
