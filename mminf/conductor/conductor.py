@@ -79,7 +79,7 @@ def _worker_process_target(
 
     from mminf.worker.worker import Worker
     logger.debug("Launching worker %s with graph nodes %s", worker_id, str(
-        sum([wg.section.get_node_names() for wg in my_worker_graphs], start=[])
+        [wg.section.get_node_names() for wg in my_worker_graphs]
     ))
     worker = Worker(
         worker_id=worker_id,

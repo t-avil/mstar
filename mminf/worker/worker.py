@@ -890,6 +890,13 @@ class Worker:
                 node_batch = self._build_node_batch(batch)
                 batch_partition = self.worker_graphs_manager.get_partition_for_node(batch.node_name)
 
+                for request_id, req_info in node_batch.per_request_info.items():
+                    req_info.dynamic_loop_iter_counts.update(
+                        self.worker_graphs_manager.get_dynamic_loop_iters(
+                            request_id, partition=batch_partition,
+                        )
+                    )
+
                 # 5. Execute via engine
                 engine = self.engine_manager.get_engine(batch.node_name)
                 logger.debug("Executing batch for node %s on engine %s", node_batch.node_name, str(type(engine)))

@@ -42,7 +42,9 @@ class IterIndexTree:
         return child.label_context_gt(other.children[child_name], target_label)
 
 
-def build_loop_index_tree(graph: GraphSection, fwd_idx: str):
+def build_loop_index_tree(
+    graph: GraphSection, fwd_idx: str
+) -> IterIndexTree:
     root = IterIndexTree(label="_fwd_idx", iter_index=fwd_idx)
     
     def _build(graph: GraphSection) -> dict[str, IterIndexTree]:

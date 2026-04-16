@@ -161,6 +161,21 @@ class WorkerGraphQueues:
                 _get_iters(section._curr_iter_section)
         _get_iters(self.per_request_queues[request_id].waiting)
         return iter_dict
+    
+    def get_dynamic_loop_iters(self, request_id: str) -> dict[str, int]:
+        iter_dict = {}
+        def _get_iters(section: GraphSection):
+            if isinstance(section, Sequential) or isinstance(section, Parallel):
+                for sec in section.sections:
+                    _get_iters(sec)
+                return
+            if isinstance(section, DynamicLoop):
+                iter_dict[section.name] = section.curr_iter
+            if isinstance(section, Loop):
+                # including dynamic loops
+                _get_iters(section._curr_iter_section)
+        _get_iters(self.per_request_queues[request_id].waiting)
+        return iter_dict
 
 
 @dataclass
@@ -480,6 +495,20 @@ class WorkerGraphsManager:
                             graph=waiting,
                             fwd_idx=req_info.fwd_index
                         )
+    
+    def get_dynamic_loop_iters(
+        self, request_id: str,
+        partition: str,
+    ) -> dict[str, int]:
+        part_info = self.per_request_info[request_id].per_partition_info[partition]
+        worker_graph_ids = part_info.graph_walk_worker_graph_ids
+
+        iter_counts: dict[str, int] = {}
+        for worker_graph_id in worker_graph_ids:
+            iter_counts.update(
+                self.queues[worker_graph_id].get_dynamic_loop_iters(request_id)
+            )
+        return iter_counts
 
     def add_request(
         self, request_id: str,

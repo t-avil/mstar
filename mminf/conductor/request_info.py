@@ -71,6 +71,7 @@ class CurrentForwardPassInfo:
     # set of names of loops to stop
     dynamic_loop_stop_signals: set[str] = field(default_factory=set)
     loop_stop_times: dict[str, IterIndexTree] = field(default_factory=dict)
+    dynamic_loop_iter_counts: dict[str, int] = field(default_factory=dict)
 
     def register_loop_stop(self, loop_name: str):
         self.dynamic_loop_stop_signals.add(loop_name)
@@ -78,6 +79,7 @@ class CurrentForwardPassInfo:
     def clear_loop_stop_info(self):
         self.loop_stop_times.clear()
         self.dynamic_loop_stop_signals.clear()
+        self.dynamic_loop_iter_counts.clear()
 
 # ---------------------------------------------------------------------------
 # Partition types for async graph partitions
