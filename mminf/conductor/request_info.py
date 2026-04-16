@@ -28,6 +28,30 @@ class SequenceInfo:
 
 
 @dataclass
+class PerLabelSeqInfo:
+    # {kv_cache_string -> {label: SequenceInfo}}
+    info: dict[str, dict[str, SequenceInfo]] = field(default_factory=dict)
+
+    def update(self, other: "PerLabelSeqInfo"):
+        for key, val in other.info.items():
+            if key not in self.info:
+                self.info[key] = val
+                continue
+            self.info[key] = {
+                **self.info[key],
+                **val
+            }
+
+    def get(self, kv_cache_str: str) -> dict:
+        return self.info.get(kv_cache_str, {})
+
+    def add(self, kv_cache_str: str, cache_info: dict[str, SequenceInfo]):
+        self.update(PerLabelSeqInfo(
+            info={kv_cache_str: cache_info}
+        ))
+
+
+@dataclass
 class CurrentForwardPassInfo:
     """
     Information that is passed into the worker / engines about this request
@@ -38,7 +62,7 @@ class CurrentForwardPassInfo:
     fwd_index: int
     random_seed: int
     step_metadata: dict = field(default_factory=dict)
-    per_label_seq_info: dict[str, SequenceInfo] = field(default_factory=dict)
+    per_label_seq_info: PerLabelSeqInfo = field(default_factory=PerLabelSeqInfo)
     partition_name: str = field(default="default")
 
 
@@ -83,4 +107,4 @@ class PartitionState:
     current_worker_graph_ids: set[str] = field(default_factory=set)
     num_output_tokens: int = 0
     curr_forward_outputs: list[str] = field(default_factory=list)
-    per_label_seq_info: dict[str, SequenceInfo] = field(default_factory=dict)
+    per_label_seq_info: PerLabelSeqInfo = field(default_factory=PerLabelSeqInfo)

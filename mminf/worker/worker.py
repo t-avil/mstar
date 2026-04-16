@@ -7,10 +7,10 @@ import torch
 
 from mminf.api_server.request_types import APIServerMessage, ResultTensors
 from mminf.communication.communicator import CommProtocol, ZMQCommunicator
-from mminf.communication.tensors import MooncakeCommunicationManager, NameToTensorList
+from mminf.communication.tensors import NameToTensorList, create_tensor_communication_manager
 from mminf.conductor.request_info import CurrentForwardPassInfo
 from mminf.engine.base import EngineType, NodeBatch, NodeOutput
-from mminf.engine.kv_store import StoreWritePolicy, TransferEngineInfo
+from mminf.engine.kv_store import KVCacheConfig, StoreWritePolicy, TransferEngineInfo
 from mminf.graph.base import GraphEdge
 from mminf.graph.request_queues import format_graph_edge_list
 from mminf.model.base import Model, WorkerGraph
@@ -56,11 +56,10 @@ class Worker:
         worker_id: str,
         worker_ids: list[str],
         my_worker_graphs: list[WorkerGraph],
-        engine_configs: list[dict],
+        kv_config: dict[str, KVCacheConfig],
         all_worker_graph_ids_to_graph_walks: dict[str, set[str]],
         all_worker_graph_ids_to_nodes: dict[str, list[str]],
         hostname: str = "localhost",
-        master_service: str = "localhost:50051",
         socket_path_prefix: str = "/tmp/mminf",
         tensor_comm_protocol: CommProtocol = CommProtocol.RDMA,
         device: torch.device = torch.device("cuda"),
@@ -107,21 +106,26 @@ class Worker:
             push_ids=worker_ids + ["conductor", "api_server", "api_server_preprocess_worker"],
             ipc_socket_path_prefix=socket_path_prefix,
         )
-        self.tensor_manager = MooncakeCommunicationManager(
+        self.tensor_manager = create_tensor_communication_manager(
+            protocol=tensor_comm_protocol,
             my_entity_id=worker_id,
             hostname=hostname,
+            device=self.device,
             communicator=self.communicator,
-            protocol=tensor_comm_protocol,
             tcp_transfer_device=tcp_transfer_device,
-            device=self.device
         )
 
-        self.engine_manager = EngineManager.from_config(
-            engine_configs=engine_configs, device=device,
+        node_names = set(sum([
+            wg.section.get_node_names() for wg in my_worker_graphs
+        ], start=[]))
+        self.engine_manager = EngineManager.build(
+            node_names,
+            device=device,
+            kv_config=kv_config,
             transfer_engine_info=TransferEngineInfo(
                 my_entity_id=worker_id,
                 my_session_id=self.tensor_manager.my_session_id,
-                transfer_engine=self.tensor_manager.engine
+                transfer_engine=self.tensor_manager.transfer_engine
             ),
             model=model,
             enable_nvtx=self.enable_nvtx
@@ -135,9 +139,7 @@ class Worker:
             all_worker_graph_ids_to_nodes,
             node_engine_types=node_engine_types,
         )
-        alloc_mgr = self.engine_manager.get_ar_alloc_manager()
-        if alloc_mgr is not None:
-            alloc_mgr.write_policy = write_policy
+        self.engine_manager.set_alloc_write_policies(write_policy)
         logger.info(
             "Worker %s: store write policy = %s", worker_id, write_policy.value
         )
@@ -145,7 +147,7 @@ class Worker:
         self._unprocessed_messages = {} # req_id -> messages for requests that are not in the queue
 
         # CPU offloading: LRU tracking and eviction policy
-        self._last_active: dict[str, float] = {}  # request_id -> monotonic timestamp
+        self._last_active: dict[tuple[str, str], float] = {}  # (request_id, node_name) -> monotonic timestamp
         self.eviction_policy = EvictionPolicy.LRU
 
         # Streaming buffers: request_id -> edge_name -> list of tensors
@@ -168,19 +170,21 @@ class Worker:
                 if any(n in my_node_names for n in self._get_node_names_for_partition(conn.to_partition, model)):
                     self._my_consumer_connections.append(conn)
 
+        # Set of edge names that arrive via streaming (used to distinguish
+        # streaming inputs from conductor-triggered non-streaming inputs
+        # when checking whether a target node is ready for ingestion).
+        self._streaming_edge_names: set[str] = {
+            conn.edge_name for conn in self._my_consumer_connections
+        }
+
         # Build consumer node cache: edge_name -> next_node name
         self._consumer_node_cache: dict[str, str] = {}
         if self._my_consumer_connections and model:
             walks = model.get_graph_walk_graphs()
             for conn in self._my_consumer_connections:
-                for _walk_name, section in walks.items():
+                for section in walks.values():
                     if hasattr(section, 'input_ids') and conn.edge_name in section.input_ids:
                         self._consumer_node_cache[conn.edge_name] = section.name
-
-        # Give all engines a reference to streaming buffers (for legacy path)
-        if not self._my_consumer_connections:
-            for engine in self.engine_manager._unique_engines():
-                engine.set_streaming_buffers(self.streaming_buffers)
 
     def _get_node_names_for_partition(self, partition_name: str, model: Model) -> list[str]:
         """Get the node names that belong to a partition."""
@@ -251,7 +255,11 @@ class Worker:
 
     def _add_new_request(self, body: NewRequest) -> None:
         logger.debug("Worker %s received request %s", self.worker_id, body.request_id)
-        self._last_active[body.request_id] = _time.monotonic()
+        ar_engine = self.engine_manager.get_ar_engine()
+        if ar_engine is not None:
+            for node_name in ar_engine.submodule_management.keys():
+                self._last_active[(body.request_id, node_name)] = _time.monotonic()
+
         self.worker_graphs_manager.add_request(
             request_id=body.request_id,
             worker_graph_ids=body.worker_graph_ids,
@@ -293,8 +301,12 @@ class Worker:
         self.engine_manager.remove_request(body.request_id)
         self.worker_graphs_manager.remove_request(body.request_id)
         self.tensor_manager.cleanup_request(body.request_id)
-        self._last_active.pop(body.request_id, None)
         self.streaming_buffers.pop(body.request_id, None)
+
+        ar_engine = self.engine_manager.get_ar_engine()
+        if ar_engine is not None:
+            for node_name in ar_engine.submodule_management.keys():
+                self._last_active.pop((body.request_id, node_name))
 
     def _handle_tensor_received(self, body: TensorReceived) -> None:
         """Sender-side cleanup: receiver confirmed RDMA read, free source buffers."""
@@ -414,32 +426,36 @@ class Worker:
         """Check all active StreamBuffers; when a chunk is ready, feed it as a normal input."""
         for request_id, req_info in list(self.worker_graphs_manager.per_request_info.items()):
             for edge_name, sbuf in req_info.stream_buffers.items():
-                synthetic_edge = sbuf.pop_waiting_edge()
                 consumer_node = self._consumer_node_cache.get(edge_name, "")
                 partition_name = self.worker_graphs_manager.get_partition_for_node(consumer_node)
-                
+
+                synthetic_edge = sbuf.pop_waiting_edge()
+
                 if synthetic_edge is None and sbuf.has_chunk_ready():
                     chunk = sbuf.pop_chunk()
                     chunk_tensor = chunk.data.get("data")
                     if chunk_tensor is None:
-                        continue
-
-                    # Store the chunk tensor so _build_node_batch can retrieve it via uuid
-                    tensor_infos = self.tensor_manager.store_and_return_tensor_info(
-                        request_id, {edge_name: [chunk_tensor]},
-                    )
-                    synthetic_edge = GraphEdge(
-                        next_node=consumer_node,
-                        name=edge_name,
-                        tensor_info=tensor_infos.get(edge_name, []),
-                    )
+                        # Empty chunk — producer done, no more data.
+                        # Create edge with empty tensor_info.
+                        synthetic_edge = GraphEdge(
+                            next_node=consumer_node,
+                            name=edge_name,
+                            tensor_info=[],
+                        )
+                    else:
+                        # Normal chunk — store tensor and create edge with tensor_info
+                        tensor_infos = self.tensor_manager.store_and_return_tensor_info(
+                            request_id, {edge_name: [chunk_tensor]},
+                        )
+                        synthetic_edge = GraphEdge(
+                            next_node=consumer_node,
+                            name=edge_name,
+                            tensor_info=tensor_infos.get(edge_name, []),
+                        )
 
                 if synthetic_edge is not None:
-                    # Route to all worker graphs (not just current walk) since
-                    # streaming chunks arrive cross-partition
-                    ingested = len(self.worker_graphs_manager.process_new_inputs(
+                    ingested = len(self.worker_graphs_manager.process_new_streaming_inputs(
                         request_id=request_id, inputs=[synthetic_edge],
-                        all_walks=True,
                     )) == 0
                     if not ingested:
                         sbuf.store_uningested_edge(synthetic_edge)
@@ -468,7 +484,7 @@ class Worker:
     # ------------------------------------------------------------------
 
     def _try_offload_cold_request(
-        self, batch_ids: set[str]
+        self, node_name: str, batch_ids: set[str]
     ) -> str | None:
         """Offload one request's KV pages to CPU using the configured eviction policy.
 
@@ -479,9 +495,15 @@ class Worker:
         Returns the victim request_id, or None if offloading wasn't possible.
         """
         ar_engine = self.engine_manager.get_ar_engine()
-        if ar_engine is None or ar_engine.cpu_page_pool is None:
+        if ar_engine is None:
             return None
-        alloc = ar_engine.alloc_manager
+        
+        submod_mgmt = ar_engine.submodule_management[node_name]
+        cache_mgmt = submod_mgmt.kv_management
+        if cache_mgmt.cpu_page_pool is None:
+            return None
+
+        alloc = cache_mgmt.alloc_manager
 
         # Gather all candidates with (rid, total_pages), split by location
         external: list[tuple[str, int]] = []
@@ -500,8 +522,8 @@ class Worker:
         if not candidates:
             return None
 
-        victim_id = self._select_eviction_victim(candidates)
-        freed = alloc.offload_request(victim_id, ar_engine.cpu_page_pool)
+        victim_id = self._select_eviction_victim(node_name, candidates)
+        freed = alloc.offload_request(victim_id, cache_mgmt.cpu_page_pool)
         logger.info(
             "Offloaded request %s to CPU (%d GPU pages freed, "
             "policy=%s, in_batch=%s)",
@@ -511,7 +533,7 @@ class Worker:
         return victim_id if freed > 0 else None
 
     def _select_eviction_victim(
-        self, candidates: list[tuple[str, int]]
+        self, node_name: str, candidates: list[tuple[str, int]]
     ) -> str:
         """Pick a victim from *candidates* based on ``self.eviction_policy``.
 
@@ -525,21 +547,28 @@ class Worker:
         return min(
             candidates,
             key=lambda x: (
-                self._last_active.get(x[0], 0.0),  # oldest first
+                self._last_active.get((x[0], node_name), 0.0),  # oldest first
                 -x[1],                               # then most pages
             ),
         )[0]
 
-    def _try_reload_request(self, request_id: str) -> bool:
+    def _try_reload_request(self, node_name: str, request_id: str) -> bool:
         """Reload an offloaded request back to GPU. Returns True if reloaded."""
         ar_engine = self.engine_manager.get_ar_engine()
-        if ar_engine is None or ar_engine.cpu_page_pool is None:
+        if ar_engine is None:
             return False
-        if not ar_engine.cpu_page_pool.is_offloaded(request_id):
+        
+        submod_mgmt = ar_engine.submodule_management[node_name]
+        cache_mgmt = submod_mgmt.kv_management
+        if cache_mgmt.cpu_page_pool is None:
             return False
+
+        if not cache_mgmt.cpu_page_pool.is_offloaded(request_id):
+            return False
+
         try:
-            ar_engine.alloc_manager.reload_request(
-                request_id, ar_engine.cpu_page_pool
+            cache_mgmt.alloc_manager.reload_request(
+                request_id, cache_mgmt.cpu_page_pool
             )
             logger.info("Reloaded request %s from CPU to GPU", request_id)
             return True
@@ -601,12 +630,20 @@ class Worker:
         batch: ScheduledBatch,
         output: "NodeOutput",
         routing_per_request: dict[str, NodeOutputRouting],
+        filtered_outputs_per_request: dict[str, list[GraphEdge]],
     ) -> dict[str, list[GraphEdge]]:
         """
         For outputs going to other workers: register tensors for RDMA send
         and populate tensor_info on the GraphEdges.
         For outputs staying local: store tensors in tensor_manager.
         Returns the output edges per request (with tensor_info filled in).
+
+        ``filtered_outputs_per_request`` contains, for each request, only the
+        GraphNode output edges whose names are actually present in the
+        submodule's returned output dict. Edges absent from the output dict
+        (e.g., Talker non-last prefill which returns {}, or Thinker with
+        audio_output=False which omits thinker_states) are excluded so that
+        empty-tensor_info edges are not routed downstream.
         """
         output_edges: dict[str, list[GraphEdge]] = {}
 
@@ -615,16 +652,16 @@ class Worker:
             request_output_tensors = output.per_request_output_tensors.get(
                 request_id, {}
             ) # name -> list of tensors
-            output_edges[request_id] = node.outputs
+            filtered_outputs = filtered_outputs_per_request.get(request_id, [])
+            output_edges[request_id] = filtered_outputs
 
             if not request_output_tensors:
-                # TODO (error handling?): this should not happen
-                continue
+                continue  # Node produced no outputs (e.g., KV-cache-only prefill step)
 
             self.tensor_manager.store_and_populate_graph_edges(
                 request_id=request_id,
                 tensors=request_output_tensors,
-                graph_edges=node.outputs
+                graph_edges=filtered_outputs
             )
 
             routing = routing_per_request[request_id]
@@ -790,7 +827,7 @@ class Worker:
                 # 3. Pick next batch via MicroScheduler
                 batch = self.scheduler.get_next_batch(self.worker_graphs_manager)
                 if batch is None:
-                    sleep(0.001)
+                    sleep(0.01)
                     continue
 
                 # 4. Gather input tensors for the batch
@@ -813,7 +850,7 @@ class Worker:
                 # 5a. Handle allocation failure: offload a victim, retry the rest
                 if output.allocation_failed:
                     batch_ids = set(batch.node_objects.keys())
-                    victim_id = self._try_offload_cold_request(batch_ids)
+                    victim_id = self._try_offload_cold_request(node_batch.node_name, batch_ids)
 
                     # Push all batch nodes back to their queues
                     for request_id, node in batch.node_objects.items():
@@ -844,7 +881,7 @@ class Worker:
                 # Update LRU timestamps for successfully executed requests
                 now = _time.monotonic()
                 for rid in batch.node_objects:
-                    self._last_active[rid] = now
+                    self._last_active[(rid, batch.node_name)] = now
 
                 batch_partition = self.worker_graphs_manager.get_partition_for_node(batch.node_name)
 
@@ -857,16 +894,31 @@ class Worker:
                 # 5b. Free consumed input tensors
                 self._cleanup_consumed_inputs(batch)
 
-                # 6. Route outputs through WorkerGraphsManager first to determine routing
+                # 6. Route outputs through WorkerGraphsManager first to determine routing.
+                # Filter each node's output edges to only those the submodule actually
+                # produced. This matters for cases like Talker non-last prefill (which
+                # returns {} -> no edges routed) or Thinker with audio_output=False
+                # (which omits thinker_states). Without filtering, edges whose names are
+                # absent from the output dict would be routed with empty tensor_info.
+                filtered_outputs_per_request: dict[str, list[GraphEdge]] = {}
                 routing_per_request: dict[str, NodeOutputRouting] = {}
                 for request_id, node in batch.node_objects.items():
+                    request_output_tensors = output.per_request_output_tensors.get(
+                        request_id, {}
+                    )
+                    filtered_outputs = [
+                        e for e in node.outputs if e.name in request_output_tensors
+                    ]
+                    filtered_outputs_per_request[request_id] = filtered_outputs
                     routing = self.worker_graphs_manager.process_node_outputs(
-                        request_id, node.outputs, graph_walk=batch.graph_walk
+                        request_id, filtered_outputs, graph_walk=batch.graph_walk
                     )
                     routing_per_request[request_id] = routing
 
                 # 7. Store output tensors, register RDMA if needed
-                self._store_outputs(batch, output, routing_per_request)
+                self._store_outputs(
+                    batch, output, routing_per_request, filtered_outputs_per_request
+                )
 
                 # 8. Send outputs to other workers / conductor
                 for request_id in batch.node_objects.keys():

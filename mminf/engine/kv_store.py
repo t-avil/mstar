@@ -5,10 +5,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 import torch
-from mooncake.engine import TransferEngine
 
-from mminf.communication.communicator import CommProtocol
-from mminf.communication.tensors import AsyncMooncakeReader, TransferReadInfo
+from mminf.communication.tensors import TensorTransferEngine, TransferReadInfo
 from mminf.conductor.request_info import SequenceInfo
 
 logger = logging.getLogger(__name__)
@@ -56,10 +54,16 @@ class KVCacheConfig:
     page_size: int = 128
     num_qo_heads: int | None = None  # Optional, defaults to num_kv_heads
     cpu_offload_pages: int = 0  # >0 enables CPU offloading with this many CPU pages
+    nodes: list[str] = None # defaults to all AR nodes
 
     def __post_init__(self):
         if self.num_qo_heads is None:
             self.num_qo_heads = self.num_kv_heads
+    
+    def get_node_str(self):
+        if self.nodes is None:
+            return "ALL_NODES"
+        return "///".join(self.nodes)
 
 
 @dataclass
@@ -101,20 +105,10 @@ class StoreAllocInfo:
 
 
 @dataclass
-class MooncakeStoreConfig:
-    hostname: str
-    metadata_server: str="http://localhost:8080/metadata"
-    segment_size=4 * 1024*1024*1024
-    local_buff_size=4 * 1024*1024*1024
-    protocol: CommProtocol=CommProtocol.RDMA
-    master_service: str="localhost:50051"
-
-
-@dataclass
 class TransferEngineInfo:
     my_entity_id: str
     my_session_id: str
-    transfer_engine: TransferEngine
+    transfer_engine: TensorTransferEngine
 
 
 class StoreWritePolicy(Enum):
@@ -135,12 +129,9 @@ class PagedAllocationManager:
         self.kv_cache = kv_cache
         self.write_policy = StoreWritePolicy.ALWAYS
 
-        self.engine = transfer_engine_info.transfer_engine
-        self._async_reader = AsyncMooncakeReader(
-            engine=self.engine, device=kv_cache.device
-        )
-
-        self.engine.register_memory(
+        self._transfer_engine = transfer_engine_info.transfer_engine
+        self._async_reader = self._transfer_engine.get_async_reader(kv_cache.device)
+        self._transfer_engine.register_memory(
             self.kv_cache.data_ptr(), self.kv_cache.nbytes
         )
         self.my_entity_id = transfer_engine_info.my_entity_id
@@ -280,35 +271,39 @@ class PagedAllocationManager:
 
         self.alloc(request_id, label, seq_len)
 
-        read_info = []
+        # When _async_reader is None (e.g., SHM / single-node), KV cache data
+        # is already in local GPU memory — no cross-worker transfer needed.
+        if self._async_reader is not None:
+            read_info = []
 
-        for page_pos in range(first_page, last_page + 1):
-            token_start = 0 if page_pos > first_page else (state.seq_len % self.config.page_size)
-            token_end = self.config.page_size if page_pos != last_page else (
-                seq_len % self.config.page_size or self.config.page_size
-            )
-
-            local_page_idx = state.page_indices[page_pos]
-            remote_page_idx = seq_info.page_indices[page_pos]
-
-            for layer in range(self.config.num_layers):
-                local_ptrs, nbytes = self._get_ptr_nbytes(
-                    layer, local_page_idx, token_start, token_end
-                )
-                remote_ptrs, _ = self._get_ptr_nbytes(
-                    layer, remote_page_idx, token_start, token_end,
-                    base_ptr=seq_info.kv_cache_addr
+            for page_pos in range(first_page, last_page + 1):
+                token_start = 0 if page_pos > first_page else (state.seq_len % self.config.page_size)
+                token_end = self.config.page_size if page_pos != last_page else (
+                    seq_len % self.config.page_size or self.config.page_size
                 )
 
-                read_info.extend([
-                    TransferReadInfo(
-                        seq_info.latest_session_id,
-                        local_ptr, remote_ptr, nbytes
-                    ) for local_ptr, remote_ptr in zip(local_ptrs, remote_ptrs, strict=True)
-                ])
-        future = self._async_reader.submit(read_info)
-        if future is not None:
-            self.pending_reads[request_id].setdefault(label, []).append(future)
+                local_page_idx = state.page_indices[page_pos]
+                remote_page_idx = seq_info.page_indices[page_pos]
+
+                for layer in range(self.config.num_layers):
+                    local_ptrs, nbytes = self._get_ptr_nbytes(
+                        layer, local_page_idx, token_start, token_end
+                    )
+                    remote_ptrs, _ = self._get_ptr_nbytes(
+                        layer, remote_page_idx, token_start, token_end,
+                        base_ptr=seq_info.kv_cache_addr
+                    )
+
+                    read_info.extend([
+                        TransferReadInfo(
+                            seq_info.latest_session_id,
+                            local_ptr, remote_ptr, nbytes
+                        ) for local_ptr, remote_ptr in zip(local_ptrs, remote_ptrs, strict=True)
+                    ])
+            future = self._async_reader.submit(read_info)
+            if future is not None:
+                self.pending_reads[request_id].setdefault(label, []).append(future)
+
         state.seq_len = seq_len
         state.position_id_start = seq_info.pos_id
         state.read_in_progress = True
@@ -337,9 +332,9 @@ class PagedAllocationManager:
         self.request_states[request_id][label] = self._new_state()
 
     def cleanup(self):
-        # wait for reads to finish before registering memory!
-        self._async_reader.shutdown()
-        self.engine.unregister_memory(
+        if self._async_reader is not None:
+            self._async_reader.shutdown()
+        self._transfer_engine.unregister_memory(
             self.kv_cache.data_ptr()
         )
 

@@ -350,6 +350,7 @@ class BagelModel(Model):
         prompt: str | None,
         input_modalities: list[str],
         output_modalities: list[str],
+        tensors: NameToTensorList | None = None,
         **kwargs,
     ) -> NameToTensorList:
         """Tokenize user prompt and system prompt (if think_mode).
@@ -357,6 +358,9 @@ class BagelModel(Model):
         Returns model-specific keys matching get_forward_pass_inputs:
             "text_inputs"    - tokenized user prompt
             "system_prompt"  - tokenized system prompt (think_mode only)
+
+        Bagel doesn't need the raw multimodal tensors for process_prompt;
+        images are loaded and handled as ``image_inputs`` by the data worker.
         """
         result: NameToTensorList = {}
 
@@ -404,14 +408,14 @@ class BagelModel(Model):
             return img_byte_arr.getvalue()
         raise ValueError(f"Unsupported modality: {modality!r}")
 
-    def get_kv_cache_config(self) -> KVCacheConfig:
-        return KVCacheConfig(
+    def get_kv_cache_config(self) -> list[KVCacheConfig]:
+        return [KVCacheConfig(
             num_layers=self.config.num_hidden_layers,
             num_kv_heads=self.config.num_key_value_heads,
             head_dim=self.config.hidden_size // self.config.num_attention_heads,
             max_seq_len=self.config.max_position_embeddings,
             num_qo_heads=self.config.num_attention_heads,
-        )
+        )]
 
     def get_submodule(self, node_name: str, device: str="cpu") -> torch.nn.Module | None:
         if node_name in self._submodule_cache:

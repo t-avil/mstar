@@ -2,7 +2,7 @@ import logging
 from copy import deepcopy
 from dataclasses import dataclass, field
 
-from mminf.conductor.request_info import CurrentForwardPassInfo
+from mminf.conductor.request_info import CurrentForwardPassInfo, PerLabelSeqInfo
 from mminf.graph.base import GraphEdge, GraphNode, TensorPointerInfo
 from mminf.graph.request_queues import (
     PerRequestNodeQueues,
@@ -55,6 +55,13 @@ class WorkerGraphQueues:
         Returns any signals that should be sent to other worker graphs.
         """
         return self.per_request_queues[request_id].process_new_inputs(inputs)
+    
+    def process_new_streaming_inputs(self, request_id: str, inputs: list[GraphEdge]) -> ProcessedInputs:
+        """
+        Add new inputs for a request, and update waiting/ready nodes accordingly.
+        Returns any signals that should be sent to other worker graphs.
+        """
+        return self.per_request_queues[request_id].process_streaming_input(inputs)
 
     def is_done(self, request_id) -> bool:
         q = self.per_request_queues[request_id]
@@ -181,7 +188,7 @@ class WorkerGraphsManager:
         self, request_id: str,
         partition_name,
         current_fwd_info: CurrentForwardPassInfo | None=None,
-        per_label_seq_info: dict | None=None,
+        per_label_seq_info: PerLabelSeqInfo | None=None,
     ):
         req_info = self.per_request_info[request_id]
         part_info = req_info.per_partition_info[partition_name]
@@ -198,10 +205,7 @@ class WorkerGraphsManager:
 
         if per_label_seq_info is not None:
             fwd_info = self.get_fwd_info(request_id, partition_name)
-            fwd_info.per_label_seq_info = {
-                **fwd_info.per_label_seq_info,
-                **per_label_seq_info
-            }
+            fwd_info.per_label_seq_info.update(per_label_seq_info)
 
     def get_graph_walk(self, request_id: str, partition_name: str):
         return self.get_fwd_info(request_id, partition_name).graph_walk
@@ -224,26 +228,35 @@ class WorkerGraphsManager:
         self,
         request_id: str,
         inputs: list[GraphEdge],
-        all_walks: bool = False,
     ):
         """
         Updates queues with new inputs for a request.
 
-        When ``all_walks`` is True, routes inputs to ALL worker graphs
-        (not just the current walk's). This is needed for streaming
-        chunks that arrive cross-partition.
+        Routes inputs to the worker graphs of the currently-active walks
+        for each partition this request participates in.
         """
-        if all_walks:
-            worker_graph_ids = self.per_request_info[request_id].worker_graph_ids
+        for part_info in self.per_request_info[request_id].per_partition_info.values():
+            worker_graph_ids = part_info.graph_walk_worker_graph_ids
             for worker_graph_id in worker_graph_ids:
                 inputs = self.queues[worker_graph_id].process_new_inputs(request_id, inputs).for_other_worker_graphs
-        else:
-            for part_info in self.per_request_info[request_id].per_partition_info.values():
-                worker_graph_ids = part_info.graph_walk_worker_graph_ids
-                for worker_graph_id in worker_graph_ids:
-                    inputs = self.queues[worker_graph_id].process_new_inputs(request_id, inputs).for_other_worker_graphs
         return inputs
+    
+    def process_new_streaming_inputs(
+        self,
+        request_id: str,
+        inputs: list[GraphEdge],
+    ):
+        """
+        Updates queues with new inputs for a request.
 
+        Routes inputs to the worker graphs of the currently-active walks
+        for each partition this request participates in.
+        """
+        for part_info in self.per_request_info[request_id].per_partition_info.values():
+            worker_graph_ids = part_info.graph_walk_worker_graph_ids
+            for worker_graph_id in worker_graph_ids:
+                inputs = self.queues[worker_graph_id].process_new_streaming_inputs(request_id, inputs).for_other_worker_graphs
+        return inputs
 
     def process_node_outputs(
         self, request_id: str,

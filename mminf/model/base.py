@@ -1,7 +1,7 @@
 
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Type
 from uuid import uuid4
 
@@ -17,13 +17,18 @@ from mminf.conductor.request_info import (
 )
 from mminf.engine.base import EngineType, NodeBatch
 from mminf.engine.cache_manager import BatchedCacheManager
+from mminf.engine.cuda_graph_runner import CudaGraphConfig
 from mminf.engine.kv_store import KVCacheConfig
 from mminf.graph.base import GraphEdge, GraphNode, GraphSection, Loop, Parallel, Sequential, TensorPointerInfo
 
 DECODE = "decode"
-
-
 MAX_OUTPUT_TOKENS = 2048
+
+
+@dataclass
+class TensorAndMetadata:
+    data: torch.Tensor
+    metadata: dict = field(default_factory=dict)
 
 
 class NodeSubmodule(torch.nn.Module):
@@ -80,6 +85,35 @@ class NodeSubmodule(torch.nn.Module):
         """
         ...
 
+    def get_cuda_graph_configs(self, device: torch.device) -> list[CudaGraphConfig]:
+        """Return dummy inputs for CUDA graph capture, or None if this walk
+        doesn't support CUDA graphs.
+
+        Default: returns text_inputs for "decode" walks. Override in subclasses
+        for walks with different input names (e.g., Qwen3-Omni Thinker uses
+        "input_embeds" and "cos_sin_3d"; Talker uses "input_embeds").
+        """
+        return [
+            CudaGraphConfig(
+                graph_walk="decode", requires_cfg=False, labels=["main"],
+                dummy_capture_inputs=[{"text_inputs": [torch.zeros(1, dtype=torch.long, device=device)]}]
+            ),
+        ]
+
+    def can_use_cuda_graphs(self, graph_walk: str) -> bool:
+        """Return True if this submodule supports CUDA graphs for ``graph_walk``.
+
+        Default: derives from ``get_cuda_graph_capture_inputs`` — if the
+        submodule provides capture templates for this walk, CUDA graphs
+        are supported.  Override for models with more complex eligibility
+        rules (e.g., excluding specific batch configurations).
+        """
+        if not hasattr(self, "_cached_cuda_graph_walks"):
+            self._cached_cuda_graph_walks = set([
+                cfg.graph_walk for cfg in self.get_cuda_graph_configs(device=torch.device("cpu"))
+            ])
+        return graph_walk in self._cached_cuda_graph_walks
+
     def can_batch(
         self, batch: NodeBatch
     ):
@@ -116,12 +150,17 @@ def _divide_into_worker_graphs(
     graph: GraphSection,
     graph_walk: str,
     node_to_group_idx: dict[str, int],
-    node_groups: list[dict]
+    node_groups: list[dict],
+    input_streams: set[str],
 ) -> list[WorkerGraph]:
     """
     Given a graph, break it into worker graphs
     """
     if isinstance(graph, GraphNode):
+        graph._streaming_inputs = input_streams.intersection(graph.input_ids)
+        if len(graph._streaming_inputs) > 0:
+            graph.consumes_stream = True
+            
         return [WorkerGraph(
             section=graph,
             graph_walks=set([graph_walk]),
@@ -135,7 +174,8 @@ def _divide_into_worker_graphs(
             graph.sections[0],
             graph_walk=graph_walk,
             node_to_group_idx=node_to_group_idx,
-            node_groups=node_groups
+            node_groups=node_groups,
+            input_streams=input_streams
         )
 
         for i in range(1, len(graph.sections)):
@@ -145,7 +185,8 @@ def _divide_into_worker_graphs(
                 graph.sections[i],
                 graph_walk=graph_walk,
                 node_to_group_idx=node_to_group_idx,
-                node_groups=node_groups
+                node_groups=node_groups,
+                input_streams=input_streams
             )
             if new_worker_graphs[0]._group_id == worker_graphs[-1]._group_id and \
                     not new_worker_graphs[0].consumes_stream:
@@ -161,7 +202,8 @@ def _divide_into_worker_graphs(
             _divide_into_worker_graphs(
                 s, graph_walk=graph_walk,
                 node_to_group_idx=node_to_group_idx,
-                node_groups=node_groups
+                node_groups=node_groups,
+                input_streams=input_streams
             ) for s in graph.sections
         ]
         # parallel sections that are all on the same worker can be merged
@@ -188,7 +230,8 @@ def _divide_into_worker_graphs(
             graph.section,
             graph_walk=graph_walk,
             node_to_group_idx=node_to_group_idx,
-            node_groups=node_groups
+            node_groups=node_groups,
+            input_streams=input_streams
         )
         if len(loop_section_worker_graphs) == 1:
             # fully colocated case
@@ -242,11 +285,22 @@ class Model(ABC):
                 name: i for name in group["node_names"]
             })
 
+        partition = "default"
+        for part in self.get_partitions():
+            if graph_walk in part.graph_walks:
+                partition = part.name
+                break
+        input_streams = set()
+        for conn in self.get_partition_topology().connections:
+            if conn.to_partition == partition:
+                input_streams.add(conn.edge_name)
+
         return _divide_into_worker_graphs(
             graph,
             graph_walk=graph_walk,
             node_to_group_idx=node_to_group_idx,
-            node_groups=node_groups
+            node_groups=node_groups,
+            input_streams=input_streams
         )
 
     def get_worker_graphs(self, config_path: str) -> list[WorkerGraph]:
@@ -263,7 +317,13 @@ class Model(ABC):
         ], start=[])
 
     @abstractmethod
-    def get_kv_cache_config(self) -> KVCacheConfig:
+    def get_kv_cache_config(self) -> list[KVCacheConfig]:
+        """Return per-node KV cache configs.
+
+        Maps AR node name -> KVCacheConfig. Nodes not in the dict
+        fall back to the first config (for models where all AR nodes
+        share the same config, e.g., Bagel's LLM / LLM_cfg_text / LLM_cfg_img).
+        """
         pass
 
     @abstractmethod
@@ -292,26 +352,69 @@ class Model(ABC):
         prompt: str | None,
         input_modalities: list[str],
         output_modalities: list[str],
+        tensors: NameToTensorList | None = None,
         **kwargs,
     ) -> NameToTensorList:
-        """Tokenize prompt and produce initial text tensors.
+        """Tokenize prompt and produce initial tensors for the request.
 
-        Called by the API server data worker to convert raw text input
-        into model-specific tensor format (e.g., tokenization). The
-        output dict keys are model-specific and will be referenced by
-        get_forward_pass_inputs via persist_signals.
+        Called by the API server data worker AFTER it has loaded raw
+        multimodal tensors from file_paths (images, audio, video).
+        The model may inspect the raw tensors dict and compute additional
+        derived tensors (e.g., Qwen3-Omni computes ``pixel_values``,
+        ``image_grid_thw``, ``audio_features``, ``audio_seqlens`` from the
+        raw ``image_inputs`` / ``audio_inputs`` / ``video_inputs``).
 
         Args:
             prompt: Raw text input from the user, or None if no text.
             input_modalities: List of input modality types for this request.
             output_modalities: List of desired output modality types.
+            tensors: Raw modality tensors already loaded by the data worker
+                (``image_inputs``, ``audio_inputs``, ``video_inputs``).
+                The model may read these to compute derived tensors.
+                Models that don't need the raw tensors may ignore this.
             **kwargs: Model-specific parameters (e.g., from model_kwargs).
 
         Returns:
-            NameToTensorList with model-specific keys, e.g.:
-            {"text_inputs": [tokenized_tensor], "system_prompt": [sys_tensor]}
+            NameToTensorList with tensors to MERGE into the request's
+            tensor dict.  Typically includes ``text_inputs`` plus any
+            model-specific derived tensors.  The returned dict is merged
+            into the existing ``tensors`` dict via ``dict.update``.
         """
         pass
+
+    def load_image(
+        self, filepath: str, device: str
+    ) -> TensorAndMetadata:
+        import torchvision
+        img = torchvision.io.decode_image(filepath).to(device)  # uint8 CxHxW
+        img = img.float() / 255.0
+
+        return TensorAndMetadata(img)
+    
+    def load_audio(
+        self, filepath: str, device: str
+    ) -> TensorAndMetadata:
+        from torchcodec.decoders import AudioDecoder
+        decoder = AudioDecoder(filepath, sample_rate=16000, num_channels=1)
+        audio = decoder.get_all_samples().data[0]
+        return TensorAndMetadata(
+            data=audio,
+            metadata=dict(
+                sample_rate=16000,
+                num_channels=1
+            )
+        )
+
+    def load_video(
+        self, filepath: str, device: str
+    ) :
+        from torchcodec.decoders import VideoDecoder
+        decoder = VideoDecoder(filepath, device=self.device)
+        video = torch.stack([frame for frame in decoder]).float() / 255.0
+        return TensorAndMetadata(
+            data=video,
+            metadata=asdict(decoder.metadata)
+        )   
 
     @abstractmethod
     def postprocess(

@@ -18,6 +18,7 @@ from mminf.conductor.request_info import (
     PartitionState,
     StreamingConnectionState,
 )
+from mminf.engine.kv_store import KVCacheConfig
 from mminf.graph.base import GraphEdge, TensorPointerInfo
 from mminf.model.base import ForwardPassArgs, Model, WorkerGraph
 from mminf.utils.ipc_format import (
@@ -43,7 +44,7 @@ def _worker_process_target(
     worker_id: str,
     worker_ids: list[str],
     my_worker_graphs: list[WorkerGraph],
-    engine_configs: list[dict],
+    kv_config: list[KVCacheConfig],
     all_worker_graph_ids_to_graph_walks: dict[str, set[str]],
     all_worker_graph_ids_to_nodes: dict[str, list[str]],
     hostname: str,
@@ -72,7 +73,7 @@ def _worker_process_target(
         worker_id=worker_id,
         worker_ids=worker_ids,
         my_worker_graphs=my_worker_graphs,
-        engine_configs=engine_configs,
+        kv_config=kv_config,
         all_worker_graph_ids_to_graph_walks=all_worker_graph_ids_to_graph_walks,
         all_worker_graph_ids_to_nodes=all_worker_graph_ids_to_nodes,
         hostname=hostname,
@@ -175,6 +176,20 @@ class Conductor:
             push_ids=self.worker_ids + ["api_server", "api_server_preprocess_worker"],
             ipc_socket_path_prefix=socket_path_prefix,
         )
+    
+    def _get_kv_config(self):
+        kv_cache_config = self.model.get_kv_cache_config()
+        # Apply any KV cache overrides from the YAML config
+        yaml_kv_overrides = self.model_config.get("kv_cache", {})
+        if yaml_kv_overrides:
+            from dataclasses import fields
+            for kv_cfg in kv_cache_config:
+                for f in fields(kv_cfg):
+                    if f.name in yaml_kv_overrides:
+                        setattr(kv_cfg, f.name, yaml_kv_overrides[f.name])
+                logger.info("KV cache config after YAML overrides: %s", kv_cfg)
+        return kv_cache_config
+        
 
     def _derive_worker_info(self):
         """Derive per-rank worker info from worker graphs and model engine types."""
@@ -191,42 +206,11 @@ class Conductor:
 
         # Per-worker graph units, engine configs
         self._per_worker_graphs: dict[str, list[WorkerGraph]] = {}
-        self._per_worker_engine_configs: dict[str, list[dict]] = {}
 
-        kv_cache_config = self.model.get_kv_cache_config()
-        # Apply any KV cache overrides from the YAML config
-        yaml_kv_overrides = self.model_config.get("kv_cache", {})
-        if yaml_kv_overrides:
-            from dataclasses import fields
-            for f in fields(kv_cache_config):
-                if f.name in yaml_kv_overrides:
-                    setattr(kv_cache_config, f.name, yaml_kv_overrides[f.name])
-            logger.info("KV cache config after YAML overrides: %s", kv_cache_config)
-
-        engine_model_cfg = {
-            "kv_cache": kv_cache_config,
-            "autocast_dtype": self.model.get_autocast_dtype()
-        }
         for rank in self._sorted_ranks:
             worker_id = f"worker_{rank}"
             worker_graphs = rank_to_worker_graphs[rank]
             self._per_worker_graphs[worker_id] = worker_graphs
-
-            # Collect engine configs: group nodes by engine type
-            engine_type_to_nodes: dict[str, list[str]] = defaultdict(list)
-            for wg in worker_graphs:
-                for node_name in wg.section.get_node_names():
-                    etype = node_engine_types[node_name].value
-                    if node_name not in engine_type_to_nodes[etype]:
-                        engine_type_to_nodes[etype].append(node_name)
-
-            self._per_worker_engine_configs[worker_id] = [
-                {
-                    "engine_type": etype, "node_names": nodes,
-                    "model_config": engine_model_cfg
-                }
-                for etype, nodes in engine_type_to_nodes.items()
-            ]
 
         # Global maps needed by all workers
         self._all_worker_graph_ids_to_graph_walks: dict[str, set[str]] = {
@@ -247,7 +231,7 @@ class Conductor:
                     "worker_id": worker_id,
                     "worker_ids": self.worker_ids,
                     "my_worker_graphs": self._per_worker_graphs[worker_id],
-                    "engine_configs": self._per_worker_engine_configs[worker_id],
+                    "kv_config": self._get_kv_config(),
                     "all_worker_graph_ids_to_graph_walks": self._all_worker_graph_ids_to_graph_walks,
                     "all_worker_graph_ids_to_nodes": self._all_worker_graph_ids_to_nodes,
                     "hostname": self.hostname,
@@ -455,7 +439,11 @@ class Conductor:
                 model_kwargs=body.model_kwargs,
             )
             pstate = partition_states[p.name]
+            # if a partition is not active at all in the request, register that here
+            pstate.is_done = fwd_args.request_done
+
             pstate.metadata = fwd_args.full_metadata
+            pstate.metadata.kwargs.update(fwd_args.step_metadata)
             self._set_partition_worker_graph_ids(
                 body.request_id, p.name, fwd_args.full_metadata.graph_walk,
             )
@@ -580,10 +568,7 @@ class Conductor:
             return []
 
         # Update sequence info
-        pstate.per_label_seq_info = {
-            **pstate.per_label_seq_info,
-            **body.per_label_seq_info,
-        }
+        pstate.per_label_seq_info.update(body.per_label_seq_info)
 
         # Absorb persist signals (request-level)
         if body.persist_signals:
@@ -641,6 +626,7 @@ class Conductor:
         if incoming_connections and partition_done_from_worker:
             pstate.is_done = True
 
+        prev_walk =  pstate.metadata.graph_walk
         fwd_args = self.model.get_partition_forward_pass_args(
             partition_name=partition_name,
             partition_metadata=pstate.metadata,
@@ -648,9 +634,8 @@ class Conductor:
             new_tokens=pstate.new_tokens,
             incoming_connections=incoming_connections,
         )
-
-        prev_walk = pstate.metadata.graph_walk
         pstate.metadata = fwd_args.full_metadata
+        pstate.metadata.kwargs.update(fwd_args.step_metadata)
 
         # Check max output tokens for partitions that produce tokens
         if pstate.num_output_tokens >= request_data.max_output_tokens:

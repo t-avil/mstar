@@ -6,6 +6,7 @@ import torch
 
 from mminf.communication.tensors import NameToTensorList
 from mminf.conductor.request_info import CurrentForwardPassInfo
+from mminf.engine.kv_store import KVCacheConfig
 
 
 class EngineType(Enum):
@@ -45,14 +46,6 @@ class NodeOutput:
 class BaseEngine(ABC):
     def __init__(self, enable_nvtx: bool = False, **kwargs):
         self.enable_nvtx = enable_nvtx
-        # Reference to worker-level streaming buffers (set by Worker.__init__)
-        self._streaming_buffers: dict[str, dict[str, list[torch.Tensor]]] | None = None
-
-    def set_streaming_buffers(
-        self, buffers: dict[str, dict[str, list[torch.Tensor]]],
-    ):
-        """Called by Worker to provide a reference to the shared streaming buffer."""
-        self._streaming_buffers = buffers
 
     def has_autocast(self):
         return True
@@ -65,7 +58,7 @@ class BaseEngine(ABC):
     def load_model(
         self,
         submodules: dict[str, torch.nn.Module],
-        model_config: dict,
+        kv_cache_config: list[KVCacheConfig],
         device: torch.device,
         **kwargs
     ) -> None:

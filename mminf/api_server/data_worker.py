@@ -17,7 +17,7 @@ except (ImportError, RuntimeError, OSError):
 
 from mminf.api_server.request_types import PreprocessInput, ResultChunk, ResultTensors
 from mminf.communication.communicator import CommProtocol, ZMQCommunicator
-from mminf.communication.tensors import MooncakeCommunicationManager, NameToTensorList
+from mminf.communication.tensors import NameToTensorList, create_tensor_communication_manager
 from mminf.model.base import Model
 from mminf.utils.ipc_format import (
     ConductorMessage,
@@ -163,13 +163,13 @@ class PreprocessWorkerThread:
             ipc_socket_path_prefix=socket_path_prefix,
         ) # only used to send
 
-        self.tensor_manager = MooncakeCommunicationManager(
+        self.tensor_manager = create_tensor_communication_manager(
+            protocol=tensor_comm_protocol,
             my_entity_id="api_server_preprocess_worker",
             hostname=hostname,
+            device=self.device,
             communicator=self.communicator,
-            protocol=tensor_comm_protocol,
             tcp_transfer_device=tcp_transfer_device,
-            device=self.device
         )
 
     def _process_input(
@@ -178,22 +178,8 @@ class PreprocessWorkerThread:
         tensors: NameToTensorList = {}
         input_metadata = {}
 
-        # Tokenize prompt via model (model-specific tokenization + system prompt)
-        if self.model is not None:
-            prompt_tensors = self.model.process_prompt(
-                input.text,
-                input.input_modalities,
-                input.output_modalities,
-                **(input.model_kwargs or {}),
-            )
-            tensors.update(prompt_tensors)
-        elif input.text is not None:
-            # Fallback: encode as UTF-8 bytes -> uint8 tensor
-            byte_data = input.text.encode("utf-8")
-            tensors["text_inputs"] = [torch.tensor(
-                list(byte_data), dtype=torch.uint8, device=self.device
-            )]
-
+        # First, load raw modality tensors from file_paths (images, audio, video)
+        # so they can be passed to process_prompt() below.
         if input.file_paths is not None:
             for modality in input.file_paths:
                 key = f"{modality}_inputs"
@@ -204,30 +190,45 @@ class PreprocessWorkerThread:
                 for filepath in input.file_paths[modality]:
                     # ---- Image ----
                     if modality == "image":
-                        img = torchvision.io.decode_image(filepath).to(self.device)  # uint8 CxHxW
-                        img = img.float() / 255.0
-                        tensors[key].append(img)
-                        input_metadata[key].append({}) # cleanest, no metadata
-
+                        out = self.model.load_image(filepath, self.device)
+                        tensors[key].append(out.data)
+                        input_metadata[key].append(out.metadata)
+    
                     # ---- Audio ----
                     elif modality == "audio":
-                        waveform, sample_rate = torchaudio.load_with_torchcodec(
-                            filepath,
-                            channels_first=True
-                        )
-                        # waveform: (channels, time)
-                        tensors[key].append(waveform)
-                        input_metadata[key].append(dict(
-                            sample_rate=sample_rate,
-                            channels_first=True
-                        ))
+                        out = self.model.load_audio(filepath, self.device)
+                        tensors[key].append(out.data)
+                        input_metadata[key].append(out.metadata)
 
                     # ---- Video ----
                     elif modality == "video":
-                        decoder = VideoDecoder(filepath, device=self.device)
-                        video = torch.stack([frame for frame in decoder]).float() / 255.0
-                        tensors[key].append(video)
-                        input_metadata[key].append(asdict(decoder.metadata))
+                        out = self.model.load_video(filepath, self.device)
+                        tensors[key].append(out.data)
+                        input_metadata[key].append(out.metadata)
+                        
+
+        # Then, tokenize the prompt and let the model augment/transform the
+        # tensors dict (e.g., Qwen3-Omni needs to compute pixel_values,
+        # image_grid_thw, audio_features, audio_seqlens from the raw tensors
+        # loaded above).  process_prompt receives the raw multimodal tensors
+        # and returns any additional tensors to merge into the final dict.
+        if self.model is not None:
+            prompt_tensors = self.model.process_prompt(
+                input.text,
+                input.input_modalities,
+                input.output_modalities,
+                tensors=tensors,
+                input_metadata=input_metadata,
+                **(input.model_kwargs or {}),
+            )
+            if prompt_tensors:
+                tensors.update(prompt_tensors)
+        elif input.text is not None:
+            # Fallback: encode as UTF-8 bytes -> uint8 tensor
+            byte_data = input.text.encode("utf-8")
+            tensors["text_inputs"] = [torch.tensor(
+                list(byte_data), dtype=torch.uint8, device=self.device
+            )]
 
         initial_signals = self.tensor_manager.store_and_return_tensor_info(
             request_id=input.request_id,
