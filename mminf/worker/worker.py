@@ -102,9 +102,9 @@ class Worker:
             tcp_transfer_device=tcp_transfer_device,
         )
 
-        node_names = set(sum([
-            wg.section.get_node_names() for wg in my_worker_graphs
-        ], start=[]))
+        node_names = set()
+        for wg in my_worker_graphs:
+            node_names.update(wg.section.get_node_names())
 
         self.engine_manager = EngineManager.build(
             node_names,
@@ -660,7 +660,6 @@ class Worker:
         batch: ScheduledBatch,
         output: "NodeOutput",
         filtered_outputs_per_request: dict[str, list[GraphEdge]],
-        output_edges: dict[str, list[GraphEdge]] = {}
     ) -> dict[str, FilteredEdges]:
         """
         ``filtered_outputs_per_request`` contains, for each request, only the
@@ -981,7 +980,10 @@ class Worker:
                     ]
                     filtered_outputs_per_request[request_id] = filtered_outputs
 
-                node_outputs = self._store_outputs_and_finish_loops(batch, output)
+                node_outputs = self._store_outputs_and_finish_loops(
+                    batch, output=output,
+                    filtered_outputs_per_request=filtered_outputs_per_request
+                )
                 
                 routing_per_request: dict[str, NodeOutputRouting] = {}
                 for request_id in batch.node_objects:
