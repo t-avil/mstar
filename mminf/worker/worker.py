@@ -7,7 +7,7 @@ import torch
 
 from mminf.api_server.request_types import APIServerMessage, ResultTensors
 from mminf.communication.communicator import CommProtocol, ZMQCommunicator
-from mminf.communication.tensors import MooncakeCommunicationManager, NameToTensorList
+from mminf.communication.tensors import NameToTensorList, create_tensor_communication_manager
 from mminf.conductor.request_info import CurrentForwardPassInfo
 from mminf.engine.base import EngineType, NodeBatch, NodeOutput
 from mminf.engine.kv_store import KVCacheConfig, StoreWritePolicy, TransferEngineInfo
@@ -106,13 +106,13 @@ class Worker:
             push_ids=worker_ids + ["conductor", "api_server", "api_server_preprocess_worker"],
             ipc_socket_path_prefix=socket_path_prefix,
         )
-        self.tensor_manager = MooncakeCommunicationManager(
+        self.tensor_manager = create_tensor_communication_manager(
+            protocol=tensor_comm_protocol,
             my_entity_id=worker_id,
             hostname=hostname,
+            device=self.device,
             communicator=self.communicator,
-            protocol=tensor_comm_protocol,
             tcp_transfer_device=tcp_transfer_device,
-            device=self.device
         )
 
         node_names = set(sum([
@@ -125,7 +125,7 @@ class Worker:
             transfer_engine_info=TransferEngineInfo(
                 my_entity_id=worker_id,
                 my_session_id=self.tensor_manager.my_session_id,
-                transfer_engine=self.tensor_manager.engine
+                transfer_engine=self.tensor_manager.transfer_engine
             ),
             model=model,
             enable_nvtx=self.enable_nvtx
