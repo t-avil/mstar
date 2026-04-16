@@ -74,8 +74,8 @@ class UnpersistTensors(MessageBody):
 class StopLoops(MessageBody):
     request_id: str
     loop_names: set[str]
-    loop_stop_times: dict[str, IterIndexTree] = field(default_factory=dict)
     partition_name: str
+    loop_stop_times: dict[str, IterIndexTree] = field(default_factory=dict)
 
 @dataclass
 class WorkerMessage:
