@@ -63,6 +63,7 @@ class Worker:
         kv_config: dict[str, KVCacheConfig],
         all_worker_graph_ids_to_graph_walks: dict[str, set[str]],
         all_worker_graph_ids_to_nodes: dict[str, set[str]],
+        all_worker_graph_ids_to_dyn_loops: dict[str, set[str]],
         hostname: str = "localhost",
         socket_path_prefix: str = "/tmp/mminf",
         tensor_comm_protocol: CommProtocol = CommProtocol.RDMA,
@@ -132,6 +133,7 @@ class Worker:
             },
             per_request_info={},
             all_worker_graph_ids_to_graph_walks=all_worker_graph_ids_to_graph_walks,
+            all_worker_graph_ids_to_dyn_loops=all_worker_graph_ids_to_dyn_loops,
             all_worker_graph_ids_to_nodes=all_worker_graph_ids_to_nodes,
             node_to_partition=node_to_partition,
         )
@@ -327,13 +329,6 @@ class Worker:
             format_graph_edge_list(body.inputs), self.worker_id, body.request_id
         )
         req_info = self.worker_graphs_manager.per_request_info.get(body.request_id)
-
-        self._stop_loops(StopLoops(
-            request_id=body.request_id,
-            loop_names=set(body.request_info.loop_stop_times.keys()),
-            loop_stop_times=body.request_info.loop_stop_times,
-            partition_name=body.partition_name
-        ))
 
         # Handle producer_done signal: mark all StreamBuffers for this request as done
         if body.producer_done:
@@ -993,32 +988,28 @@ class Worker:
                     )
                     routing_per_request[request_id] = routing
 
-                    # 6b. If there are loop-back signals that were filtered out for different
-                    # workers, send "loop done" messages to the corresponding workers
-                    if node_batch.per_request_info[request_id].dynamic_loop_stop_signals:
-                        workers = set()
-                        for edge in node_outputs[request_id].filtered_out:
-                            workers.add(
-                                self.worker_graphs_manager.per_request_info[request_id].node_to_worker[NodeAndGraphWalk(
-                                    node=edge.next_node,
-                                    graph_walk=batch.graph_walk
-                                )]
-                            )
-                        for worker in workers:
-                            if worker == self.worker_id:
-                                continue
-                            self.communicator.send(
-                                entity_id=worker,
-                                msg=WorkerMessage(
-                                    message_type=WorkerMessageType.STOP_LOOPS,
-                                    body=StopLoops(
-                                        request_id=request_id,
-                                        loop_names=node_batch.per_request_info[request_id].dynamic_loop_stop_signals,
-                                        fwd_index=node_batch.per_request_info[request_id].fwd_index,
-                                        partition_name=batch_partition
-                                    )
+                    # 6b. send "loop done" messages to the corresponding workers
+                    stop_loop_workers = {}
+                    for loop_name in node_batch.per_request_info[request_id].dynamic_loop_stop_signals:
+                        for worker in self.worker_graphs_manager.get_dyn_loop_workers(
+                            request_id,  batch_partition, loop_name
+                        ):
+                            stop_loop_workers.setdefault(worker, set()).add(loop_name)
+                    for worker, loop_names in stop_loop_workers.items():
+                        if worker == self.worker_id:
+                            continue
+                        self.communicator.send(
+                            entity_id=worker,
+                            msg=WorkerMessage(
+                                message_type=WorkerMessageType.STOP_LOOPS,
+                                body=StopLoops(
+                                    request_id=request_id,
+                                    loop_names=loop_names,
+                                    loop_stop_times=node_batch.per_request_info[request_id].loop_stop_times,
+                                    partition_name=batch_partition
                                 )
                             )
+                        )
 
                 # 7. Store output tensors, register RDMA if needed
                 self._register_outputs(batch, routing_per_request)

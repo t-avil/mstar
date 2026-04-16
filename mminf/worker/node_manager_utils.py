@@ -207,6 +207,7 @@ class PerRequestInfo:
     - tensors: TBD
     """
     node_to_worker: dict[NodeAndGraphWalk, str]  # for all nodes
+    dyn_loop_to_workers: dict[NodeAndGraphWalk, list[str]]
     worker_graph_ids: list[str] # for this worker
 
     pending_persist_signals: list[GraphEdge] = field(default_factory=list)
@@ -231,6 +232,7 @@ class WorkerGraphsManager:
     # The following two are for routing purposes:
     all_worker_graph_ids_to_graph_walks: dict[str, set[str]] # for worker graphs on different workers too
     all_worker_graph_ids_to_nodes: dict[str, set[str]] # for worker graphs on different workers too
+    all_worker_graph_ids_to_dyn_loops: dict[str, set[str]]
 
     # Maps node_name -> partition_name. Populated from the model's partitions
     # and graph walk definitions. Used to look up which partition a node belongs
@@ -525,6 +527,7 @@ class WorkerGraphsManager:
         is responsible for which nodes for this request (for output routing).
         """
         node_to_worker = {}
+        dyn_loop_to_workers = {}
         for graph_id in worker_graph_ids:
             if graph_id in self.queues:
                 self.queues[graph_id].add_request(request_id)
@@ -539,6 +542,14 @@ class WorkerGraphsManager:
                         graph_walk=graph_walk
                     ): worker_id for name in self.all_worker_graph_ids_to_nodes[worker_graph_id]
                 })
+
+                for loop_name in self.all_worker_graph_ids_to_dyn_loops[worker_graph_id]:
+                    dyn_loop_to_workers.setdefault(NodeAndGraphWalk(
+                        node=loop_name,
+                        graph_walk=graph_walk
+                    ), []).append(worker_id)
+
+                self.all_worker_graph_ids_to_dyn_loops
         graph_walk = current_fwd_info.graph_walk
         my_worker_graph_ids = [gid for gid in worker_graph_ids if gid in self.queues]
         partition_name = getattr(current_fwd_info, 'partition_name', 'default')
@@ -546,6 +557,7 @@ class WorkerGraphsManager:
         if request_id not in self.per_request_info:
             self.per_request_info[request_id] = PerRequestInfo(
                 node_to_worker=node_to_worker,
+                dyn_loop_to_workers=dyn_loop_to_workers,
                 worker_graph_ids=my_worker_graph_ids,
                 per_partition_info={
                     partition_name: PerPartitionInfo(
@@ -572,6 +584,11 @@ class WorkerGraphsManager:
             for queue_id in self.per_request_info[request_id].worker_graph_ids:
                 self.queues[queue_id].remove_request(request_id)
             del self.per_request_info[request_id]
+    
+    def get_dyn_loop_workers(self, request_id: str, partition_name: str, loop_name: str):
+        return self.per_request_info[request_id].dyn_loop_to_workers[NodeAndGraphWalk(
+            node=loop_name, graph_walk=self.get_graph_walk(request_id, partition_name)
+        )]
 
     def buffer_persist_signals(
             self, request_id: str,

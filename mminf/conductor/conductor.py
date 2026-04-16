@@ -59,6 +59,7 @@ def _worker_process_target(
     kv_config: list[KVCacheConfig],
     all_worker_graph_ids_to_graph_walks: dict[str, set[str]],
     all_worker_graph_ids_to_nodes: dict[str, set[str]],
+    all_worker_graph_ids_to_dyn_loops: dict[str, set[str]],
     hostname: str,
     socket_path_prefix: str,
     enable_nvtx: bool = False,
@@ -88,6 +89,7 @@ def _worker_process_target(
         kv_config=kv_config,
         all_worker_graph_ids_to_graph_walks=all_worker_graph_ids_to_graph_walks,
         all_worker_graph_ids_to_nodes=all_worker_graph_ids_to_nodes,
+        all_worker_graph_ids_to_dyn_loops=all_worker_graph_ids_to_dyn_loops,
         hostname=hostname,
         socket_path_prefix=socket_path_prefix,
         enable_nvtx=enable_nvtx,
@@ -232,6 +234,10 @@ class Conductor:
             worker_graph_id: worker_graph.section.get_node_names()
             for worker_graph_id, worker_graph in self.worker_graphs.items()
         }
+        self._all_worker_graph_ids_to_dyn_loops = {
+            worker_graph_id: worker_graph.section.get_dyn_loop_names()
+            for worker_graph_id, worker_graph in self.worker_graphs.items()
+        }
 
     def _launch_workers(self):
         """Spawn one process per worker rank using spawn context."""
@@ -246,6 +252,7 @@ class Conductor:
                     "kv_config": self._get_kv_config(),
                     "all_worker_graph_ids_to_graph_walks": self._all_worker_graph_ids_to_graph_walks,
                     "all_worker_graph_ids_to_nodes": self._all_worker_graph_ids_to_nodes,
+                    "all_worker_graph_ids_to_dyn_loops": self._all_worker_graph_ids_to_dyn_loops,
                     "hostname": self.hostname,
                     "socket_path_prefix": self.socket_path_prefix,
                     "model": self.model,

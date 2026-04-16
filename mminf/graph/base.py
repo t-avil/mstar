@@ -86,6 +86,10 @@ class GraphSection(ABC):
         pass
 
     @abstractmethod
+    def get_dyn_loop_names(self) -> set[str]:
+        pass
+
+    @abstractmethod
     def get_inputs(self) -> list[GraphEdge]:
         """
         All external or "loop-back" inputs into a worker graph
@@ -162,6 +166,9 @@ class GraphNode(GraphSection):
 
     def get_node_names(self) -> set[str]:
         return {self.name}
+    
+    def get_dyn_loop_names(self) -> set[str]:
+        return set()
 
     def get_inputs(self) -> list[GraphEdge]:
         return [
@@ -221,6 +228,12 @@ class Sequential(GraphSection):
         res = set()
         for s in self.sections:
             res.update(s.get_node_names())
+        return res
+    
+    def get_dyn_loop_names(self) -> set[str]:
+        res = set()
+        for s in self.sections:
+            res.update(s.get_dyn_loop_names())
         return res
 
     def _get_inputs_outputs(self):
@@ -305,6 +318,12 @@ class Parallel(GraphSection):
         res = set()
         for s in self.sections:
             res.update(s.get_node_names())
+        return res
+
+    def get_dyn_loop_names(self) -> set[str]:
+        res = set()
+        for s in self.sections:
+            res.update(s.get_dyn_loop_names())
         return res
 
     def get_inputs(self):
@@ -403,6 +422,9 @@ class Loop(GraphSection):
 
     def get_node_names(self):
         return self.section.get_node_names()
+
+    def get_dyn_loop_names(self) -> set[str]:
+        return self.section.get_dyn_loop_names()
     
     def register_communication_info(
         self, communication_manager,
@@ -605,6 +627,11 @@ class DynamicLoop(Loop):
 
     def register_finished(self):
         self._finished = True
+
+    def get_dyn_loop_names(self) -> set[str]:
+        res = super().get_dyn_loop_names()
+        res.add(self.name)
+        return res
     
     def _is_done(self):
         return (
