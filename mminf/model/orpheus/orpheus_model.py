@@ -288,37 +288,35 @@ class OrpheusModel(Model):
         which is updated from the worker's StreamBuffer via
         WorkerGraphsDone.stream_tokens_consumed.
         """
-        stride = self.config.snac_stride_tokens
+        # stride = self.config.snac_stride_tokens
 
         metadata.graph_walk = "snac_chunk"
 
-        available = token_buffer_count - consumed
+        # available = token_buffer_count - consumed
 
-        # Nothing left to decode
-        if available <= 0 and producer_done:
-            return ForwardPassArgs(
-                full_metadata=metadata,
-                inputs=[],
-                unpersist_tensors=[],
-                request_done=True,
-            )
+        # # Nothing left to decode
+        # if available <= 0 and producer_done:
+        #     return ForwardPassArgs(
+        #         full_metadata=metadata,
+        #         inputs=[],
+        #         unpersist_tensors=[],
+        #         request_done=True,
+        #     )
 
-        step_metadata = {"consumed_tokens": stride}
+        # step_metadata = {"consumed_tokens": stride}
 
-        # Check if this is the last chunk. Basically, the new_consumed = consumed + stride
-        # is only used to calculate is_last. it's asking "after the worker consumes another
-        # stride's worth of tokens, will there be enough left for another chunk?"
-        # It's not actually advancing any state.
-        new_consumed = consumed + stride
-        remaining_after = token_buffer_count - new_consumed
-        is_last = producer_done and remaining_after < stride
+        # # Check if this is the last chunk. Basically, the new_consumed = consumed + stride
+        # # is only used to calculate is_last. it's asking "after the worker consumes another
+        # # stride's worth of tokens, will there be enough left for another chunk?"
+        # # It's not actually advancing any state.
+        # new_consumed = consumed + stride
+        # remaining_after = token_buffer_count - new_consumed
+        # is_last = producer_done and remaining_after < stride
 
         return ForwardPassArgs(
             full_metadata=metadata,
             inputs=[],
             unpersist_tensors=[],
-            step_metadata=step_metadata,
-            request_done=is_last,
         )
 
     # -------------------------------------------------------------------
