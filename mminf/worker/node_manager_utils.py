@@ -68,7 +68,7 @@ class WorkerGraphQueues:
 
     def is_done(self, request_id) -> bool:
         q = self.per_request_queues[request_id]
-        return q.waiting is None and len(q.ready) == 0
+        return q.waiting is None and len(q.ready) == 0 and len(q.waiting_for_stream) == 0
 
     def add_request(self, request_id: str):
         """
@@ -320,7 +320,7 @@ class WorkerGraphsManager:
 
     def complete_loops(
         self, request_id: str, worker_graph_id: str,
-        output_edges: list[GraphEdge]
+        output_edges: list[GraphEdge], done_node: str
     ) -> FilteredEdges:
         queue = self.queues[worker_graph_id].per_request_queues[request_id]
         if queue.waiting is None:
@@ -328,7 +328,7 @@ class WorkerGraphsManager:
                 kept=output_edges,
                 filtered_out=[]
             )
-        out = queue.waiting.complete_loops()
+        out = queue.waiting.complete_loops(done_node)
         queue.waiting = out.new_waiting
 
         filter_result = out.filter_out_loop_back(output_edges)
@@ -534,7 +534,7 @@ class WorkerGraphsManager:
 
         graph_walk = current_fwd_info.graph_walk
         my_worker_graph_ids = [gid for gid in worker_graph_ids if gid in self.queues]
-        partition_name = getattr(current_fwd_info, 'partition_name', 'default')
+        partition_name = current_fwd_info.partition_name
 
         if request_id not in self.per_request_info:
             self.per_request_info[request_id] = PerRequestInfo(
@@ -553,6 +553,7 @@ class WorkerGraphsManager:
             )
         else:
             req_info = self.per_request_info[request_id]
+            req_info.worker_graph_ids += my_worker_graph_ids
             req_info.per_partition_info[partition_name] = PerPartitionInfo(
                 graph_walk_worker_graph_ids=[
                     graph_id for graph_id in my_worker_graph_ids

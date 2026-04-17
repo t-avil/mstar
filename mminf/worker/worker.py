@@ -333,7 +333,10 @@ class Worker:
         if body.producer_done:
             if req_info:
                 for sbuf in req_info.stream_buffers.values():
-                    sbuf.signal_done()
+                    if sbuf.from_partition in body.producer_done:
+                        # If we have multiple consumer partitions colocated, we need to signal
+                        # the right one
+                        sbuf.signal_done()
 
         # Separate streaming edges — they'll be handled when tensors are ready
         # (streaming edges with tensor_info go through RDMA, handled in _check_ready_tensors)
@@ -698,7 +701,8 @@ class Worker:
             if waiting_node is not None:
                 waiting_node.cache_outputs(output_tensor_info)
             output_edges[request_id] = self.worker_graphs_manager.complete_loops(
-                request_id, worker_graph_id, output_edges[request_id].kept
+                request_id, worker_graph_id, output_edges[request_id].kept,
+                done_node=batch.node_name
             )
 
             # if any outputs were filtered out, we must dereference them

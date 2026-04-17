@@ -39,6 +39,7 @@ class PerRequestNodeQueues:
         self.full_section.reset()
         self.waiting = self.full_section
         self.ready.clear()
+        self.waiting_for_stream.clear()
 
     def _update_ready_waiting(self):
         """
@@ -48,9 +49,7 @@ class PerRequestNodeQueues:
         if self.waiting is None:
             return
         new_ready, new_waiting = self.waiting.split_off_ready()
-        self.ready += [node for node in new_ready if node.is_ready_including_streaming()]
-        self.waiting_for_stream += [node for node in new_ready if not node.is_ready_including_streaming()]
-
+        self.ready += new_ready
         self.waiting = new_waiting
     
     def process_streaming_input(
@@ -60,19 +59,26 @@ class PerRequestNodeQueues:
         new_inputs: DestToGraphEdges = get_node_to_inputs_mapping(new_inputs)
         ingested = []
 
-        self._update_ready_waiting()
+        if self.waiting is None:
+            return ProcessedInputs(
+                for_other_worker_graphs=new_inputs,
+                routed_to_this_worker_graph=[],
+            )
+
+        self.waiting_for_stream.extend(
+            self.waiting.split_off_ready_for_streaming()
+        )
 
         new_waiting_for_stream = []
         for node in self.waiting_for_stream:
             ingested.extend(node.ingest_inputs(new_inputs))
-            if not node.is_ready_including_streaming():
+            if not node.is_ready():
                 new_waiting_for_stream.append(node)
-            else:
-                self.ready.append(node)
         self.waiting_for_stream = new_waiting_for_stream
         external_outputs = sum(
             new_inputs.values(), start=[]
         )
+        self._update_ready_waiting()
         return ProcessedInputs(
             for_other_worker_graphs=external_outputs,
             routed_to_this_worker_graph=ingested,

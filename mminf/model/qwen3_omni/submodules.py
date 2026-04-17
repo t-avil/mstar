@@ -884,6 +884,19 @@ class ThinkerSubmodule(NodeSubmodule):
         per_request_info: dict[str, CurrentForwardPassInfo],
     ) -> list[str]:
         return ["main"]
+    
+    def postprocess(
+        self, request_info: CurrentForwardPassInfo,
+        outputs: dict[str, list[torch.Tensor]]
+    ):
+        if "new_token" not in outputs:
+            return
+        outputs["text_inputs"] = outputs["new_token"]
+        token = outputs["new_token"][0].item()
+        eos_token_id = self.config.im_end_token_id
+        if (eos_token_id is not None and eos_token_id == token) or \
+                (request_info.dynamic_loop_iter_counts.get("thinker_decode_loop", 0) >= request_info.max_tokens):
+            request_info.register_loop_stop("thinker_decode_loop")
 
 
 # ===================================================================
@@ -1470,6 +1483,8 @@ class TalkerSubmodule(NodeSubmodule):
         """
         cache_handle.set_active_label("main")
 
+        print("is_last_prefill", is_last_prefill)
+
         # Check for non-last prefill (KV-cache-only step)
         if graph_walk == "talker_prefill" and not is_last_prefill:
             self.model(input_embeds=input_embeds, cache_handle=cache_handle)
@@ -1748,13 +1763,25 @@ class TalkerSubmodule(NodeSubmodule):
         per_request_info: dict[str, CurrentForwardPassInfo],
     ) -> list[str]:
         return ["main"]
+    
+    def postprocess(
+        self, request_info: CurrentForwardPassInfo,
+        outputs: dict[str, list[torch.Tensor]]
+    ):
+        if "new_token" not in outputs:
+            return
+        token = outputs["new_token"][0].item()
+        eos_token_id = self.config.talker.codec_eos_token_id
+        print(token, eos_token_id)
+        if (eos_token_id is not None and eos_token_id == token) or \
+                (request_info.dynamic_loop_iter_counts.get("talker_decode_loop", 0) >= request_info.max_tokens):
+            request_info.register_loop_stop("talker_decode_loop")
 
     # ---- cleanup ----
 
     def cleanup_request(self, request_id: str) -> None:
         """Remove per-request state when a request completes."""
         self._seen_layer0_mask.pop(request_id, None)
-        self._prefill_conv_tail.pop(request_id, None)
         self._eos_embed_sent.discard(request_id)
 
 

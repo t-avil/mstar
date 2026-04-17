@@ -238,37 +238,33 @@ def _divide_into_worker_graphs(
 
     if isinstance(graph, Loop):
         loop_section_worker_graphs = _divide_into_worker_graphs(
-            graph.curr_section_replica,
+            graph.section,
             graph_walk=graph_walk,
             node_to_group_idx=node_to_group_idx,
             node_groups=node_groups,
             input_streams=input_streams
         )
-        if len(loop_section_worker_graphs) == 1:
-            # fully colocated case
-            loop_section_worker_graphs[0].section = graph
-            return loop_section_worker_graphs
-
-        # in the disaggregated case, we need to wrap all worker graphs in a loop
-        # with the external signals and loop-back signals pre-computed
+        ext_inps = [
+            inp for inp in graph._external_inputs if inp.name not in input_streams
+        ]
         for s in loop_section_worker_graphs:
             if isinstance(graph, DynamicLoop):
                 s.section = DynamicLoop(
-                    curr_section_replica=s.section,
+                    section=s.section,
                     name=graph.name,
                     max_iters=graph.max_iters,
                     curr_iter=graph.curr_iter,
-                    _external_inputs=graph._external_inputs,
+                    _external_inputs=ext_inps,
                     _loop_back_signals=graph._loop_back_signals,
                     outputs=graph.outputs,
                     _uuid_label=graph._uuid_label
                 )
             else:
                 s.section = Loop(
-                    curr_section_replica=s.section,
+                    section=s.section,
                     max_iters=graph.max_iters,
                     curr_iter=graph.curr_iter,
-                    _external_inputs=graph._external_inputs,
+                    _external_inputs=ext_inps,
                     _loop_back_signals=graph._loop_back_signals,
                     outputs=graph.outputs,
                     _uuid_label=graph._uuid_label

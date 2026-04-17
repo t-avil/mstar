@@ -55,7 +55,7 @@ class InputSignals(MessageBody):
     inputs: list[GraphEdge]
     request_info: CurrentForwardPassInfo
     partition_name: str = "default"
-    producer_done: bool = False
+    producer_done: set = field(default_factory=set)
 
 
 @dataclass
