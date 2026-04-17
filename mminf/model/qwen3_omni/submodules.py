@@ -1483,8 +1483,6 @@ class TalkerSubmodule(NodeSubmodule):
         """
         cache_handle.set_active_label("main")
 
-        print("is_last_prefill", is_last_prefill)
-
         # Check for non-last prefill (KV-cache-only step)
         if graph_walk == "talker_prefill" and not is_last_prefill:
             self.model(input_embeds=input_embeds, cache_handle=cache_handle)
@@ -1772,7 +1770,6 @@ class TalkerSubmodule(NodeSubmodule):
             return
         token = outputs["new_token"][0].item()
         eos_token_id = self.config.talker.codec_eos_token_id
-        print(token, eos_token_id)
         if (eos_token_id is not None and eos_token_id == token) or \
                 (request_info.dynamic_loop_iter_counts.get("talker_decode_loop", 0) >= request_info.max_tokens):
             request_info.register_loop_stop("talker_decode_loop")
