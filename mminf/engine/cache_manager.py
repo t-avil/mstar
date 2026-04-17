@@ -444,35 +444,25 @@ class BatchedCacheManager:
             combined_label: key for the combined _PlanState (must already exist
                 from plan_attention_batched_cfg).
         """
-        # CPU-accumulate positions across (label, rid) pairs into a single
-        # Python list, then do one H2D. The old per-(label, rid) `torch.arange
-        # + start` pattern launched 2 GPU kernels per (label × rid) and then
-        # needed N `torch.cat` calls. When a label has explicit pos_ids
-        # provided, we concat them on GPU (rare path, few entries).
-        pos_ids_list: list[int] = []
-        explicit_parts: list[torch.Tensor] = []
+        # Build one tensor *per label* in `labels` order, then concat. Order
+        # matters: downstream attention indexes these positions by
+        # (label_i * per_label_len + within_label_offset), so reordering the
+        # labels silently corrupts the attention computation. For labels with
+        # explicit pos_ids we concat their list as given; for computed labels
+        # we accumulate Python ints on CPU and do one H2D per label.
+        parts: list[torch.Tensor] = []
         for label in labels:
             if per_label_pos_ids and label in per_label_pos_ids:
-                explicit_parts.append(torch.cat(per_label_pos_ids[label]))
+                parts.append(torch.cat(per_label_pos_ids[label]))
             else:
+                pos_ids_list: list[int] = []
                 for rid, sl in zip(self.request_ids, seq_lens, strict=True):
                     start = self._get_state(rid, label).position_id_start
                     pos_ids_list.extend(range(start, start + sl))
-
-        if pos_ids_list and not explicit_parts:
-            combined_pos_ids = torch.tensor(
-                pos_ids_list, dtype=torch.long, device=self.device,
-            )
-        elif not pos_ids_list and explicit_parts:
-            combined_pos_ids = torch.cat(explicit_parts)
-        else:
-            pieces: list[torch.Tensor] = []
-            if pos_ids_list:
-                pieces.append(torch.tensor(
+                parts.append(torch.tensor(
                     pos_ids_list, dtype=torch.long, device=self.device,
                 ))
-            pieces.extend(explicit_parts)
-            combined_pos_ids = torch.cat(pieces)
+        combined_pos_ids = parts[0] if len(parts) == 1 else torch.cat(parts)
         self._plan_states[combined_label].pos_ids = combined_pos_ids
 
     @torch.compiler.disable
