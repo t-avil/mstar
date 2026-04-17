@@ -221,7 +221,7 @@ class AREngine(BaseEngine):
             tensors["new_token"] = [
                 self.submodule_management[node_name].sampler.sample(
                     request_ids=[rid], logits=logits
-                )[rid]
+                )
             ]
             del tensors["logits"]
 
