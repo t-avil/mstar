@@ -557,7 +557,7 @@ class CudaGraphRunner:
             sampled_views = sampled.split(1)
             outputs = {
                 rid: {"new_token": [view]}
-                for rid, view in zip(request_ids, sampled_views)
+                for rid, view in zip(request_ids, sampled_views, strict=True)
             }
 
             # Collect non-logit per-rid outputs (e.g. hidden states) only when
