@@ -9,7 +9,7 @@ from typing import Optional
 
 import aiohttp
 
-from benchmark.base import Model, RequestType
+from benchmark.base import Model, ModelType, RequestType
 from benchmark.dataset import BaseDataset, TxtFileDataset, VBenchDataset
 from benchmark.request import (
     AggregateMetrics,
@@ -247,7 +247,7 @@ class Benchmark:
 def parse_args() -> BenchmarkConfig:
     parser = argparse.ArgumentParser(description="Run inference benchmark")
     parser.add_argument("--url", required=True)
-    parser.add_argument("--model", required=True, choices=[m.value for m in Model])
+    parser.add_argument("--model", required=True, choices=[m.value for m in ModelType])
     parser.add_argument("--dataset", required=True, choices=[d.value for d in DatasetType])
     parser.add_argument("--inference-system", choices=[s.value for s in InferenceSystemType],
                         default=InferenceSystemType.OURS.value)
@@ -262,6 +262,9 @@ def parse_args() -> BenchmarkConfig:
     parser.add_argument("--output-dir", default=None,
                         help="Directory to save outputs (text files / images). Omit to skip.")
     parser.add_argument("--verbose", action="store_true")
+
+    # specific to image gen
+    parser.add_argument("--disable-cfg", action="store_true")
 
     # VBench args
     vbench = parser.add_argument_group("vbench")
@@ -279,7 +282,7 @@ def parse_args() -> BenchmarkConfig:
 
     return BenchmarkConfig(
         url=args.url,
-        model=Model(args.model),
+        model=ModelType(args.model).inst(disable_cfg=args.disable_cfg),
         dataset=DatasetType(args.dataset),
         num_requests=args.num_requests,
         request_type=RequestType(args.request_type),

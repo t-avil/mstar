@@ -29,4 +29,5 @@ python -m benchmark.runner \
     --num-requests "${NUM_REQUESTS:-10}" \
     --inference-system "${INF_SYS:-ours}" \
     ${BATCH_SIZE:+--batch-size "$BATCH_SIZE"} \
-    ${RATE:+--rate "$RATE"}
+    ${RATE:+--rate "$RATE"} \
+    ${EXTRA_ARGS:+"$EXTRA_ARGS"}
