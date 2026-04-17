@@ -221,13 +221,13 @@ class Pi05Model(Model):
     # ------------------------------------------------------------------
 
     def get_kv_cache_config(self) -> KVCacheConfig:
-        return KVCacheConfig(
+        return [KVCacheConfig(
             num_layers=self.config.num_layers,
             num_kv_heads=self.config.num_kv_heads,
             head_dim=self.config.head_dim,
             max_seq_len=self.config.max_position_embeddings,
             num_qo_heads=self.config.num_qo_heads,
-        )
+        )]
 
     def get_node_engine_types(self) -> dict[str, EngineType]:
         return {

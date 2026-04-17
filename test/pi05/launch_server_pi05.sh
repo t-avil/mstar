@@ -21,13 +21,14 @@
 
 set -euo pipefail
 
-USERNAME="${1:-${USER:-keisuke}}"
+USERNAME="${1:-${USER:-irmak}}"
 DEVICES="${2:-0}"
 PORT="${PORT:-20002}"
 
 export LD_LIBRARY_PATH="${CONDA_PREFIX:-}/lib:${LD_LIBRARY_PATH:-}"
 
-CACHE_DIR="/m-coriander/coriander/${USERNAME}/mminf_cache/pi05/"
+# CACHE_DIR="/m-coriander/coriander/${USERNAME}/mminf_cache/pi05/"
+CACHE_DIR="/mnt/storage/${USERNAME}/mminf_cache/pi05/"
 mkdir -p "${CACHE_DIR}"
 
 echo "[pi05] launching server"
@@ -42,5 +43,6 @@ CUDA_VISIBLE_DEVICES="${DEVICES}" python mminf/api_server/entrypoint.py \
     --cache-dir "${CACHE_DIR}" \
     --socket-path-prefix "/tmp/mminf_${USERNAME}/" \
     --upload-dir "/tmp/mminf_uploads_${USERNAME}/" \
-    --tensor-comm-protocol TCP \
-    --tcp-transfer-device "0.0.0.0:0"
+    --tensor-comm-protocol SHM
+    # --tensor-comm-protocol TCP \
+    # --tcp-transfer-device "0.0.0.0:0"

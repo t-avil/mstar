@@ -385,8 +385,11 @@ def main():
     n_layers = mminf_model.config.num_layers
     for L in range(n_layers):
         ours_k, ours_v = prefill_handle.captured_kv[L]
-        ref_k = ref_past_kv[L][0][0].transpose(0, 1)  # [seq, n_kv, head_dim]
-        ref_v = ref_past_kv[L][1][0].transpose(0, 1)
+        # import ipdb; ipdb.set_trace()
+        # ref_k = ref_past_kv[L][0][0].transpose(0, 1)  # [seq, n_kv, head_dim]
+        # ref_v = ref_past_kv[L][1][0].transpose(0, 1)
+        ref_k = ref_past_kv.layers[L].keys[0].transpose(0, 1)   # [seq, n_kv, head_dim]
+        ref_v = ref_past_kv.layers[L].values[0].transpose(0, 1)
         if L < 3 or L >= n_layers - 2:
             stat(f"layer {L:2d} K", ours_k, ref_k, tol=args.tol)
             stat(f"layer {L:2d} V", ours_v, ref_v, tol=args.tol)

@@ -335,7 +335,7 @@ class Pi05LLMSubmodule(NodeSubmodule):
 
         # Bidirectional attention over the prefix; PaliGemma is a prefix-LM.
         cache_manager.plan_attention(
-            seq_lens=seq_lens, is_causal=False, label="main"
+            seq_lens=seq_lens, is_causal=False, label="main", dtype=torch.bfloat16
         )
         cache_manager.plan_rope(seq_lens=seq_lens, pos_ids=None, label="main")
 
@@ -377,6 +377,7 @@ class Pi05LLMSubmodule(NodeSubmodule):
             is_causal=False,
             label="main",
             write_store=False,
+            dtype=torch.bfloat16
         )
         cache_manager.plan_rope(
             seq_lens=seq_lens, pos_ids=None, label="main"
