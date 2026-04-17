@@ -22,6 +22,7 @@ class AudioCodecEngine(BaseEngine):
         self.submodules: dict[str, torch.nn.Module] = {}
         self.device = None
         self.autocast_dtype = autocast_dtype
+        self._streaming_buffers: dict[str, dict[str, list[torch.Tensor]]] | None = None
 
     def engine_type(self) -> EngineType:
         return EngineType.AUDIO_CODEC

@@ -15,14 +15,15 @@ set -euo pipefail
 
 NUM_REQUESTS="${1:-4}"
 DEVICES="${2:-0}"
-PORT=20001
+PORT="${PORT:-20001}"
 USERNAME="${USER:-keisuke}"
 CACHE_DIR="/m-coriander/coriander/${USERNAME}/mminf_cache/orpheus/"
 SOCKET_PREFIX="/tmp/mminf_${USERNAME}/"
 UPLOAD_DIR="/tmp/mminf_uploads_${USERNAME}/"
 OUTPUT_DIR="nsys_profiles"
-PROFILE_NAME="${OUTPUT_DIR}/orpheus_bs${NUM_REQUESTS}"
-SERVER_LOG="${OUTPUT_DIR}/server.log"
+TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+PROFILE_NAME="${OUTPUT_DIR}/orpheus_bs${NUM_REQUESTS}_${TIMESTAMP}"
+SERVER_LOG="${OUTPUT_DIR}/server_${TIMESTAMP}.log"
 
 PYTHON="/m-coriander/coriander/keisuke/miniconda3/envs/mminf/bin/python"
 REPO_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
