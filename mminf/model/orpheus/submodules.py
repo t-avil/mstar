@@ -32,6 +32,14 @@ class OrpheusLLMSubmodule(NodeSubmodule):
         self.lm_head = language_model.lm_head
         self.config = config
 
+    def get_cuda_graph_configs(self, device: torch.device) -> list[CudaGraphConfig]:
+        return [
+            CudaGraphConfig(
+                graph_walk="decode", requires_cfg=False, labels=["main"],
+                dummy_capture_inputs=[{"text_inputs": [torch.zeros(1, dtype=torch.long, device=device)]}]
+            ),
+        ]
+        
     def preprocess(
         self,
         graph_walk: str,

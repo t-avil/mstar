@@ -86,19 +86,9 @@ class NodeSubmodule(torch.nn.Module):
         ...
 
     def get_cuda_graph_configs(self, device: torch.device) -> list[CudaGraphConfig]:
-        """Return dummy inputs for CUDA graph capture, or None if this walk
-        doesn't support CUDA graphs.
-
-        Default: returns text_inputs for "decode" walks. Override in subclasses
-        for walks with different input names (e.g., Qwen3-Omni Thinker uses
-        "input_embeds" and "cos_sin_3d"; Talker uses "input_embeds").
+        """TODO: add cuda graph support for pi05.
         """
-        return [
-            CudaGraphConfig(
-                graph_walk="decode", requires_cfg=False, labels=["main"],
-                dummy_capture_inputs=[{"text_inputs": [torch.zeros(1, dtype=torch.long, device=device)]}]
-            ),
-        ]
+        return []
 
     def can_use_cuda_graphs(self, graph_walk: str) -> bool:
         """Return True if this submodule supports CUDA graphs for ``graph_walk``.
