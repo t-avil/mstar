@@ -215,7 +215,12 @@ class AREngine(BaseEngine):
         """
 
         for rid, tensors in output.per_request_output_tensors.items():
-            if "logits" not in tensors:
+            # Guard against non-per-rid keys (e.g. the __batched_logits__
+            # sentinel used as a CUDA-graph fast-path hint): their value is
+            # a torch.Tensor, not a dict, so the `"logits" not in tensors`
+            # check below would raise TypeError (Tensor.__contains__ calls
+            # torch.eq on strings).
+            if not isinstance(tensors, dict) or "logits" not in tensors:
                 continue
             logits = tensors["logits"][0]  # [1, vocab_size]
             tensors["new_token"] = [
@@ -267,6 +272,12 @@ class AREngine(BaseEngine):
             range_pop()
 
         cache_manager.flush_to_store()
+
+        # The `__batched_logits__` sentinel key is a CUDA-graph fast-path
+        # hint (see cuda_graph_runner.sample_and_remap); it must not leak
+        # into NodeOutput.per_request_output_tensors, whose keys are
+        # per-request dicts.
+        batched_output.pop("__batched_logits__", None)
 
         if self.enable_nvtx:
             range_push("ar.batched.sample", synchronize=True)
