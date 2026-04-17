@@ -301,10 +301,14 @@ class OrpheusLLMSubmodule(NodeSubmodule):
 
         logits = self.lm_head(hidden)
 
-        return {
+        # Expose the stacked [B, V] tensor under a sentinel key so the CUDA
+        # graph runner can sample directly without concatenating per-rid slices.
+        out: dict = {
             rid: {"logits": [logits[i : i + 1]]}
             for i, rid in enumerate(request_ids)
         }
+        out["__batched_logits__"] = logits
+        return out
     
     def get_cuda_graph_configs(self, device: torch.device) -> list[CudaGraphConfig]:
         """Return dummy inputs for CUDA graph capture, or None if this walk

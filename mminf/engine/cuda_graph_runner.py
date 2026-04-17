@@ -49,6 +49,10 @@ class CudaGraphData:
     static_cache_manager: BatchedCacheManager
     config: CudaGraphConfig
     bs: int
+    # Cached at capture time: True iff any dummy_rid in static_outputs has a
+    # key besides "logits". When False, sample_and_remap can skip the
+    # per-rid collection loop entirely.
+    has_non_logit_outputs: bool = False
 
 
 class CudaGraphRunner:
@@ -327,6 +331,25 @@ class CudaGraphRunner:
                     output = run_forward()
             torch.cuda.synchronize()
 
+            # Inspect per-rid output keys once at capture time so sample_and_remap
+            # can skip its per-rid collection loop when only logits are present.
+            # Skip only the __batched_logits__ sentinel — the per-rid entries
+            # (dummy_rids, also "__"-prefixed) ARE what we want to inspect.
+            has_non_logit = False
+            if isinstance(output, dict):
+                for k, v in output.items():
+                    if k == "__batched_logits__":
+                        continue
+                    if isinstance(v, dict) and any(
+                        out_key != "logits" for out_key in v.keys()
+                    ):
+                        has_non_logit = True
+                        break
+            logger.info(
+                "CudaGraphRunner: captured graph %s has_non_logit_outputs=%s",
+                key, has_non_logit,
+            )
+
             self.graphs[key] = CudaGraphData(
                 graph=graph,
                 static_inputs={
@@ -339,7 +362,8 @@ class CudaGraphRunner:
                 static_outputs=output,
                 static_cache_manager=cache_manager,
                 config=config,
-                bs=bs
+                bs=bs,
+                has_non_logit_outputs=has_non_logit,
             )
 
             logger.debug("Captured graph %s, output keys: %s", key,
@@ -514,41 +538,79 @@ class CudaGraphRunner:
         if self.enable_nvtx:
             range_push("cg.sample_and_remap", synchronize=True)
 
-        # Collect logits and non-logit outputs in a single pass
-        all_logits = []
-        non_logit_keys: dict[str, list] = {}
-        for i in range(len(request_ids)):
-            dummy_rid = dummy_rids[i]
-            if dummy_rid not in static_output:
-                continue
-            dummy_out = static_output[dummy_rid]
-            for out_key, val in dummy_out.items():
-                if out_key == "logits":
-                    logits_t = val[0] if isinstance(val, list) else val
-                    all_logits.append(logits_t)
-                else:
-                    non_logit_keys.setdefault(out_key, []).append((i, val))
-
-        # Batched sample: one kernel launch for all requests
         outputs = {}
-        if all_logits:
-            stacked_logits = torch.cat(all_logits, dim=0)
-            sampled = self.sampler.sample(request_ids, stacked_logits)
-            for rid in request_ids:
-                outputs[rid] = {"new_token": [sampled[rid].clone()]}
-        else:
-            for rid in request_ids:
-                outputs[rid] = {}
 
-        for out_key, entries in non_logit_keys.items():
-            for idx, val in entries:
-                rid = request_ids[idx]
-                if isinstance(val, list):
-                    outputs[rid][out_key] = [t.clone() for t in val]
-                elif isinstance(val, torch.Tensor):
-                    outputs[rid][out_key] = [val.clone()]
-                else:
-                    outputs[rid][out_key] = val
+        # Fast path: submodule exposed the stacked [padded_bs, V] logits tensor
+        # under a sentinel key, so we can sample directly without per-rid
+        # iteration or torch.cat.
+        batched_logits = static_output.get("__batched_logits__")
+        if batched_logits is not None:
+            stacked_logits = batched_logits[:len(request_ids)]
+            # Sampler.sample returns the raw [B] tokens tensor. FlashInfer
+            # allocates a fresh output each call (not captured in the CUDA
+            # graph), so the per-rid views are valid for the lifetime of the
+            # Python reference — no .clone() needed.
+            sampled = self.sampler.sample(request_ids, stacked_logits)
+            # One `split` call produces N [1] views in C++ (faster than N
+            # Python-level slicing ops). Then zip + dict comprehension builds
+            # the outputs dict without enumerate overhead.
+            sampled_views = sampled.split(1)
+            outputs = {
+                rid: {"new_token": [view]}
+                for rid, view in zip(request_ids, sampled_views)
+            }
+
+            # Collect non-logit per-rid outputs (e.g. hidden states) only when
+            # the captured graph actually produced any — for most AR models
+            # (Orpheus included) it only emits logits, so the loop is skipped.
+            if graph_data.has_non_logit_outputs:
+                for i, rid in enumerate(request_ids):
+                    dummy_rid = dummy_rids[i]
+                    if dummy_rid not in static_output:
+                        continue
+                    for out_key, val in static_output[dummy_rid].items():
+                        if out_key == "logits":
+                            continue
+                        if isinstance(val, list):
+                            outputs[rid][out_key] = [t.clone() for t in val]
+                        elif isinstance(val, torch.Tensor):
+                            outputs[rid][out_key] = [val.clone()]
+                        else:
+                            outputs[rid][out_key] = val
+        else:
+            # Fallback: collect per-rid logits and concatenate.
+            all_logits = []
+            non_logit_keys: dict[str, list] = {}
+            for i in range(len(request_ids)):
+                dummy_rid = dummy_rids[i]
+                if dummy_rid not in static_output:
+                    continue
+                dummy_out = static_output[dummy_rid]
+                for out_key, val in dummy_out.items():
+                    if out_key == "logits":
+                        logits_t = val[0] if isinstance(val, list) else val
+                        all_logits.append(logits_t)
+                    else:
+                        non_logit_keys.setdefault(out_key, []).append((i, val))
+
+            if all_logits:
+                stacked_logits = torch.cat(all_logits, dim=0)
+                sampled = self.sampler.sample(request_ids, stacked_logits)
+                for i, rid in enumerate(request_ids):
+                    outputs[rid] = {"new_token": [sampled[i:i+1]]}
+            else:
+                for rid in request_ids:
+                    outputs[rid] = {}
+
+            for out_key, entries in non_logit_keys.items():
+                for idx, val in entries:
+                    rid = request_ids[idx]
+                    if isinstance(val, list):
+                        outputs[rid][out_key] = [t.clone() for t in val]
+                    elif isinstance(val, torch.Tensor):
+                        outputs[rid][out_key] = [val.clone()]
+                    else:
+                        outputs[rid][out_key] = val
 
         if self.enable_nvtx:
             range_pop(synchronize=True)

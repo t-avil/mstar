@@ -876,6 +876,9 @@ class ThinkerSubmodule(NodeSubmodule):
                 if rid in masks_for_talker:
                     req_out["thinker_mask"] = [masks_for_talker[rid]]
             outputs[rid] = req_out
+        # Expose the stacked [B, V] tensor under a sentinel key so the CUDA
+        # graph runner can sample directly without concatenating per-rid slices.
+        outputs["__batched_logits__"] = logits
         return outputs
 
     def get_needed_cache_labels(
