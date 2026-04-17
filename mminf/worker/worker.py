@@ -60,6 +60,7 @@ class Worker:
         worker_ids: list[str],
         my_worker_graphs: list[WorkerGraph],
         kv_config: dict[str, KVCacheConfig],
+        model_config: dict,
         all_worker_graph_ids_to_graph_walks: dict[str, set[str]],
         all_worker_graph_ids_to_nodes: dict[str, set[str]],
         all_worker_graph_ids_to_dyn_loops: dict[str, set[str]],
@@ -110,6 +111,7 @@ class Worker:
             node_names,
             device=device,
             kv_config=kv_config,
+            model_config=model_config,
             transfer_engine_info=TransferEngineInfo(
                 my_entity_id=worker_id,
                 my_session_id=self.tensor_manager.my_session_id,

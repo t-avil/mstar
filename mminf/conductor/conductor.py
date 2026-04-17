@@ -8,6 +8,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 
 import numpy as np
+import torch
 import yaml
 
 from mminf.api_server.request_types import APIServerMessage, RequestComplete
@@ -57,6 +58,7 @@ def _worker_process_target(
     worker_ids: list[str],
     my_worker_graphs: list[WorkerGraph],
     kv_config: list[KVCacheConfig],
+    model_config: dict,
     all_worker_graph_ids_to_graph_walks: dict[str, set[str]],
     all_worker_graph_ids_to_nodes: dict[str, set[str]],
     all_worker_graph_ids_to_dyn_loops: dict[str, set[str]],
@@ -87,6 +89,7 @@ def _worker_process_target(
         worker_ids=worker_ids,
         my_worker_graphs=my_worker_graphs,
         kv_config=kv_config,
+        model_config=model_config,
         all_worker_graph_ids_to_graph_walks=all_worker_graph_ids_to_graph_walks,
         all_worker_graph_ids_to_nodes=all_worker_graph_ids_to_nodes,
         all_worker_graph_ids_to_dyn_loops=all_worker_graph_ids_to_dyn_loops,
@@ -250,6 +253,7 @@ class Conductor:
                     "worker_ids": self.worker_ids,
                     "my_worker_graphs": self._per_worker_graphs[worker_id],
                     "kv_config": self._get_kv_config(),
+                    "model_config": self.model_config,
                     "all_worker_graph_ids_to_graph_walks": self._all_worker_graph_ids_to_graph_walks,
                     "all_worker_graph_ids_to_nodes": self._all_worker_graph_ids_to_nodes,
                     "all_worker_graph_ids_to_dyn_loops": self._all_worker_graph_ids_to_dyn_loops,
