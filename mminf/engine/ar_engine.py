@@ -273,18 +273,25 @@ class AREngine(BaseEngine):
 
         cache_manager.flush_to_store()
 
-        # The `__batched_logits__` sentinel key is a CUDA-graph fast-path
-        # hint (see cuda_graph_runner.sample_and_remap); it must not leak
-        # into NodeOutput.per_request_output_tensors, whose keys are
-        # per-request dicts.
-        batched_output.pop("__batched_logits__", None)
+        # `__batched_logits__` is the stacked [B, V] logits the submodule
+        # already produced for the batch. When present, sample once across
+        # the whole batch instead of looping per-rid (matches the CUDA-graph
+        # fast path in cuda_graph_runner.sample_and_remap).
+        batched_logits = batched_output.pop("__batched_logits__", None)
 
         if self.enable_nvtx:
             range_push("ar.batched.sample", synchronize=True)
-        output = NodeOutput(per_request_output_tensors=batched_output)
-        output = self._sample_decode_outputs(
-            batch.node_name, output
-        )
+        if batched_logits is not None:
+            sampler = self.submodule_management[batch.node_name].sampler
+            sampled = sampler.sample(rids, batched_logits)
+            for rid, view in zip(rids, sampled.split(1), strict=True):
+                rid_out = batched_output[rid]
+                rid_out["new_token"] = [view]
+                del rid_out["logits"]
+            output = NodeOutput(per_request_output_tensors=batched_output)
+        else:
+            output = NodeOutput(per_request_output_tensors=batched_output)
+            output = self._sample_decode_outputs(batch.node_name, output)
         if self.enable_nvtx:
             range_pop(synchronize=True)
         return output
