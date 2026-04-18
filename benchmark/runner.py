@@ -173,6 +173,7 @@ class Benchmark:
             )
             tasks.append(task)
             if i < len(requests) - 1:
+                # Poisson inter-request times
                 interval = random.expovariate(self.config.rate)
                 await asyncio.sleep(interval)
         return list(await asyncio.gather(*tasks))

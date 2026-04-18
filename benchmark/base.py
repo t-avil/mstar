@@ -13,10 +13,13 @@ class RequestType(Enum):
     T2I = "text_to_image"
     I2T = "image_to_text"
     I2I = "image_to_image"
+    T2S = "text_to_speech"
 
     def get_output_modalities(self):
         if self in [RequestType.I2I, RequestType.T2I]:
             return "image"
+        if self in [RequestType.T2S]:
+            return "audio"
         return "text"
 
 
@@ -29,6 +32,10 @@ class Model(ABC):
 
     @abstractmethod
     def get_hf_url(self):
+        pass
+
+    @abstractmethod
+    def get_supported_modalities(self):
         pass
 
 
@@ -52,12 +59,33 @@ class Bagel(Model):
 
     def get_hf_url(self):
         return "ByteDance-Seed/BAGEL-7B-MoT"
+    
+    def get_supported_modalities(self):
+        return {
+            RequestType.T2T,
+            RequestType.T2I,
+            RequestType.I2I,
+            RequestType.I2T
+        }
 
+
+class Orpheus(Model):
+    def get_hf_url(self):
+        return "canopylabs/orpheus-3b-0.1-ft"
+    
+    def get_supported_modalities(self):
+        return {
+            RequestType.T2S
+        }
+    
 
 class ModelType(Enum):
     BAGEL = "bagel"
+    ORPHEUS = "orpheus"
 
     def inst(self, **kwargs) -> Model:
         if self == ModelType.BAGEL:
             return Bagel(**kwargs)
+        if self == ModelType.ORPHEUS:
+            return Orpheus(**kwargs)
         raise NotImplementedError(f"Unknown model type {self}")
