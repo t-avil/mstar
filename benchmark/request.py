@@ -295,14 +295,15 @@ class AggregateMetrics:
             chunks = self.total_output_chunks.get(modality, 0)
             tok_lines += f"Output bytes ({modality}): {total_bytes} total ({chunks} chunks)\n"
 
+        max_len = max([len(m) for m in self.ttft])
         ttft_lines = "\n".join(
-            f"TTFT ({m})  : {s}" for m, s in sorted(self.ttft.items())
+            f"TTFT ({m})" + (" " * (max_len - len(m))) + f"  : {s}" for m, s in sorted(self.ttft.items())
         )
         itl_lines = "\n".join(
-            f"ITL  ({m})  : {s}" for m, s in sorted(self.itl.items())
+            f"ITL  ({m})"  + (" " * (max_len - len(m))) + f"  : {s}" for m, s in sorted(self.itl.items())
         )
         sv_line = (
-            f"Audio SV   : {self.streaming_viability}\n"
+            f"Audio SV " + (" " * max_len) + f": {self.streaming_viability}\n"
             if self.streaming_viability is not None
             else ""
         )
@@ -314,7 +315,7 @@ class AggregateMetrics:
             f"Request type breakdown: {breakdown}\n"
             f"Requests : {self.n_success}/{self.n_requests} succeeded\n"
             f"{ttft_lines}\n"
-            f"E2E      : {self.e2e_latency}\n"
+            f"E2E      " + (" " * max_len) + f": {self.e2e_latency}\n"
             f"{itl_lines}\n"
             f"{sv_line}"
             f"{tok_lines}"

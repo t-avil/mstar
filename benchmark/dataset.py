@@ -60,7 +60,7 @@ class TxtFileDataset(BaseDataset):
         with open(filename, "r") as f:
             for line in f.readlines():
                 self.items.append(RequestInput(
-                    req_type=RequestType.T2T,
+                    req_type=req_type,
                     prompt=line.strip()
                 ))
         self.items = self._resize_data(self.items)
