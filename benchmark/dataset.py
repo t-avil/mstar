@@ -53,7 +53,7 @@ class TxtFileDataset(BaseDataset):
         req_type=RequestType.T2T
     ):
         assert req_type in [
-            RequestType.T2T, RequestType.T2I
+            RequestType.T2T, RequestType.T2I, RequestType.T2S
         ]
         self.items = []
         self._num_requests = num_requests

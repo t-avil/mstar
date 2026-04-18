@@ -238,7 +238,6 @@ def parse_args() -> BenchmarkConfig:
     parser = argparse.ArgumentParser(description="Run inference benchmark")
     parser.add_argument("--url", required=True)
     parser.add_argument("--model", required=True, choices=[m.value for m in ModelType])
-    parser.add_argument("--dataset", required=True, choices=[d.value for d in DatasetType])
     parser.add_argument("--inference-system", choices=[s.value for s in InferenceSystemType],
                         default=InferenceSystemType.OURS.value)
     parser.add_argument("--num-requests", type=int, default=10)
@@ -247,6 +246,7 @@ def parse_args() -> BenchmarkConfig:
                         default=ProfilingType.OFFLINE.value)
     parser.add_argument("--request-type", choices=[r.value for r in RequestType])
     parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--dataset", default=None, choices=[d.value for d in DatasetType])
     parser.add_argument("--rate", type=float, default=1.0,
                         help="Requests/sec (default: 1.0)")
     parser.add_argument("--output-dir", default=None,
@@ -270,12 +270,30 @@ def parse_args() -> BenchmarkConfig:
 
     args = parser.parse_args()
 
+    dataset = args.dataset
+    txtfile = args.request_txt_file
+    request_type = RequestType(args.request_type)
+    if dataset is None:
+        if request_type in {
+            RequestType.T2I, RequestType.I2T, RequestType.I2I
+        }:
+            dataset = DatasetType.VBENCH
+            txtfile = None
+        elif request_type == RequestType.T2T:
+            dataset = DatasetType.TEXT
+            txtfile = "benchmark/assets/simple_text_queries.txt"
+        elif request_type == RequestType.T2S:
+            dataset = DatasetType.TEXT
+            txtfile = "benchmark/assets/t2s.txt"
+        print(f"Dataset not specified, setting it to {dataset.value}, txtfile={txtfile}")
+            
+
     return BenchmarkConfig(
         url=args.url,
         model=ModelType(args.model).inst(disable_cfg=args.disable_cfg),
-        dataset=DatasetType(args.dataset),
+        dataset=dataset,
         num_requests=args.num_requests,
-        request_type=RequestType(args.request_type),
+        request_type=request_type,
         num_warmup=args.num_warmup,
         profiling_type=ProfilingType(args.profiling_type),
         inference_system=InferenceSystemType(args.inference_system),
@@ -284,7 +302,7 @@ def parse_args() -> BenchmarkConfig:
         verbose=args.verbose,
         output_dir=args.output_dir,
         vbench_cache_dir=args.vbench_cache_dir,
-        request_txt_file=args.request_txt_file,
+        request_txt_file=txtfile,
     )
 
 
