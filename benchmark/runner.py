@@ -36,11 +36,12 @@ class InferenceSystemType(Enum):
     VLLM_OMNI = "vllm_omni"
     VOX_SERVE = "vox_serve"
 
-    def instantiate(self) -> InferenceSystem:
+    # def instantiate(self) -> InferenceSystem:
+    def instantiate(self, base_url: str = "") -> InferenceSystem:
         if self == InferenceSystemType.OURS:
             return OurSystem()
         elif self == InferenceSystemType.VLLM_OMNI:
-            return VLLMOmni()
+            return VLLMOmni(base_url=base_url)
         elif self == InferenceSystemType.VOX_SERVE:
             return VoxServe()
 
@@ -76,7 +77,8 @@ class BenchmarkConfig:
 class Benchmark:
     def __init__(self, config: BenchmarkConfig):
         self.config = config
-        self.inference_system = config.inference_system.instantiate()
+        # self.inference_system = config.inference_system.instantiate()
+        self.inference_system = config.inference_system.instantiate(base_url=config.url)
 
     def _get_dataset(self) -> BaseDataset:
         if self.config.dataset == DatasetType.VBENCH:

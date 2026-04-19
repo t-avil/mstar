@@ -16,6 +16,8 @@ import aiohttp
 from benchmark.base import Model, RequestType, Status
 from benchmark.utils import _write_wav
 
+import requests
+from openai import OpenAI
 
 @dataclass
 class LatencyStats:
@@ -538,119 +540,261 @@ class VoxServe(InferenceSystem):
         return metrics
 
 
+# class VLLMOmni(InferenceSystem):
+#     async def send_request(
+#         self,
+#         session: aiohttp.ClientSession,
+#         base_url: str,
+#         request_id: int,
+#         req_type: RequestType,
+#         model: Model,
+#         prompt: str,
+#         image_path: Optional[str] = None,
+#         additional_model_kwargs: dict = {},
+#     ) -> RequestMetrics:
+#         metrics = RequestMetrics(request_id=request_id, type=req_type)
+#         try:
+#             if req_type == RequestType.T2I:
+#                 await self._chat(
+#                     session, base_url, model, prompt, None, metrics,
+#                     additional_model_kwargs, output_modality="image",
+#                 )
+#             elif req_type == RequestType.I2I:
+#                 if image_path is None:
+#                     raise ValueError("image_path is required for I2I requests")
+#                 await self._chat(
+#                     session, base_url, model, prompt, image_path, metrics,
+#                     additional_model_kwargs, output_modality="image",
+#                 )
+#             elif req_type in (RequestType.T2T, RequestType.I2T):
+#                 await self._chat(
+#                     session, base_url, model, prompt, image_path, metrics,
+#                     additional_model_kwargs, output_modality="text",
+#                 )
+#             else:
+#                 raise ValueError(f"Unsupported request type: {req_type}")
+#         except Exception as e:
+#             metrics.record_error(str(e))
+#         else:
+#             metrics.record_completion()
+#         return metrics
+
+#     async def _chat(
+#         self,
+#         session: aiohttp.ClientSession,
+#         base_url: str,
+#         model: Model,
+#         prompt: str,
+#         image_path: Optional[str],
+#         metrics: RequestMetrics,
+#         additional_model_kwargs: dict,
+#         output_modality: str = "text",
+#     ) -> None:
+#         if image_path is not None:
+#             image_bytes = Path(image_path).read_bytes()
+#             b64 = base64.b64encode(image_bytes).decode()
+#             content_type = mimetypes.guess_type(image_path)[0] or "image/jpeg"
+#             content = [
+#                 {
+#                     "type": "image_url",
+#                     "image_url": {"url": f"data:{content_type};base64,{b64}"},
+#                 },
+#                 {
+#                     "type": "text",
+#                     "text": f"<|im_start|>{prompt}<|im_end|>",
+#                 },
+#             ]
+#             messages = [{"role": "user", "content": content}]
+#         else:
+#             messages = [{"role": "user", "content": f"<|im_start|>{prompt}<|im_end|>"}]
+
+#         extra_body = {k: v for k, v in additional_model_kwargs.items()}
+
+#         payload = {
+#             "model": model.get_hf_url(),
+#             "messages": messages,
+#             "max_tokens": 2048,
+#         }
+#         # Only send modalities for image output — vLLM-Omni returns empty
+#         # content for I2T when modalities: ["text"] is explicitly set
+#         if output_modality != "text":
+#             payload["modalities"] = [output_modality]
+#         if extra_body:
+#             payload["extra_body"] = extra_body
+        
+#         # TODO refactor. figure out streaming for this!
+
+#         async with session.post(
+#             f"{base_url}/v1/chat/completions", json=payload, read_bufsize=2**24
+#         ) as resp:
+#             if resp.status != 200:
+#                 raise Exception(f"HTTP {resp.status}: {await resp.text()}")
+
+#             resp_json = await resp.json()
+#             choices = resp_json.get("choices", [])
+#             if not choices:
+#                 raise Exception(f"No choices in response: {resp_json}")
+
+#             # Extract token count from usage if available
+#             usage = resp_json.get("usage", {})
+#             metrics.output_tokens = usage.get("completion_tokens", 0)
+
+#             msg = choices[0].get("message", {})
+#             content = msg.get("content", "")
+
+#             if isinstance(content, list):
+#                 for chunk in content:
+#                     if chunk.get("type") == "image_url":
+#                         metrics.record_token()
+#                         # Extract image bytes
+#                         url = chunk.get("image_url", {}).get("url", "")
+#                         if url.startswith("data:image"):
+#                             _, b64_data = url.split(",", 1)
+#                             metrics.output_content = base64.b64decode(b64_data)
+#                     elif chunk.get("type") == "text":
+#                         metrics.record_token()
+#             elif content:
+#                 metrics.record_token()
+#                 metrics.output_content = content
+
+
+# ---------------------------------------------------------------------------
+# VLLMOmni — adapted from vllm-omni in line with OurSystem
+# ---------------------------------------------------------------------------
+
+_SYSTEM_MESSAGE = {
+    "role": "system",
+    "content": [{
+        "type": "text",
+        "text": (
+            "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, "
+            "capable of perceiving auditory and visual inputs, as well as generating text and speech."
+        ),
+    }],
+}
+
+
 class VLLMOmni(InferenceSystem):
+    """
+    Benchmark adapter for the vLLM-Omni OpenAI-compatible server.
+
+    Uses the synchronous `openai.OpenAI` client (matching the original
+    vllm-omni example style) wrapped inside `asyncio.to_thread` so it
+    slots into the same async benchmark harness as OurSystem.
+
+    Streaming is always enabled so that TTFT / inter-chunk latencies are
+    recorded the same way as for OurSystem.
+    """
+
+
+    def __init__(self, base_url: str = "http://localhost:8091") -> None:
+        self._client = OpenAI(api_key="EMPTY", base_url=f"{base_url}/v1")
+
     async def send_request(
         self,
-        session: aiohttp.ClientSession,
+        session: aiohttp.ClientSession,       # kept for interface parity; not used here
+        req_input: RequestInput,
         base_url: str,
         request_id: int,
-        req_type: RequestType,
         model: Model,
-        prompt: str,
-        image_path: Optional[str] = None,
         additional_model_kwargs: dict = {},
     ) -> RequestMetrics:
-        metrics = RequestMetrics(request_id=request_id, type=req_type)
+        req_type = req_input.req_type
+        output_mod = req_type.get_output_modalities()  # "text", "audio", "image"
+        input_mod = req_type.get_input_modalities()    # "text", "image", "audio", "video"
+
+        metrics = RequestMetrics(
+            request_id=request_id,
+            type=req_type,
+            expected_output_modalities=[output_mod],
+        )
+
         try:
-            if req_type == RequestType.T2I:
-                await self._chat(
-                    session, base_url, model, prompt, None, metrics,
-                    additional_model_kwargs, output_modality="image",
+            # Build user message from input modality
+            files = req_input.get_all_filepaths()
+            media_path = files.get(input_mod) if input_mod != "text" else None
+            user_message = self._build_user_message(req_input.prompt, input_mod, media_path)
+
+            model_name = model.get_hf_url() # check
+            extra_body = {
+                **model.get_model_kwargs(req_type), # check
+                **additional_model_kwargs,
+            }
+
+            def _stream_blocking():
+                """Run the blocking OpenAI streaming call and collect raw chunks."""
+                chunks = []
+                # Only pass modalities for non-text output — vLLM-Omni returns
+                # empty content for text-output requests when modalities=["text"]
+                # is explicitly set.
+                modalities_arg = [output_mod] if output_mod != "text" else None
+                stream = self._client.chat.completions.create(
+                    model=model_name,
+                    messages=[_SYSTEM_MESSAGE, user_message],
+                    modalities=modalities_arg,
+                    extra_body=extra_body or None,
+                    stream=True,
+                    stream_options={"include_usage": True},
                 )
-            elif req_type == RequestType.I2I:
-                if image_path is None:
-                    raise ValueError("image_path is required for I2I requests")
-                await self._chat(
-                    session, base_url, model, prompt, image_path, metrics,
-                    additional_model_kwargs, output_modality="image",
-                )
-            elif req_type in (RequestType.T2T, RequestType.I2T):
-                await self._chat(
-                    session, base_url, model, prompt, image_path, metrics,
-                    additional_model_kwargs, output_modality="text",
-                )
-            else:
-                raise ValueError(f"Unsupported request type: {req_type}")
+                for chunk in stream:
+                    chunks.append((chunk, time.monotonic()))
+                return chunks
+
+            chunks = await asyncio.to_thread(_stream_blocking)
+
+            for chunk, arrival_time in chunks:
+                # Handle final usage chunk
+                if getattr(chunk, "usage", None):
+                    metrics.output_tokens = chunk.usage.completion_tokens
+                    continue
+
+                modality = getattr(chunk, "modality", None)
+
+                for choice in chunk.choices:
+                    delta = getattr(choice, "delta", None)
+                    if delta is None:
+                        continue
+                    content = getattr(delta, "content", None)
+                    if not content:
+                        continue
+
+                    if modality == "audio":
+                        # content is already base64-encoded PCM/WAV from vLLM-Omni
+                        data_b64 = content
+                    else:
+                        # text: encode to base64 so record_output_chunk stays uniform
+                        data_b64 = base64.b64encode(content.encode()).decode()
+
+                    metrics.record_output_chunk(
+                        modality=modality or "text",
+                        data_b64=data_b64,
+                        arrival_time=arrival_time,
+                        n_tokens=1,  # TODO: fix this number
+                    )
+
         except Exception as e:
             metrics.record_error(str(e))
         else:
             metrics.record_completion()
+
         return metrics
 
-    async def _chat(
-        self,
-        session: aiohttp.ClientSession,
-        base_url: str,
-        model: Model,
-        prompt: str,
-        image_path: Optional[str],
-        metrics: RequestMetrics,
-        additional_model_kwargs: dict,
-        output_modality: str = "text",
-    ) -> None:
-        if image_path is not None:
-            image_bytes = Path(image_path).read_bytes()
-            b64 = base64.b64encode(image_bytes).decode()
-            content_type = mimetypes.guess_type(image_path)[0] or "image/jpeg"
-            content = [
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{content_type};base64,{b64}"},
-                },
-                {
-                    "type": "text",
-                    "text": f"<|im_start|>{prompt}<|im_end|>",
-                },
-            ]
-            messages = [{"role": "user", "content": content}]
-        else:
-            messages = [{"role": "user", "content": f"<|im_start|>{prompt}<|im_end|>"}]
+    @staticmethod
+    def _build_user_message(prompt: str, media_type: str, media_path: Optional[str]) -> dict:
+        content = []
 
-        extra_body = {k: v for k, v in additional_model_kwargs.items()}
+        if media_path is not None:
+            b64 = base64.b64encode(Path(media_path).read_bytes()).decode()
+            mime = mimetypes.guess_type(media_path)[0] or {
+                "image": "image/jpeg",
+                "audio": "audio/wav",
+                "video": "video/mp4",
+            }[media_type]
+            content.append({
+                "type": f"{media_type}_url",
+                f"{media_type}_url": {"url": f"data:{mime};base64,{b64}"},
+            })
 
-        payload = {
-            "model": model.get_hf_url(),
-            "messages": messages,
-            "max_tokens": 2048,
-        }
-        # Only send modalities for image output — vLLM-Omni returns empty
-        # content for I2T when modalities: ["text"] is explicitly set
-        if output_modality != "text":
-            payload["modalities"] = [output_modality]
-        if extra_body:
-            payload["extra_body"] = extra_body
-        
-        # TODO refactor. figure out streaming for this!
-
-        async with session.post(
-            f"{base_url}/v1/chat/completions", json=payload, read_bufsize=2**24
-        ) as resp:
-            if resp.status != 200:
-                raise Exception(f"HTTP {resp.status}: {await resp.text()}")
-
-            resp_json = await resp.json()
-            choices = resp_json.get("choices", [])
-            if not choices:
-                raise Exception(f"No choices in response: {resp_json}")
-
-            # Extract token count from usage if available
-            usage = resp_json.get("usage", {})
-            metrics.output_tokens = usage.get("completion_tokens", 0)
-
-            msg = choices[0].get("message", {})
-            content = msg.get("content", "")
-
-            if isinstance(content, list):
-                for chunk in content:
-                    if chunk.get("type") == "image_url":
-                        metrics.record_token()
-                        # Extract image bytes
-                        url = chunk.get("image_url", {}).get("url", "")
-                        if url.startswith("data:image"):
-                            _, b64_data = url.split(",", 1)
-                            metrics.output_content = base64.b64decode(b64_data)
-                    elif chunk.get("type") == "text":
-                        metrics.record_token()
-            elif content:
-                metrics.record_token()
-                metrics.output_content = content
+        content.append({"type": "text", "text": prompt})
+        return {"role": "user", "content": content}
+    
