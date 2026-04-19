@@ -450,3 +450,30 @@ class VJepa2Model(Model):
             predictor_module=self.predictor,
             device=device,
         )
+
+
+class VJepa2ACModel(VJepa2Model):
+    """V-JEPA 2 action-conditioned variant.
+
+    Thin subclass that hard-codes ``predictor_kind="ac"`` so the serving
+    entrypoint — which only forwards ``model_path_hf`` to the constructor
+    (see ``api_server/entrypoint.py``) — can select the AC path purely via
+    the registry.  Use ``configs/vjepa2_ac.yaml`` with ``model: "vjepa2_ac"``.
+    """
+
+    def __init__(
+        self,
+        model_path_hf: str,
+        cache_dir: str | None = None,
+        skip_weight_loading: bool = False,
+        ac_predictor_config: dict | None = None,
+        **kwargs,
+    ):
+        super().__init__(
+            model_path_hf=model_path_hf,
+            cache_dir=cache_dir,
+            skip_weight_loading=skip_weight_loading,
+            predictor_kind="ac",
+            ac_predictor_config=ac_predictor_config,
+            **kwargs,
+        )
