@@ -457,7 +457,8 @@ class OurSystem(InferenceSystem):
                     metrics.record_output_chunk(
                         modality=mod,
                         data_b64=data_b64,
-                        arrival_time=arrival_time
+                        arrival_time=arrival_time,
+                        n_tokens=1, # our system outputs one token at a time for now
                     )
 
         except Exception as e:
