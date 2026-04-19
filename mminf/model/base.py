@@ -99,19 +99,19 @@ class NodeSubmodule(torch.nn.Module):
         """
         return []
 
-    def can_use_cuda_graphs(self, graph_walk: str) -> bool:
-        """Return True if this submodule supports CUDA graphs for ``graph_walk``.
+    def can_use_cuda_graphs(self, batch: NodeBatch) -> bool:
+        """Return True if this submodule supports CUDA graphs for ``batch``.
 
-        Default: derives from ``get_cuda_graph_capture_inputs`` — if the
-        submodule provides capture templates for this walk, CUDA graphs
-        are supported.  Override for models with more complex eligibility
-        rules (e.g., excluding specific batch configurations).
+        Default: derives from ``get_cuda_graph_configs`` — if the submodule
+        declared a capture for this batch's graph_walk, CUDA graphs are
+        supported. Subclasses can override to reject on batch shape /
+        metadata (e.g. codec submodules that need homogeneous frame counts).
         """
         if not hasattr(self, "_cached_cuda_graph_walks"):
-            self._cached_cuda_graph_walks = set([
+            self._cached_cuda_graph_walks = {
                 cfg.graph_walk for cfg in self.get_cuda_graph_configs(device=torch.device("cpu"))
-            ])
-        return graph_walk in self._cached_cuda_graph_walks
+            }
+        return batch.graph_walk in self._cached_cuda_graph_walks
 
     def can_batch(
         self, batch: NodeBatch

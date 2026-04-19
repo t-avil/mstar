@@ -351,16 +351,16 @@ class AREngine(BaseEngine):
     def _can_use_cuda_graph(self, batch: NodeBatch) -> bool:
         """Check if CUDA graph replay is available for this batch.
 
-        Delegates the graph_walk eligibility check to the submodule via
-        ``submodule.can_use_cuda_graphs(graph_walk)``.  The default
+        Delegates the eligibility check to the submodule via
+        ``submodule.can_use_cuda_graphs(batch)``. The default
         implementation on NodeSubmodule derives this from
-        ``get_cuda_graph_capture_inputs(graph_walk) is not None``.
+        ``get_cuda_graph_configs`` (graph_walk membership).
         """
         submod_mgmt = self.submodule_management[batch.node_name]
         submodule = submod_mgmt.submodule
         if submodule is None:
             return False
-        if not submodule.can_use_cuda_graphs(batch.graph_walk):
+        if not submodule.can_use_cuda_graphs(batch):
             return False
         runner = submod_mgmt.cuda_graph_runner
         if runner is None:
