@@ -385,7 +385,20 @@ def aggregate_metrics(
 class RequestInput:
     req_type: RequestType
     prompt: str
-    image_path: Optional[str]=None
+
+    image_path: Optional[str] = None
+    audio_path: Optional[str] = None
+    video_path: Optional[str] = None
+    
+    def get_all_filepaths(self) -> dict[str, str]:
+        res = {}
+        if self.image_path:
+            res["image"] = self.image_path
+        if self.audio_path:
+            res["audio"] = self.audio_path
+        if self.video_path:
+            res["video"] = self.video_path
+        return res
 
 
 class InferenceSystem(ABC):
@@ -393,12 +406,10 @@ class InferenceSystem(ABC):
     async def send_request(
         self,
         session: aiohttp.ClientSession,
+        req_input: RequestInput,
         base_url: str,
         request_id: int,
-        req_type: RequestType,
         model: Model,
-        prompt: str,
-        image_path: Optional[str] = None,
         additional_model_kwargs: dict = {},
     ) -> RequestMetrics:
         pass
@@ -408,14 +419,13 @@ class OurSystem(InferenceSystem):
     async def send_request(
         self,
         session: aiohttp.ClientSession,
+        req_input: RequestInput,
         base_url: str,
         request_id: int,
-        req_type: RequestType,
         model: Model,
-        prompt: str,
-        image_path: Optional[str] = None,
         additional_model_kwargs: dict = {},
     ) -> RequestMetrics:
+        req_type = req_input.req_type
         model_kwargs = json.dumps({
             **model.get_model_kwargs(req_type),
             **additional_model_kwargs
@@ -429,14 +439,17 @@ class OurSystem(InferenceSystem):
 
         try:
             form = aiohttp.FormData()
-            form.add_field("text", prompt)
+            form.add_field("text", req_input.prompt)
             form.add_field("model_kwargs", model_kwargs)
             form.add_field("output_modalities", output_mod)
 
-            if image_path is not None:
-                path = Path(image_path)
-                file_bytes = path.read_bytes()
-                form.add_field("files", file_bytes, filename=path.name, content_type="application/octet-stream")
+            for file_bytes in req_input.get_all_filepaths().values():
+                file_content = Path(file_bytes).read_bytes()
+                form.add_field(
+                    "files", file_content,
+                    filename=os.path.basename(file_bytes),
+                    content_type="application/octet-stream"
+                )
 
             async with session.post(f"{base_url}/generate", data=form, read_bufsize=2**24) as resp:
                 resp.raise_for_status()
@@ -472,14 +485,13 @@ class VoxServe(InferenceSystem):
     async def send_request(
         self,
         session: aiohttp.ClientSession,
+        req_input: RequestInput,
         base_url: str,
         request_id: int,
-        req_type: RequestType,
         model: Model,
-        prompt: str,
-        image_path: Optional[str] = None,
         additional_model_kwargs: dict = {},
     ) -> RequestMetrics:
+        req_type = req_input.req_type
         assert req_type == RequestType.T2S, "vox-serve only supports text-to-speech requests"
         metrics = RequestMetrics(
             request_id=request_id, type=req_type,
@@ -488,7 +500,7 @@ class VoxServe(InferenceSystem):
 
         try:
             form = aiohttp.FormData()
-            form.add_field("text", prompt)
+            form.add_field("text", req_input.prompt)
             form.add_field("streaming", "true")
 
             async with session.post(

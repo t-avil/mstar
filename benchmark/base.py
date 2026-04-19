@@ -9,16 +9,38 @@ class Status(Enum):
 
 
 class RequestType(Enum):
+    # Text input
     T2T = "text_to_text"
     T2I = "text_to_image"
+    T2S = "text_to_speech"
+
+    # Image inputs
     I2T = "image_to_text"
     I2I = "image_to_image"
-    T2S = "text_to_speech"
+    I2S = "image_to_speech"
+
+    # Audio input
+    A2T = "audio_to_text"
+    A2S = "audio_to_speech"
+
+    # Video input
+    V2T = "video_to_text"
+    V2S = "video_to_speech"
+
 
     def get_output_modalities(self):
         if self in [RequestType.I2I, RequestType.T2I]:
             return "image"
-        if self in [RequestType.T2S]:
+        if self in [RequestType.T2S, RequestType.I2S, RequestType.V2S, RequestType.A2S]:
+            return "audio"
+        return "text"
+    
+    def get_input_modalities(self):
+        if self in [RequestType.I2I, RequestType.I2T, RequestType.I2S]:
+            return "image"
+        if self in [RequestType.V2T, RequestType.V2S]:
+            return "video"
+        if self in [RequestType.A2T, RequestType.A2S]:
             return "audio"
         return "text"
 
@@ -77,15 +99,34 @@ class Orpheus(Model):
         return {
             RequestType.T2S
         }
+
+class Qwen3Omni(Model):
+    def get_hf_url(self):
+        return "Qwen/Qwen3-Omni-30B-A3B-Instruct"
+    
+    def get_supported_modalities(self):
+        return {
+            RequestType.T2T,
+            RequestType.T2S,
+            RequestType.I2T,
+            RequestType.I2S,
+            RequestType.A2T,
+            RequestType.A2S,
+            RequestType.V2T,
+            RequestType.V2S
+        }
     
 
 class ModelType(Enum):
     BAGEL = "bagel"
     ORPHEUS = "orpheus"
+    QWEN3OMNI = "qwen3omni"
 
     def inst(self, **kwargs) -> Model:
         if self == ModelType.BAGEL:
             return Bagel(**kwargs)
         if self == ModelType.ORPHEUS:
             return Orpheus(**kwargs)
+        if self == ModelType.QWEN3OMNI:
+            return Qwen3Omni(**kwargs)
         raise NotImplementedError(f"Unknown model type {self}")

@@ -10,7 +10,7 @@ from typing import Optional
 import aiohttp
 
 from benchmark.base import Model, ModelType, RequestType
-from benchmark.dataset import BaseDataset, TxtFileDataset, VBenchDataset
+from benchmark.dataset import BaseDataset, Food101Dataset, LibriSpeechDataset, TxtFileDataset, UCF101Dataset, VBenchDataset
 from benchmark.request import (
     AggregateMetrics,
     InferenceSystem,
@@ -26,6 +26,9 @@ from benchmark.request import (
 class DatasetType(Enum):
     VBENCH = "vbench"
     TEXT = "text"
+    LIBRI = "libri"
+    FOOD = "food101"
+    UCF = "ucf101"
 
 
 class InferenceSystemType(Enum):
@@ -54,6 +57,7 @@ class BenchmarkConfig:
     dataset: DatasetType
     num_requests: int
     request_type: RequestType
+    local_cache_dir: str
     num_warmup: int = 3
     profiling_type: ProfilingType = ProfilingType.OFFLINE
     inference_system: InferenceSystemType = InferenceSystemType.OURS
@@ -86,6 +90,26 @@ class Benchmark:
                 filename=self.config.request_txt_file,
                 num_requests=self.config.num_requests,
                 req_type=self.config.request_type
+            )
+        elif self.config.dataset == DatasetType.LIBRI:
+            return LibriSpeechDataset(
+                num_requests=self.config.num_requests,
+                req_type=self.config.request_type,
+                local_file_dir=self.config.local_cache_dir
+            )
+        elif self.config.dataset == DatasetType.FOOD:
+            return Food101Dataset(
+                num_requests=self.config.num_requests,
+                req_type=self.config.request_type
+            )
+        elif self.config.dataset == DatasetType.UCF:
+            # TODO: this is the dataset that vllm-omni reports using, so we have it as an example,
+            # but it only has two videos that we're just alternating between... We should replace
+            # this with a better dataset
+            return UCF101Dataset(
+                num_requests=self.config.num_requests,
+                req_type=self.config.request_type,
+                local_file_dir=self.config.local_cache_dir
             )
         raise ValueError(f"Unknown dataset: {self.config.dataset}")
 
@@ -120,12 +144,10 @@ class Benchmark:
             asyncio.create_task(
                 self.inference_system.send_request(
                     session=session,
+                    req_input=req,
                     base_url=self.config.url,
                     request_id=i,
-                    req_type=req.req_type,
                     model=self.config.model,
-                    prompt=req.prompt,
-                    image_path=req.image_path,
                 )
             )
             for i, req in batch
@@ -167,12 +189,10 @@ class Benchmark:
             task = asyncio.create_task(
                 self.inference_system.send_request(
                     session=session,
+                    req_input=req,
                     base_url=self.config.url,
                     request_id=i,
-                    req_type=req.req_type,
                     model=self.config.model,
-                    prompt=req.prompt,
-                    image_path=req.image_path,
                 )
             )
             tasks.append(task)
@@ -202,13 +222,11 @@ class Benchmark:
                 if self.config.verbose:
                     print(f"Warmup {i+1} / {self.config.num_warmup}")
                 await self.inference_system.send_request(
+                    req_input=warmup_req,
                     session=session,
                     base_url=self.config.url,
                     request_id=-1,
-                    req_type=warmup_req.req_type,
                     model=self.config.model,
-                    prompt=warmup_req.prompt,
-                    image_path=warmup_req.image_path,
                 )
             if self.config.verbose:
                 print("Warmup complete.")
@@ -256,6 +274,7 @@ def parse_args() -> BenchmarkConfig:
     parser.add_argument("--output-dir", default=None,
                         help="Directory to save outputs (text files / images). Omit to skip.")
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--local-cache",  default="./mminf-benchmark-cache/", type=str)
 
     # specific to image gen
     parser.add_argument("--disable-cfg", action="store_true")
@@ -272,6 +291,7 @@ def parse_args() -> BenchmarkConfig:
         help="Text file with one line per prompt"
     )
 
+
     args = parser.parse_args()
 
     dataset = args.dataset
@@ -279,16 +299,36 @@ def parse_args() -> BenchmarkConfig:
     request_type = RequestType(args.request_type)
     if dataset is None:
         if request_type in {
-            RequestType.T2I, RequestType.I2T, RequestType.I2I
+            RequestType.T2I, RequestType.I2I
         }:
             dataset = DatasetType.VBENCH
+            txtfile = None
+        elif request_type in {
+            RequestType.I2T, RequestType.I2S
+        }:
+            dataset = DatasetType.FOOD
+            txtfile = None
+        elif request_type in {
+            RequestType.V2T, RequestType.V2S
+        }:
+            dataset = DatasetType.UCF
+            txtfile = None
+        elif request_type in {
+            RequestType.A2T, RequestType.A2S
+        }:
+            dataset = DatasetType.LIBRI
             txtfile = None
         elif request_type == RequestType.T2T:
             dataset = DatasetType.TEXT
             txtfile = "benchmark/assets/simple_text_queries.txt"
         elif request_type == RequestType.T2S:
             dataset = DatasetType.TEXT
-            txtfile = "benchmark/assets/t2s.txt"
+            if args.model == ModelType.ORPHEUS:
+                # T2S model, will just transcribe
+                txtfile = "benchmark/assets/t2s.txt"
+            else:
+                # thinker-talker type model that speaks its answer
+                txtfile = "benchmark/assets/simple_text_queries.txt"
         print(f"Dataset not specified, setting it to {dataset.value}, txtfile={txtfile}")
             
 
@@ -307,6 +347,7 @@ def parse_args() -> BenchmarkConfig:
         output_dir=args.output_dir,
         vbench_cache_dir=args.vbench_cache_dir,
         request_txt_file=txtfile,
+        local_cache_dir=args.local_cache
     )
 
 

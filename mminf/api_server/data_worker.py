@@ -337,3 +337,6 @@ class PreprocessWorkerThread:
                 logger.exception("PreprocessWorkerThread error")
 
             time.sleep(0.001)
+
+        # cleanup
+        self.communicator.close()
