@@ -127,9 +127,3 @@ class ZMQCommunicator(BaseCommunicator):
                 # zmq.Again actually means no messages left to read
                 break
         return messages
-
-    def close(self):
-        for sock in self.push_sockets.values():
-            sock.close()
-        self.pull_socket.close()
-        self.context.term()

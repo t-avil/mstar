@@ -276,7 +276,6 @@ class Conductor:
     def shutdown(self):
         logger.info("Shutting down conductor...")
         """Terminate and join all worker processes."""
-        self.communicator.close()
         for p in self._worker_processes:
             if p.is_alive():
                 p.terminate()
