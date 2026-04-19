@@ -1,0 +1,348 @@
+"""V-JEPA 2 action-conditioned predictor (for V-JEPA 2-AC).
+
+Port of ``VisionTransformerPredictorAC`` and supporting blocks from
+``vjepa2/src/models/ac_predictor.py`` + ``vjepa2/src/models/utils/modules.py``.
+The HuggingFace Transformers port does NOT include the AC variant, so this
+file stays close to the upstream naming to preserve checkpoint-key parity
+with the upstream ``vjepa2-ac-vitg`` weights.
+
+Key differences from the masked predictor:
+
+- Fused ``qkv`` Linear (``dim -> dim*3``) per layer (upstream layout).
+- Action + state + (optional) extrinsics tokens are interleaved into the
+  spatial sequence per timestep: ``[a, s, x_0, ..., x_{H*W-1}]`` (+ ``e``
+  if ``use_extrinsics``).  Action tokens rotate only along the depth axis.
+- Causal attention across frames via ``build_action_block_causal_attention_mask``.
+- Uses ``F.scaled_dot_product_attention`` (SDPA) — the attention mask is
+  always present, so the eager fallback is unreachable.
+"""
+
+from __future__ import annotations
+
+import math
+
+import torch
+import torch.nn.functional as F
+from torch import nn
+
+from mminf.model.vjepa2.components.rope_utils import rotate_queries_or_keys
+from mminf.model.vjepa2.config import VJepa2ACPredictorConfig
+
+
+def build_action_block_causal_attention_mask(
+    grid_depth: int,
+    grid_height: int,
+    grid_width: int,
+    add_tokens: int = 1,
+) -> torch.Tensor:
+    """Build a ``[N, N]`` boolean mask where frame ``t`` attends only to frames 0..t.
+
+    Each frame contributes ``add_tokens + grid_height * grid_width`` tokens.
+    """
+    tokens_per_frame = add_tokens + (grid_height * grid_width)
+    n = grid_depth * tokens_per_frame
+    mask = torch.zeros(n, n, dtype=torch.bool)
+    block = torch.ones(tokens_per_frame, tokens_per_frame, dtype=torch.bool)
+    for t1 in range(grid_depth):
+        for t2 in range(0, t1 + 1):
+            mask[
+                t1 * tokens_per_frame : (t1 + 1) * tokens_per_frame,
+                t2 * tokens_per_frame : (t2 + 1) * tokens_per_frame,
+            ] = block
+    return mask
+
+
+class _MLP(nn.Module):
+    def __init__(self, in_features: int, hidden_features: int):
+        super().__init__()
+        self.fc1 = nn.Linear(in_features, hidden_features)
+        self.act = nn.GELU()
+        self.fc2 = nn.Linear(hidden_features, in_features)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.fc2(self.act(self.fc1(x)))
+
+
+class ACRoPEAttention(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        qkv_bias: bool = True,
+        grid_size: int = 16,
+    ):
+        super().__init__()
+        if dim % num_heads != 0:
+            raise ValueError(f"dim={dim} not divisible by num_heads={num_heads}")
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.scale = self.head_dim**-0.5
+
+        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.proj = nn.Linear(dim, dim)
+
+        third = 2 * ((self.head_dim // 3) // 2)
+        self.d_dim = third
+        self.h_dim = third
+        self.w_dim = third
+        self.grid_size = grid_size
+
+    @staticmethod
+    def _separate_positions(ids: torch.Tensor, h: int, w: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        tokens_per_frame = h * w
+        frame_ids = ids // tokens_per_frame
+        rem = ids - tokens_per_frame * frame_ids
+        height_ids = rem // w
+        width_ids = rem - w * height_ids
+        return 1.0 * frame_ids, 1.0 * height_ids, 1.0 * width_ids
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        attn_mask: torch.Tensor,
+        t: int,
+        h: int,
+        w: int,
+        action_tokens: int,
+    ) -> torch.Tensor:
+        b, n, c = x.size()
+
+        # Position ids for the spatial part of each frame
+        spatial_ids = torch.arange(t * h * w, device=x.device)
+        d_pos, h_pos, w_pos = self._separate_positions(spatial_ids, h, w)
+        # Upstream snaps to the RoPE grid in case inference H/W differ
+        # from training; these are no-ops when grid_size matches.
+        h_pos = h_pos * (self.grid_size / h)
+        w_pos = w_pos * (self.grid_size / w)
+
+        if action_tokens > 0:
+            x = x.view(b, -1, action_tokens + h * w, c)  # [B, T, A+H*W, C]
+
+            action_q, action_k, action_v = [], [], []
+            for i in range(action_tokens):
+                a = x[:, :, i : i + 1, :].flatten(1, 2)  # [B, T, C]
+                qkv = (
+                    self.qkv(a).unflatten(-1, (3, self.num_heads, -1)).permute(2, 0, 3, 1, 4)
+                )  # [3, B, num_heads, T, head_dim]
+                q, k, v = qkv[0], qkv[1], qkv[2]
+                time_pos = torch.arange(t, device=x.device)
+                qd = rotate_queries_or_keys(q[..., : self.d_dim], pos=time_pos)
+                kd = rotate_queries_or_keys(k[..., : self.d_dim], pos=time_pos)
+                qr = q[..., self.d_dim :]
+                kr = k[..., self.d_dim :]
+                action_q.append(torch.cat([qd, qr], dim=-1).view(b, self.num_heads, t, 1, -1))
+                action_k.append(torch.cat([kd, kr], dim=-1).view(b, self.num_heads, t, 1, -1))
+                action_v.append(v.view(b, self.num_heads, t, 1, -1))
+
+            action_q = torch.cat(action_q, dim=3).flatten(2, 3)
+            action_k = torch.cat(action_k, dim=3).flatten(2, 3)
+            action_v = torch.cat(action_v, dim=3).flatten(2, 3)
+            x = x[:, :, action_tokens:, :].flatten(1, 2)  # [B, T*H*W, C]
+
+        # Spatial qkv + 3D RoPE
+        qkv = self.qkv(x).unflatten(-1, (3, self.num_heads, -1)).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+
+        s = 0
+        qd = rotate_queries_or_keys(q[..., s : s + self.d_dim], pos=d_pos)
+        kd = rotate_queries_or_keys(k[..., s : s + self.d_dim], pos=d_pos)
+        s += self.d_dim
+        qh = rotate_queries_or_keys(q[..., s : s + self.h_dim], pos=h_pos)
+        kh = rotate_queries_or_keys(k[..., s : s + self.h_dim], pos=h_pos)
+        s += self.h_dim
+        qw = rotate_queries_or_keys(q[..., s : s + self.w_dim], pos=w_pos)
+        kw = rotate_queries_or_keys(k[..., s : s + self.w_dim], pos=w_pos)
+        s += self.w_dim
+        if s < self.head_dim:
+            qr, kr = q[..., s:], k[..., s:]
+            q = torch.cat([qd, qh, qw, qr], dim=-1)
+            k = torch.cat([kd, kh, kw, kr], dim=-1)
+        else:
+            q = torch.cat([qd, qh, qw], dim=-1)
+            k = torch.cat([kd, kh, kw], dim=-1)
+
+        if action_tokens > 0:
+            # Interleave back: per frame, [A action tokens, H*W spatial tokens]
+            def merge_(tx: torch.Tensor, ta: torch.Tensor) -> torch.Tensor:
+                tx = tx.view(b, self.num_heads, t, h * w, -1)
+                ta = ta.view(b, self.num_heads, t, action_tokens, -1)
+                return torch.cat([ta, tx], dim=3).flatten(2, 3)
+
+            q = merge_(q, action_q)
+            k = merge_(k, action_k)
+            v = merge_(v, action_v)
+
+        x = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+        x = x.transpose(1, 2).reshape(b, n, c)
+        return self.proj(x)
+
+
+class ACBlock(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        mlp_ratio: float,
+        qkv_bias: bool,
+        layer_norm_eps: float,
+        grid_size: int,
+    ):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(dim, eps=layer_norm_eps)
+        self.attn = ACRoPEAttention(
+            dim=dim,
+            num_heads=num_heads,
+            qkv_bias=qkv_bias,
+            grid_size=grid_size,
+        )
+        self.norm2 = nn.LayerNorm(dim, eps=layer_norm_eps)
+        self.mlp = _MLP(in_features=dim, hidden_features=int(dim * mlp_ratio))
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        attn_mask: torch.Tensor,
+        t: int,
+        h: int,
+        w: int,
+        action_tokens: int,
+    ) -> torch.Tensor:
+        x = x + self.attn(self.norm1(x), attn_mask=attn_mask, t=t, h=h, w=w, action_tokens=action_tokens)
+        x = x + self.mlp(self.norm2(x))
+        return x
+
+
+class VisionTransformerPredictorAC(nn.Module):
+    """Action-conditioned V-JEPA 2 predictor.
+
+    Forward signature matches the upstream class so parity tests can pass
+    outputs directly.  Expects encoder context embeddings plus per-timestep
+    action / state (and optional extrinsics) tensors.
+    """
+
+    def __init__(self, config: VJepa2ACPredictorConfig):
+        super().__init__()
+        self.config = config
+        self.is_frame_causal = config.is_frame_causal
+        self.use_extrinsics = config.use_extrinsics
+        self.img_height, self.img_width = config.img_size
+        self.patch_size = config.patch_size
+        self.num_frames = config.num_frames
+        self.tubelet_size = config.tubelet_size
+        self.grid_height = config.img_size[0] // config.patch_size
+        self.grid_width = config.img_size[1] // config.patch_size
+
+        # Input projections
+        self.predictor_embed = nn.Linear(config.embed_dim, config.predictor_embed_dim, bias=True)
+        self.action_encoder = nn.Linear(config.action_embed_dim, config.predictor_embed_dim, bias=True)
+        self.state_encoder = nn.Linear(config.action_embed_dim, config.predictor_embed_dim, bias=True)
+        # Extrinsics encoder uses one fewer input dim (matches upstream).
+        self.extrinsics_encoder = nn.Linear(config.action_embed_dim - 1, config.predictor_embed_dim, bias=True)
+
+        # Transformer blocks
+        self.predictor_blocks = nn.ModuleList(
+            [
+                ACBlock(
+                    dim=config.predictor_embed_dim,
+                    num_heads=config.num_heads,
+                    mlp_ratio=config.mlp_ratio,
+                    qkv_bias=config.qkv_bias,
+                    layer_norm_eps=config.layer_norm_eps,
+                    grid_size=self.grid_height,
+                )
+                for _ in range(config.depth)
+            ]
+        )
+
+        self.predictor_norm = nn.LayerNorm(config.predictor_embed_dim, eps=config.layer_norm_eps)
+        self.predictor_proj = nn.Linear(config.predictor_embed_dim, config.embed_dim, bias=True)
+
+        attn_mask: torch.Tensor | None = None
+        if config.is_frame_causal:
+            grid_depth = config.num_frames // config.tubelet_size
+            add_tokens = 3 if config.use_extrinsics else 2
+            attn_mask = build_action_block_causal_attention_mask(
+                grid_depth, self.grid_height, self.grid_width, add_tokens=add_tokens
+            )
+        # Register as a non-persistent buffer so it moves with .to(device) but
+        # doesn't appear in state_dict (matches upstream, which stores it on
+        # the module but not in the checkpoint).
+        self.register_buffer("attn_mask", attn_mask, persistent=False)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        actions: torch.Tensor,
+        states: torch.Tensor,
+        extrinsics: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """
+        Args:
+            x: encoder context embeddings ``[B, N_ctxt, embed_dim]``.
+            actions: ``[B, T, action_embed_dim]``.
+            states: ``[B, T, action_embed_dim]``.
+            extrinsics: ``[B, T, action_embed_dim - 1]`` (only when
+                ``use_extrinsics=True``).
+
+        Returns:
+            Predicted embeddings, ``[B, N_ctxt, embed_dim]``.
+        """
+        x = self.predictor_embed(x)
+        b, n_ctxt, d = x.size()
+        t = n_ctxt // (self.grid_height * self.grid_width)
+
+        s = self.state_encoder(states).unsqueeze(2)  # [B, T, 1, D]
+        a = self.action_encoder(actions).unsqueeze(2)
+        x = x.view(b, t, self.grid_height * self.grid_width, d)
+
+        if self.use_extrinsics:
+            if extrinsics is None:
+                raise ValueError("extrinsics required when use_extrinsics=True")
+            e = self.extrinsics_encoder(extrinsics).unsqueeze(2)
+            x = torch.cat([a, s, e, x], dim=2).flatten(1, 2)
+            cond_tokens = 3
+        else:
+            x = torch.cat([a, s, x], dim=2).flatten(1, 2)
+            cond_tokens = 2
+
+        assert self.attn_mask is not None, "frame-causal attn_mask not built"
+        attn_mask = self.attn_mask[: x.size(1), : x.size(1)].to(x.device, non_blocking=True)
+
+        for blk in self.predictor_blocks:
+            x = blk(
+                x,
+                attn_mask=attn_mask,
+                t=t,
+                h=self.grid_height,
+                w=self.grid_width,
+                action_tokens=cond_tokens,
+            )
+
+        # Drop interleaved action/state(+extrinsics) tokens, keep spatial ones.
+        x = x.view(b, t, cond_tokens + self.grid_height * self.grid_width, d)
+        x = x[:, :, cond_tokens:, :].flatten(1, 2)
+
+        x = self.predictor_norm(x)
+        x = self.predictor_proj(x)
+        return x
+
+
+def _init_ac_predictor_weights(module: nn.Module, init_std: float = 0.02) -> None:
+    """Match upstream initialization + rescale_blocks scheme.
+
+    Only used when instantiating without a checkpoint (parity-test reference
+    setup).  Real deployments load weights via the weight_loader.
+    """
+    for m in module.modules():
+        if isinstance(m, nn.Linear):
+            nn.init.trunc_normal_(m.weight, std=init_std)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
+
+    if isinstance(module, VisionTransformerPredictorAC):
+        for layer_id, blk in enumerate(module.predictor_blocks, start=1):
+            blk.attn.proj.weight.data.div_(math.sqrt(2.0 * layer_id))
+            blk.mlp.fc2.weight.data.div_(math.sqrt(2.0 * layer_id))
