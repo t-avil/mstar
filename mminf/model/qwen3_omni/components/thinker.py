@@ -202,6 +202,7 @@ class Qwen3OmniThinkerModel(nn.Module):
         cache_handle: BatchedCacheManager,
         cos_sin_3d: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         mrope_section: Optional[list[int]] = None,
+        mrope_pos_advance: Optional[list[int]] = None,
         deepstack_visual_embeds: list[torch.Tensor] | None = None,
         visual_pos_masks: torch.Tensor | None = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
@@ -214,6 +215,11 @@ class Qwen3OmniThinkerModel(nn.Module):
             cos_sin_3d: (cos, sin) for 3D MRoPE, each [tokens, head_dim].
             mrope_section: section sizes for interleaved 3D MRoPE,
                 e.g. [24, 20, 20].
+            mrope_pos_advance: optional per-request MRoPE position advance
+                for ``advance_seq_lens``.  Vision prefill passes an explicit
+                value because the 3D-grid position span is larger than the
+                number of tokens; text / audio / decode leave it None and
+                ``position_id_start`` advances by ``seq_len``.
 
         Returns:
             hidden_states: [tokens, hidden_size] -- final normed hidden states
@@ -248,8 +254,17 @@ class Qwen3OmniThinkerModel(nn.Module):
             if layer_idx == self.accept_hidden_layer:
                 layer_n_hidden = hidden_states.clone()
 
-        # Advance sequence lengths after all layers
-        cache_handle.advance_seq_lens()
+        # Advance sequence lengths after all layers.  ``pos_id_ns`` decouples
+        # the position-id advance from the seq-len advance (needed for vision
+        # prefill where the 3D-grid span != number of tokens).
+        #
+        # NOTE: correct for eager + decode-only capture.  CudaGraphRunner
+        # does its own post-replay ``advance_seq_lens()`` at
+        # cuda_graph_runner.py:552 with no args, so this ``pos_id_ns`` is
+        # NOT honored on the replay path.  If we ever capture vision
+        # prefill, that runner call would need to accept a submodule-
+        # supplied ``pos_id_ns``.
+        cache_handle.advance_seq_lens(pos_id_ns=mrope_pos_advance)
 
         # Final layer norm
         hidden_states = run_rms_norm(
