@@ -183,14 +183,50 @@ def test_ac_predictor_state_dict_keys():
     assert "attn_mask" not in keys
 
 
-def test_ac_predictor_attn_mask_is_buffer_not_parameter():
-    """attn_mask moves with .to(device) but is never saved in checkpoints."""
+def test_ac_predictor_attn_mask_lazy_and_excluded_from_state_dict():
+    """attn_mask is lazily computed (not a registered buffer) and never
+    saved in checkpoints.  This matters because the model class uses
+    ``meta → to_empty(device)`` which would zero a registered buffer.
+    """
     cfg = _tiny_ac_config()
     predictor = VisionTransformerPredictorAC(cfg)
+    # Lazy property builds on first access
     assert predictor.attn_mask is not None
     assert not predictor.attn_mask.requires_grad
-    # Not in state_dict either
+    # Never in state_dict (and not registered as a buffer either)
     assert "attn_mask" not in predictor.state_dict()
+    assert "attn_mask" not in dict(predictor.named_buffers())
+
+
+def test_ac_predictor_survives_to_empty_materialization():
+    """Reproduces the production path: build on meta, ``to_empty(device)``,
+    then forward.  Before the fix, ``attn_mask`` was a non-persistent
+    buffer and ``to_empty`` left it as uninitialized garbage, crashing
+    forward.  Now that it's a lazy cache, forward rebuilds it on the
+    first call.
+    """
+    torch.manual_seed(0)
+    cfg = _tiny_ac_config()
+    with torch.device("meta"):
+        predictor = VisionTransformerPredictorAC(cfg)
+    predictor = predictor.to_empty(device="cpu")
+    # Fill the parameters with something deterministic since to_empty
+    # leaves them uninitialized (real loading would come from a checkpoint).
+    with torch.no_grad():
+        for p in predictor.parameters():
+            p.zero_()
+
+    b = 1
+    t = cfg.num_frames // cfg.tubelet_size
+    n_ctxt = t * (cfg.img_size[0] // cfg.patch_size) ** 2
+    x = torch.randn(b, n_ctxt, cfg.embed_dim)
+    a = torch.randn(b, t, cfg.action_embed_dim)
+    s = torch.randn(b, t, cfg.action_embed_dim)
+    predictor.eval()
+    with torch.no_grad():
+        out = predictor(x, a, s)
+    assert out.shape == (b, n_ctxt, cfg.embed_dim)
+    assert torch.isfinite(out).all()
 
 
 def test_ac_predictor_deterministic():
