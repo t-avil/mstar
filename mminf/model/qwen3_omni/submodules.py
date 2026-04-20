@@ -1552,63 +1552,74 @@ class Code2WavSubmodule(NodeSubmodule):
     
     def preprocess(
         self,
-        graph_walk: str,
-        cache_manager: BatchedCacheManager | None = None,
         per_request_inputs: list[NameToTensorList] | None = None,
         request_ids: list[str] | None = None,
-        per_request_info: dict[str, CurrentForwardPassInfo] | None = None,
+        **kwargs
     ) -> dict[str, torch.Tensor]:
-        """Unpack codec_tokens from StreamBuffer chunk.
+        """Unpack codec_tokens from StreamBuffer chunks for a batch of requests.
 
-        Selects the first ``num_quantizers`` (16) of the 32 code groups,
-        transposes to [1, num_quantizers, num_frames]
+        For each request, selects the first ``num_quantizers`` (16) of the 32
+        code groups and transposes to [num_quantizers, num_frames].  All
+        requests in the batch must have the same num_frames so the results can
+        be stacked into a single (bs, Q, T) tensor.
         """
-        assert len(per_request_inputs) == 1, (
-            "Code2Wav processes one request at a time"
-        )
-        rid = request_ids[0]
-        inputs = per_request_inputs[0]
-
-        # codec_tokens: accumulated from StreamBuffer
-        # Shape varies: could be (num_frames, num_code_groups) or (num_frames,)
-        codec_tokens = inputs["codec_tokens"][0]
-
         num_quantizers = self.config.code2wav.num_quantizers  # 16
-
-        # Reshape to (num_frames, num_code_groups) if flat
-        if codec_tokens.dim() == 1:
-            num_groups = self.config.num_code_groups  # 16 (Qwen3-Omni)
-            if codec_tokens.shape[0] % num_groups == 0:
-                codec_tokens = codec_tokens.view(-1, num_groups)
-            else:
-                # Single frame
-                codec_tokens = codec_tokens.unsqueeze(0)
-
-        # Filter out codec_eos frames — the vocoder should not decode EOS tokens.
-        # EOS is identified by the layer-0 code (first column).
         codec_eos = self.config.talker.codec_eos_token_id
-        if codec_tokens.dim() == 2 and codec_tokens.shape[0] > 0:
-            eos_mask = codec_tokens[:, 0] == codec_eos
-            if eos_mask.any():
-                codec_tokens = codec_tokens[~eos_mask]
-                if codec_tokens.shape[0] == 0:
-                    return {"request_id": rid, "codec_tokens": torch.empty(0)}
 
-        # Select first num_quantizers codebook layers
-        if codec_tokens.shape[-1] > num_quantizers:
-            codec_tokens = codec_tokens[..., :num_quantizers]
+        per_request_codec: list[torch.Tensor] = []
 
-        # Transpose to [1, num_quantizers, num_frames] for Code2Wav
-        codec_tokens = codec_tokens.T.unsqueeze(0)  # (1, Q, T)
+        for inputs in per_request_inputs:
+            codec_tokens = inputs["codec_tokens"][0]
 
+            # Reshape to (num_frames, num_code_groups) if flat
+            if codec_tokens.dim() == 1:
+                num_groups = self.config.num_code_groups  # 16 (Qwen3-Omni)
+                if codec_tokens.shape[0] % num_groups == 0:
+                    codec_tokens = codec_tokens.view(-1, num_groups)
+                else:
+                    codec_tokens = codec_tokens.unsqueeze(0)
+
+            # Filter out codec_eos frames
+            if codec_tokens.dim() == 2 and codec_tokens.shape[0] > 0:
+                eos_mask = codec_tokens[:, 0] == codec_eos
+                if eos_mask.any():
+                    codec_tokens = codec_tokens[~eos_mask]
+
+            # Select first num_quantizers codebook layers
+            if codec_tokens.shape[-1] > num_quantizers:
+                codec_tokens = codec_tokens[..., :num_quantizers]
+
+            # Transpose to (Q, T)
+            codec_tokens = codec_tokens.T  # (Q, T)
+            per_request_codec.append(codec_tokens)
+
+        # Assert all requests have the same numel so they can be batched
+        assert all(t.numel() == per_request_codec[0].numel() for t in per_request_codec), (
+            f"All codec token inputs must have the same numel for batching, "
+            f"got: {[t.numel() for t in per_request_codec]}"
+        )
+
+        # Stack into (bs, Q, T)
+        batched_codec_tokens = torch.stack(per_request_codec, dim=0)
+
+        return {"codec_tokens": batched_codec_tokens}
+    
+    def forward_batched(
+        self,
+        request_ids: list[str],
+        packed_inputs: dict[str, torch.Tensor],
+        per_request_info: dict[str, CurrentForwardPassInfo],
+        **kwargs
+    ) -> dict[str, NameToTensorList]:
+        fwd_out = self.forward(packed_inputs["codec_tokens"])
         return {
-            "request_id": rid,
-            "codec_tokens": codec_tokens,
+            rid: {
+                "audio_chunk": [fwd_out["audio_chunk"][0][i]]
+            } for i, rid in enumerate(request_ids)
         }
 
     def forward(
         self,
-        request_id: str | None = None,
         codec_tokens: torch.Tensor | None = None,
         **kwargs,
     ) -> NameToTensorList:
@@ -1635,35 +1646,65 @@ class Code2WavSubmodule(NodeSubmodule):
         # Run the ConvNet vocoder
         wav = self.code2wav(codec_tokens)
 
+        # Convert to int16 PCM
+        audio_int16 = (
+            wav.clamp(-1, 1) * 32767
+        ).to(torch.int16)
+
+        return {"audio_chunk": [audio_int16]}
+    
+    def postprocess(
+        self,
+        request_id: str,
+        request_info: CurrentForwardPassInfo,
+        outputs: dict[str, list[torch.Tensor]],
+        **kwargs
+    ):
+        outputs["audio_chunk"][0] = outputs["audio_chunk"][0].squeeze()
         is_first_chunk = (
             request_id is None or request_id not in self._first_chunk_emitted
         )
-        if request_id is not None:
-            self._first_chunk_emitted.add(request_id)
-
         if is_first_chunk:
-            # First chunk: no left context to discard — emit the full waveform.
-            trimmed_wav = wav
+            self._first_chunk_emitted.add(request_id)
         else:
             # Subsequent chunk: trim the ``left_context_size`` warmup frames
             # from the front of the output (they were already emitted by the
             # previous chunk).
+            wav = outputs["audio_chunk"][0]
             left_context_size = self.config.code2wav.left_context_size  # 25
             context_samples = left_context_size * self._total_upsample  # 25 * 1920 = 48000
             if wav.shape[-1] > context_samples:
-                trimmed_wav = wav[:, :, context_samples:]
-            else:
-                trimmed_wav = wav
-
-        # Convert to int16 PCM
-        audio_int16 = (
-            trimmed_wav.clamp(-1, 1) * 32767
-        ).to(torch.int16).squeeze().detach()
-
-        return {"audio_chunk": [audio_int16]}
+                outputs["audio_chunk"][0] = wav[context_samples:]
 
     def can_batch(self, batch: NodeBatch) -> bool:
-        return False
-        # return len({
-        #     inputs["codec_tokens"][0].numel() for inputs in batch.per_request_input_tensors.values()
-        # }) == 1
+        return len({
+            inputs["codec_tokens"][0].numel() for inputs in batch.per_request_input_tensors.values()
+        }) == 1
+    
+    # Cuda graph memory is blowing up; possibly due to us just being a wrapper around the
+    # transformers module. Until code2wav becomes a bottleneck, making this eager mode for now
+    # def can_use_cuda_graphs(self, batch):
+    #     total_numel = self.config.num_code_groups * (
+    #         self.config.code2wav.left_context_size + self.config.code2wav.chunk_size
+    #     )
+    #     return all([
+    #         inputs["codec_tokens"][0].numel() == total_numel for inputs in batch.per_request_input_tensors.values()
+    #     ])
+    
+    # def get_cuda_graph_configs(self, device: torch.device) -> list[CudaGraphConfig]:
+    #     return [
+    #         CudaGraphConfig(
+    #             graph_walk="code2wav_chunk",
+    #             requires_cfg=False,
+    #             dummy_capture_inputs=[{
+    #                 "codec_tokens": [
+    #                     torch.zeros(
+    #                         (self.config.code2wav.left_context_size + self.config.code2wav.chunk_size, self.config.num_code_groups),
+    #                         dtype=torch.long, device=device
+    #                     ),
+    #                 ],
+    #             }],
+    #             compile=True,
+    #             capture_batch_sizes=[1, 2],
+    #         ),
+    #     ]
