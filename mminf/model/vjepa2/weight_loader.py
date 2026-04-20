@@ -215,30 +215,39 @@ def _rename_upstream_ac_predictor_keys(
 
 
 def download_vjepa2_ac_upstream_pt(
-    model_path_hf: str,
+    model_path_hf: str | None = None,
     cache_dir: str | None = None,
 ) -> Path:
-    """Fetch just the upstream ``original/model.pth`` from an HF AC repo.
+    """Fetch the upstream V-JEPA 2-AC ``.pt`` from the public S3 mirror.
 
-    Uses :func:`huggingface_hub.snapshot_download` with ``allow_patterns`` so
-    we don't pull the entire repo (it also ships converted-config metadata we
-    don't use).  If HF rate-limits or the file is missing there, the caller
-    can fall back to :data:`VJEPA2_AC_VITG_S3_URL` directly.
+    As of Apr 2026 the HuggingFace V-JEPA 2 collection does NOT include an
+    AC-variant repo (only the base + SSv2 / Diving-48 classification
+    checkpoints for vitl/h/g are published there).  So we go straight to
+    :data:`VJEPA2_AC_VITG_S3_URL` — the public
+    ``dl.fbaipublicfiles.com/vjepa2/vjepa2-ac-vitg.pt`` artifact that
+    upstream ``vjepa2_ac_vit_giant(pretrained=True)`` pulls from.
+
+    Cached at ``{cache_dir}/vjepa2-ac-vitg.pt`` so re-launches skip the
+    ~11.7 GB download.  The ``model_path_hf`` argument is kept in the
+    signature for symmetry with :func:`download_vjepa2_snapshot` but is
+    ignored (we don't need an HF repo ID for the S3 path).
     """
-    from huggingface_hub import snapshot_download
+    del model_path_hf  # not used — S3 path is unique, not keyed by repo ID.
+    cache_root = Path(cache_dir) if cache_dir else Path.home() / ".cache" / "mminf_vjepa2"
+    cache_root.mkdir(parents=True, exist_ok=True)
 
-    local = snapshot_download(
-        repo_id=model_path_hf,
-        cache_dir=cache_dir,
-        allow_patterns=["original/*"],
+    pt_path = cache_root / "vjepa2-ac-vitg.pt"
+    if pt_path.exists() and pt_path.stat().st_size > 0:
+        logger.info("Using cached V-JEPA 2-AC checkpoint at %s", pt_path)
+        return pt_path
+
+    logger.info(
+        "Downloading V-JEPA 2-AC checkpoint from %s to %s (~11.7 GB, be patient)",
+        VJEPA2_AC_VITG_S3_URL,
+        pt_path,
     )
-    pt_path = Path(local) / "original" / "model.pth"
-    if not pt_path.exists():
-        raise FileNotFoundError(
-            f"Expected upstream checkpoint at {pt_path}; HF repo {model_path_hf} "
-            "does not ship an 'original/model.pth'.  Fall back to the direct S3 URL "
-            f"{VJEPA2_AC_VITG_S3_URL} or inspect the repo contents."
-        )
+    # ``torch.hub.download_url_to_file`` atomically writes + shows tqdm progress.
+    torch.hub.download_url_to_file(VJEPA2_AC_VITG_S3_URL, str(pt_path), progress=True)
     return pt_path
 
 
