@@ -60,7 +60,9 @@ from mminf.model.vjepa2.submodules import (
     VJepa2RolloutPredictorSubmodule,
 )
 from mminf.model.vjepa2.weight_loader import (
+    download_vjepa2_ac_upstream_pt,
     download_vjepa2_snapshot,
+    load_vjepa2_ac_upstream_weights,
     load_vjepa2_hf_weights,
 )
 
@@ -169,6 +171,7 @@ class VJepa2Model(Model):
 
         self.config = self._load_config(predictor_kind, ac_predictor_config)
         self._repo_dir: Path | None = None
+        self._ac_pt_path: Path | None = None
         self._submodule_cache: dict[str, NodeSubmodule | None] = {}
 
         # Lazily materialized components (populated in get_submodule).
@@ -178,6 +181,14 @@ class VJepa2Model(Model):
     # ------------------------------------------------------------------
     # Config
     # ------------------------------------------------------------------
+
+    # Architecture override applied on top of whatever HF ``config.json`` we
+    # manage to load.  Subclasses use this to force a known-good architecture
+    # when the HF repo doesn't ship a ``config.json`` (e.g. the AC repo,
+    # which only hosts the upstream ``.pt`` under ``original/model.pth``).
+    # Format: ``{VJepa2Config field: value}`` — applied via ``setattr`` after
+    # the normal load path.
+    _ARCH_OVERRIDES: dict = {}
 
     def _load_config(
         self,
@@ -205,6 +216,13 @@ class VJepa2Model(Model):
                 )
                 config = VJepa2Config()
 
+        # Apply class-level arch overrides (e.g. VJepa2ACModel forces ViT-g
+        # dims because the HF AC repo doesn't ship a config.json).  Run this
+        # BEFORE building ``ac_predictor`` so the AC sub-config picks up the
+        # corrected ``hidden_size`` / ``layer_norm_eps`` / etc.
+        for field, value in self._ARCH_OVERRIDES.items():
+            setattr(config, field, value)
+
         config.predictor_kind = predictor_kind
         if predictor_kind == "ac":
             if ac_predictor_config is None:
@@ -227,6 +245,23 @@ class VJepa2Model(Model):
             return self._repo_dir
         self._repo_dir = download_vjepa2_snapshot(self.model_path_hf, self.cache_dir)
         return self._repo_dir
+
+    def _ensure_ac_pt(self) -> Path:
+        """Lazily resolve the upstream V-JEPA 2-AC ``.pt`` path.
+
+        AC weights ship as a single ~11.7 GB ``.pt`` at
+        ``{model_path_hf}/original/model.pth`` on HuggingFace (mirror of the
+        upstream S3 artifact).  We only download that one file — no point
+        pulling the whole repo since there are no converted safetensors for
+        the AC variant in HF Transformers.
+        """
+        if self._ac_pt_path is not None:
+            return self._ac_pt_path
+        self._ac_pt_path = download_vjepa2_ac_upstream_pt(
+            model_path_hf=self.model_path_hf,
+            cache_dir=self.cache_dir,
+        )
+        return self._ac_pt_path
 
     # ------------------------------------------------------------------
     # Model ABC: structure
@@ -635,6 +670,23 @@ class VJepa2Model(Model):
             self.encoder = self.encoder.to_empty(device=device)
             return
         self.encoder.to_empty(device=device)
+
+        # V-JEPA 2-AC: encoder + predictor come from the same upstream .pt
+        # (different key layouts for each).  Loader is idempotent — calling
+        # it with one module at a time just reads and discards the other
+        # half of the blob, which is cheap once the OS page-cache is warm
+        # after the first call on the rank.
+        if self.config.predictor_kind == "ac":
+            pt_path = self._ensure_ac_pt()
+            load_vjepa2_ac_upstream_weights(
+                pt_path=pt_path,
+                encoder_module=self.encoder,
+                predictor_module=None,
+                device=device,
+                hidden_size=self.config.hidden_size,
+            )
+            return
+
         repo_dir = self._ensure_repo()
         load_vjepa2_hf_weights(
             repo_dir=repo_dir,
@@ -655,15 +707,13 @@ class VJepa2Model(Model):
             if self.skip_weight_loading:
                 self.predictor = self.predictor.to_empty(device=device)
                 return
-            # TODO: AC weight loading (upstream .pt format) — not yet
-            # supported.  Users of the AC variant should pass
-            # ``skip_weight_loading=True`` and load weights manually, or
-            # wait for the follow-up that adds a key-rename loader.
             self.predictor.to_empty(device=device)
-            logger.warning(
-                "V-JEPA 2-AC predictor instantiated without weights; "
-                "load them manually or wait for the upstream-checkpoint "
-                "loader follow-up."
+            pt_path = self._ensure_ac_pt()
+            load_vjepa2_ac_upstream_weights(
+                pt_path=pt_path,
+                encoder_module=None,
+                predictor_module=self.predictor,
+                device=device,
             )
             return
 
@@ -689,7 +739,24 @@ class VJepa2ACModel(VJepa2Model):
     entrypoint — which only forwards ``model_path_hf`` to the constructor
     (see ``api_server/entrypoint.py``) — can select the AC path purely via
     the registry.  Use ``configs/vjepa2_ac.yaml`` with ``model: "vjepa2_ac"``.
+
+    The AC checkpoint ships only as a ViT-g backbone (no vitl-ac / vith-ac
+    variants exist on HF), and the HF AC repo does NOT ship an HF-style
+    ``config.json`` — it hosts only the upstream ``.pt`` under
+    ``original/model.pth``.  To keep the model loadable without a config
+    file, we hardcode the ViT-g architecture via ``_ARCH_OVERRIDES``, which
+    the base class applies in :meth:`_load_config`.
     """
+
+    # ViT-g @ 256 with AC predictor.  Matches
+    # ``vjepa2/src/models/vision_transformer.py::vit_giant_xformers`` +
+    # ``transformers/.../convert_vjepa2_to_hf.py::get_vjepa2_config("vit_giant")``.
+    _ARCH_OVERRIDES = {
+        "hidden_size": 1408,
+        "num_hidden_layers": 40,
+        "num_attention_heads": 22,
+        "mlp_ratio": 48 / 11,
+    }
 
     def __init__(
         self,
