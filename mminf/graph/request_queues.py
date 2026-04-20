@@ -1,5 +1,3 @@
-
-
 import logging
 from dataclasses import dataclass, field
 
@@ -8,9 +6,7 @@ from mminf.graph.base import DestToGraphEdges, GraphEdge, GraphNode, GraphSectio
 logger = logging.getLogger(__name__)
 
 
-def format_graph_edge_list(
-    lst: list[GraphEdge]
-):
+def format_graph_edge_list(lst: list[GraphEdge]):
     return ", ".join([f"{edge.name} -> {edge.next_node}" for edge in lst])
 
 
@@ -27,6 +23,7 @@ class PerRequestNodeQueues:
     using that graph. For every (worker graph, request) pair, we instantiate
     one of these queues.
     """
+
     waiting: GraphSection | None
     full_section: GraphSection
     ready: list[GraphNode] = field(default_factory=list)
@@ -51,10 +48,7 @@ class PerRequestNodeQueues:
         self.ready += new_ready
         self.waiting = new_waiting
 
-    def process_streaming_input(
-        self,
-        new_inputs: list[GraphEdge]
-    ) -> ProcessedInputs:
+    def process_streaming_input(self, new_inputs: list[GraphEdge]) -> ProcessedInputs:
         if self.waiting is None:
             return ProcessedInputs(
                 for_other_worker_graphs=new_inputs,
@@ -64,9 +58,7 @@ class PerRequestNodeQueues:
         new_inputs: DestToGraphEdges = get_node_to_inputs_mapping(new_inputs)
         ingested = []
 
-        self.waiting_for_stream.extend(
-            self.waiting.split_off_ready_for_streaming()
-        )
+        self.waiting_for_stream.extend(self.waiting.split_off_ready_for_streaming())
 
         new_waiting_for_stream = []
         for node in self.waiting_for_stream:
@@ -74,19 +66,14 @@ class PerRequestNodeQueues:
             if not node.is_ready():
                 new_waiting_for_stream.append(node)
         self.waiting_for_stream = new_waiting_for_stream
-        external_outputs = sum(
-            new_inputs.values(), start=[]
-        )
+        external_outputs = sum(new_inputs.values(), start=[])
         self._update_ready_waiting()
         return ProcessedInputs(
             for_other_worker_graphs=external_outputs,
             routed_to_this_worker_graph=ingested,
         )
 
-    def process_new_inputs(
-        self,
-        new_inputs: list[GraphEdge]
-    ) -> ProcessedInputs:
+    def process_new_inputs(self, new_inputs: list[GraphEdge]) -> ProcessedInputs:
         """
         Processes all outputs that feed into the waiting graph section, and
         return a dictionary of external output graph edges (ones that are feeding
@@ -101,26 +88,23 @@ class PerRequestNodeQueues:
                 for_other_worker_graphs=new_inputs,
             )
 
-        logger.debug(
-            "Processed new graph inputs: %s.",
-            format_graph_edge_list(new_inputs)
-        )
+        logger.debug("Processed new graph inputs: %s.", format_graph_edge_list(new_inputs))
 
         new_inputs: DestToGraphEdges = get_node_to_inputs_mapping(new_inputs)
         ingested = self.waiting.ingest_inputs(new_inputs)
-        external_outputs = sum(
-            new_inputs.values(), start=[]
-        )
+        external_outputs = sum(new_inputs.values(), start=[])
         self._update_ready_waiting()
         logger.debug(
-            ("Finished processing new graph inputs. Ready nodes: %s, waiting: %s.\n"
-             "Ingested inputs %s, didn't ingest %s"),
+            (
+                "Finished processing new graph inputs. Ready nodes: %s, waiting: %s.\n"
+                "Ingested inputs %s, didn't ingest %s"
+            ),
             str([node.name for node in self.ready]),
             str(list(self.waiting.get_node_names())) if self.waiting else "[]",
             str([i.name for i in ingested]),
-            str([e.name for e in external_outputs])
+            str([e.name for e in external_outputs]),
         )
         return ProcessedInputs(
-            for_other_worker_graphs=external_outputs, # inputs **not** utilized for self.waiting
-            routed_to_this_worker_graph=ingested, # inputs utilized for self.waiting
+            for_other_worker_graphs=external_outputs,  # inputs **not** utilized for self.waiting
+            routed_to_this_worker_graph=ingested,  # inputs utilized for self.waiting
         )
