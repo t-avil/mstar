@@ -311,7 +311,9 @@ class VJepa2Model(Model):
         from torchcodec.decoders import VideoDecoder
 
         target_frames = self.config.frames_per_clip
+        logger.info("load_video: opening %s", filepath)
         decoder = VideoDecoder(filepath)
+        logger.info("load_video: decoder opened; reading metadata")
 
         metadata_obj = getattr(decoder, "metadata", None)
         total = None
@@ -320,6 +322,7 @@ class VJepa2Model(Model):
         if total is None:
             total = len(decoder)
         total = int(total)
+        logger.info("load_video: total_frames=%d, target=%d", total, target_frames)
 
         if target_frames > total:
             raise ValueError(
@@ -333,15 +336,22 @@ class VJepa2Model(Model):
         # Truncated to ``num_frames`` to handle float-accumulation overshoot.
         step = total / target_frames
         indices = torch.arange(0, total, step).to(torch.int64)[:target_frames].tolist()
+        logger.info(
+            "load_video: sampling indices=%s...%s (step=%.2f)",
+            indices[:3], indices[-3:], step,
+        )
 
         get_at = getattr(decoder, "get_frames_at", None)
         if get_at is not None:
+            logger.info("load_video: calling get_frames_at(%d indices)", len(indices))
             frame_batch = get_at(indices=indices)
             frames = getattr(frame_batch, "data", frame_batch)
         else:
             # Older torchcodec: no batched sampled-decode API, per-index
             # lookup still avoids materializing the whole video.
+            logger.info("load_video: per-index lookup (no get_frames_at)")
             frames = torch.stack([decoder[i] for i in indices])
+        logger.info("load_video: decoded frames shape=%s", tuple(frames.shape))
 
         video = frames.float() / 255.0
 
