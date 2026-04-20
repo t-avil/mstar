@@ -195,7 +195,10 @@ class VJepa2Model(Model):
         predictor_kind: str,
         ac_predictor_config: dict | None,
     ) -> VJepa2Config:
-        if self.skip_weight_loading:
+        # AC has no HF repo (as of Apr 2026 the V-JEPA 2 HF collection doesn't
+        # ship an AC checkpoint; we pull ``.pt`` from S3).  Skip the HF config
+        # lookup entirely and rely on ``_ARCH_OVERRIDES`` to apply ViT-g dims.
+        if self.skip_weight_loading or predictor_kind == "ac":
             config = VJepa2Config()
         else:
             try:
@@ -272,15 +275,22 @@ class VJepa2Model(Model):
         return []
 
     def get_node_engine_types(self) -> dict[str, EngineType]:
-        return {
+        types: dict[str, EngineType] = {
             "video_encoder": EngineType.ENC_DEC,
             "predictor": EngineType.ENC_DEC,
-            # Phase 2 rollout uses a distinct node so the single-pass and
-            # rollout walks can coexist without branching inside a submodule.
-            # Both node names resolve to wrappers around the same underlying
-            # ``VJEPA2Predictor`` nn.Module — no weight duplication.
-            "rollout_predictor": EngineType.ENC_DEC,
         }
+        # Phase 2 rollout uses a distinct node so the single-pass and rollout
+        # walks can coexist without branching inside a submodule.  Both node
+        # names resolve to wrappers around the same underlying
+        # ``VJEPA2Predictor`` nn.Module — no weight duplication.  AC-variant
+        # rollout (multi-step, action-conditioned) is Phase 3; the rollout
+        # submodule factory raises NotImplementedError on ``predictor_kind="ac"``,
+        # so we must NOT register the rollout node/walk for AC — otherwise
+        # conductor graph construction demands a ``rollout_predictor`` entry
+        # in the config's ``node_groups`` that would have no valid submodule.
+        if self.config.predictor_kind != "ac":
+            types["rollout_predictor"] = EngineType.ENC_DEC
+        return types
 
     def get_graph_walk_graphs(self) -> dict[str, GraphSection]:
         predictor_inputs: list[str] = ["encoder_hidden"]
@@ -334,60 +344,68 @@ class VJepa2Model(Model):
             ],
         )
 
+        walks: dict[str, GraphSection] = {
+            self.PREFILL_VIDEO: prefill_video,
+            self.PREFILL_VIDEO_ENCODER_ONLY: prefill_encoder_only,
+        }
+
         # ----------------------------------------------------------------
         # Phase 2: autoregressive rollout (AnticipativeWrapper-parity)
         # ----------------------------------------------------------------
-        # The rollout section is a single ``rollout_predictor`` node that
-        # consumes the sliding-window ``encoder_hidden`` and emits both the
-        # updated window (loop-back) and the fresh ``predicted_hidden``.
-        # ``predicted_hidden`` is declared as a section output purely so
-        # ``Loop.__post_init__`` recognizes it when filtering the
-        # ``accumulated_outputs`` edge list — its ``next_node`` target is
-        # the same node, meaning the loop-back value is ignored by the
-        # node's ``input_ids`` and only survives in the accumulated cache.
-        rollout_section = GraphNode(
-            name="rollout_predictor",
-            input_ids=["encoder_hidden"],
-            outputs=[
-                GraphEdge(next_node="rollout_predictor", name="encoder_hidden"),
-                GraphEdge(next_node="rollout_predictor", name="predicted_hidden"),
-            ],
-        )
-        # ``max_iters`` is a config-level upper bound baked in at graph-build
-        # time.  The per-request ``rollout_horizon`` is enforced inside the
-        # submodule via ``register_loop_stop`` when iter_idx + 1 reaches it.
-        rollout_loop = DynamicLoop(
-            name=self.ROLLOUT_LOOP_NAME,
-            section=rollout_section,
-            max_iters=self.config.max_rollout_horizon,
-            outputs=[],
-            accumulated_outputs=[
-                GraphEdge(
-                    next_node=EMIT_TO_CLIENT,
-                    name="predicted_hidden",
-                    output_modality="video",
-                    persist=True,
-                ),
-            ],
-        )
-        prefill_video_rollout = Sequential(
-            [
-                GraphNode(
-                    name="video_encoder",
-                    input_ids=["video_frames"],
-                    outputs=[
-                        GraphEdge(next_node="rollout_predictor", name="encoder_hidden"),
-                    ],
-                ),
-                rollout_loop,
-            ]
-        )
+        # AC-variant rollout is a Phase 3 item (see
+        # ``_create_submodule("rollout_predictor")`` for the NotImplementedError),
+        # so skip registering the walk + node here.  Otherwise the conductor
+        # demands a ``rollout_predictor`` entry in ``configs/vjepa2_ac.yaml``
+        # that has no working submodule.
+        if self.config.predictor_kind != "ac":
+            # The rollout section is a single ``rollout_predictor`` node that
+            # consumes the sliding-window ``encoder_hidden`` and emits both the
+            # updated window (loop-back) and the fresh ``predicted_hidden``.
+            # ``predicted_hidden`` is declared as a section output purely so
+            # ``Loop.__post_init__`` recognizes it when filtering the
+            # ``accumulated_outputs`` edge list — its ``next_node`` target is
+            # the same node, meaning the loop-back value is ignored by the
+            # node's ``input_ids`` and only survives in the accumulated cache.
+            rollout_section = GraphNode(
+                name="rollout_predictor",
+                input_ids=["encoder_hidden"],
+                outputs=[
+                    GraphEdge(next_node="rollout_predictor", name="encoder_hidden"),
+                    GraphEdge(next_node="rollout_predictor", name="predicted_hidden"),
+                ],
+            )
+            # ``max_iters`` is a config-level upper bound baked in at graph-build
+            # time.  The per-request ``rollout_horizon`` is enforced inside the
+            # submodule via ``register_loop_stop`` when iter_idx + 1 reaches it.
+            rollout_loop = DynamicLoop(
+                name=self.ROLLOUT_LOOP_NAME,
+                section=rollout_section,
+                max_iters=self.config.max_rollout_horizon,
+                outputs=[],
+                accumulated_outputs=[
+                    GraphEdge(
+                        next_node=EMIT_TO_CLIENT,
+                        name="predicted_hidden",
+                        output_modality="video",
+                        persist=True,
+                    ),
+                ],
+            )
+            prefill_video_rollout = Sequential(
+                [
+                    GraphNode(
+                        name="video_encoder",
+                        input_ids=["video_frames"],
+                        outputs=[
+                            GraphEdge(next_node="rollout_predictor", name="encoder_hidden"),
+                        ],
+                    ),
+                    rollout_loop,
+                ]
+            )
+            walks[self.PREFILL_VIDEO_ROLLOUT] = prefill_video_rollout
 
-        return {
-            self.PREFILL_VIDEO: prefill_video,
-            self.PREFILL_VIDEO_ENCODER_ONLY: prefill_encoder_only,
-            self.PREFILL_VIDEO_ROLLOUT: prefill_video_rollout,
-        }
+        return walks
 
     # ------------------------------------------------------------------
     # Model ABC: I/O
@@ -544,7 +562,8 @@ class VJepa2Model(Model):
         # Rollout walk: triggered by ``rollout_horizon > 1``.  H == 1 is
         # equivalent to a single-pass prefill — save a loop's worth of
         # overhead and route through the normal ``prefill_video`` walk.
-        if model_kwargs:
+        # Not available for AC (Phase 3); see ``get_graph_walk_graphs``.
+        if model_kwargs and self.config.predictor_kind != "ac":
             horizon = int(model_kwargs.get("rollout_horizon", 0) or 0)
             if horizon > 1:
                 return self.PREFILL_VIDEO_ROLLOUT
