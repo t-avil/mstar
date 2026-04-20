@@ -47,7 +47,7 @@ from mminf.graph.base import (
     TensorPointerInfo,
 )
 from mminf.graph.special_destinations import EMIT_TO_CLIENT
-from mminf.model.base import ForwardPassArgs, Model, NodeSubmodule
+from mminf.model.base import ForwardPassArgs, Model, NodeSubmodule, TensorAndMetadata
 from mminf.model.vjepa2.components.ac_predictor import VisionTransformerPredictorAC
 from mminf.model.vjepa2.components.predictor import VJEPA2Predictor
 from mminf.model.vjepa2.components.vit_encoder import VJEPA2Encoder
@@ -251,6 +251,32 @@ class VJepa2Model(Model):
     # ------------------------------------------------------------------
     # Model ABC: I/O
     # ------------------------------------------------------------------
+
+    def load_video(self, filepath: str, device: str) -> TensorAndMetadata:
+        """Decode a video file into ``[T, C, H, W]`` float in ``[0, 1]``.
+
+        Overrides the base ``Model.load_video`` because that one references
+        an unset ``self.device`` attribute.  We use the supplied ``device``
+        argument directly — torchcodec's ``VideoDecoder`` accepts ``"cpu"``
+        or ``"cuda[:N]"``; falling back to CPU on failure handles envs
+        where torchcodec lacks CUDA support.
+        """
+        from dataclasses import asdict
+
+        from torchcodec.decoders import VideoDecoder
+
+        try:
+            decoder = VideoDecoder(filepath, device=device)
+        except Exception:  # noqa: BLE001 — torchcodec raises a family of errors
+            decoder = VideoDecoder(filepath, device="cpu")
+
+        video = torch.stack([frame for frame in decoder]).float() / 255.0
+        try:
+            metadata = asdict(decoder.metadata)
+        except TypeError:
+            # metadata object may not be a dataclass across torchcodec versions
+            metadata = {}
+        return TensorAndMetadata(data=video, metadata=metadata)
 
     def process_prompt(
         self,
