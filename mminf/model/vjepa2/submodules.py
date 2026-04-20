@@ -26,7 +26,6 @@ import torch
 
 from mminf.communication.tensors import NameToTensorList
 from mminf.conductor.request_info import CurrentForwardPassInfo
-from mminf.engine.base import NodeBatch
 from mminf.engine.cache_manager import BatchedCacheManager
 from mminf.model.base import NodeSubmodule
 from mminf.model.vjepa2.components.ac_predictor import VisionTransformerPredictorAC
@@ -54,9 +53,15 @@ def _normalize_video_frames(frames: torch.Tensor) -> torch.Tensor:
 class VJepa2EncoderSubmodule(NodeSubmodule):
     """ViT 3D-patch video encoder.
 
-    Preprocessing stacks ``video_frames`` tensors across requests (requires
-    matching shapes) into a single ``pixel_values_videos`` batch.
-    ``forward`` runs the encoder and emits ``encoder_hidden``.
+    Phase 1: one request per forward pass (``can_batch`` inherits ``False``
+    from ``NodeSubmodule``).  Cross-request batching is a Phase 3
+    optimization that requires fixing the engine's batched path —
+    ``EncoderDecoderEngine._execute_batched`` currently passes a
+    ``dict[rid, inputs]`` where preprocess expects ``list[NameToTensorList]``,
+    and skips ``request_info`` at forward time.  See the Phase-3 tracking
+    note in the plan; the V-JEPA 2 encoder is natively batchable (stateless,
+    fixed shapes, torch.compile-friendly), so the optimization will be
+    worth doing once the engine path is fixed.
     """
 
     def __init__(self, encoder: VJEPA2Encoder, config: VJepa2Config):
@@ -67,50 +72,26 @@ class VJepa2EncoderSubmodule(NodeSubmodule):
     def preprocess(
         self,
         graph_walk: str,
-        cache_manager: BatchedCacheManager | None,
         per_request_inputs: list[NameToTensorList],
         request_ids: list[str],
         per_request_info: dict[str, CurrentForwardPassInfo],
+        cache_manager: BatchedCacheManager | None = None,
     ) -> dict[str, torch.Tensor]:
-        frames = [_normalize_video_frames(inp["video_frames"][0]) for inp in per_request_inputs]
-        # Same-shape requirement for batched dispatch is enforced by can_batch.
-        pixel_values_videos = torch.cat(frames, dim=0)
-        # Track per-request batch sizes so forward can split the stacked output.
-        batch_sizes = [f.size(0) for f in frames]
-        return {
-            "pixel_values_videos": pixel_values_videos,
-            "_batch_sizes": torch.tensor(batch_sizes, dtype=torch.long),
-        }
+        assert len(per_request_inputs) == 1, (
+            "VJepa2EncoderSubmodule runs one request at a time; cross-request "
+            "batching is deferred to Phase 3 (needs engine-path fix)."
+        )
+        frames = _normalize_video_frames(per_request_inputs[0]["video_frames"][0])
+        return {"pixel_values_videos": frames}
 
     def forward(
         self,
         request_info: CurrentForwardPassInfo,
         pixel_values_videos: torch.Tensor,
-        _batch_sizes: torch.Tensor | None = None,
         **kwargs,
     ) -> NameToTensorList:
-        hidden = self.encoder(pixel_values_videos)  # [B_total, N, D]
-        if _batch_sizes is None or _batch_sizes.numel() <= 1:
-            return {"encoder_hidden": [hidden]}
-        # Split along the batch dim back to per-request tensors
-        splits = torch.split(hidden, _batch_sizes.tolist(), dim=0)
-        return {"encoder_hidden": list(splits)}
-
-    def can_batch(self, batch: NodeBatch) -> bool:
-        # Batchable when every request has the same video-frames shape.
-        shapes = []
-        for rid in batch.request_ids:
-            inputs = batch.per_request_input_tensors[rid]
-            if "video_frames" not in inputs or not inputs["video_frames"]:
-                return False
-            t = inputs["video_frames"][0]
-            if t.dim() == 4:
-                shapes.append(tuple(t.shape))
-            elif t.dim() == 5:
-                shapes.append(tuple(t.shape[1:]))
-            else:
-                return False
-        return len(set(shapes)) == 1
+        hidden = self.encoder(pixel_values_videos)
+        return {"encoder_hidden": [hidden]}
 
 
 def _build_default_masks(
@@ -143,17 +124,14 @@ class VJepa2PredictorSubmodule(NodeSubmodule):
     def preprocess(
         self,
         graph_walk: str,
-        cache_manager: BatchedCacheManager | None,
         per_request_inputs: list[NameToTensorList],
         request_ids: list[str],
         per_request_info: dict[str, CurrentForwardPassInfo],
+        cache_manager: BatchedCacheManager | None = None,
     ) -> dict[str, torch.Tensor]:
-        if len(per_request_inputs) != 1:
-            raise NotImplementedError(
-                "VJepa2PredictorSubmodule cross-request batching is not yet "
-                "supported (would need identical mask shapes).  Use one "
-                "request per forward pass for now."
-            )
+        assert len(per_request_inputs) == 1, (
+            "VJepa2PredictorSubmodule runs one request at a time."
+        )
         inputs = per_request_inputs[0]
         encoder_hidden = inputs["encoder_hidden"][0]
         out: dict[str, torch.Tensor] = {"encoder_hidden": encoder_hidden}
@@ -181,11 +159,6 @@ class VJepa2PredictorSubmodule(NodeSubmodule):
         predicted = self.predictor(encoder_hidden, ctx_list, tgt_list)
         return {"predicted_hidden": [predicted]}
 
-    def can_batch(self, batch: NodeBatch) -> bool:
-        # Defer true cross-request batching (requires matching masks) —
-        # each request gets its own forward.
-        return False
-
 
 class VJepa2ACPredictorSubmodule(NodeSubmodule):
     """Action-conditioned predictor (V-JEPA 2-AC).
@@ -206,13 +179,12 @@ class VJepa2ACPredictorSubmodule(NodeSubmodule):
     def preprocess(
         self,
         graph_walk: str,
-        cache_manager: BatchedCacheManager | None,
         per_request_inputs: list[NameToTensorList],
         request_ids: list[str],
         per_request_info: dict[str, CurrentForwardPassInfo],
+        cache_manager: BatchedCacheManager | None = None,
     ) -> dict[str, torch.Tensor]:
-        if len(per_request_inputs) != 1:
-            raise NotImplementedError("VJepa2ACPredictorSubmodule cross-request batching is not yet supported.")
+        assert len(per_request_inputs) == 1, "VJepa2ACPredictorSubmodule runs one request at a time."
         inputs = per_request_inputs[0]
         out: dict[str, torch.Tensor] = {
             "encoder_hidden": inputs["encoder_hidden"][0],
@@ -242,6 +214,3 @@ class VJepa2ACPredictorSubmodule(NodeSubmodule):
             extrinsics = extrinsics.unsqueeze(0)
         predicted = self.predictor(encoder_hidden, actions, states, extrinsics=extrinsics)
         return {"predicted_hidden": [predicted]}
-
-    def can_batch(self, batch: NodeBatch) -> bool:
-        return False
