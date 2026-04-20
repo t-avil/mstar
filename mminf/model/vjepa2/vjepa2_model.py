@@ -384,6 +384,7 @@ class VJepa2Model(Model):
         out: NameToTensorList = {}
 
         if tensors and "video_inputs" in tensors and len(tensors["video_inputs"]) > 0:
+            logger.info("process_prompt: preprocessing video")
             raw = tensors["video_inputs"][0]
             # Per-request override of the frame budget (e.g. to experiment
             # with longer clips on larger GPUs); defaults to the model's
@@ -395,6 +396,7 @@ class VJepa2Model(Model):
                 target_frames=target_frames,
             )
             out["video_frames"] = [processed]
+            logger.info("process_prompt: video_frames shape=%s", tuple(processed.shape))
 
         if self.config.predictor_kind == "ac":
             actions = kwargs.get("actions")
