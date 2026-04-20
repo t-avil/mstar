@@ -90,7 +90,16 @@ class VJepa2EncoderSubmodule(NodeSubmodule):
         pixel_values_videos: torch.Tensor,
         **kwargs,
     ) -> NameToTensorList:
+        logger.info(
+            "VJepa2EncoderSubmodule.forward: input shape=%s dtype=%s device=%s",
+            tuple(pixel_values_videos.shape),
+            pixel_values_videos.dtype,
+            pixel_values_videos.device,
+        )
         hidden = self.encoder(pixel_values_videos)
+        logger.info(
+            "VJepa2EncoderSubmodule.forward: output shape=%s", tuple(hidden.shape)
+        )
         return {"encoder_hidden": [hidden]}
 
 
@@ -149,6 +158,10 @@ class VJepa2PredictorSubmodule(NodeSubmodule):
         target_mask: torch.Tensor | None = None,
         **kwargs,
     ) -> NameToTensorList:
+        logger.info(
+            "VJepa2PredictorSubmodule.forward: encoder_hidden shape=%s",
+            tuple(encoder_hidden.shape),
+        )
         if encoder_hidden.dim() == 2:
             encoder_hidden = encoder_hidden.unsqueeze(0)
         if context_mask is None or target_mask is None:
@@ -157,6 +170,9 @@ class VJepa2PredictorSubmodule(NodeSubmodule):
             ctx_list = [context_mask]
             tgt_list = [target_mask]
         predicted = self.predictor(encoder_hidden, ctx_list, tgt_list)
+        logger.info(
+            "VJepa2PredictorSubmodule.forward: output shape=%s", tuple(predicted.shape)
+        )
         return {"predicted_hidden": [predicted]}
 
 
