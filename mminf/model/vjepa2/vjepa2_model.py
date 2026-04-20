@@ -240,10 +240,14 @@ class VJepa2Model(Model):
             predictor_inputs += ["actions", "states"]
             if self.config.ac_predictor and self.config.ac_predictor.use_extrinsics:
                 predictor_inputs.append("extrinsics")
-        else:
-            # Masked predictor accepts optional context/target masks; when
-            # absent, the submodule builds full-coverage defaults.
-            predictor_inputs += ["context_mask", "target_mask"]
+        # Note: for the masked predictor we intentionally do NOT list
+        # context_mask / target_mask in input_ids.  GraphNode.is_ready
+        # waits for every declared input to arrive; if we listed them and
+        # the caller didn't pass masks (the usual case — the submodule
+        # builds full-coverage defaults), the node would hang forever
+        # waiting.  Custom-mask support will come back as a Phase 2/3
+        # feature when we add a proper "optional input" mechanism to the
+        # graph primitive.
 
         prefill_video = Sequential(
             [
@@ -411,12 +415,9 @@ class VJepa2Model(Model):
                     raise ValueError("use_extrinsics=True but no 'extrinsics' kwarg provided.")
                 out["extrinsics"] = [torch.as_tensor(extrinsics, dtype=torch.float32)]
 
-        # Optional custom masks (masked predictor only).
-        if self.config.predictor_kind != "ac":
-            for mask_name in ("context_mask", "target_mask"):
-                m = kwargs.get(mask_name)
-                if m is not None:
-                    out[mask_name] = [torch.as_tensor(m, dtype=torch.long)]
+        # Custom context/target masks via model_kwargs are Phase 2/3 —
+        # see the graph-walk comment for why they can't just be wired in
+        # as optional graph inputs today.
 
         return out
 
@@ -461,7 +462,10 @@ class VJepa2Model(Model):
             inputs.append(edge)
 
         if walk == self.PREFILL_VIDEO:
-            for name in ("actions", "states", "extrinsics", "context_mask", "target_mask"):
+            # context_mask / target_mask intentionally omitted (see
+            # get_graph_walk_graphs — would hang the graph dispatcher
+            # when not provided).
+            for name in ("actions", "states", "extrinsics"):
                 if name in input_signals:
                     edge = GraphEdge(next_node="predictor", name=name)
                     edge.tensor_info = input_signals[name]
