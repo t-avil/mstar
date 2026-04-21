@@ -614,24 +614,46 @@ class VJepa2Model(Model):
                 out["extrinsics"] = [torch.as_tensor(extrinsics, dtype=torch.float32)]
 
             # Phase 3.B: MPC walk requires a pre-encoded goal latent.  When
-            # the client flags ``mpc=True`` they must also supply
-            # ``goal_hidden`` (shape [1, N, D] or [N, D]).  Accepted as a
-            # python list / numpy array / tensor — torch.as_tensor handles
-            # all three.  If mpc=True but no goal_hidden is provided, fail
-            # loudly here rather than waiting for the scorer node to hang.
+            # the client flags ``mpc=True`` they must also supply EITHER:
+            #   * ``goal_hidden`` — the full tensor, shape [1, N, D] or [N, D],
+            #     accepted as python list / numpy array / tensor.  In
+            #     production use this path: real goals are per-episode, not
+            #     shape-broadcast constants.
+            #   * ``goal_hidden_fill`` — a scalar that server-side expands
+            #     to ``torch.full((1, N, D), fill)``.  Exists purely to make
+            #     smoke-testing viable: the full tensor at ViT-g (1×8192×1408
+            #     f32 = ~46 MB raw, ~100 MB as JSON list-of-lists) blows past
+            #     Starlette's default ``max_part_size`` of 1 MB per form
+            #     field, so the request would 400 before reaching this
+            #     handler.  A scalar serializes to <20 bytes and hits the
+            #     same scorer math end-to-end.
             if kwargs.get("mpc"):
                 goal_hidden = kwargs.get("goal_hidden")
                 if goal_hidden is None:
-                    raise ValueError(
-                        "model_kwargs['mpc']=True requires 'goal_hidden' "
-                        "(pre-encoded goal latent from a prior "
-                        "prefill_video_encoder_only call)."
+                    fill = kwargs.get("goal_hidden_fill")
+                    if fill is None:
+                        raise ValueError(
+                            "model_kwargs['mpc']=True requires 'goal_hidden' "
+                            "(pre-encoded goal latent from a prior "
+                            "prefill_video_encoder_only call) or "
+                            "'goal_hidden_fill' (scalar, for smoke-test only)."
+                        )
+                    n_tokens = self.config.grid_depth * self.config.grid_size * self.config.grid_size
+                    d = self.config.hidden_size
+                    out["goal_hidden"] = [
+                        torch.full((1, n_tokens, d), float(fill), dtype=torch.float32)
+                    ]
+                    logger.info(
+                        "process_prompt: MPC goal_hidden_fill=%s expanded to shape=%s",
+                        fill,
+                        tuple(out["goal_hidden"][0].shape),
                     )
-                out["goal_hidden"] = [torch.as_tensor(goal_hidden, dtype=torch.float32)]
-                logger.info(
-                    "process_prompt: MPC goal_hidden shape=%s",
-                    tuple(out["goal_hidden"][0].shape),
-                )
+                else:
+                    out["goal_hidden"] = [torch.as_tensor(goal_hidden, dtype=torch.float32)]
+                    logger.info(
+                        "process_prompt: MPC goal_hidden shape=%s",
+                        tuple(out["goal_hidden"][0].shape),
+                    )
 
         # Optional user-supplied masks (masked predictor only).  These are
         # routed via the new ``GraphNode.optional_input_ids`` primitive —
