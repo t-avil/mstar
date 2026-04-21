@@ -123,6 +123,16 @@ class VJepa2EncoderSubmodule(NodeSubmodule):
         self.config = config
 
     def can_batch(self, batch: NodeBatch) -> bool:
+        # Route B=1 through the sequential ``forward`` (proven Phase 2 path).
+        # ``forward_batched`` is a distinct torch.compile cache from ``forward``
+        # and — empirically on vjepa2-ac-vitg — compiles a much slower kernel
+        # than ``forward`` when both are traced with the same [1, ...] shape.
+        # Observed: AC warm latency went 1 s → 23 s when B=1 traffic routed
+        # through forward_batched.  Keeping B=1 on forward sidesteps that
+        # entirely; batched-path cost (and value) only shows up when the
+        # scheduler actually co-batches concurrent requests.
+        if len(batch.request_ids) < 2:
+            return False
         shapes: set[tuple] = set()
         for rid in batch.request_ids:
             inputs = batch.per_request_input_tensors.get(rid, {})
@@ -138,7 +148,7 @@ class VJepa2EncoderSubmodule(NodeSubmodule):
             else:
                 return False
             shapes.add(shape)
-        return len(shapes) == 1 and len(batch.request_ids) >= 1
+        return len(shapes) == 1
 
     def preprocess(
         self,
@@ -241,6 +251,11 @@ class VJepa2PredictorSubmodule(NodeSubmodule):
         self.config = config
 
     def can_batch(self, batch: NodeBatch) -> bool:
+        # B=1 → sequential forward; see VJepa2EncoderSubmodule.can_batch
+        # for the full justification (AC warm-latency regression on
+        # forward_batched when it's the only path).
+        if len(batch.request_ids) < 2:
+            return False
         enc_shapes: set[tuple] = set()
         ctx_shapes: set[tuple | None] = set()
         tgt_shapes: set[tuple | None] = set()
@@ -266,7 +281,6 @@ class VJepa2PredictorSubmodule(NodeSubmodule):
             len(enc_shapes) == 1
             and len(ctx_shapes) == 1
             and len(tgt_shapes) == 1
-            and len(batch.request_ids) >= 1
         )
 
     def preprocess(
@@ -427,7 +441,15 @@ class VJepa2RolloutPredictorSubmodule(NodeSubmodule):
         same number of prior iterations.  The scheduler groups same-iter
         requests together, so this is the common case; mixed-iter batches
         fall through to sequential.
+
+        B=1 → sequential forward; see VJepa2EncoderSubmodule.can_batch for
+        the rationale (AC warm-latency regression when forward_batched is
+        the only path).  Rollout is especially sensitive because it calls
+        forward_batched once per iter — amortizing a slow compile over H
+        iters would multiply the pain.
         """
+        if len(batch.request_ids) < 2:
+            return False
         enc_shapes: set[tuple] = set()
         iters: set[int] = set()
         for rid in batch.request_ids:
@@ -449,7 +471,6 @@ class VJepa2RolloutPredictorSubmodule(NodeSubmodule):
         return (
             len(enc_shapes) == 1
             and len(iters) == 1
-            and len(batch.request_ids) >= 1
         )
 
     def preprocess(
@@ -603,6 +624,14 @@ class VJepa2ACPredictorSubmodule(NodeSubmodule):
         self.config = config
 
     def can_batch(self, batch: NodeBatch) -> bool:
+        # B=1 → sequential forward.  See VJepa2EncoderSubmodule.can_batch
+        # for the rationale — AC ViT-g warm-forward_batched measured ~20×
+        # slower than warm-forward on the same input shape, so routing
+        # single-request traffic through the batched path is a strict
+        # regression.  Only opt into forward_batched when there's an
+        # actual multi-rid batch to amortize the compile cost over.
+        if len(batch.request_ids) < 2:
+            return False
         shapes: set[tuple] = set()
         for rid in batch.request_ids:
             inputs = batch.per_request_input_tensors.get(rid, {})
@@ -629,7 +658,7 @@ class VJepa2ACPredictorSubmodule(NodeSubmodule):
             ext_l = inputs.get("extrinsics")
             ext_s = _norm(ext_l[0], 3) if ext_l else None
             shapes.add((enc_s, act_s, st_s, ext_s))
-        return len(shapes) == 1 and len(batch.request_ids) >= 1
+        return len(shapes) == 1
 
     def preprocess(
         self,
