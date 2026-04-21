@@ -55,6 +55,7 @@ from mminf.model.vjepa2.components.vit_encoder import VJEPA2Encoder
 from mminf.model.vjepa2.config import VJepa2ACPredictorConfig, VJepa2Config
 from mminf.model.vjepa2.submodules import (
     VJepa2ACPredictorSubmodule,
+    VJepa2ACRolloutPredictorSubmodule,
     VJepa2EncoderSubmodule,
     VJepa2MPCPredictorSubmodule,
     VJepa2MPCScorerSubmodule,
@@ -283,17 +284,14 @@ class VJepa2Model(Model):
             "video_encoder": EngineType.ENC_DEC,
             "predictor": EngineType.ENC_DEC,
         }
-        # Phase 2 rollout uses a distinct node so the single-pass and rollout
-        # walks can coexist without branching inside a submodule.  Both node
-        # names resolve to wrappers around the same underlying
-        # ``VJEPA2Predictor`` nn.Module — no weight duplication.  AC-variant
-        # rollout (multi-step, action-conditioned) is Phase 3.D; the rollout
-        # submodule factory raises NotImplementedError on ``predictor_kind="ac"``,
-        # so we must NOT register the rollout node/walk for AC — otherwise
-        # conductor graph construction demands a ``rollout_predictor`` entry
-        # in the config's ``node_groups`` that would have no valid submodule.
-        if self.config.predictor_kind != "ac":
-            types["rollout_predictor"] = EngineType.ENC_DEC
+        # Rollout uses a distinct node so the single-pass and rollout walks
+        # can coexist without branching inside a submodule.  Both node names
+        # resolve to wrappers around the same underlying predictor nn.Module
+        # (``VJEPA2Predictor`` for masked, ``VisionTransformerPredictorAC``
+        # for AC) — no weight duplication.  AC-variant rollout landed in
+        # Phase 3.D (sliding-window autoregressive AC rollout), so
+        # ``rollout_predictor`` is now registered for both predictor kinds.
+        types["rollout_predictor"] = EngineType.ENC_DEC
         # Phase 3.B: MPC nodes advertised only for AC (the masked predictor
         # has no action input, so K-way candidate evaluation makes no sense
         # for it).  ``ac_predictor_mpc`` shares the underlying
@@ -361,60 +359,77 @@ class VJepa2Model(Model):
         }
 
         # ----------------------------------------------------------------
-        # Phase 2: autoregressive rollout (AnticipativeWrapper-parity)
+        # Phase 2 (masked) + Phase 3.D (AC): autoregressive rollout.
         # ----------------------------------------------------------------
-        # AC-variant rollout is a Phase 3 item (see
-        # ``_create_submodule("rollout_predictor")`` for the NotImplementedError),
-        # so skip registering the walk + node here.  Otherwise the conductor
-        # demands a ``rollout_predictor`` entry in ``configs/vjepa2_ac.yaml``
-        # that has no working submodule.
-        if self.config.predictor_kind != "ac":
-            # The rollout section is a single ``rollout_predictor`` node that
-            # consumes the sliding-window ``encoder_hidden`` and emits both the
-            # updated window (loop-back) and the fresh ``predicted_hidden``.
-            # ``predicted_hidden`` is declared as a section output purely so
-            # ``Loop.__post_init__`` recognizes it when filtering the
-            # ``accumulated_outputs`` edge list — its ``next_node`` target is
-            # the same node, meaning the loop-back value is ignored by the
-            # node's ``input_ids`` and only survives in the accumulated cache.
-            rollout_section = GraphNode(
-                name="rollout_predictor",
-                input_ids=["encoder_hidden"],
-                outputs=[
-                    GraphEdge(next_node="rollout_predictor", name="encoder_hidden"),
-                    GraphEdge(next_node="rollout_predictor", name="predicted_hidden"),
-                ],
-            )
-            # ``max_iters`` is a config-level upper bound baked in at graph-build
-            # time.  The per-request ``rollout_horizon`` is enforced inside the
-            # submodule via ``register_loop_stop`` when iter_idx + 1 reaches it.
-            rollout_loop = DynamicLoop(
-                name=self.ROLLOUT_LOOP_NAME,
-                section=rollout_section,
-                max_iters=self.config.max_rollout_horizon,
-                outputs=[],
-                accumulated_outputs=[
-                    GraphEdge(
-                        next_node=EMIT_TO_CLIENT,
-                        name="predicted_hidden",
-                        output_modality="video",
-                        persist=True,
-                    ),
-                ],
-            )
-            prefill_video_rollout = Sequential(
-                [
-                    GraphNode(
-                        name="video_encoder",
-                        input_ids=["video_frames"],
-                        outputs=[
-                            GraphEdge(next_node="rollout_predictor", name="encoder_hidden"),
-                        ],
-                    ),
-                    rollout_loop,
-                ]
-            )
-            walks[self.PREFILL_VIDEO_ROLLOUT] = prefill_video_rollout
+        # The rollout section is a single ``rollout_predictor`` node that
+        # consumes a sliding-window ``encoder_hidden`` and emits both the
+        # updated window (loop-back) and the fresh ``predicted_hidden``.
+        # ``predicted_hidden`` is declared as a section output purely so
+        # ``Loop.__post_init__`` recognizes it when filtering the
+        # ``accumulated_outputs`` edge list — its ``next_node`` target is
+        # the same node, meaning the loop-back value is ignored by the
+        # node's ``input_ids`` and only survives in the accumulated cache.
+        #
+        # AC rollout additionally carries ``actions`` / ``states`` (+
+        # optional ``extrinsics``) as identity loop-back edges: the client
+        # sends the full per-iter trajectory once and the submodule slices
+        # per-iter from ``iter_idx``, so the tensors don't change across
+        # iters but still need to be routed on every iter.  See
+        # ``VJepa2ACRolloutPredictorSubmodule`` for the sliding-window
+        # semantics and the P3.D "Sliding-window vs upstream growing-context"
+        # note in the plan for why we diverge from upstream.
+        rollout_inputs: list[str] = ["encoder_hidden"]
+        rollout_outputs: list[GraphEdge] = [
+            GraphEdge(next_node="rollout_predictor", name="encoder_hidden"),
+            GraphEdge(next_node="rollout_predictor", name="predicted_hidden"),
+        ]
+        if self.config.predictor_kind == "ac":
+            rollout_inputs += ["actions", "states"]
+            rollout_outputs += [
+                GraphEdge(next_node="rollout_predictor", name="actions"),
+                GraphEdge(next_node="rollout_predictor", name="states"),
+            ]
+            if self.config.ac_predictor and self.config.ac_predictor.use_extrinsics:
+                rollout_inputs.append("extrinsics")
+                rollout_outputs.append(
+                    GraphEdge(next_node="rollout_predictor", name="extrinsics")
+                )
+
+        rollout_section = GraphNode(
+            name="rollout_predictor",
+            input_ids=rollout_inputs,
+            outputs=rollout_outputs,
+        )
+        # ``max_iters`` is a config-level upper bound baked in at graph-build
+        # time.  The per-request ``rollout_horizon`` is enforced inside the
+        # submodule via ``register_loop_stop`` when iter_idx + 1 reaches it.
+        rollout_loop = DynamicLoop(
+            name=self.ROLLOUT_LOOP_NAME,
+            section=rollout_section,
+            max_iters=self.config.max_rollout_horizon,
+            outputs=[],
+            accumulated_outputs=[
+                GraphEdge(
+                    next_node=EMIT_TO_CLIENT,
+                    name="predicted_hidden",
+                    output_modality="video",
+                    persist=True,
+                ),
+            ],
+        )
+        prefill_video_rollout = Sequential(
+            [
+                GraphNode(
+                    name="video_encoder",
+                    input_ids=["video_frames"],
+                    outputs=[
+                        GraphEdge(next_node="rollout_predictor", name="encoder_hidden"),
+                    ],
+                ),
+                rollout_loop,
+            ]
+        )
+        walks[self.PREFILL_VIDEO_ROLLOUT] = prefill_video_rollout
 
         # ----------------------------------------------------------------
         # Phase 3.B: K-way action-candidate MPC (AC variant only)
@@ -613,6 +628,23 @@ class VJepa2Model(Model):
                     raise ValueError("use_extrinsics=True but no 'extrinsics' kwarg provided.")
                 out["extrinsics"] = [torch.as_tensor(extrinsics, dtype=torch.float32)]
 
+            # Phase 3.D: AC rollout needs T_total >= T_ctx + H - 1.  Fail fast
+            # in process_prompt so the client gets a clear error before any
+            # forward pass runs.  Sliced per-iter inside the rollout submodule
+            # (see ``VJepa2ACRolloutPredictorSubmodule._rollout_step``).
+            rollout_horizon = int(kwargs.get("rollout_horizon", 0) or 0)
+            if rollout_horizon > 1:
+                t_ctx = self.config.grid_depth
+                required = t_ctx + rollout_horizon - 1
+                act_tensor = out["actions"][0]
+                t_total = act_tensor.size(0) if act_tensor.dim() == 2 else act_tensor.size(1)
+                if t_total < required:
+                    raise ValueError(
+                        f"AC rollout with rollout_horizon={rollout_horizon} requires "
+                        f"actions/states trajectory length >= T_ctx + H - 1 = "
+                        f"{t_ctx} + {rollout_horizon} - 1 = {required}; got {t_total}."
+                    )
+
             # Phase 3.B: MPC walk requires a pre-encoded goal latent.  When
             # the client flags ``mpc=True`` they must also supply EITHER:
             #   * ``goal_hidden`` — the full tensor, shape [1, N, D] or [N, D],
@@ -698,8 +730,8 @@ class VJepa2Model(Model):
         # Rollout walk: triggered by ``rollout_horizon > 1``.  H == 1 is
         # equivalent to a single-pass prefill — save a loop's worth of
         # overhead and route through the normal ``prefill_video`` walk.
-        # Not available for AC (Phase 3.D); see ``get_graph_walk_graphs``.
-        if model_kwargs and self.config.predictor_kind != "ac":
+        # Available for both masked (Phase 2) and AC (Phase 3.D sliding-window).
+        if model_kwargs:
             horizon = int(model_kwargs.get("rollout_horizon", 0) or 0)
             if horizon > 1:
                 return self.PREFILL_VIDEO_ROLLOUT
@@ -741,6 +773,17 @@ class VJepa2Model(Model):
             for name in ("context_mask", "target_mask"):
                 if name in input_signals:
                     edge = GraphEdge(next_node="predictor", name=name)
+                    edge.tensor_info = input_signals[name]
+                    inputs.append(edge)
+
+        if walk == self.PREFILL_VIDEO_ROLLOUT and self.config.predictor_kind == "ac":
+            # AC rollout: route per-timestep actions/states (and optional
+            # extrinsics) to the rollout node.  The submodule identity-
+            # loop-backs them across iters and slices per-iter based on
+            # dynamic_loop_iter_counts["rollout_loop"].
+            for name in ("actions", "states", "extrinsics"):
+                if name in input_signals:
+                    edge = GraphEdge(next_node="rollout_predictor", name=name)
                     edge.tensor_info = input_signals[name]
                     inputs.append(edge)
 
@@ -815,12 +858,17 @@ class VJepa2Model(Model):
                 return VJepa2ACPredictorSubmodule(self.predictor, self.config)
             return VJepa2PredictorSubmodule(self.predictor, self.config)
         if node_name == "rollout_predictor":
-            # Masked predictor only (AC rollout is Phase 3.D — see plan).
-            if self.config.predictor_kind == "ac":
-                raise NotImplementedError(
-                    "AC-variant rollout is deferred to Phase 3.D; use predictor_kind='masked' for Phase 2 rollout."
-                )
             self._init_predictor(device)
+            if self.config.predictor_kind == "ac":
+                # Phase 3.D — sliding-window AC autoregressive rollout.
+                # Shares the predictor nn.Module with the single-shot
+                # ``predictor`` node.  Sliding-window by 1 tubelet group
+                # per iter; diverges from upstream growing-context for
+                # encoder-shape reasons (see plan's P3.D divergence note).
+                return VJepa2ACRolloutPredictorSubmodule(
+                    self.predictor,
+                    self.config,
+                )
             return VJepa2RolloutPredictorSubmodule(
                 self.predictor,
                 self.config,
