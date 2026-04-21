@@ -13,13 +13,16 @@ node_groups:
       - 0
 
   # Single-shot AC (prefill_video walk) + K-way MPC (prefill_video_mpc walk
-  # — Phase 3.B) share the same underlying VisionTransformerPredictorAC
-  # nn.Module, so colocate both node names on the same rank.  mpc_scorer
+  # — Phase 3.B) + sliding-window AC rollout (prefill_video_rollout walk
+  # — Phase 3.D) all share the same underlying VisionTransformerPredictorAC
+  # nn.Module, so colocate all node names on the same rank.  mpc_scorer
   # is cheap (L1 over [K, N*D]) and runs on the same rank to avoid an
-  # extra cross-rank tensor hop.
+  # extra cross-rank tensor hop.  rollout_predictor wraps the same AC
+  # nn.Module with per-iter sliding-window context + action/state slicing.
   - node_names:
       - predictor
       - ac_predictor_mpc
       - mpc_scorer
+      - rollout_predictor
     ranks:
       - 0
