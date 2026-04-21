@@ -8,9 +8,9 @@ Three submodules:
 
 All three are stateless (no KV cache, no per-iteration state) and are
 dispatched through ``EncoderDecoderEngine``.  ``preprocess`` stacks
-per-request tensors into a batch when shapes match; ``forward`` runs the
-underlying nn.Module and emits a single output tensor per request on the
-downstream edge.
+per-request tensors into a batch (dim 0) — the single-request case
+through ``_execute_sequential`` looks like B=1 and goes through ``forward``;
+``_execute_batched`` with B>1 goes through ``forward_batched``.
 
 The masked-vs-AC choice is made by ``VJepa2Model.get_submodule`` based on
 ``config.predictor_kind``.  Both predictor submodules emit the same output
@@ -26,6 +26,7 @@ import torch
 
 from mminf.communication.tensors import NameToTensorList
 from mminf.conductor.request_info import CurrentForwardPassInfo
+from mminf.engine.base import NodeBatch
 from mminf.engine.cache_manager import BatchedCacheManager
 from mminf.model.base import NodeSubmodule
 from mminf.model.vjepa2.components.ac_predictor import VisionTransformerPredictorAC
@@ -50,24 +51,94 @@ def _normalize_video_frames(frames: torch.Tensor) -> torch.Tensor:
     return frames
 
 
+def _ensure_lead_batch_dim(tensor: torch.Tensor, target_rank: int) -> torch.Tensor:
+    """Return ``tensor`` reshaped so its first dim is a batch dim of 1.
+
+    ``target_rank`` is the expected rank of the per-request tensor *including*
+    the batch dim.  Handles two inbound cases:
+      * Tensor is already ``[1, ...]`` (rank == target_rank) → return as-is.
+      * Tensor is ``[...]`` (rank == target_rank - 1) → unsqueeze(0).
+
+    Any other rank is a shape bug and we fail loudly.  Keeping the helper
+    per-field explicit (rather than a generic "heuristic on first dim")
+    avoids silent batch-dim-collision surprises (e.g. a `[k, N]` multi-mask
+    tensor being mistaken for a `[B, N]` input).
+    """
+    if tensor.dim() == target_rank:
+        if tensor.size(0) != 1:
+            raise ValueError(
+                f"Per-request tensor has leading dim {tensor.size(0)} != 1; "
+                f"expected [1, ...] shape with rank {target_rank}, got {tuple(tensor.shape)}."
+            )
+        return tensor
+    if tensor.dim() == target_rank - 1:
+        return tensor.unsqueeze(0)
+    raise ValueError(
+        f"Tensor rank {tensor.dim()} doesn't match target rank "
+        f"{target_rank} or {target_rank - 1}; got shape {tuple(tensor.shape)}."
+    )
+
+
+def _stack_field(
+    per_request_inputs: list[NameToTensorList],
+    field_name: str,
+    target_rank: int,
+) -> torch.Tensor:
+    """Stack the first tensor under ``field_name`` from every request along dim 0.
+
+    Each per-request tensor is first normalized to ``[1, ...]`` via
+    :func:`_ensure_lead_batch_dim`, then all are concatenated on dim 0.  The
+    caller is responsible for verifying shape homogeneity (done upfront in
+    ``can_batch``); this helper will raise on any mismatch.
+    """
+    parts: list[torch.Tensor] = []
+    for inp in per_request_inputs:
+        t = inp[field_name][0]
+        parts.append(_ensure_lead_batch_dim(t, target_rank))
+    return torch.cat(parts, dim=0)
+
+
+def _shape_key(tensor: torch.Tensor | None) -> tuple | None:
+    """Return a shape tuple for dict-key comparison, or ``None`` if absent."""
+    return tuple(tensor.shape) if tensor is not None else None
+
+
 class VJepa2EncoderSubmodule(NodeSubmodule):
     """ViT 3D-patch video encoder.
 
-    Phase 1: one request per forward pass (``can_batch`` inherits ``False``
-    from ``NodeSubmodule``).  Cross-request batching is a Phase 3
-    optimization that requires fixing the engine's batched path —
-    ``EncoderDecoderEngine._execute_batched`` currently passes a
-    ``dict[rid, inputs]`` where preprocess expects ``list[NameToTensorList]``,
-    and skips ``request_info`` at forward time.  See the Phase-3 tracking
-    note in the plan; the V-JEPA 2 encoder is natively batchable (stateless,
-    fixed shapes, torch.compile-friendly), so the optimization will be
-    worth doing once the engine path is fixed.
+    Supports cross-request batching (Phase 3): requests with identical
+    ``video_frames`` shapes are stacked on dim 0 and run in a single
+    encoder forward.  Shape-heterogeneous batches fall through to the
+    engine's sequential path (one forward per request).
+
+    Because ``VJepa2Model.process_prompt`` always resizes + center-crops to
+    ``(crop_size, crop_size)`` and uniformly samples to ``frames_per_clip``,
+    concurrent requests hitting the same serving config are shape-homogeneous
+    by construction.  Cross-config deployments (rare) naturally fall back.
     """
 
     def __init__(self, encoder: VJEPA2Encoder, config: VJepa2Config):
         super().__init__()
         self.encoder = encoder
         self.config = config
+
+    def can_batch(self, batch: NodeBatch) -> bool:
+        shapes: set[tuple] = set()
+        for rid in batch.request_ids:
+            inputs = batch.per_request_input_tensors.get(rid, {})
+            frames_list = inputs.get("video_frames")
+            if not frames_list:
+                return False
+            t = frames_list[0]
+            # Normalize rank for comparison: we accept [T,C,H,W] or [1,T,C,H,W].
+            if t.dim() == 4:
+                shape = (1, *t.shape)
+            elif t.dim() == 5:
+                shape = tuple(t.shape)
+            else:
+                return False
+            shapes.add(shape)
+        return len(shapes) == 1 and len(batch.request_ids) >= 1
 
     def preprocess(
         self,
@@ -77,12 +148,14 @@ class VJepa2EncoderSubmodule(NodeSubmodule):
         per_request_info: dict[str, CurrentForwardPassInfo],
         cache_manager: BatchedCacheManager | None = None,
     ) -> dict[str, torch.Tensor]:
-        assert len(per_request_inputs) == 1, (
-            "VJepa2EncoderSubmodule runs one request at a time; cross-request "
-            "batching is deferred to Phase 3 (needs engine-path fix)."
+        # Handles both sequential (len == 1) and batched (len > 1) — the
+        # single-request case yields a [1, T, C, H, W] tensor, identical to
+        # Phase 1 behaviour.
+        stacked = torch.cat(
+            [_normalize_video_frames(inp["video_frames"][0]) for inp in per_request_inputs],
+            dim=0,
         )
-        frames = _normalize_video_frames(per_request_inputs[0]["video_frames"][0])
-        return {"pixel_values_videos": frames}
+        return {"pixel_values_videos": stacked}
 
     def forward(
         self,
@@ -99,6 +172,39 @@ class VJepa2EncoderSubmodule(NodeSubmodule):
         hidden = self.encoder(pixel_values_videos)
         logger.info("VJepa2EncoderSubmodule.forward: output shape=%s", tuple(hidden.shape))
         return {"encoder_hidden": [hidden]}
+
+    def forward_batched(
+        self,
+        graph_walk: str,
+        request_ids: list[str],
+        packed_inputs: dict[str, torch.Tensor],
+        per_request_info: dict[str, CurrentForwardPassInfo],
+    ) -> dict[str, NameToTensorList]:
+        """Batched encoder forward.  Returns per-rid outputs directly.
+
+        The returned per-rid ``encoder_hidden`` slices preserve the leading
+        batch dim as size 1 (``hidden[i:i+1]``) so downstream submodules
+        see ``[1, N, D]`` — identical shape to what the sequential path
+        emits.  That keeps the ``preprocess`` stacking symmetric across
+        paths and avoids a shape discrepancy at the predictor boundary.
+        """
+        pixel_values_videos = packed_inputs["pixel_values_videos"]
+        b_in = pixel_values_videos.size(0)
+        logger.info(
+            "VJepa2EncoderSubmodule.forward_batched: input shape=%s rids=%d",
+            tuple(pixel_values_videos.shape),
+            len(request_ids),
+        )
+        if b_in != len(request_ids):
+            raise ValueError(
+                f"pixel_values_videos batch dim {b_in} does not match "
+                f"request count {len(request_ids)}."
+            )
+        hidden = self.encoder(pixel_values_videos)  # [B, N, D]
+        return {
+            rid: {"encoder_hidden": [hidden[i : i + 1]]}
+            for i, rid in enumerate(request_ids)
+        }
 
 
 def _build_default_masks(
@@ -121,12 +227,47 @@ class VJepa2PredictorSubmodule(NodeSubmodule):
     accepts pre-built ``context_mask`` and ``target_mask`` edges; when
     absent, falls back to full-context / full-target defaults.  Output is
     the predicted hidden tensor at the target positions.
+
+    Supports cross-request batching when ``encoder_hidden`` shapes agree
+    across the batch AND (if provided) mask shapes agree.  All-defaults is
+    the common case — the full-context / full-target masks are derived from
+    ``encoder_hidden.shape`` and so are trivially homogeneous when the
+    encoder outputs are.
     """
 
     def __init__(self, predictor: VJEPA2Predictor, config: VJepa2Config):
         super().__init__()
         self.predictor = predictor
         self.config = config
+
+    def can_batch(self, batch: NodeBatch) -> bool:
+        enc_shapes: set[tuple] = set()
+        ctx_shapes: set[tuple | None] = set()
+        tgt_shapes: set[tuple | None] = set()
+        for rid in batch.request_ids:
+            inputs = batch.per_request_input_tensors.get(rid, {})
+            enc_list = inputs.get("encoder_hidden")
+            if not enc_list:
+                return False
+            enc = enc_list[0]
+            # Normalize rank for comparison: [N,D] vs [1,N,D] are treated
+            # as the same shape after adding a batch dim.
+            if enc.dim() == 2:
+                enc_shapes.add((1, *enc.shape))
+            elif enc.dim() == 3:
+                enc_shapes.add(tuple(enc.shape))
+            else:
+                return False
+            ctx_list = inputs.get("context_mask")
+            ctx_shapes.add(_shape_key(ctx_list[0]) if ctx_list else None)
+            tgt_list = inputs.get("target_mask")
+            tgt_shapes.add(_shape_key(tgt_list[0]) if tgt_list else None)
+        return (
+            len(enc_shapes) == 1
+            and len(ctx_shapes) == 1
+            and len(tgt_shapes) == 1
+            and len(batch.request_ids) >= 1
+        )
 
     def preprocess(
         self,
@@ -136,14 +277,14 @@ class VJepa2PredictorSubmodule(NodeSubmodule):
         per_request_info: dict[str, CurrentForwardPassInfo],
         cache_manager: BatchedCacheManager | None = None,
     ) -> dict[str, torch.Tensor]:
-        assert len(per_request_inputs) == 1, "VJepa2PredictorSubmodule runs one request at a time."
-        inputs = per_request_inputs[0]
-        encoder_hidden = inputs["encoder_hidden"][0]
-        out: dict[str, torch.Tensor] = {"encoder_hidden": encoder_hidden}
-        if "context_mask" in inputs:
-            out["context_mask"] = inputs["context_mask"][0]
-        if "target_mask" in inputs:
-            out["target_mask"] = inputs["target_mask"][0]
+        # Sequential (len == 1) and batched (len > 1) share this path.
+        out: dict[str, torch.Tensor] = {
+            "encoder_hidden": _stack_field(per_request_inputs, "encoder_hidden", target_rank=3),
+        }
+        if "context_mask" in per_request_inputs[0]:
+            out["context_mask"] = _stack_field(per_request_inputs, "context_mask", target_rank=2)
+        if "target_mask" in per_request_inputs[0]:
+            out["target_mask"] = _stack_field(per_request_inputs, "target_mask", target_rank=2)
         return out
 
     def forward(
@@ -168,6 +309,32 @@ class VJepa2PredictorSubmodule(NodeSubmodule):
         predicted = self.predictor(encoder_hidden, ctx_list, tgt_list)
         logger.info("VJepa2PredictorSubmodule.forward: output shape=%s", tuple(predicted.shape))
         return {"predicted_hidden": [predicted]}
+
+    def forward_batched(
+        self,
+        graph_walk: str,
+        request_ids: list[str],
+        packed_inputs: dict[str, torch.Tensor],
+        per_request_info: dict[str, CurrentForwardPassInfo],
+    ) -> dict[str, NameToTensorList]:
+        encoder_hidden = packed_inputs["encoder_hidden"]  # [B, N, D]
+        context_mask = packed_inputs.get("context_mask")
+        target_mask = packed_inputs.get("target_mask")
+        if context_mask is None or target_mask is None:
+            ctx_list, tgt_list = _build_default_masks(encoder_hidden)
+        else:
+            ctx_list = [context_mask]
+            tgt_list = [target_mask]
+        logger.info(
+            "VJepa2PredictorSubmodule.forward_batched: encoder_hidden=%s rids=%d",
+            tuple(encoder_hidden.shape),
+            len(request_ids),
+        )
+        predicted = self.predictor(encoder_hidden, ctx_list, tgt_list)  # [B, N_pred, D]
+        return {
+            rid: {"predicted_hidden": [predicted[i : i + 1]]}
+            for i, rid in enumerate(request_ids)
+        }
 
 
 class VJepa2RolloutPredictorSubmodule(NodeSubmodule):
@@ -250,6 +417,41 @@ class VJepa2RolloutPredictorSubmodule(NodeSubmodule):
     # NodeSubmodule ABC
     # ------------------------------------------------------------------
 
+    def can_batch(self, batch: NodeBatch) -> bool:
+        """Batch only when every request is at the same rollout iter AND
+        their encoder_hidden shapes agree.
+
+        Different iters can't share a forward because the sliding-window
+        math ``torch.cat([hidden[:, n_pred:], predicted], dim=1)`` is
+        symmetric across the batch dim only if all rids moved through the
+        same number of prior iterations.  The scheduler groups same-iter
+        requests together, so this is the common case; mixed-iter batches
+        fall through to sequential.
+        """
+        enc_shapes: set[tuple] = set()
+        iters: set[int] = set()
+        for rid in batch.request_ids:
+            inputs = batch.per_request_input_tensors.get(rid, {})
+            enc_list = inputs.get("encoder_hidden")
+            if not enc_list:
+                return False
+            enc = enc_list[0]
+            if enc.dim() == 2:
+                enc_shapes.add((1, *enc.shape))
+            elif enc.dim() == 3:
+                enc_shapes.add(tuple(enc.shape))
+            else:
+                return False
+            info = batch.per_request_info.get(rid)
+            if info is None:
+                return False
+            iters.add(info.dynamic_loop_iter_counts.get("rollout_loop", 0))
+        return (
+            len(enc_shapes) == 1
+            and len(iters) == 1
+            and len(batch.request_ids) >= 1
+        )
+
     def preprocess(
         self,
         graph_walk: str,
@@ -258,15 +460,33 @@ class VJepa2RolloutPredictorSubmodule(NodeSubmodule):
         per_request_info: dict[str, CurrentForwardPassInfo],
         cache_manager: BatchedCacheManager | None = None,
     ) -> dict[str, torch.Tensor]:
-        assert len(per_request_inputs) == 1, (
-            "VJepa2RolloutPredictorSubmodule runs one request at a time; "
-            "cross-request batching is a Phase 3 optimization."
-        )
-        inputs = per_request_inputs[0]
-        # ``encoder_hidden`` arrives from either the preceding video_encoder
-        # (iter 0) or the self-loop-back (iter k > 0) — both paths deliver a
-        # single tensor under the same edge name.
-        return {"encoder_hidden": inputs["encoder_hidden"][0]}
+        # Sequential (len == 1) and batched (len > 1) share this path.
+        return {"encoder_hidden": _stack_field(per_request_inputs, "encoder_hidden", target_rank=3)}
+
+    def _rollout_step(
+        self,
+        encoder_hidden: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute one rollout step for a [B, N, D] encoder_hidden.
+
+        Returns ``(next_encoder_hidden [B, N, D], predicted [B, n_pred, D])``.
+        Shape math is symmetric across B, so this function is used by both
+        the sequential and batched paths.
+        """
+        b, n_ctxt, _ = encoder_hidden.shape
+        device = encoder_hidden.device
+        n_pred = self._n_pred
+        if n_pred >= n_ctxt:
+            raise ValueError(
+                f"Rollout requires n_pred ({n_pred}) < encoder context length "
+                f"({n_ctxt}); reduce num_output_frames or the anticipation horizon."
+            )
+        ctxt_positions = torch.arange(n_ctxt, device=device).unsqueeze(0).repeat(b, 1)
+        skip = n_ctxt + self._grid_size * self._grid_size * self._anticipation_steps
+        tgt_positions = (torch.arange(n_pred, device=device) + skip).unsqueeze(0).repeat(b, 1)
+        predicted = self.predictor(encoder_hidden, [ctxt_positions], [tgt_positions])
+        next_encoder_hidden = torch.cat([encoder_hidden[:, n_pred:, :], predicted], dim=1)
+        return next_encoder_hidden, predicted
 
     def forward(
         self,
@@ -281,38 +501,15 @@ class VJepa2RolloutPredictorSubmodule(NodeSubmodule):
         """
         if encoder_hidden.dim() == 2:
             encoder_hidden = encoder_hidden.unsqueeze(0)
-        b, n_ctxt, _ = encoder_hidden.shape
-        device = encoder_hidden.device
-
-        n_pred = self._n_pred
-        if n_pred >= n_ctxt:
-            raise ValueError(
-                f"Rollout requires n_pred ({n_pred}) < encoder context length "
-                f"({n_ctxt}); reduce num_output_frames or the anticipation "
-                f"horizon."
-            )
-
-        # Fixed every iter (context window always holds N tokens); matches
-        # the upstream wrapper's arange(N).
-        ctxt_positions = torch.arange(n_ctxt, device=device).unsqueeze(0).repeat(b, 1)
-        skip = n_ctxt + self._grid_size * self._grid_size * self._anticipation_steps
-        tgt_positions = (torch.arange(n_pred, device=device) + skip).unsqueeze(0).repeat(b, 1)
 
         iter_idx = request_info.dynamic_loop_iter_counts.get("rollout_loop", 0)
         logger.info(
-            "VJepa2RolloutPredictorSubmodule.forward: iter=%d encoder_hidden=%s n_pred=%d skip=%d",
+            "VJepa2RolloutPredictorSubmodule.forward: iter=%d encoder_hidden=%s",
             iter_idx,
             tuple(encoder_hidden.shape),
-            n_pred,
-            skip,
         )
 
-        predicted = self.predictor(encoder_hidden, [ctxt_positions], [tgt_positions])
-
-        # Slide the window: drop oldest n_pred tokens, append predicted.
-        # This is the upstream
-        #   x_pred_input = cat([x_pred_input[:, N_pred:, :], x_pred], dim=1)
-        next_encoder_hidden = torch.cat([encoder_hidden[:, n_pred:, :], predicted], dim=1)
+        next_encoder_hidden, predicted = self._rollout_step(encoder_hidden)
 
         # Per-request early-exit.  The DynamicLoop's ``max_iters`` is a
         # config-level upper bound (``max_rollout_horizon``); the caller's
@@ -339,6 +536,55 @@ class VJepa2RolloutPredictorSubmodule(NodeSubmodule):
             "predicted_hidden": [predicted],
         }
 
+    def forward_batched(
+        self,
+        graph_walk: str,
+        request_ids: list[str],
+        packed_inputs: dict[str, torch.Tensor],
+        per_request_info: dict[str, CurrentForwardPassInfo],
+    ) -> dict[str, NameToTensorList]:
+        """Batched rollout step across shape-homogeneous same-iter requests.
+
+        ``can_batch`` guarantees all rids are at the same ``iter_idx`` (else
+        we fall to sequential), so the rollout-step math is a single
+        ``[B, N, D]`` forward.  Per-request early-exit (``register_loop_stop``)
+        still fires independently when each rid's ``rollout_horizon`` is
+        reached — individual rids can drop out while others continue, and
+        the scheduler re-batches remaining rids on the next iter.
+        """
+        encoder_hidden = packed_inputs["encoder_hidden"]  # [B, N, D]
+        if encoder_hidden.size(0) != len(request_ids):
+            raise ValueError(
+                f"encoder_hidden batch dim {encoder_hidden.size(0)} does not "
+                f"match request count {len(request_ids)}."
+            )
+
+        # All rids at same iter (can_batch invariant); read any one for logs.
+        iter_idx = per_request_info[request_ids[0]].dynamic_loop_iter_counts.get("rollout_loop", 0)
+        logger.info(
+            "VJepa2RolloutPredictorSubmodule.forward_batched: iter=%d encoder_hidden=%s rids=%d",
+            iter_idx,
+            tuple(encoder_hidden.shape),
+            len(request_ids),
+        )
+
+        next_encoder_hidden, predicted = self._rollout_step(encoder_hidden)
+
+        # Per-rid early exit.
+        for rid in request_ids:
+            info = per_request_info[rid]
+            horizon = int(info.step_metadata.get("rollout_horizon", 0) or 0)
+            if horizon > 0 and iter_idx + 1 >= horizon:
+                info.register_loop_stop("rollout_loop")
+
+        return {
+            rid: {
+                "encoder_hidden": [next_encoder_hidden[i : i + 1]],
+                "predicted_hidden": [predicted[i : i + 1]],
+            }
+            for i, rid in enumerate(request_ids)
+        }
+
 
 class VJepa2ACPredictorSubmodule(NodeSubmodule):
     """Action-conditioned predictor (V-JEPA 2-AC).
@@ -356,6 +602,35 @@ class VJepa2ACPredictorSubmodule(NodeSubmodule):
         self.predictor = predictor
         self.config = config
 
+    def can_batch(self, batch: NodeBatch) -> bool:
+        shapes: set[tuple] = set()
+        for rid in batch.request_ids:
+            inputs = batch.per_request_input_tensors.get(rid, {})
+            enc_l = inputs.get("encoder_hidden")
+            act_l = inputs.get("actions")
+            st_l = inputs.get("states")
+            if not enc_l or not act_l or not st_l:
+                return False
+            enc, act, st = enc_l[0], act_l[0], st_l[0]
+
+            # Normalize rank so [N,D]/[1,N,D] and [T,7]/[1,T,7] compare equal.
+            def _norm(t, target_rank):
+                if t.dim() == target_rank:
+                    return tuple(t.shape)
+                if t.dim() == target_rank - 1:
+                    return (1, *t.shape)
+                return None
+
+            enc_s = _norm(enc, 3)
+            act_s = _norm(act, 3)
+            st_s = _norm(st, 3)
+            if enc_s is None or act_s is None or st_s is None:
+                return False
+            ext_l = inputs.get("extrinsics")
+            ext_s = _norm(ext_l[0], 3) if ext_l else None
+            shapes.add((enc_s, act_s, st_s, ext_s))
+        return len(shapes) == 1 and len(batch.request_ids) >= 1
+
     def preprocess(
         self,
         graph_walk: str,
@@ -364,15 +639,13 @@ class VJepa2ACPredictorSubmodule(NodeSubmodule):
         per_request_info: dict[str, CurrentForwardPassInfo],
         cache_manager: BatchedCacheManager | None = None,
     ) -> dict[str, torch.Tensor]:
-        assert len(per_request_inputs) == 1, "VJepa2ACPredictorSubmodule runs one request at a time."
-        inputs = per_request_inputs[0]
         out: dict[str, torch.Tensor] = {
-            "encoder_hidden": inputs["encoder_hidden"][0],
-            "actions": inputs["actions"][0],
-            "states": inputs["states"][0],
+            "encoder_hidden": _stack_field(per_request_inputs, "encoder_hidden", target_rank=3),
+            "actions": _stack_field(per_request_inputs, "actions", target_rank=3),
+            "states": _stack_field(per_request_inputs, "states", target_rank=3),
         }
-        if "extrinsics" in inputs:
-            out["extrinsics"] = inputs["extrinsics"][0]
+        if "extrinsics" in per_request_inputs[0]:
+            out["extrinsics"] = _stack_field(per_request_inputs, "extrinsics", target_rank=3)
         return out
 
     def forward(
@@ -394,3 +667,251 @@ class VJepa2ACPredictorSubmodule(NodeSubmodule):
             extrinsics = extrinsics.unsqueeze(0)
         predicted = self.predictor(encoder_hidden, actions, states, extrinsics=extrinsics)
         return {"predicted_hidden": [predicted]}
+
+    def forward_batched(
+        self,
+        graph_walk: str,
+        request_ids: list[str],
+        packed_inputs: dict[str, torch.Tensor],
+        per_request_info: dict[str, CurrentForwardPassInfo],
+    ) -> dict[str, NameToTensorList]:
+        encoder_hidden = packed_inputs["encoder_hidden"]  # [B, N, D]
+        actions = packed_inputs["actions"]                # [B, T, action_dim]
+        states = packed_inputs["states"]                  # [B, T, action_dim]
+        extrinsics = packed_inputs.get("extrinsics")
+        if encoder_hidden.size(0) != len(request_ids):
+            raise ValueError(
+                f"encoder_hidden batch dim {encoder_hidden.size(0)} does not "
+                f"match request count {len(request_ids)}."
+            )
+        logger.info(
+            "VJepa2ACPredictorSubmodule.forward_batched: enc=%s act=%s st=%s rids=%d",
+            tuple(encoder_hidden.shape),
+            tuple(actions.shape),
+            tuple(states.shape),
+            len(request_ids),
+        )
+        predicted = self.predictor(
+            encoder_hidden, actions, states, extrinsics=extrinsics,
+        )  # [B, N, out_dim]
+        return {
+            rid: {"predicted_hidden": [predicted[i : i + 1]]}
+            for i, rid in enumerate(request_ids)
+        }
+
+
+# ---------------------------------------------------------------------------
+# P3.B — MPC submodules (intra-request K-way candidate evaluation)
+#
+# The AC predictor's ``forward(encoder_hidden, actions, states)`` is already
+# batch-dim aware (upstream ``mpc_utils.cem`` uses exactly this pattern via
+# ``context_frame.repeat(K, 1, 1, 1)``).  Our MPC walk runs ONE request end-
+# to-end: a single encoder forward produces ``encoder_hidden = [1, N, D]``,
+# then the MPC predictor broadcasts it to ``[K, N, D]`` via ``.expand`` and
+# runs the AC predictor with ``actions/states`` of shape ``[K, T, 7]``.
+# The scorer then L1-compares each of K predicted latents against a single
+# goal latent (pre-encoded by the client) and emits ``best_index`` + per-
+# candidate costs + the full ``[K, N, D]`` predicted stack.
+#
+# No ``can_batch`` override: MPC is intra-request, so cross-request batching
+# is meaningless here — the K-way batch dim is already saturating the
+# predictor.  If a future deployment needs cross-request batching of MPC
+# requests too (K1 rids × K2 candidates), the natural path is the same
+# engine batching that P3.A introduced for the single-candidate predictor.
+# ---------------------------------------------------------------------------
+
+
+class VJepa2MPCPredictorSubmodule(NodeSubmodule):
+    """Single-request K-way AC predictor forward.
+
+    Inputs:
+      * ``encoder_hidden``: ``[1, N, D]`` — context-video latent from the
+        preceding ``video_encoder`` node.
+      * ``actions``:  ``[K, T, 7]`` — K candidate action trajectories.
+      * ``states``:   ``[K, T, 7]`` — matching proprioceptive states.
+      * ``extrinsics`` (optional, use_extrinsics=True on the config).
+
+    Output: ``predicted_hidden`` of shape ``[K, N, out_dim]`` — all K
+    candidates' predicted future latents.
+
+    Parity anchor: ``vjepa2/notebooks/utils/mpc_utils.py::cem`` lines 62-64
+    (context expansion) + line 114 (world_model call with K-batched inputs).
+    """
+
+    def __init__(self, predictor: VisionTransformerPredictorAC, config: VJepa2Config):
+        super().__init__()
+        self.predictor = predictor
+        self.config = config
+
+    def preprocess(
+        self,
+        graph_walk: str,
+        per_request_inputs: list[NameToTensorList],
+        request_ids: list[str],
+        per_request_info: dict[str, CurrentForwardPassInfo],
+        cache_manager: BatchedCacheManager | None = None,
+    ) -> dict[str, torch.Tensor]:
+        # Single request — MPC is intra-request K-way.  Enforce explicitly
+        # so a future scheduler change that co-batches MPC requests trips
+        # this immediately instead of silently mis-broadcasting.
+        if len(per_request_inputs) != 1:
+            raise ValueError(
+                f"VJepa2MPCPredictorSubmodule runs one request at a time; "
+                f"got batch of {len(per_request_inputs)}."
+            )
+        inputs = per_request_inputs[0]
+        enc = inputs["encoder_hidden"][0]
+        actions = inputs["actions"][0]
+        states = inputs["states"][0]
+        out: dict[str, torch.Tensor] = {
+            "encoder_hidden": enc,
+            "actions": actions,
+            "states": states,
+        }
+        if "extrinsics" in inputs:
+            out["extrinsics"] = inputs["extrinsics"][0]
+        return out
+
+    def forward(
+        self,
+        request_info: CurrentForwardPassInfo,
+        encoder_hidden: torch.Tensor,
+        actions: torch.Tensor,
+        states: torch.Tensor,
+        extrinsics: torch.Tensor | None = None,
+        **kwargs,
+    ) -> NameToTensorList:
+        # Normalize encoder_hidden to [1, N, D].
+        if encoder_hidden.dim() == 2:
+            encoder_hidden = encoder_hidden.unsqueeze(0)
+        if encoder_hidden.size(0) != 1:
+            raise ValueError(
+                f"MPC predictor expects encoder_hidden [1, N, D]; got "
+                f"{tuple(encoder_hidden.shape)} — context should be a single "
+                "request's latent before K-way broadcast."
+            )
+        # Broadcast to [K, N, D].  ``.expand`` is zero-copy; the predictor's
+        # internal ops (``predictor_embed`` Linear etc.) will materialize as
+        # they consume.  This matches mpc_utils.cem's ``.repeat(K,1,1,1)``
+        # at the output level.
+        k = actions.size(0)
+        enc_k = encoder_hidden.expand(k, -1, -1).contiguous()
+
+        predicted = self.predictor(enc_k, actions, states, extrinsics=extrinsics)
+        logger.info(
+            "VJepa2MPCPredictorSubmodule.forward: K=%d enc_in=%s actions=%s predicted=%s",
+            k,
+            tuple(encoder_hidden.shape),
+            tuple(actions.shape),
+            tuple(predicted.shape),
+        )
+        return {"predicted_hidden": [predicted]}
+
+
+class VJepa2MPCScorerSubmodule(NodeSubmodule):
+    """Score K candidate predicted latents against a goal latent.
+
+    Inputs:
+      * ``predicted_hidden``: ``[K, N, D]`` — from the MPC predictor.
+      * ``goal_hidden``:      ``[1, N, D]`` (or ``[N, D]``) — pre-encoded
+        by the client via a prior ``prefill_video_encoder_only`` call.
+
+    Outputs emitted to the client:
+      * ``best_index`` (int64 scalar): argmin of costs.
+      * ``costs`` (``[K]``): per-candidate cost values.
+      * ``predicted_hidden`` (``[K, N, D]``): passed through so clients
+        that want the imagined trajectories (e.g. for visualization) get
+        them without a second request.
+
+    Cost function is selectable via ``config.mpc_cost_fn``:
+      * ``"l1"`` (default): ``(pred - goal).abs().mean(dim=[1, 2])`` — matches
+        upstream ``mpc_utils.py::l1``.
+      * ``"l2"``: squared-error mean.
+      * ``"cosine"``: 1 - cosine similarity (so argmin still picks best).
+    """
+
+    def __init__(self, config: VJepa2Config):
+        super().__init__()
+        self.config = config
+
+    def preprocess(
+        self,
+        graph_walk: str,
+        per_request_inputs: list[NameToTensorList],
+        request_ids: list[str],
+        per_request_info: dict[str, CurrentForwardPassInfo],
+        cache_manager: BatchedCacheManager | None = None,
+    ) -> dict[str, torch.Tensor]:
+        if len(per_request_inputs) != 1:
+            raise ValueError(
+                f"VJepa2MPCScorerSubmodule runs one request at a time; "
+                f"got batch of {len(per_request_inputs)}."
+            )
+        inputs = per_request_inputs[0]
+        return {
+            "predicted_hidden": inputs["predicted_hidden"][0],
+            "goal_hidden": inputs["goal_hidden"][0],
+        }
+
+    def _cost(self, pred: torch.Tensor, goal: torch.Tensor) -> torch.Tensor:
+        """Compute per-candidate cost for ``pred [K, N, D]`` vs ``goal [1, N, D]``.
+
+        Returns ``[K]``.  Lower cost = closer to goal.
+        """
+        fn = getattr(self.config, "mpc_cost_fn", "l1")
+        # Flatten N*D so shape is [K, N*D] / [1, N*D].
+        p = pred.flatten(start_dim=1)
+        g = goal.flatten(start_dim=1)
+        if fn == "l1":
+            return (p - g).abs().mean(dim=-1)
+        if fn == "l2":
+            return ((p - g) ** 2).mean(dim=-1)
+        if fn == "cosine":
+            # 1 - cosine_sim so argmin still picks best.
+            p_n = torch.nn.functional.normalize(p, dim=-1)
+            g_n = torch.nn.functional.normalize(g, dim=-1)
+            return 1.0 - (p_n * g_n).sum(dim=-1)
+        raise ValueError(
+            f"Unknown mpc_cost_fn {fn!r}; expected one of 'l1', 'l2', 'cosine'."
+        )
+
+    def forward(
+        self,
+        request_info: CurrentForwardPassInfo,
+        predicted_hidden: torch.Tensor,
+        goal_hidden: torch.Tensor,
+        **kwargs,
+    ) -> NameToTensorList:
+        # Normalize goal to [1, N, D] if needed (client may send [N, D]).
+        if goal_hidden.dim() == 2:
+            goal_hidden = goal_hidden.unsqueeze(0)
+        if goal_hidden.size(0) != 1:
+            raise ValueError(
+                f"goal_hidden must have batch dim 1; got shape "
+                f"{tuple(goal_hidden.shape)}."
+            )
+        if predicted_hidden.dim() == 2:
+            predicted_hidden = predicted_hidden.unsqueeze(0)
+
+        # Sanity: [K, N, D] vs [1, N, D] agree on N and D.
+        if predicted_hidden.shape[1:] != goal_hidden.shape[1:]:
+            raise ValueError(
+                f"predicted_hidden feature shape {tuple(predicted_hidden.shape[1:])} "
+                f"does not match goal_hidden feature shape "
+                f"{tuple(goal_hidden.shape[1:])}."
+            )
+
+        costs = self._cost(predicted_hidden, goal_hidden)  # [K]
+        best = torch.argmin(costs).to(torch.int64)
+        logger.info(
+            "VJepa2MPCScorerSubmodule.forward: K=%d best=%d min_cost=%.4f max_cost=%.4f",
+            int(predicted_hidden.size(0)),
+            int(best.item()),
+            float(costs.min().item()),
+            float(costs.max().item()),
+        )
+        return {
+            "best_index": [best],
+            "costs": [costs],
+            "predicted_hidden": [predicted_hidden],
+        }
