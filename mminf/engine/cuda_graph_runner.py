@@ -39,7 +39,7 @@ class CudaGraphConfig:
     """Defines what computation a captured graph represents."""
     graph_walk: str  # "decode"
     dummy_capture_inputs: list[dict[str, list[torch.Tensor]]] # [{tensor_name: [tensor(s)]}]
-    requires_cfg: bool  = False# whether CFG is active
+    requires_cfg: bool  = False # whether CFG is active
     labels: list[str]  = field(default_factory=lambda: ["main"]) # cache labels used: ["main"] or ["main", "cfg_img"]
     compile: bool = True
     # Per-config override for the set of batch sizes to capture. None → use the
@@ -271,6 +271,7 @@ class CudaGraphRunner:
                     fwd_index=0,
                     random_seed=0,
                     max_tokens=1,
+                    sampling_config={}
                 ) for rid in dummy_rids
             }
 
@@ -814,6 +815,7 @@ class CodecCudaGraphRunner:
                 fwd_index=0,
                 random_seed=0,
                 max_tokens=1,
+                sampling_config={}
             )
             for rid in dummy_rids
         }
