@@ -1,4 +1,3 @@
-
 from dataclasses import dataclass, field
 
 from mminf.graph.base import DynamicLoop, GraphNode, GraphSection, Parallel, Sequential
@@ -44,9 +43,7 @@ class IterIndexTree:
         return child.label_context_gt(other.children[child_name], target_label)
 
 
-def build_loop_index_tree(
-    graph: GraphSection, fwd_idx: str
-) -> IterIndexTree:
+def build_loop_index_tree(graph: GraphSection, fwd_idx: str) -> IterIndexTree:
     root = IterIndexTree(label="_fwd_idx", iter_index=fwd_idx)
 
     def _build(graph: GraphSection) -> dict[str, IterIndexTree]:
@@ -60,19 +57,17 @@ def build_loop_index_tree(
 
         # otherwise, this is a loop
         label = graph.name if isinstance(graph, DynamicLoop) else graph._uuid_label
-        base_node = IterIndexTree(
-            label=label, iter_index=graph.curr_iter
-        )
+        base_node = IterIndexTree(label=label, iter_index=graph.curr_iter)
         base_node.children = _build(graph._curr_iter_section)
         base_node._set_desc_labels()
         return {label: base_node}
+
     root.children = _build(graph)
     root._set_desc_labels()
     return root
 
-def update_loop_index_tree(
-    index_tree: IterIndexTree, graph: GraphSection, fwd_idx: str
-):
+
+def update_loop_index_tree(index_tree: IterIndexTree, graph: GraphSection, fwd_idx: str):
     index_tree.iter_index = fwd_idx
 
     def _update(tree: IterIndexTree, graph: GraphSection) -> dict[str, IterIndexTree]:
@@ -90,4 +85,5 @@ def update_loop_index_tree(
         tree = tree.children[label]
         tree.iter_index = graph.curr_iter
         _update(tree, graph._curr_iter_section)
+
     _update(index_tree, graph)

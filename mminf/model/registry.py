@@ -4,6 +4,7 @@ from mminf.model.dummy_model import DummyModel
 from mminf.model.orpheus.orpheus_model import OrpheusModel
 from mminf.model.pi05.pi05_model import Pi05Model
 from mminf.model.qwen3_omni.qwen3_omni_model import Qwen3OmniModel
+from mminf.model.vjepa2.vjepa2_model import VJepa2ACModel, VJepa2Model
 
 MODEL_REGISTRY: dict[str, type[Model]] = {
     "dummy": DummyModel,
@@ -11,6 +12,8 @@ MODEL_REGISTRY: dict[str, type[Model]] = {
     "orpheus": OrpheusModel,
     "pi05": Pi05Model,
     "qwen3_omni": Qwen3OmniModel,
+    "vjepa2": VJepa2Model,
+    "vjepa2_ac": VJepa2ACModel,
 }
 
 HF_MODELS: dict[str, dict] = {
@@ -21,6 +24,16 @@ HF_MODELS: dict[str, dict] = {
     # state-dict remap inside Pi05Model.get_submodule().
     "pi05": {"model_path_hf": "lerobot/pi05_base"},
     "qwen3_omni": {"model_path_hf": "Qwen/Qwen3-Omni-30B-A3B-Instruct"},
+    # V-JEPA 2 standard (encoder + masked predictor).  Default is ViT-L @ 256
+    # (~300M); the same class loads vitl/h/g at 256 or 384 by reading
+    # config.json.
+    "vjepa2": {"model_path_hf": "facebook/vjepa2-vitl-fpc64-256"},
+    # V-JEPA 2-AC (encoder + action-conditioned predictor).  HF doesn't host
+    # an AC checkpoint as of 2026-04; weights come from the public S3 mirror
+    # ``https://dl.fbaipublicfiles.com/vjepa2/vjepa2-ac-vitg.pt`` via
+    # ``download_vjepa2_ac_upstream_pt`` — the ``model_path_hf`` string is
+    # kept as a logical identifier but isn't resolved against HuggingFace.
+    "vjepa2_ac": {"model_path_hf": "vjepa2-ac-vitg"},
 }
 
 
