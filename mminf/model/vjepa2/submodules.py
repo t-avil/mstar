@@ -21,14 +21,11 @@ branch.
 from __future__ import annotations
 
 import logging
-
-from mminf.engine.kv_store import PositionInfo
 import torch
 
 from mminf.communication.tensors import NameToTensorList
 from mminf.conductor.request_info import CurrentForwardPassInfo
 from mminf.engine.base import NodeBatch
-from mminf.engine.cache_manager import BatchedCacheManager
 from mminf.model.submodule_base import ARNodeInputs, ARNodeSubmodule, ModelInputsFromEngine, NodeInputs, NodeSubmodule
 from mminf.model.vjepa2.components.ac_predictor import VisionTransformerPredictorAC
 from mminf.model.vjepa2.components.predictor import VJEPA2Predictor
@@ -441,7 +438,7 @@ class VJepa2RolloutPredictorSubmodule(ARNodeSubmodule):
     # NodeSubmodule ABC
     # ------------------------------------------------------------------
 
-    def can_batch(self, batch: NodeBatch, model_inputs: list[NodeInputs]) -> bool:
+    def can_batch(self, batch: NodeBatch, model_inputs: list[ARNodeInputs]) -> bool:
         """Batch only when every request is at the same rollout iter AND
         their encoder_hidden shapes agree.
 
@@ -641,7 +638,7 @@ class VJepa2ACPredictorSubmodule(ARNodeSubmodule):
         self.predictor = predictor
         self.config = config
 
-    def can_batch(self, batch: NodeBatch, model_inputs: list[NodeInputs]) -> bool:
+    def can_batch(self, batch: NodeBatch, model_inputs: list[ARNodeInputs]) -> bool:
         # B=1 → sequential forward.  See VJepa2EncoderSubmodule.can_batch
         # for the rationale — AC ViT-g warm-forward_batched measured ~20×
         # slower than warm-forward on the same input shape, so routing
@@ -651,31 +648,13 @@ class VJepa2ACPredictorSubmodule(ARNodeSubmodule):
         if len(batch.request_ids) < 2:
             return False
         shapes: set[tuple] = set()
-        for rid in batch.request_ids:
-            inputs = batch.per_request_input_tensors.get(rid, {})
-            enc_l = inputs.get("encoder_hidden")
-            act_l = inputs.get("actions")
-            st_l = inputs.get("states")
-            if not enc_l or not act_l or not st_l:
-                return False
-            enc, act, st = enc_l[0], act_l[0], st_l[0]
 
-            # Normalize rank so [N,D]/[1,N,D] and [T,7]/[1,T,7] compare equal.
-            def _norm(t, target_rank):
-                if t.dim() == target_rank:
-                    return tuple(t.shape)
-                if t.dim() == target_rank - 1:
-                    return (1, *t.shape)
-                return None
-
-            enc_s = _norm(enc, 3)
-            act_s = _norm(act, 3)
-            st_s = _norm(st, 3)
-            if enc_s is None or act_s is None or st_s is None:
-                return False
-            ext_l = inputs.get("extrinsics")
-            ext_s = _norm(ext_l[0], 3) if ext_l else None
-            shapes.add((enc_s, act_s, st_s, ext_s))
+        for inp in model_inputs:
+            enc = inp.input_embeds
+            act = inp.tensor_inputs.get("actions")
+            st = inp.tensor_inputs.get("states")
+            ext = inp.tensor_inputs.get("extrinsics")
+            shapes.add((_shape_key(enc), _shape_key(act), _shape_key(st), _shape_key(ext)))
         return len(shapes) == 1
 
     def prepare_inputs(
@@ -683,7 +662,7 @@ class VJepa2ACPredictorSubmodule(ARNodeSubmodule):
         graph_walk: str,
         fwd_info: CurrentForwardPassInfo,
         inputs: NameToTensorList,
-        pos_info: dict[str, PositionInfo] = {},
+        **kwargs
     ) -> ARNodeInputs:
         
         encoder_hidden = _ensure_lead_batch_dim(inputs["encoder_hidden"][0], 3)
@@ -851,7 +830,7 @@ class VJepa2ACRolloutPredictorSubmodule(ARNodeSubmodule):
     # NodeSubmodule ABC
     # ------------------------------------------------------------------
 
-    def can_batch(self, batch: NodeBatch, model_inputs: list[NodeInputs]) -> bool:
+    def can_batch(self, batch: NodeBatch, model_inputs: list[ARNodeInputs]) -> bool:
         """Same rule as masked rollout: B >= 2, shape-homogeneous across
         ``encoder_hidden`` / ``actions`` / ``states`` (+ optional
         ``extrinsics``), and same ``iter_idx`` for every rid.
@@ -862,36 +841,22 @@ class VJepa2ACRolloutPredictorSubmodule(ARNodeSubmodule):
         """
         if len(batch.request_ids) < 2:
             return False
-        enc_shapes: set[tuple] = set()
-        act_shapes: set[tuple] = set()
-        st_shapes: set[tuple] = set()
-        ext_shapes: set[tuple | None] = set()
+
         iters: set[int] = set()
+
+        enc_shapes: set[tuple] = {
+            _shape_key(inp.input_embeds) for inp in model_inputs
+        }
+        act_shapes: set[tuple] = {
+            _shape_key(inp.tensor_inputs.get("actions")) for inp in model_inputs
+        }
+        st_shapes: set[tuple] = {
+            _shape_key(inp.tensor_inputs.get("states")) for inp in model_inputs
+        }
+        ext_shapes: set[tuple | None] = {
+            _shape_key(inp.tensor_inputs.get("extrinsics")) for inp in model_inputs
+        }
         for rid in batch.request_ids:
-            inputs = batch.per_request_input_tensors.get(rid, {})
-            enc_l = inputs.get("encoder_hidden")
-            act_l = inputs.get("actions")
-            st_l = inputs.get("states")
-            if not enc_l or not act_l or not st_l:
-                return False
-
-            def _norm(t: torch.Tensor, target_rank: int) -> tuple | None:
-                if t.dim() == target_rank:
-                    return tuple(t.shape)
-                if t.dim() == target_rank - 1:
-                    return (1, *t.shape)
-                return None
-
-            enc_s = _norm(enc_l[0], 3)
-            act_s = _norm(act_l[0], 3)
-            st_s = _norm(st_l[0], 3)
-            if enc_s is None or act_s is None or st_s is None:
-                return False
-            enc_shapes.add(enc_s)
-            act_shapes.add(act_s)
-            st_shapes.add(st_s)
-            ext_l = inputs.get("extrinsics")
-            ext_shapes.add(_norm(ext_l[0], 3) if ext_l else None)
             info = batch.per_request_info.get(rid)
             if info is None:
                 return False
@@ -909,7 +874,7 @@ class VJepa2ACRolloutPredictorSubmodule(ARNodeSubmodule):
         graph_walk: str,
         fwd_info: CurrentForwardPassInfo,
         inputs: NameToTensorList,
-        pos_info: dict[str, PositionInfo] = {},
+        **kwargs
     ) -> ARNodeInputs:
         
         encoder_hidden = _ensure_lead_batch_dim(inputs["encoder_hidden"][0], 3)
@@ -1171,7 +1136,7 @@ class VJepa2MPCPredictorSubmodule(ARNodeSubmodule):
         graph_walk: str,
         fwd_info: CurrentForwardPassInfo,
         inputs: NameToTensorList,
-        pos_info: dict[str, PositionInfo] = {},
+        **kwargs
     ) -> ARNodeInputs:
         
         enc = inputs["encoder_hidden"][0]
@@ -1213,6 +1178,7 @@ class VJepa2MPCPredictorSubmodule(ARNodeSubmodule):
 
     def forward(
         self,
+        graph_walk: str,
         engine_inputs: ModelInputsFromEngine,
         encoder_hidden: torch.Tensor,
         actions: torch.Tensor,
@@ -1325,6 +1291,7 @@ class VJepa2MPCScorerSubmodule(NodeSubmodule):
         
     def forward(
         self,
+        graph_walk: str,
         engine_inputs: ModelInputsFromEngine,
         predicted_hidden: torch.Tensor,
         goal_hidden: torch.Tensor,
