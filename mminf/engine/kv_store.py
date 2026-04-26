@@ -1,12 +1,15 @@
+from abc import ABC, abstractmethod
 import logging
 import queue
 from concurrent.futures import Future
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any
 
 import torch
+from torch.multiprocessing.reductions import rebuild_cuda_tensor
 
-from mminf.communication.tensors import TensorTransferEngine, TransferReadInfo
+from mminf.communication.tensors import LocalTransferEngine, MooncakeTransferEngine, TensorTransferEngine, TransferReadInfo
 from mminf.conductor.request_info import SequenceInfo
 
 logger = logging.getLogger(__name__)
@@ -129,6 +132,217 @@ class StoreWritePolicy(Enum):
     NEVER = "never"     # non-disaggregated: all AR graph walks on same worker
 
 
+
+@dataclass
+class KVReadInfo:
+    layer_idx: int
+    local_page_idx: int
+    remote_page_idx: int
+    token_start: int
+    token_end: int
+
+
+class KVTransferEngine(ABC):
+    @abstractmethod
+    def read_batched_sync(
+        self, remote_kv_info,
+        read_info: list[KVReadInfo]
+    ):
+        future = self.read_batched_async(
+            remote_kv_info, read_info
+        )
+        if future is None:
+            return
+        future.result()
+
+    @abstractmethod
+    def read_batched_async(
+        self, remote_kv_info,
+        read_info: list[KVReadInfo]
+    ) -> Future | None:
+        pass
+
+    @abstractmethod
+    def get_kv_transfer_info(self) -> Any:
+        pass
+
+    @abstractmethod
+    def shutdown(self):
+        pass
+
+
+@dataclass
+class MooncakeKVTransferInfo:
+    entity_id: str
+    session_id: str
+    data_ptr: int
+
+
+class MooncakeKVTransferEngine(KVTransferEngine):
+    def __init__(
+        self, kv_cache: torch.Tensor,
+        entity_id: str,
+        transfer_engine: MooncakeTransferEngine
+    ):
+        self._kv_cache = kv_cache
+        self._transfer_engine = transfer_engine
+        self._transfer_engine.register_memory(
+            kv_cache.data_ptr(), kv_cache.nbytes
+        )
+        self._transfer_info = MooncakeKVTransferInfo(
+            entity_id=entity_id,
+            session_id=transfer_engine.get_session_id(),
+            data_ptr=kv_cache.data_ptr()
+        )
+        self._async_reader = transfer_engine.get_async_reader(
+            kv_cache.device
+        )
+    
+    def get_kv_transfer_info(self) -> MooncakeKVTransferInfo:
+        return self._transfer_info
+    
+    def _get_ptr_nbytes(
+        self, kv_read_info: KVReadInfo,
+        is_local: bool=True,
+        base_ptr=None
+    ):
+        token_stride = self._kv_cache.stride(3)
+        kv_stride = self._kv_cache.stride(2)
+        page_stride = self._kv_cache.stride(1)
+        layer_stride = self._kv_cache.stride(0)
+        element_size = self._kv_cache.element_size()
+        tokens_per_chunk = kv_read_info.token_end - kv_read_info.token_start
+
+        nbytes = tokens_per_chunk * token_stride * element_size  # token_stride = num_kv_heads * head_dim
+
+        if base_ptr is None:
+            base_ptr = self._kv_cache.data_ptr()
+
+        page_idx  = kv_read_info.local_page_idx if is_local else kv_read_info.remote_page_idx
+        ptrs = [
+            base_ptr + (
+                    kv_read_info.layer_idx * layer_stride +
+                    page_idx * page_stride +
+                    kv_idx * kv_stride +
+                    kv_read_info.token_start * token_stride
+                ) * element_size for kv_idx in [0, 1]
+        ]
+        return ptrs, nbytes
+
+    def read_batched_async(
+        self, remote_kv_info: MooncakeKVTransferInfo,
+        read_info: list[KVReadInfo]
+    ) -> Future | None:
+        mooncake_read_info: list[TransferReadInfo] = []
+        for info in read_info:
+            local_ptrs, nbytes = self._get_ptr_nbytes(
+                kv_read_info=info, is_local=True
+            )
+            remote_ptrs, _ = self._get_ptr_nbytes(
+                kv_read_info=info, is_local=False,
+                base_ptr=remote_kv_info.data_ptr
+            )
+            mooncake_read_info.extend([
+                TransferReadInfo(
+                    remote_kv_info.session_id,
+                    local_ptr, remote_ptr, nbytes
+                ) for local_ptr, remote_ptr in zip(local_ptrs, remote_ptrs, strict=True)
+            ])
+        return self._async_reader.submit(read_info)
+
+    def shutdown(self):
+        self._async_reader.shutdown()
+        self._transfer_engine.unregister_memory(
+            self._kv_cache.data_ptr()
+        )
+
+
+@dataclass
+class CudaIpcKVTransferInfo:
+    cuda_share: tuple
+    size: tuple
+    stride: tuple
+    offset: int
+    dtype: str
+    requires_grad: bool
+
+
+# TODO: this can also become a regular tensor transport method
+class CudaIpcKVTransferEngine(KVTransferEngine):
+    def __init__(
+        self, kv_cache: torch.Tensor,
+    ):
+        storage = kv_cache.untyped_storage()
+        cuda_share = storage._share_cuda_()
+        self._transfer_info = CudaIpcKVTransferInfo(
+            cuda_share=cuda_share,
+            size=kv_cache.size(),
+            stride=kv_cache.stride(),
+            offset=kv_cache.storage_offset(),
+            dtype=str(kv_cache.dtype),
+            requires_grad=kv_cache.requires_grad
+        )
+        self._device = kv_cache.device
+        self._kv_cache = kv_cache
+    
+    def get_kv_transfer_info(self) -> CudaIpcKVTransferInfo:
+        return self._transfer_info
+    
+    def read_batched_async(
+        self, remote_kv_info: CudaIpcKVTransferInfo,
+        read_info: list[KVReadInfo]
+    ):
+        # TODO: async version
+        self.read_batched_sync(remote_kv_info, read_info)
+    
+    def read_batched_sync(
+        self, remote_kv_info: CudaIpcKVTransferInfo,
+        read_info: list[KVReadInfo]
+    ):
+        dtype = getattr(torch, remote_kv_info.dtype.split(".")[-1])
+        (
+            storage_device,
+            storage_handle,
+            storage_size_bytes,
+            storage_offset_bytes,
+            ref_counter_handle,
+            ref_counter_offset,
+            event_handle,
+            event_sync_required,
+        ) = remote_kv_info.cuda_share
+
+        tensor = rebuild_cuda_tensor(
+            torch.Tensor,
+            remote_kv_info.size,
+            remote_kv_info.stride,
+            remote_kv_info.offset,
+            torch.UntypedStorage,
+            dtype,
+            storage_device,
+            storage_handle,
+            storage_size_bytes,
+            storage_offset_bytes,
+            remote_kv_info.requires_grad,
+            ref_counter_handle,
+            ref_counter_offset,
+            event_handle,
+            event_sync_required,
+        )
+
+        for info in read_info:
+            slice = tensor[
+                info.layer_idx, info.remote_page_idx,
+                info.token_start:info.token_end
+            ].to(self._device)
+            self._kv_cache[
+                info.layer_idx, info.local_page_idx,
+                info.token_start:info.token_end
+            ] = slice
+    
+    def shutdown(self):
+        return
+
+
 class PagedAllocationManager:
     def __init__(
         self,
@@ -142,13 +356,20 @@ class PagedAllocationManager:
         self.kv_cache = kv_cache
         self.write_policy = StoreWritePolicy.ALWAYS
 
-        self._transfer_engine = transfer_engine_info.transfer_engine
-        self._async_reader = self._transfer_engine.get_async_reader(kv_cache.device)
-        self._transfer_engine.register_memory(
-            self.kv_cache.data_ptr(), self.kv_cache.nbytes
-        )
-        self.my_entity_id = transfer_engine_info.my_entity_id
-        self.my_session_id = transfer_engine_info.my_session_id
+        if isinstance(
+            transfer_engine_info.transfer_engine, MooncakeTransferEngine
+        ):
+            self._kv_transfer_engine = MooncakeKVTransferEngine(
+                kv_cache=kv_cache,
+                entity_id=transfer_engine_info.my_entity_id,
+                transfer_engine=transfer_engine_info.transfer_engine
+            )
+        elif isinstance(
+            transfer_engine_info.transfer_engine, LocalTransferEngine
+        ):
+            self._kv_transfer_engine = CudaIpcKVTransferEngine(kv_cache)
+        else:
+            raise ValueError(f"Unsupported transfer engine type: {type(transfer_engine_info.transfer_engine)}")
 
         # Stream for async GPU↔CPU page copies (Feature 3: CPU offloading)
         self._offload_stream: torch.cuda.Stream | None = None
@@ -170,34 +391,6 @@ class PagedAllocationManager:
 
     def _key(self, request_id: str, label: str, pos: int, layer: int):
         return f"{request_id}_{label}_{pos}_{layer}"
-
-    def _get_ptr_nbytes(
-        self, layer, page_idx,
-        token_start, token_end,
-        base_ptr=None
-    ):
-        token_stride = self.kv_cache.stride(3)
-        kv_stride = self.kv_cache.stride(2)
-        page_stride = self.kv_cache.stride(1)
-        layer_stride = self.kv_cache.stride(0)
-        element_size = self.kv_cache.element_size()
-        tokens_per_chunk = token_end - token_start
-
-        nbytes = tokens_per_chunk * token_stride * element_size  # token_stride = num_kv_heads * head_dim
-
-        if base_ptr is None:
-            base_ptr = self.kv_cache.data_ptr()
-
-        ptrs = [
-            base_ptr + (
-                    layer * layer_stride +
-                    page_idx * page_stride +
-                    kv_idx * kv_stride +
-                    token_start * token_stride
-                ) * element_size for kv_idx in [0, 1]
-        ]
-
-        return ptrs, nbytes
 
     def flush_to_store(
         self, request_id: str, label: str, layers: int | list[int] | None = None
@@ -284,45 +477,37 @@ class PagedAllocationManager:
 
         self.alloc(request_id, label, seq_len)
 
-        # When _async_reader is None (e.g., SHM / single-node), KV cache data
-        # is already in local GPU memory — no cross-worker transfer needed.
-        if self._async_reader is not None:
-            read_info = []
+        read_info = []
+        for page_pos in range(first_page, last_page + 1):
+            token_start = 0 if page_pos > first_page else (state.seq_len % self.config.page_size)
+            token_end = self.config.page_size if page_pos != last_page else (
+                seq_len % self.config.page_size or self.config.page_size
+            )
 
-            for page_pos in range(first_page, last_page + 1):
-                token_start = 0 if page_pos > first_page else (state.seq_len % self.config.page_size)
-                token_end = self.config.page_size if page_pos != last_page else (
-                    seq_len % self.config.page_size or self.config.page_size
-                )
+            local_page_idx = state.page_indices[page_pos]
+            remote_page_idx = seq_info.page_indices[page_pos]
 
-                local_page_idx = state.page_indices[page_pos]
-                remote_page_idx = seq_info.page_indices[page_pos]
-
-                for layer in range(self.config.num_layers):
-                    local_ptrs, nbytes = self._get_ptr_nbytes(
-                        layer, local_page_idx, token_start, token_end
-                    )
-                    remote_ptrs, _ = self._get_ptr_nbytes(
-                        layer, remote_page_idx, token_start, token_end,
-                        base_ptr=seq_info.kv_cache_addr
-                    )
-
-                    read_info.extend([
-                        TransferReadInfo(
-                            seq_info.latest_session_id,
-                            local_ptr, remote_ptr, nbytes
-                        ) for local_ptr, remote_ptr in zip(local_ptrs, remote_ptrs, strict=True)
-                    ])
-            future = self._async_reader.submit(read_info)
-            if future is not None:
-                self.pending_reads[request_id].setdefault(label, []).append(future)
+            for layer in range(self.config.num_layers):
+                read_info.append(KVReadInfo(
+                    layer_idx=layer, local_page_idx=local_page_idx,
+                    remote_page_idx=remote_page_idx,
+                    token_start=token_start,
+                    token_end=token_end
+                ))
+        future = self._kv_transfer_engine.read_batched_async(
+            remote_kv_info=seq_info.latest_kv_transfer_info,
+            read_info=read_info
+        )
+        if future is not None:
+            self.pending_reads[request_id].setdefault(label, []).append(future)
 
         state.seq_len = seq_len
         state.position_id_start = seq_info.pos_id
-        state.read_in_progress = True
+        state.read_in_progress = future is not None
 
     def get_per_label_seq_info(self, request_id: str):
         per_label_seq_info: dict[str, SequenceInfo] = {}
+        transfer_info = self._kv_transfer_engine.get_kv_transfer_info()
         for label, state in self.request_states.get(request_id, {}).items():
             self.wait_for_retrieves(request_id, label)
 
@@ -330,9 +515,7 @@ class PagedAllocationManager:
             per_label_seq_info[label] = SequenceInfo(
                 seq_len = state.seq_len,
                 pos_id = state.position_id_start,
-                latest_entity_id = self.my_entity_id,
-                latest_session_id = self.my_session_id,
-                kv_cache_addr = self.kv_cache.data_ptr(),
+                latest_kv_transfer_info=transfer_info,
                 page_indices=state.page_indices
             )
         return per_label_seq_info
@@ -348,11 +531,7 @@ class PagedAllocationManager:
         self.request_states[request_id][label] = self._new_state()
 
     def cleanup(self):
-        if self._async_reader is not None:
-            self._async_reader.shutdown()
-        self._transfer_engine.unregister_memory(
-            self.kv_cache.data_ptr()
-        )
+        self._kv_transfer_engine.shutdown()
 
     def add_request(self, request_id: str, labels: list[str]=None):
         if labels is None:

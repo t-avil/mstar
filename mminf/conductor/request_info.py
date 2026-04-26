@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from typing import Any
 
 from mminf.graph.loop_index import IterIndexTree
 from mminf.utils.sampling import SamplingConfig
@@ -24,9 +25,7 @@ class SequenceInfo:
     pos_id: int
 
     # for tracking KV cache
-    latest_entity_id: str = ""
-    latest_session_id: str = ""
-    kv_cache_addr: int = -1
+    latest_kv_transfer_info: Any
     page_indices: list[int] = field(default_factory=list)
 
 
