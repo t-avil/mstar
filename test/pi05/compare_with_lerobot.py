@@ -45,6 +45,8 @@ import requests
 import torch
 from PIL import Image
 
+from _env import get_server_url
+
 # These constants must match Pi0.5's defaults / lerobot/pi05_base.
 ACTION_HORIZON = 50
 ACTION_DIM = 32
@@ -109,15 +111,13 @@ def build_deterministic_images(seed: int = 12345) -> list[bytes]:
 
 def post_to_server(
     *,
-    host: str,
-    port: int,
     request_id: str,
     text: str,
     state: list[float],
     image_bytes: list[bytes],
 ) -> np.ndarray:
     """POST a deterministic Pi0.5 request and return the [50, 32] action array."""
-    url = f"http://{host}:{port}/generate"
+    url = get_server_url()
     files = [
         ("files", (f"camera_{i}.png", blob, "image/png"))
         for i, blob in enumerate(image_bytes)
@@ -348,8 +348,6 @@ def report(server_actions: np.ndarray, ref_actions: np.ndarray, tolerance: float
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=20002)
     parser.add_argument(
         "--request-id",
         default=DEFAULT_REQUEST_ID,
@@ -396,8 +394,6 @@ def main():
 
     # ----- 2. POST to server -----
     server_actions = post_to_server(
-        host=args.host,
-        port=args.port,
         request_id=args.request_id,
         text=args.text,
         state=state_values,

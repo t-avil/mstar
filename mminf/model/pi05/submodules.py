@@ -18,6 +18,7 @@ from torch import nn
 
 from mminf.communication.tensors import NameToTensorList
 from mminf.conductor.request_info import CurrentForwardPassInfo
+from mminf.engine.base import NodeBatch
 from mminf.engine.cache_manager import BatchedCacheManager
 from mminf.model.submodule_base import ARNodeInputs, ARNodeSubmodule, ModelInputsFromEngine, NodeInputs, NodeSubmodule
 from mminf.model.pi05.components.action_expert import Pi05ActionExpert, Pi05TimeMLP
@@ -139,7 +140,9 @@ class Pi05ViTEncoderSubmodule(NodeSubmodule):
         inputs: NameToTensorList,
         **kwargs
     ) -> NodeInputs:
-        return NodeInputs(tensor_inputs={"pixel_values": self._preprocess_one(inputs["image_inputs"][0])})
+        return NodeInputs(tensor_inputs={"pixel_values": self._prepare_one(
+            inputs["image_inputs"][0]
+        )})
 
     def preprocess(
         self,
@@ -252,7 +255,11 @@ class Pi05LLMSubmodule(ARNodeSubmodule):
                 param.data = param.data.to(torch.float32)
         return result
 
-    def can_batch(self, batch) -> bool:
+    def can_batch(
+        self,
+        batch: NodeBatch,
+        model_inputs: list[NodeInputs],
+    ) -> bool:
         """Pi0.5 supports batched execution for both graph walks.
 
         - ``prefill``: prefix embeddings are concatenated across requests and
@@ -363,7 +370,7 @@ class Pi05LLMSubmodule(ARNodeSubmodule):
         inputs: NameToTensorList,
         **kwargs
     ) -> ARNodeInputs:
-        device = self.device
+        device = self.get_device()
         action_horizon = self.config.action_horizon
         action_dim = self.config.action_dim
 
