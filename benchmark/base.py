@@ -109,6 +109,22 @@ class Qwen3Omni(Model):
     def get_hf_url(self):
         return "Qwen/Qwen3-Omni-30B-A3B-Instruct"
 
+    def get_model_kwargs(self, request_type: RequestType):
+        # Cap thinker output at 256 tokens to match sglang-omni's published
+        # H200 benchmark convention (THINKER_MAX_NEW_TOKENS=256 in their
+        # benchmarks/tasks/tts.py:911 and same value used across MMSU /
+        # videomme / videoamme result tables). Without this cap the talker
+        # speaks the full 8192-token thinker max, producing 5+ min of audio
+        # per request and making B=1 cells take minutes instead of seconds.
+        if request_type in (
+            RequestType.T2S,
+            RequestType.I2S,
+            RequestType.A2S,
+            RequestType.V2S,
+        ):
+            return {"max_tokens": 256}
+        return {}
+
     def get_supported_modalities(self):
         return {
             RequestType.T2T,
