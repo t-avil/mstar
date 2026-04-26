@@ -33,6 +33,8 @@ import numpy as np
 import requests
 from PIL import Image
 
+from _env import get_server_url
+
 ACTION_HORIZON = 50
 ACTION_DIM = 32
 
@@ -78,13 +80,11 @@ def main():
                         help="Task description.")
     parser.add_argument("--state", default=None,
                         help="Comma-separated robot state values (padded to action_dim with zeros).")
-    parser.add_argument("--port", type=int, default=20002,
-                        help="Port number to connect to (localhost only).")
     parser.add_argument("--streaming", action="store_true",
                         help="Use the NDJSON streaming endpoint instead of blocking.")
     args = parser.parse_args()
 
-    url = f"http://127.0.0.1:{args.port}/generate"
+    url = get_server_url()
     print(f"text:  {args.text!r}")
     print(f"state: {_parse_state(args.state)[:8]}{'...' if ACTION_DIM > 8 else ''}")
     print(f"POST   {url}")

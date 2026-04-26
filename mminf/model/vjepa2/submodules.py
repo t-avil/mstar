@@ -28,7 +28,7 @@ from mminf.communication.tensors import NameToTensorList
 from mminf.conductor.request_info import CurrentForwardPassInfo
 from mminf.engine.base import NodeBatch
 from mminf.engine.cache_manager import BatchedCacheManager
-from mminf.model.base import NodeSubmodule
+from mminf.model.submodule_base import ARNodeInputs, ARNodeSubmodule, ModelInputsFromEngine, NodeInputs, NodeSubmodule
 from mminf.model.vjepa2.components.ac_predictor import VisionTransformerPredictorAC
 from mminf.model.vjepa2.components.predictor import VJEPA2Predictor
 from mminf.model.vjepa2.components.vit_encoder import VJEPA2Encoder
@@ -79,25 +79,6 @@ def _ensure_lead_batch_dim(tensor: torch.Tensor, target_rank: int) -> torch.Tens
     )
 
 
-def _stack_field(
-    per_request_inputs: list[NameToTensorList],
-    field_name: str,
-    target_rank: int,
-) -> torch.Tensor:
-    """Stack the first tensor under ``field_name`` from every request along dim 0.
-
-    Each per-request tensor is first normalized to ``[1, ...]`` via
-    :func:`_ensure_lead_batch_dim`, then all are concatenated on dim 0.  The
-    caller is responsible for verifying shape homogeneity (done upfront in
-    ``can_batch``); this helper will raise on any mismatch.
-    """
-    parts: list[torch.Tensor] = []
-    for inp in per_request_inputs:
-        t = inp[field_name][0]
-        parts.append(_ensure_lead_batch_dim(t, target_rank))
-    return torch.cat(parts, dim=0)
-
-
 def _shape_key(tensor: torch.Tensor | None) -> tuple | None:
     """Return a shape tuple for dict-key comparison, or ``None`` if absent."""
     return tuple(tensor.shape) if tensor is not None else None
@@ -122,7 +103,11 @@ class VJepa2EncoderSubmodule(NodeSubmodule):
         self.encoder = encoder
         self.config = config
 
-    def can_batch(self, batch: NodeBatch) -> bool:
+    def can_batch(
+        self,
+        batch: NodeBatch,
+        model_inputs: list[NodeInputs],
+    ):
         # Route B=1 through the sequential ``forward`` (proven Phase 2 path).
         # ``forward_batched`` is a distinct torch.compile cache from ``forward``
         # and — empirically on vjepa2-ac-vitg — compiles a much slower kernel
@@ -133,43 +118,43 @@ class VJepa2EncoderSubmodule(NodeSubmodule):
         # scheduler actually co-batches concurrent requests.
         if len(batch.request_ids) < 2:
             return False
-        shapes: set[tuple] = set()
-        for rid in batch.request_ids:
-            inputs = batch.per_request_input_tensors.get(rid, {})
-            frames_list = inputs.get("video_frames")
-            if not frames_list:
-                return False
-            t = frames_list[0]
-            # Normalize rank for comparison: we accept [T,C,H,W] or [1,T,C,H,W].
-            if t.dim() == 4:
-                shape = (1, *t.shape)
-            elif t.dim() == 5:
-                shape = tuple(t.shape)
-            else:
-                return False
-            shapes.add(shape)
+        shapes: set[tuple] = {
+            tuple(inp.tensor_inputs["video_frames"].shape) for inp in model_inputs
+        }
         return len(shapes) == 1
+    
+    def prepare_inputs(
+        self,
+        graph_walk: str,
+        fwd_info: CurrentForwardPassInfo,
+        inputs: NameToTensorList,
+        **kwargs
+    ) -> NodeInputs:
+        return NodeInputs(
+            tensor_inputs={
+                "video_frames": _normalize_video_frames(inputs["video_frames"][0])
+            }
+        )
 
     def preprocess(
         self,
         graph_walk: str,
-        per_request_inputs: list[NameToTensorList],
-        request_ids: list[str],
-        per_request_info: dict[str, CurrentForwardPassInfo],
-        cache_manager: BatchedCacheManager | None = None,
+        engine_inputs: ModelInputsFromEngine,
+        inputs: list[NodeInputs],
     ) -> dict[str, torch.Tensor]:
         # Handles both sequential (len == 1) and batched (len > 1) — the
         # single-request case yields a [1, T, C, H, W] tensor, identical to
         # Phase 1 behaviour.
         stacked = torch.cat(
-            [_normalize_video_frames(inp["video_frames"][0]) for inp in per_request_inputs],
+            [inp.tensor_inputs["video_frames"] for inp in inputs],
             dim=0,
         )
         return {"pixel_values_videos": stacked}
 
     def forward(
         self,
-        request_info: CurrentForwardPassInfo,
+        graph_walk: str,
+        engine_inputs: ModelInputsFromEngine,
         pixel_values_videos: torch.Tensor,
         **kwargs,
     ) -> NameToTensorList:
@@ -186,9 +171,9 @@ class VJepa2EncoderSubmodule(NodeSubmodule):
     def forward_batched(
         self,
         graph_walk: str,
-        request_ids: list[str],
-        packed_inputs: dict[str, torch.Tensor],
-        per_request_info: dict[str, CurrentForwardPassInfo],
+        engine_inputs: ModelInputsFromEngine,
+        pixel_values_videos: torch.Tensor,
+        **kwargs,
     ) -> dict[str, NameToTensorList]:
         """Batched encoder forward.  Returns per-rid outputs directly.
 
@@ -198,7 +183,7 @@ class VJepa2EncoderSubmodule(NodeSubmodule):
         emits.  That keeps the ``preprocess`` stacking symmetric across
         paths and avoids a shape discrepancy at the predictor boundary.
         """
-        pixel_values_videos = packed_inputs["pixel_values_videos"]
+        request_ids = engine_inputs.request_ids
         b_in = pixel_values_videos.size(0)
         logger.info(
             "VJepa2EncoderSubmodule.forward_batched: input shape=%s rids=%d",
@@ -230,7 +215,7 @@ def _build_default_masks(
     return [ids], [ids]
 
 
-class VJepa2PredictorSubmodule(NodeSubmodule):
+class VJepa2PredictorSubmodule(ARNodeSubmodule):
     """Masked latent predictor (non-AC).
 
     Expects ``encoder_hidden`` from the preceding encoder node.  Optionally
@@ -250,60 +235,84 @@ class VJepa2PredictorSubmodule(NodeSubmodule):
         self.predictor = predictor
         self.config = config
 
-    def can_batch(self, batch: NodeBatch) -> bool:
+    def can_batch(
+        self,
+        batch: NodeBatch,
+        model_inputs: list[ARNodeInputs],
+    ) -> bool:
         # B=1 → sequential forward; see VJepa2EncoderSubmodule.can_batch
         # for the full justification (AC warm-latency regression on
         # forward_batched when it's the only path).
         if len(batch.request_ids) < 2:
             return False
-        enc_shapes: set[tuple] = set()
-        ctx_shapes: set[tuple | None] = set()
-        tgt_shapes: set[tuple | None] = set()
-        for rid in batch.request_ids:
-            inputs = batch.per_request_input_tensors.get(rid, {})
-            enc_list = inputs.get("encoder_hidden")
-            if not enc_list:
-                return False
-            enc = enc_list[0]
-            # Normalize rank for comparison: [N,D] vs [1,N,D] are treated
-            # as the same shape after adding a batch dim.
-            if enc.dim() == 2:
-                enc_shapes.add((1, *enc.shape))
-            elif enc.dim() == 3:
-                enc_shapes.add(tuple(enc.shape))
-            else:
-                return False
-            ctx_list = inputs.get("context_mask")
-            ctx_shapes.add(_shape_key(ctx_list[0]) if ctx_list else None)
-            tgt_list = inputs.get("target_mask")
-            tgt_shapes.add(_shape_key(tgt_list[0]) if tgt_list else None)
+        enc_shapes: set[tuple] = {
+            _shape_key(inp.input_embeds) for inp in model_inputs
+        }
+        ctx_shapes: set[tuple | None] = {
+            _shape_key(inp.tensor_inputs.get("context_mask")) for inp in model_inputs
+        }
+        tgt_shapes: set[tuple | None] = {
+            _shape_key(inp.tensor_inputs.get("target_mask")) for inp in model_inputs
+        }
         return (
             len(enc_shapes) == 1
             and len(ctx_shapes) == 1
             and len(tgt_shapes) == 1
         )
 
+    def prepare_inputs(
+        self,
+        graph_walk: str,
+        fwd_info: CurrentForwardPassInfo,
+        inputs: NameToTensorList,
+        **kwargs
+    ) -> ARNodeInputs:
+        """
+            parts: list[torch.Tensor] = []
+        for inp in per_request_inputs:
+            t = inp[field_name][0]
+            parts.append(_ensure_lead_batch_dim(t, target_rank))
+        return torch.cat(parts, dim=0)
+
+        """
+        encoder_hidden = _ensure_lead_batch_dim(inputs["encoder_hidden"][0], 3)
+        tensor_inputs = {}
+        if "context_mask" in inputs:
+            tensor_inputs["context_mask"] = _ensure_lead_batch_dim(inputs["context_mask"][0], 2)
+        if "target_mask" in inputs:
+            tensor_inputs["target_mask"] = _ensure_lead_batch_dim(inputs["target_mask"][0], 2)
+        return ARNodeInputs(
+            input_embeds=encoder_hidden,
+            tensor_inputs=tensor_inputs
+        )
+
+
     def preprocess(
         self,
         graph_walk: str,
-        per_request_inputs: list[NameToTensorList],
-        request_ids: list[str],
-        per_request_info: dict[str, CurrentForwardPassInfo],
-        cache_manager: BatchedCacheManager | None = None,
+        engine_inputs: ModelInputsFromEngine,
+        inputs: list[ARNodeInputs],
     ) -> dict[str, torch.Tensor]:
         # Sequential (len == 1) and batched (len > 1) share this path.
         out: dict[str, torch.Tensor] = {
-            "encoder_hidden": _stack_field(per_request_inputs, "encoder_hidden", target_rank=3),
+            "encoder_hidden": torch.cat([
+                inp.input_embeds for inp in inputs
+            ], dim=0)
         }
-        if "context_mask" in per_request_inputs[0]:
-            out["context_mask"] = _stack_field(per_request_inputs, "context_mask", target_rank=2)
-        if "target_mask" in per_request_inputs[0]:
-            out["target_mask"] = _stack_field(per_request_inputs, "target_mask", target_rank=2)
+        if "context_mask" in inputs[0].tensor_inputs:
+            out["context_mask"] = torch.cat([
+                inp.tensor_inputs["context_mask"] for inp in inputs
+            ], dim=0)
+        if "target_mask" in inputs[0].tensor_inputs:
+            out["target_mask"] = torch.cat([
+                inp.tensor_inputs["target_mask"] for inp in inputs
+            ], dim=0)
         return out
 
     def forward(
         self,
-        request_info: CurrentForwardPassInfo,
+        graph_walk: str,
+        engine_inputs: ModelInputsFromEngine,
         encoder_hidden: torch.Tensor,
         context_mask: torch.Tensor | None = None,
         target_mask: torch.Tensor | None = None,
@@ -327,13 +336,13 @@ class VJepa2PredictorSubmodule(NodeSubmodule):
     def forward_batched(
         self,
         graph_walk: str,
-        request_ids: list[str],
-        packed_inputs: dict[str, torch.Tensor],
-        per_request_info: dict[str, CurrentForwardPassInfo],
+        engine_inputs: ModelInputsFromEngine,
+        encoder_hidden: torch.Tensor,
+        context_mask: torch.Tensor | None = None,
+        target_mask: torch.Tensor | None = None,
+        **kwargs,
     ) -> dict[str, NameToTensorList]:
-        encoder_hidden = packed_inputs["encoder_hidden"]  # [B, N, D]
-        context_mask = packed_inputs.get("context_mask")
-        target_mask = packed_inputs.get("target_mask")
+        request_ids = engine_inputs.request_ids
         if context_mask is None or target_mask is None:
             ctx_list, tgt_list = _build_default_masks(encoder_hidden)
         else:
@@ -482,6 +491,9 @@ class VJepa2RolloutPredictorSubmodule(NodeSubmodule):
         cache_manager: BatchedCacheManager | None = None,
     ) -> dict[str, torch.Tensor]:
         # Sequential (len == 1) and batched (len > 1) share this path.
+
+        # hiii @irmak this deleted _stack_field function did:
+        # torch.cat([_ensure_lead_batch_dim(inp["tensor_name"][0], target_rank) for inp in inputs], dim=0)
         return {"encoder_hidden": _stack_field(per_request_inputs, "encoder_hidden", target_rank=3)}
 
     def _rollout_step(
@@ -668,6 +680,8 @@ class VJepa2ACPredictorSubmodule(NodeSubmodule):
         per_request_info: dict[str, CurrentForwardPassInfo],
         cache_manager: BatchedCacheManager | None = None,
     ) -> dict[str, torch.Tensor]:
+        # hiii @irmak this deleted _stack_field function did:
+        # torch.cat([_ensure_lead_batch_dim(inp["tensor_name"][0], target_rank) for inp in inputs], dim=0)
         out: dict[str, torch.Tensor] = {
             "encoder_hidden": _stack_field(per_request_inputs, "encoder_hidden", target_rank=3),
             "actions": _stack_field(per_request_inputs, "actions", target_rank=3),
@@ -864,6 +878,8 @@ class VJepa2ACRolloutPredictorSubmodule(NodeSubmodule):
         per_request_info: dict[str, CurrentForwardPassInfo],
         cache_manager: BatchedCacheManager | None = None,
     ) -> dict[str, torch.Tensor]:
+        # hiii @irmak this deleted _stack_field function did:
+        # torch.cat([_ensure_lead_batch_dim(inp["tensor_name"][0], target_rank) for inp in inputs], dim=0)
         out: dict[str, torch.Tensor] = {
             "encoder_hidden": _stack_field(per_request_inputs, "encoder_hidden", target_rank=3),
             "actions": _stack_field(per_request_inputs, "actions", target_rank=3),
