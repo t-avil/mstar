@@ -322,6 +322,7 @@ class Benchmark:
             rate=self.config.rate,
             max_concurrency=self.config.max_concurrency,
             profiling_type=self.config.profiling_type.value,
+            model=self.config.model,
         )
 
         print(f"\n--- Benchmark Results (wall time: {wall_time:.2f}s) ---")
