@@ -10,7 +10,14 @@ from typing import Optional
 import aiohttp
 
 from benchmark.base import Model, ModelType, RequestType
-from benchmark.dataset import BaseDataset, Food101Dataset, LibriSpeechDataset, TxtFileDataset, UCF101Dataset, VBenchDataset
+from benchmark.dataset import (
+    BaseDataset,
+    Food101Dataset,
+    LibriSpeechDataset,
+    TxtFileDataset,
+    UCF101Dataset,
+    VBenchDataset,
+)
 from benchmark.request import (
     AggregateMetrics,
     InferenceSystem,
@@ -38,12 +45,11 @@ class InferenceSystemType(Enum):
     VOX_SERVE = "vox_serve"
     SGLANG_OMNI = "sglang_omni"
 
-    # def instantiate(self) -> InferenceSystem:
-    def instantiate(self, base_url: str = "") -> InferenceSystem:
+    def instantiate(self) -> InferenceSystem:
         if self == InferenceSystemType.OURS:
             return OurSystem()
         elif self == InferenceSystemType.VLLM_OMNI:
-            return VLLMOmni(base_url=base_url)
+            return VLLMOmni()
         elif self == InferenceSystemType.VOX_SERVE:
             return VoxServe()
         elif self == InferenceSystemType.SGLANG_OMNI:
@@ -51,8 +57,9 @@ class InferenceSystemType(Enum):
 
 
 class ProfilingType(Enum):
-    OFFLINE = "offline"
-    ONLINE = "online"
+    OFFLINE = "offline"  # strict-batch waves of size B (existing)
+    CLOSED_LOOP = "closed_loop"  # semaphore-bounded continuous (Fix 9)
+    ONLINE = "online"  # Poisson at fixed rate (existing)
 
 
 @dataclass
@@ -70,6 +77,9 @@ class BenchmarkConfig:
 
     batch_size: Optional[int] = 1
     rate: Optional[float] = 1
+    # Max in-flight requests for CLOSED_LOOP mode (semaphore cap). Ignored for
+    # OFFLINE / ONLINE. Default 1 = sequential, matching sglang-omni's default.
+    max_concurrency: Optional[int] = 1
     output_dir: Optional[str] = None  # Save outputs here (text files / images)
     # VBench args
     vbench_cache_dir: str = "./vbench_cache"
@@ -81,8 +91,7 @@ class BenchmarkConfig:
 class Benchmark:
     def __init__(self, config: BenchmarkConfig):
         self.config = config
-        # self.inference_system = config.inference_system.instantiate()
-        self.inference_system = config.inference_system.instantiate(base_url=config.url)
+        self.inference_system = config.inference_system.instantiate()
 
     def _get_dataset(self) -> BaseDataset:
         if self.config.dataset == DatasetType.VBENCH:
@@ -95,19 +104,16 @@ class Benchmark:
             return TxtFileDataset(
                 filename=self.config.request_txt_file,
                 num_requests=self.config.num_requests,
-                req_type=self.config.request_type
+                req_type=self.config.request_type,
             )
         elif self.config.dataset == DatasetType.LIBRI:
             return LibriSpeechDataset(
                 num_requests=self.config.num_requests,
                 req_type=self.config.request_type,
-                local_file_dir=self.config.local_cache_dir
+                local_file_dir=self.config.local_cache_dir,
             )
         elif self.config.dataset == DatasetType.FOOD:
-            return Food101Dataset(
-                num_requests=self.config.num_requests,
-                req_type=self.config.request_type
-            )
+            return Food101Dataset(num_requests=self.config.num_requests, req_type=self.config.request_type)
         elif self.config.dataset == DatasetType.UCF:
             # TODO: this is the dataset that vllm-omni reports using, so we have it as an example,
             # but it only has two videos that we're just alternating between... We should replace
@@ -115,7 +121,7 @@ class Benchmark:
             return UCF101Dataset(
                 num_requests=self.config.num_requests,
                 req_type=self.config.request_type,
-                local_file_dir=self.config.local_cache_dir
+                local_file_dir=self.config.local_cache_dir,
             )
         raise ValueError(f"Unknown dataset: {self.config.dataset}")
 
@@ -159,7 +165,6 @@ class Benchmark:
             for i, req in batch
         ]
         return list(await asyncio.gather(*tasks))
-
 
     async def _run_concurrent_offline(
         self,
@@ -208,6 +213,78 @@ class Benchmark:
                 await asyncio.sleep(interval)
         return list(await asyncio.gather(*tasks))
 
+    async def _run_concurrent_closed_loop(
+        self,
+        session: aiohttp.ClientSession,
+        requests: list[RequestInput],
+    ) -> list[RequestMetrics]:
+        """Closed-loop continuous: keep `max_concurrency` requests in flight at all times.
+
+        Pattern matches `sglang-omni/benchmarks/benchmarker/runner.py:83-110`:
+        create all tasks upfront, semaphore-gate each one. As soon as one
+        finishes, another is admitted — eliminating the tail-of-wave GPU idle
+        that strict-batch (`OFFLINE`) suffers from at high B.
+        """
+        n = self.config.max_concurrency or 1
+        sem = asyncio.Semaphore(n)
+
+        async def _limited(request_id: int, req: RequestInput) -> RequestMetrics:
+            async with sem:
+                return await self.inference_system.send_request(
+                    session=session,
+                    req_input=req,
+                    base_url=self.config.url,
+                    request_id=request_id,
+                    model=self.config.model,
+                )
+
+        tasks = [asyncio.create_task(_limited(i, r)) for i, r in enumerate(requests)]
+        return list(await asyncio.gather(*tasks))
+
+    async def _warmup(
+        self,
+        session: aiohttp.ClientSession,
+        requests: list[RequestInput],
+    ) -> None:
+        """Fire warmup requests at the same firing pattern used for measurement.
+
+        Sequential warmup on a concurrent measurement path leaves the first
+        measured wave hitting cold concurrency code paths (KV-page allocation
+        for the bigger shape, scheduler queues, CUDA-graph misses). Warmup
+        cadence must match measurement cadence.
+        """
+        if self.config.num_warmup == 0 or not requests:
+            return
+
+        if self.config.profiling_type == ProfilingType.OFFLINE:
+            wave_size = max(1, self.config.batch_size or 1)
+        elif self.config.profiling_type == ProfilingType.CLOSED_LOOP:
+            wave_size = max(1, self.config.max_concurrency or 1)
+        else:  # ONLINE
+            wave_size = 1
+
+        # Replicate the first `wave_size` requests `num_warmup` times so we
+        # always have enough payloads even when the dataset is smaller than
+        # the wave size.
+        seed = requests[: max(1, wave_size)]
+        warmup_total = wave_size * self.config.num_warmup
+        warmup_reqs = [seed[i % len(seed)] for i in range(warmup_total)]
+
+        if self.config.verbose:
+            print(f"--- Warmup ({self.config.profiling_type.value}, {warmup_total} request(s), wave={wave_size}) ---")
+
+        if self.config.profiling_type == ProfilingType.OFFLINE:
+            for w in range(self.config.num_warmup):
+                batch = [(-(w * wave_size + i + 1), warmup_reqs[w * wave_size + i]) for i in range(wave_size)]
+                await self._run_batch(session, batch)
+        elif self.config.profiling_type == ProfilingType.CLOSED_LOOP:
+            await self._run_concurrent_closed_loop(session, warmup_reqs)
+        else:
+            await self._run_concurrent_online(session, warmup_reqs)
+
+        if self.config.verbose:
+            print("Warmup complete.")
+
     async def run(self) -> tuple[list[RequestMetrics], AggregateMetrics]:
         dataset = self._get_dataset()
         if self.config.profiling_type == ProfilingType.OFFLINE:
@@ -216,31 +293,22 @@ class Benchmark:
             self.config.num_requests = ((self.config.num_requests + bs - 1) // bs) * bs
         requests = dataset.get_requests()[: self.config.num_requests]
 
+        # Bump the connection-pool cap so closed-loop runs at high
+        # max_concurrency don't bottleneck on aiohttp's default 100/host limit.
+        connector_limit = max(100, (self.config.max_concurrency or 1) + 10)
         async with aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=300),
-            connector=aiohttp.TCPConnector(),
+            connector=aiohttp.TCPConnector(limit=connector_limit),
             read_bufsize=5 * 2**20,  # 1MB read buffer
         ) as session:
-            if self.config.verbose:
-                print("--- Warmup ---")
-            warmup_req = requests[0]
-            for i in range(self.config.num_warmup):
-                if self.config.verbose:
-                    print(f"Warmup {i+1} / {self.config.num_warmup}")
-                await self.inference_system.send_request(
-                    req_input=warmup_req,
-                    session=session,
-                    base_url=self.config.url,
-                    request_id=-1,
-                    model=self.config.model,
-                )
-            if self.config.verbose:
-                print("Warmup complete.")
+            await self._warmup(session, requests)
 
             wall_start = time.monotonic()
 
             if self.config.profiling_type == ProfilingType.OFFLINE:
                 metrics = await self._run_concurrent_offline(session, requests)
+            elif self.config.profiling_type == ProfilingType.CLOSED_LOOP:
+                metrics = await self._run_concurrent_closed_loop(session, requests)
             else:
                 metrics = await self._run_concurrent_online(session, requests)
 
@@ -252,6 +320,8 @@ class Benchmark:
             online=self.config.profiling_type == ProfilingType.ONLINE,
             batch_size=self.config.batch_size,
             rate=self.config.rate,
+            max_concurrency=self.config.max_concurrency,
+            profiling_type=self.config.profiling_type.value,
         )
 
         print(f"\n--- Benchmark Results (wall time: {wall_time:.2f}s) ---")
@@ -266,37 +336,45 @@ def parse_args() -> BenchmarkConfig:
     parser = argparse.ArgumentParser(description="Run inference benchmark")
     parser.add_argument("--url", required=True)
     parser.add_argument("--model", required=True, choices=[m.value for m in ModelType])
-    parser.add_argument("--inference-system", choices=[s.value for s in InferenceSystemType],
-                        default=InferenceSystemType.OURS.value)
+    parser.add_argument(
+        "--inference-system", choices=[s.value for s in InferenceSystemType], default=InferenceSystemType.OURS.value
+    )
     parser.add_argument("--num-requests", type=int, default=10)
     parser.add_argument("--num-warmup", type=int, default=3)
-    parser.add_argument("--profiling-type", choices=[p.value for p in ProfilingType],
-                        default=ProfilingType.OFFLINE.value)
+    parser.add_argument(
+        "--profiling-type", choices=[p.value for p in ProfilingType], default=ProfilingType.OFFLINE.value
+    )
     parser.add_argument("--request-type", choices=[r.value for r in RequestType])
     parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument(
+        "--max-concurrency", type=int, default=1, help="Max in-flight requests for closed_loop profiling (default: 1)."
+    )
     parser.add_argument("--dataset", default=None, choices=[d.value for d in DatasetType])
-    parser.add_argument("--rate", type=float, default=1.0,
-                        help="Requests/sec (default: 1.0)")
-    parser.add_argument("--output-dir", default=None,
-                        help="Directory to save outputs (text files / images). Omit to skip.")
+    parser.add_argument("--rate", type=float, default=1.0, help="Requests/sec (default: 1.0)")
+    parser.add_argument(
+        "--output-dir", default=None, help="Directory to save outputs (text files / images). Omit to skip."
+    )
     parser.add_argument("--verbose", action="store_true")
-    parser.add_argument("--local-cache",  default="./mminf-benchmark-cache/", type=str)
+    parser.add_argument("--local-cache", default="./mminf-benchmark-cache/", type=str)
 
     # specific to image gen
     parser.add_argument("--disable-cfg", action="store_true")
 
     # VBench args
     vbench = parser.add_argument_group("vbench")
-    vbench.add_argument("--vbench-cache-dir", default="./vbench_cache",
-                        help="Directory to cache downloaded VBench data (default: ./vbench_cache)")
+    vbench.add_argument(
+        "--vbench-cache-dir",
+        default="./vbench_cache",
+        help="Directory to cache downloaded VBench data (default: ./vbench_cache)",
+    )
 
     # Text dataset args
     text_dataset = parser.add_argument_group("text_dataset")
     text_dataset.add_argument(
-        "--request-txt-file", default="benchmark/assets/simple_text_queries.txt",
-        help="Text file with one line per prompt"
+        "--request-txt-file",
+        default="benchmark/assets/simple_text_queries.txt",
+        help="Text file with one line per prompt",
     )
-
 
     args = parser.parse_args()
 
@@ -304,24 +382,16 @@ def parse_args() -> BenchmarkConfig:
     txtfile = args.request_txt_file
     request_type = RequestType(args.request_type)
     if dataset is None:
-        if request_type in {
-            RequestType.T2I, RequestType.I2I
-        }:
+        if request_type in {RequestType.T2I, RequestType.I2I}:
             dataset = DatasetType.VBENCH
             txtfile = None
-        elif request_type in {
-            RequestType.I2T, RequestType.I2S
-        }:
+        elif request_type in {RequestType.I2T, RequestType.I2S}:
             dataset = DatasetType.FOOD
             txtfile = None
-        elif request_type in {
-            RequestType.V2T, RequestType.V2S
-        }:
+        elif request_type in {RequestType.V2T, RequestType.V2S}:
             dataset = DatasetType.UCF
             txtfile = None
-        elif request_type in {
-            RequestType.A2T, RequestType.A2S
-        }:
+        elif request_type in {RequestType.A2T, RequestType.A2S}:
             dataset = DatasetType.LIBRI
             txtfile = None
         elif request_type == RequestType.T2T:
@@ -336,7 +406,6 @@ def parse_args() -> BenchmarkConfig:
                 # thinker-talker type model that speaks its answer
                 txtfile = "benchmark/assets/simple_text_queries.txt"
         print(f"Dataset not specified, setting it to {dataset.value}, txtfile={txtfile}")
-            
 
     return BenchmarkConfig(
         url=args.url,
@@ -348,12 +417,13 @@ def parse_args() -> BenchmarkConfig:
         profiling_type=ProfilingType(args.profiling_type),
         inference_system=InferenceSystemType(args.inference_system),
         batch_size=args.batch_size,
+        max_concurrency=args.max_concurrency,
         rate=args.rate,
         verbose=args.verbose,
         output_dir=args.output_dir,
         vbench_cache_dir=args.vbench_cache_dir,
         request_txt_file=txtfile,
-        local_cache_dir=args.local_cache
+        local_cache_dir=args.local_cache,
     )
 
 
