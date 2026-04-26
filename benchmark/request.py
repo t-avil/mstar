@@ -90,8 +90,12 @@ class RequestMetrics:
     e2e_latency: Optional[float] = None
     error: Optional[str] = None
 
-    # Per-modality chunk counts (one per record_token call)
-    output_chunks: dict[str, int] = field(default_factory=dict)
+    # Per-modality count of server-emitted framing units (one per record_token
+    # call). For text these are SSE / NDJSON messages, NOT tokens —
+    # vllm-omni and OurSystem emit one token per chunk while sglang-omni
+    # chunk-bursts ~5 tokens per message. For the actual text-token count use
+    # `output_text_tokens` (set from `usage.completion_tokens`).
+    response_chunks: dict[str, int] = field(default_factory=dict)
     # Per-modality byte counts (raw bytes received)
     output_bytes: dict[str, int] = field(default_factory=dict)
     # Text token count. Per-chunk increments accumulate while streaming and are
@@ -171,7 +175,7 @@ class RequestMetrics:
             self.ttft[modality] = now - self.start_time
         self.chunk_arrivals.setdefault(modality, []).append(now)
 
-        self.output_chunks[modality] = self.output_chunks.get(modality, 0) + 1
+        self.response_chunks[modality] = self.response_chunks.get(modality, 0) + 1
         self.output_bytes[modality] = self.output_bytes.get(modality, 0) + nbytes
 
         if modality == "text":
@@ -255,29 +259,42 @@ class RequestMetrics:
             out[modality] = [arrivals[i + 1] - arrivals[i] for i in range(len(arrivals) - 1)]
         return out
 
-    @property
-    def itl_per_token_text(self) -> Optional[list[float]]:
-        """
-        Per-token-normalised inter-token latency for the text modality.
+    def itl_per_token_text(self, tokenizer=None) -> Optional[list[float]]:
+        """Per-token-normalised inter-token latency for the text modality.
 
-        sglang-omni chunk-bursts ~5 tokens per SSE message while vllm-omni and
-        OurSystem stream one token per chunk; without normalisation, sglang-omni
-        ITL would look ~5x larger than the others. We assume per-chunk token
-        density is uniform within a request (true within a single scheduler
-        decision-batch) and divide each gap by `tokens_per_chunk`.
+        Mirrors sglang.bench_serving's `--accept-length` path: re-tokenize each
+        chunk individually, divide that chunk's gap by its actual token count,
+        then replicate the result by the token count so percentiles are
+        weighted by tokens (not by chunks). This makes sglang-omni's
+        chunk-bursting comparable to systems that stream one token per chunk
+        (OurSystem, vllm-omni) — both collapse to "per-token gap".
+
+        If `tokenizer` is None, falls back to raw per-chunk gaps (matches
+        sglang.bench_serving's default ITL path; not cross-system comparable
+        for sglang-omni vs others).
         """
         gaps = self.chunk_gaps.get("text")
         if not gaps:
             return None
-        n_chunks = len(self.chunk_arrivals.get("text", []))
-        if self.output_text_tokens > 0 and n_chunks > 0:
-            tokens_per_chunk = self.output_text_tokens / n_chunks
-        else:
-            # Fallback for OurSystem (server emits no usage block; one token per chunk).
-            tokens_per_chunk = 1.0
-        if tokens_per_chunk <= 0:
-            return None
-        return [g / tokens_per_chunk for g in gaps]
+        # gap[i] is the time from chunk i's arrival to chunk i+1's arrival; we
+        # attribute it to chunk i+1 (the one that "took" that long to arrive).
+        if tokenizer is None or len(self._text_chunks) < 2:
+            return list(gaps)
+        out: list[float] = []
+        for i, gap in enumerate(gaps):
+            chunk_idx = i + 1
+            if chunk_idx >= len(self._text_chunks):
+                continue
+            chunk_text = self._text_chunks[chunk_idx]
+            try:
+                n_tokens = len(tokenizer.encode(chunk_text, add_special_tokens=False))
+            except Exception:
+                n_tokens = 1
+            if n_tokens <= 0:
+                continue
+            per_token = gap / n_tokens
+            out.extend([per_token] * n_tokens)
+        return out if out else None
 
     @property
     def streaming_viability(self) -> Optional[float]:
@@ -309,7 +326,7 @@ class AggregateMetrics:
     itl: dict[str, LatencyStats]
     streaming_viability: Optional[LatencyStats]
     type_counts: dict[str, int]
-    total_output_chunks: dict[str, int] = field(default_factory=dict)
+    total_response_chunks: dict[str, int] = field(default_factory=dict)
     total_output_bytes: dict[str, int] = field(default_factory=dict)
     total_text_tokens: int = 0
     mean_text_tokens: Optional[float] = None
@@ -389,7 +406,7 @@ class AggregateMetrics:
         if self.total_input_tokens > 0:
             tok_lines += f"Prompt tokens: {self.total_input_tokens} total\n"
         for modality, total_bytes in sorted(self.total_output_bytes.items()):
-            chunks = self.total_output_chunks.get(modality, 0)
+            chunks = self.total_response_chunks.get(modality, 0)
             tok_lines += f"Output bytes ({modality}): {total_bytes} total ({chunks} chunks)\n"
 
         breakdown = ", ".join(f"{k}={v}" for k, v in sorted(self.type_counts.items()))
@@ -426,6 +443,7 @@ def aggregate_metrics(
     rate: Optional[float] = None,
     max_concurrency: Optional[int] = None,
     profiling_type: Optional[str] = None,
+    model: Optional[Model] = None,
 ) -> AggregateMetrics:
     n_success = sum(1 for r in requests if r.status == Status.SUCCESS)
 
@@ -434,15 +452,28 @@ def aggregate_metrics(
         for modality, t in r.ttft.items():
             ttft_by_modality.setdefault(modality, []).append(t)
 
-    # ITL: flatten per-chunk gaps (audio) and per-token-normalised gaps (text)
-    # across all requests, then take percentiles over the flattened list. This
-    # surfaces within-request stalls that per-request-mean ITL hides, and the
-    # text normalisation makes sglang-omni's chunk-burst SSE comparable to
-    # vllm-omni / OurSystem (one token per chunk).
+    # ITL: per-chunk audio gaps and per-token-normalised text gaps, flattened
+    # across all requests. The text normalisation re-tokenises each chunk
+    # (matching sglang.bench_serving's --accept-length path) and replicates
+    # the per-token gap by the chunk's token count, weighting percentiles by
+    # tokens. For OurSystem and vllm-omni (one token per chunk) this
+    # collapses to raw per-chunk gaps; for sglang-omni it un-bursts the
+    # chunk-burst into per-token equivalents — making all three comparable.
+    tokenizer = None
+    if model is not None:
+        try:
+            tokenizer = model.get_tokenizer()
+        except Exception as e:
+            print(
+                f"WARNING: failed to load tokenizer ({e}); falling back to raw "
+                f"per-chunk text ITL (sglang default; not cross-system "
+                f"comparable for sglang-omni vs others).",
+                file=sys.stderr,
+            )
     itl_text_per_token: list[float] = []
     itl_audio_per_chunk: list[float] = []
     for r in requests:
-        text_itl = r.itl_per_token_text
+        text_itl = r.itl_per_token_text(tokenizer)
         if text_itl:
             itl_text_per_token.extend(text_itl)
         audio_gaps = r.chunk_gaps.get("audio")
@@ -460,7 +491,7 @@ def aggregate_metrics(
     total_chunks: dict[str, int] = {}
     total_bytes: dict[str, int] = {}
     for r in requests:
-        for modality, n in r.output_chunks.items():
+        for modality, n in r.response_chunks.items():
             total_chunks[modality] = total_chunks.get(modality, 0) + n
         for modality, n in r.output_bytes.items():
             total_bytes[modality] = total_bytes.get(modality, 0) + n
@@ -507,7 +538,7 @@ def aggregate_metrics(
         profiling_type=profiling_type,
         max_concurrency=max_concurrency,
         type_counts=type_counts,
-        total_output_chunks=total_chunks,
+        total_response_chunks=total_chunks,
         total_output_bytes=total_bytes,
         total_text_tokens=total_text_tokens,
         mean_text_tokens=statistics.mean(text_token_counts) if text_token_counts else None,
