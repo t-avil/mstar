@@ -292,15 +292,6 @@ class CudaIpcKVTransferEngine(KVTransferEngine):
     
     def get_kv_transfer_info(self) -> CudaIpcKVTransferInfo:
         return self._transfer_info
-    
-    def submit(self, read_info: list[TransferReadInfo]) -> Future:
-        """Non-blocking: enqueue a batch of READs.
-
-        Records a CUDA event on the current stream to ensure GPU data
-        is ready before the background thread reads it.
-        """
-        if not read_info:
-            return
 
     def read_batched_async(
         self, remote_kv_info: CudaIpcKVTransferInfo,
@@ -343,6 +334,12 @@ class CudaIpcKVTransferEngine(KVTransferEngine):
             event_sync_required,
         ) = remote_kv_info.cuda_share
 
+        # Note: as this is a zero-copy operation and not allocating memory
+        # (just building a reference to underlying storage on the sending device),
+        # it is ok that this is rebuilding the whole kv cache. What matters is that,
+        # in the rest of the function, we are only copying the right pages to
+        # self._device. In fact, in testing, we see it is faster to call
+        # rebuild_cuda_tensor on the whole KV cache instead of just the slice we need. 
         tensor = rebuild_cuda_tensor(
             torch.Tensor,
             remote_kv_info.size,
