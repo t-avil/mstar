@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 import logging
 import queue
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -271,6 +271,7 @@ class CudaIpcKVTransferInfo:
 class CudaIpcKVTransferEngine(KVTransferEngine):
     def __init__(
         self, kv_cache: torch.Tensor,
+        max_workers=3
     ):
         storage = kv_cache.untyped_storage()
         cuda_share = storage._share_cuda_()
@@ -284,21 +285,52 @@ class CudaIpcKVTransferEngine(KVTransferEngine):
         )
         self._device = kv_cache.device
         self._kv_cache = kv_cache
+
+        self._copy_stream = torch.cuda.Stream(device=kv_cache.device)
+        self._pending: list[Future] = []
+        self._executor = ThreadPoolExecutor(max_workers=max_workers)
     
     def get_kv_transfer_info(self) -> CudaIpcKVTransferInfo:
         return self._transfer_info
     
+    def submit(self, read_info: list[TransferReadInfo]) -> Future:
+        """Non-blocking: enqueue a batch of READs.
+
+        Records a CUDA event on the current stream to ensure GPU data
+        is ready before the background thread reads it.
+        """
+        if not read_info:
+            return
+
     def read_batched_async(
         self, remote_kv_info: CudaIpcKVTransferInfo,
         read_info: list[KVReadInfo]
     ):
-        # TODO: async version
-        self.read_batched_sync(remote_kv_info, read_info)
+        if not read_info:
+            return
+        event = torch.cuda.current_stream().record_event()
+        future = self._executor.submit(self._do_read, remote_kv_info, read_info, event)
+        self._pending.append(future)
+        # Prune completed futures to avoid unbounded growth
+        self._pending = [f for f in self._pending if not f.done()]
+        return future
     
     def read_batched_sync(
         self, remote_kv_info: CudaIpcKVTransferInfo,
         read_info: list[KVReadInfo]
     ):
+        if not read_info:
+            return
+        return self._do_read(remote_kv_info, read_info)
+
+    def _do_read(
+        self, remote_kv_info: CudaIpcKVTransferInfo,
+        read_info: list[KVReadInfo],
+        event: torch.Event=None
+    ):
+        if event is not None:
+            self._copy_stream.wait_event(event)
+            self._copy_stream.synchronize()
         dtype = getattr(torch, remote_kv_info.dtype.split(".")[-1])
         (
             storage_device,
@@ -340,7 +372,8 @@ class CudaIpcKVTransferEngine(KVTransferEngine):
             ] = slice
     
     def shutdown(self):
-        return
+        for fut in self._pending:
+            fut.result()
 
 
 class PagedAllocationManager:
