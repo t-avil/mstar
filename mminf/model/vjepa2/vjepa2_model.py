@@ -48,7 +48,8 @@ from mminf.graph.base import (
     TensorPointerInfo,
 )
 from mminf.graph.special_destinations import EMIT_TO_CLIENT
-from mminf.model.base import ForwardPassArgs, Model, NodeSubmodule, TensorAndMetadata
+from mminf.model.base import ForwardPassArgs, Model, TensorAndMetadata
+from mminf.model.submodule_base import NodeSubmodule
 from mminf.model.vjepa2.components.ac_predictor import VisionTransformerPredictorAC
 from mminf.model.vjepa2.components.predictor import VJEPA2Predictor
 from mminf.model.vjepa2.components.vit_encoder import VJEPA2Encoder

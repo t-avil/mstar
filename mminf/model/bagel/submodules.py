@@ -1344,12 +1344,6 @@ class CombineCFGSubmodule(NodeSubmodule):
         N = self.config.num_timesteps
         shift = self.config.timestep_shift
 
-        print(v_main)
-        print(v_cfg_text)
-        print(v_cfg_img)
-        print(cfg_interval, cfg_text_scale, cfg_img_scale)
-        print()
-
         # Compute timestep and step size
         t_uniform = 1.0 - time_index / (N - 1)
         t_uniform_next = 1.0 - (time_index + 1) / (N - 1)
