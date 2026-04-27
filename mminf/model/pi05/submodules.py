@@ -204,7 +204,7 @@ class Pi05LLMSubmodule(ARNodeSubmodule):
     )
 
     # TODO: check what numbers to actually use here
-    PREFILL_TOKEN_BUCKETS = [128, 256, 512, 1024, 2048, 4096]
+    PREFILL_TOKEN_BUCKETS = [512, 1024, 2048]
     PREFILL_CAPTURE_BATCH_SIZES = [1, 2, 4]
 
     def __init__(
@@ -351,7 +351,7 @@ class Pi05LLMSubmodule(ARNodeSubmodule):
                 single_request_inputs=ARNodeInputs(
                     input_seq_len=self.config.action_horizon,
                     tensor_inputs={
-                        "noisy": torch.zeros(
+                        "noisy_actions": torch.zeros(
                             self.config.action_horizon, self.config.action_dim, device=device
                         ),
                         "ts": torch.zeros(1, device=device, dtype=torch.long)
@@ -520,7 +520,7 @@ class Pi05LLMSubmodule(ARNodeSubmodule):
             "seq_lens": seq_lens,
             "fraction": self._get_timestep_emb_fraction(),
             "time_emb_buffer": torch.zeros(
-                (len(inputs), self.config.action_dim),
+                (len(inputs), self.config.action_hidden_size),
                 device=self.get_device(),
                 dtype=cat_noisy.dtype
             )
@@ -574,16 +574,16 @@ class Pi05LLMSubmodule(ARNodeSubmodule):
 
     def _forward_prefill_batched(
         self,
-        cache_handle: BatchedCacheManager,
+        cache_manager: BatchedCacheManager,
         request_ids: list[str],
         prefix_embs: torch.Tensor,
         **kwargs,
     ) -> dict[str, NameToTensorList]:
         """Batched prefill: single PaliGemma forward over concatenated prefixes."""
-        cache_handle.set_active_label("main")
+        cache_manager.set_active_label("main")
         self.paligemma(
             query_sequence=prefix_embs,
-            cache_handle=cache_handle,
+            cache_handle=cache_manager,
             write_cache=True,
         )
         # Prefill produces no graph-edge outputs.
@@ -617,7 +617,7 @@ class Pi05LLMSubmodule(ARNodeSubmodule):
             end = start + horizon
             result[rid] = {
                 "noisy_actions": [next_actions[start:end]],
-                "timestep_index": [next_index[i]],
+                "timestep_index": [next_index[i:i+1]],
             }
         return result
 
