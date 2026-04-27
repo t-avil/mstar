@@ -941,12 +941,17 @@ class VLLMOmni(InferenceSystem):
                 )
 
             for chunk, arrival_time in chunks:
-                if getattr(chunk, "usage", None):
-                    if chunk.usage.completion_tokens is not None:
-                        metrics.output_text_tokens = chunk.usage.completion_tokens
-                    if chunk.usage.prompt_tokens is not None:
-                        metrics.input_tokens = chunk.usage.prompt_tokens
-                    continue
+                # NOTE: don't `continue` after reading usage — vllm-omni's audio
+                # chunks have BOTH usage (with completion_tokens=0) AND
+                # choices[0].delta.content carrying base64 audio bytes. Process
+                # choices unconditionally; only the final usage-summary chunk
+                # has empty choices and is naturally skipped by the for loop.
+                usage = getattr(chunk, "usage", None)
+                if usage:
+                    if usage.completion_tokens is not None:
+                        metrics.output_text_tokens = usage.completion_tokens
+                    if usage.prompt_tokens is not None:
+                        metrics.input_tokens = usage.prompt_tokens
 
                 chunk_modality = getattr(chunk, "modality", None)
                 for choice in chunk.choices:
@@ -1073,7 +1078,10 @@ class SGLangOmni(InferenceSystem):
 
                     arrival_time = time.monotonic()
 
-                    # Final usage chunk (Fix 3).
+                    # Read usage if present, but DON'T `continue` — sglang-omni
+                    # may also emit chunks that carry both usage and audio (the
+                    # same dual-payload pattern we hit with vllm-omni). Process
+                    # choices unconditionally below.
                     usage = chunk.get("usage")
                     if usage:
                         ct = usage.get("completion_tokens")
@@ -1082,7 +1090,6 @@ class SGLangOmni(InferenceSystem):
                         pt = usage.get("prompt_tokens")
                         if pt is not None:
                             metrics.input_tokens = pt
-                        continue
 
                     for choice in chunk.get("choices", []):
                         delta = choice.get("delta") or {}
