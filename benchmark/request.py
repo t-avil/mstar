@@ -920,6 +920,26 @@ class VLLMOmni(InferenceSystem):
             metrics.start_time = time.monotonic()
             chunks = await asyncio.to_thread(_stream_blocking)
 
+            # DEBUG: show what the SDK actually returned
+            print(f"DBG [req {request_id}]: SDK returned {len(chunks)} chunks", file=sys.stderr)
+            for _i, (_c, _) in enumerate(chunks[:5]):
+                _delta_attrs = []
+                if _c.choices:
+                    _d = getattr(_c.choices[0], "delta", None)
+                    if _d is not None:
+                        _delta_attrs = [
+                            a for a in dir(_d)
+                            if not a.startswith("_") and getattr(_d, a, None) is not None
+                        ]
+                print(
+                    f"DBG [req {request_id}] sdk_chunk #{_i}: "
+                    f"top_modality={getattr(_c, 'modality', None)!r}, "
+                    f"has_choices={bool(_c.choices)}, "
+                    f"delta_set_attrs={_delta_attrs}, "
+                    f"raw={_c.model_dump_json()[:200]}",
+                    file=sys.stderr,
+                )
+
             for chunk, arrival_time in chunks:
                 if getattr(chunk, "usage", None):
                     if chunk.usage.completion_tokens is not None:
