@@ -204,7 +204,7 @@ class Pi05LLMSubmodule(ARNodeSubmodule):
     )
 
     # TODO: check what numbers to actually use here
-    PREFILL_TOKEN_BUCKETS = [512, 1024, 2048]
+    PREFILL_TOKEN_BUCKETS = [512, 1024, 1800] # 2048 was giving OOM
     PREFILL_CAPTURE_BATCH_SIZES = [1, 2, 4]
 
     def __init__(
@@ -357,7 +357,7 @@ class Pi05LLMSubmodule(ARNodeSubmodule):
                         "ts": torch.zeros(1, device=device, dtype=torch.long)
                     }
                 ),
-                capture_batch_sizes=[1, 2, 4, 8, 16]
+                capture_batch_sizes=[1, 2, 4]
             ),
             FlashInferPackedCudaGraphConfig(
                 capture_graph_walk="prefill",
@@ -472,8 +472,6 @@ class Pi05LLMSubmodule(ARNodeSubmodule):
         per_request_seqs = [inp.input_embeds for inp in inputs]
         prefix_embs = torch.cat(per_request_seqs, dim=0)
         seq_lens = [inp.input_seq_len for inp in inputs]
-
-        print("Prefill seq lens", seq_lens)
         
         # Bidirectional attention over the prefix; PaliGemma is a prefix-LM.
         cache_manager.plan_attention(
