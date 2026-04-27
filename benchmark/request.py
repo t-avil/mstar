@@ -797,31 +797,36 @@ _SYSTEM_MESSAGE_PLAINTEXT = {
 
 
 def _build_openai_user_message(prompt: str, input_modality: str, req_input: RequestInput) -> dict:
-    """Build a vllm-omni-compatible user message with OpenAI content parts.
+    """Build a vllm-omni-compatible user message.
 
-    Pulls the pre-encoded base64 from `req_input.get_b64(...)` (Fix 6) so file
-    I/O and base64 encoding happen once at dataset construction, not per
-    request.
+    For text-only inputs, returns a plain-string `content` (matches what
+    vllm-omni's own bench sends — `patch.py` puts the prompt as a string).
+    Wrapping a single text part in a content-parts list seems to enter a
+    different code path in vllm-omni's chat handler that drops audio output.
+
+    For multimodal inputs (image/audio/video), uses OpenAI content parts
+    with the pre-encoded base64 from `req_input.get_b64(...)` (Fix 6).
     """
+    if input_modality == "text":
+        return {"role": "user", "content": prompt}
+    media_path = req_input.get_all_filepaths().get(input_modality)
+    b64 = req_input.get_b64(input_modality)
     content: list[dict] = []
-    if input_modality != "text":
-        media_path = req_input.get_all_filepaths().get(input_modality)
-        b64 = req_input.get_b64(input_modality)
-        if media_path is not None and b64 is not None:
-            mime = (
-                mimetypes.guess_type(media_path)[0]
-                or {
-                    "image": "image/jpeg",
-                    "audio": "audio/wav",
-                    "video": "video/mp4",
-                }[input_modality]
-            )
-            content.append(
-                {
-                    "type": f"{input_modality}_url",
-                    f"{input_modality}_url": {"url": f"data:{mime};base64,{b64}"},
-                }
-            )
+    if media_path is not None and b64 is not None:
+        mime = (
+            mimetypes.guess_type(media_path)[0]
+            or {
+                "image": "image/jpeg",
+                "audio": "audio/wav",
+                "video": "video/mp4",
+            }[input_modality]
+        )
+        content.append(
+            {
+                "type": f"{input_modality}_url",
+                f"{input_modality}_url": {"url": f"data:{mime};base64,{b64}"},
+            }
+        )
     content.append({"type": "text", "text": prompt})
     return {"role": "user", "content": content}
 
@@ -888,9 +893,13 @@ class VLLMOmni(InferenceSystem):
                 modalities_arg = ["image"]
             else:
                 modalities_arg = None
+            # No system message — vllm-omni's own bench omits it and lets the
+            # server's chat template inject the correct omni system prompt.
+            # Sending an explicit system message overrides that and seems to
+            # short-circuit audio output for some prompts.
             payload: dict = {
                 "model": model.get_hf_url(),
-                "messages": [_SYSTEM_MESSAGE, user_message],
+                "messages": [user_message],
                 "stream": True,
                 "stream_options": {"include_usage": True},
                 **model.get_model_kwargs(req_type),
