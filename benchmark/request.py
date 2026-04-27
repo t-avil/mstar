@@ -1,4 +1,3 @@
-import asyncio
 import base64
 import io
 import json
@@ -849,39 +848,85 @@ def _parse_sse_chunk(raw_line: bytes) -> Optional[dict]:
         return None
 
 
+def _record_vllm_omni_chunk(chunk: dict, metrics: "RequestMetrics") -> None:
+    """Extract content from one vllm-omni SSE chunk and feed it to metrics.
+
+    vllm-omni's chunks have a top-level `modality` field ("text" / "audio" /
+    "image") and audio bytes typically arrive as base64 in
+    `choices[0].delta.content` (with `delta.audio.data` as a fallback path).
+    Critically, audio chunks ALSO carry `usage` with `completion_tokens=0`,
+    so we must process choices unconditionally rather than skipping after
+    reading usage.
+    """
+    arrival_time = time.monotonic()
+
+    usage = chunk.get("usage")
+    if usage:
+        ct = usage.get("completion_tokens")
+        if ct is not None:
+            metrics.output_text_tokens = ct
+        pt = usage.get("prompt_tokens")
+        if pt is not None:
+            metrics.input_tokens = pt
+
+    chunk_modality = chunk.get("modality")
+    for choice in chunk.get("choices", []):
+        delta = choice.get("delta") or {}
+        content = delta.get("content")
+        audio_obj = delta.get("audio") if isinstance(delta.get("audio"), dict) else None
+        audio_b64_field = audio_obj.get("data") if audio_obj else None
+
+        if content and chunk_modality == "audio":
+            modality, data_b64 = "audio", content
+        elif content and chunk_modality == "image":
+            modality, data_b64 = "image", content
+        elif content:
+            modality = "text"
+            data_b64 = base64.b64encode(content.encode()).decode()
+        elif audio_b64_field:
+            modality, data_b64 = "audio", audio_b64_field
+        else:
+            continue
+
+        metrics.record_output_chunk(
+            modality=modality,
+            data_b64=data_b64,
+            arrival_time=arrival_time,
+            n_tokens=1,
+        )
+
+
 class VLLMOmni(InferenceSystem):
     """
     Benchmark adapter for the vllm-omni OpenAI-compatible server.
 
-    Uses the synchronous `openai.OpenAI` client wrapped in `asyncio.to_thread`
-    instead of raw aiohttp. This is a deliberate trade: native aiohttp produced
-    text but never received audio chunks for omni T2S/A2S/V2S/I2S cells, even
-    when matching vllm-omni's own bench payload byte-for-byte (we tried omitting
-    `modalities`, sending `["audio"]`, sending `["text","audio"]`, omitting the
-    system message, switching to `iter_any()` + manual buffer, adding the
-    `Authorization` header, and flushing the trailing buffer — none worked).
-    The OpenAI SDK path was verified working on this same server config (April
-    21 run produced both text and audio chunks), so we use it for VLLMOmni.
-    Threadpool dispatch overhead is ~5-15 ms per request — small compared to
-    multi-second e2e for omni cells.
+    Uses native aiohttp + iter_any()-based SSE parsing. Two important
+    implementation details that took a while to track down:
 
-    The `modalities` argument is `[output_mod]` only when `output_mod != "text"`
-    (matches vllm-omni's behavior: with `modalities=["audio"]` the server
-    streams audio only; with `modalities=None` for T2T it streams both text
-    and audio because the talker runs unconditionally).
+    1. vllm-omni's audio SSE chunks can be very large (~200KB base64 WAV per
+       chunk). aiohttp's default line iterator (`async for line in
+       resp.content`) has an 8 KB max-line limit and silently drops oversized
+       lines. We use `iter_any()` + manual `\\n\\n` message buffering instead
+       (matches `vllm_omni/benchmarks/patch/patch.py:391`).
+    2. vllm-omni's audio chunks carry BOTH a populated `usage` field (with
+       `completion_tokens=0`) AND `choices[0].delta.content` with the audio
+       bytes. We must NOT `continue` after reading usage — that drops the
+       audio. Read usage AND process choices on every chunk.
+
+    `modalities=[output_mod]` only when `output_mod != "text"` (matches
+    vllm-omni's expected behavior: `["audio"]` streams audio-only; absence
+    streams text+audio because the talker runs unconditionally).
     """
 
     async def send_request(
         self,
-        session: aiohttp.ClientSession,  # kept for interface parity; not used
+        session: aiohttp.ClientSession,
         req_input: RequestInput,
         base_url: str,
         request_id: int,
         model: Model,
         additional_model_kwargs: dict = {},
     ) -> RequestMetrics:
-        from openai import OpenAI
-
         req_type = req_input.req_type
         output_mod = req_type.get_output_modalities()  # "text", "audio", "image"
         input_mod = req_type.get_input_modalities()  # "text", "image", "audio", "video"
@@ -895,91 +940,68 @@ class VLLMOmni(InferenceSystem):
         try:
             user_message = _build_openai_user_message(req_input.prompt, input_mod, req_input)
             modalities_arg = [output_mod] if output_mod != "text" else None
-            model_name = model.get_hf_url()
-            extra_body = {
+
+            payload: dict = {
+                "model": model.get_hf_url(),
+                "messages": [_SYSTEM_MESSAGE, user_message],
+                "temperature": 0.0,  # match vllm-omni's bench (`patch.py:336`)
+                "stream": True,
+                "stream_options": {"include_usage": True},
                 **model.get_model_kwargs(req_type),
                 **additional_model_kwargs,
             }
-            client = OpenAI(api_key="EMPTY", base_url=f"{base_url}/v1")
+            if modalities_arg is not None:
+                payload["modalities"] = modalities_arg
 
-            def _stream_blocking():
-                """Run the blocking OpenAI streaming call and collect raw chunks."""
-                chunks = []
-                stream = client.chat.completions.create(
-                    model=model_name,
-                    messages=[_SYSTEM_MESSAGE, user_message],
-                    modalities=modalities_arg,
-                    extra_body=extra_body or None,
-                    stream=True,
-                    stream_options={"include_usage": True},
-                )
-                for chunk in stream:
-                    chunks.append((chunk, time.monotonic()))
-                return chunks
+            # Match vllm-omni bench headers (`patch.py:354-358`).
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
+            }
 
             metrics.start_time = time.monotonic()
-            chunks = await asyncio.to_thread(_stream_blocking)
+            async with session.post(
+                f"{base_url}/v1/chat/completions",
+                json=payload,
+                headers=headers,
+                read_bufsize=2**24,
+                timeout=aiohttp.ClientTimeout(total=None, sock_read=120),
+            ) as resp:
+                if resp.status != 200:
+                    raise Exception(f"HTTP {resp.status}: {await resp.text()}")
 
-            # DEBUG: show what the SDK actually returned
-            print(f"DBG [req {request_id}]: SDK returned {len(chunks)} chunks", file=sys.stderr)
-            for _i, (_c, _) in enumerate(chunks[:5]):
-                _delta_attrs = []
-                if _c.choices:
-                    _d = getattr(_c.choices[0], "delta", None)
-                    if _d is not None:
-                        _delta_attrs = [
-                            a for a in dir(_d)
-                            if not a.startswith("_") and getattr(_d, a, None) is not None
-                        ]
-                print(
-                    f"DBG [req {request_id}] sdk_chunk #{_i}: "
-                    f"top_modality={getattr(_c, 'modality', None)!r}, "
-                    f"has_choices={bool(_c.choices)}, "
-                    f"delta_set_attrs={_delta_attrs}, "
-                    f"raw={_c.model_dump_json()[:200]}",
-                    file=sys.stderr,
-                )
-
-            for chunk, arrival_time in chunks:
-                # NOTE: don't `continue` after reading usage — vllm-omni's audio
-                # chunks have BOTH usage (with completion_tokens=0) AND
-                # choices[0].delta.content carrying base64 audio bytes. Process
-                # choices unconditionally; only the final usage-summary chunk
-                # has empty choices and is naturally skipped by the for loop.
-                usage = getattr(chunk, "usage", None)
-                if usage:
-                    if usage.completion_tokens is not None:
-                        metrics.output_text_tokens = usage.completion_tokens
-                    if usage.prompt_tokens is not None:
-                        metrics.input_tokens = usage.prompt_tokens
-
-                chunk_modality = getattr(chunk, "modality", None)
-                for choice in chunk.choices:
-                    delta = getattr(choice, "delta", None)
-                    if delta is None:
+                buffer = b""
+                async for raw_bytes in resp.content.iter_any():
+                    if not raw_bytes:
                         continue
-                    content = getattr(delta, "content", None)
-                    audio_obj = getattr(delta, "audio", None)
-                    audio_b64_field = getattr(audio_obj, "data", None) if audio_obj else None
+                    buffer += raw_bytes
+                    while b"\n\n" in buffer:
+                        message, buffer = buffer.split(b"\n\n", 1)
+                        message = message.strip()
+                        if not message:
+                            continue
+                        chunk = _parse_sse_chunk(message)
+                        if chunk is None:
+                            continue
+                        if chunk.get("_done"):
+                            # vllm-omni may emit data after [DONE]; keep reading
+                            # until the stream is naturally closed.
+                            continue
+                        _record_vllm_omni_chunk(chunk, metrics)
 
-                    if content and chunk_modality == "audio":
-                        modality, data_b64 = "audio", content
-                    elif content and chunk_modality == "image":
-                        modality, data_b64 = "image", content
-                    elif content:
-                        modality = "text"
-                        data_b64 = base64.b64encode(content.encode()).decode()
-                    elif audio_b64_field:
-                        modality, data_b64 = "audio", audio_b64_field
-                    else:
-                        continue
-
-                    metrics.record_output_chunk(
-                        modality=modality,
-                        data_b64=data_b64,
-                        arrival_time=arrival_time,
-                        n_tokens=1,
-                    )
+                # Trailing-buffer flush: catch a final chunk if the server
+                # closed without a final `\n\n`.
+                tail = buffer.strip()
+                if tail.startswith(b"data:"):
+                    payload_str = tail[len(b"data:") :].strip()
+                    if payload_str and payload_str != b"[DONE]":
+                        try:
+                            json.loads(payload_str)
+                            chunk = _parse_sse_chunk(tail)
+                            if chunk is not None and not chunk.get("_done"):
+                                _record_vllm_omni_chunk(chunk, metrics)
+                        except json.JSONDecodeError:
+                            pass
 
         except Exception as e:
             metrics.record_error(str(e))
