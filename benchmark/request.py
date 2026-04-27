@@ -797,36 +797,36 @@ _SYSTEM_MESSAGE_PLAINTEXT = {
 
 
 def _build_openai_user_message(prompt: str, input_modality: str, req_input: RequestInput) -> dict:
-    """Build a vllm-omni-compatible user message.
+    """Build a vllm-omni-compatible user message with OpenAI content parts.
 
-    For text-only inputs, returns a plain-string `content` (matches what
-    vllm-omni's own bench sends — `patch.py` puts the prompt as a string).
-    Wrapping a single text part in a content-parts list seems to enter a
-    different code path in vllm-omni's chat handler that drops audio output.
+    Always wraps text in a `[{"type": "text", "text": prompt}]` list — this is
+    what vllm-omni's own bench sends (see `_get_chat_content` in
+    `vllm/benchmarks/lib/endpoint_request_func.py`). Plain-string content
+    appears to bypass omni multimodal routing on the server side.
 
-    For multimodal inputs (image/audio/video), uses OpenAI content parts
-    with the pre-encoded base64 from `req_input.get_b64(...)` (Fix 6).
+    For multimodal inputs (image/audio/video), prepends the media as the
+    first content part using pre-encoded base64 from `req_input.get_b64(...)`
+    (Fix 6).
     """
-    if input_modality == "text":
-        return {"role": "user", "content": prompt}
-    media_path = req_input.get_all_filepaths().get(input_modality)
-    b64 = req_input.get_b64(input_modality)
     content: list[dict] = []
-    if media_path is not None and b64 is not None:
-        mime = (
-            mimetypes.guess_type(media_path)[0]
-            or {
-                "image": "image/jpeg",
-                "audio": "audio/wav",
-                "video": "video/mp4",
-            }[input_modality]
-        )
-        content.append(
-            {
-                "type": f"{input_modality}_url",
-                f"{input_modality}_url": {"url": f"data:{mime};base64,{b64}"},
-            }
-        )
+    if input_modality != "text":
+        media_path = req_input.get_all_filepaths().get(input_modality)
+        b64 = req_input.get_b64(input_modality)
+        if media_path is not None and b64 is not None:
+            mime = (
+                mimetypes.guess_type(media_path)[0]
+                or {
+                    "image": "image/jpeg",
+                    "audio": "audio/wav",
+                    "video": "video/mp4",
+                }[input_modality]
+            )
+            content.append(
+                {
+                    "type": f"{input_modality}_url",
+                    f"{input_modality}_url": {"url": f"data:{mime};base64,{b64}"},
+                }
+            )
     content.append({"type": "text", "text": prompt})
     return {"role": "user", "content": content}
 
