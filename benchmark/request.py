@@ -918,11 +918,14 @@ class VLLMOmni(InferenceSystem):
                 if resp.status != 200:
                     raise Exception(f"HTTP {resp.status}: {await resp.text()}")
 
+                _vllm_dbg_count = 0
+                _vllm_dbg_max = 6
                 async for raw_line in resp.content:
                     chunk = _parse_sse_chunk(raw_line)
                     if chunk is None:
                         continue
                     if chunk.get("_done"):
+                        print(f"DBG [req {request_id}]: hit [DONE] terminator", file=sys.stderr)
                         break
 
                     arrival_time = time.monotonic()
@@ -945,6 +948,18 @@ class VLLMOmni(InferenceSystem):
                         audio_obj = delta.get("audio") if isinstance(delta.get("audio"), dict) else None
                         audio_b64_field = audio_obj.get("data") if audio_obj else None
 
+                        # DEBUG: dump first few chunks per request to see vllm-omni's actual shape
+                        if _vllm_dbg_count < _vllm_dbg_max:
+                            _vllm_dbg_count += 1
+                            print(
+                                f"DBG [req {request_id}] chunk #{_vllm_dbg_count}: "
+                                f"top_modality={chunk_modality!r}, "
+                                f"delta_keys={list(delta.keys())}, "
+                                f"content_preview={(str(content)[:60] if content else None)!r}, "
+                                f"audio_obj={audio_obj!r}",
+                                file=sys.stderr,
+                            )
+
                         # Decide modality + payload bytes for this chunk.
                         if content and chunk_modality == "audio":
                             modality, data_b64 = "audio", content
@@ -956,6 +971,14 @@ class VLLMOmni(InferenceSystem):
                         elif audio_b64_field:
                             modality, data_b64 = "audio", audio_b64_field
                         else:
+                            # DEBUG: dump unrecognized chunks (might be audio in unknown shape)
+                            print(
+                                f"DBG [req {request_id}] UNRECOGNIZED chunk: "
+                                f"top_modality={chunk_modality!r}, "
+                                f"chunk_keys={list(chunk.keys())}, "
+                                f"delta_full={delta!r}",
+                                file=sys.stderr,
+                            )
                             continue
 
                         metrics.record_output_chunk(
