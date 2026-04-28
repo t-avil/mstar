@@ -939,7 +939,12 @@ class VLLMOmni(InferenceSystem):
 
         try:
             user_message = _build_openai_user_message(req_input.prompt, input_mod, req_input)
-            modalities_arg = [output_mod] if output_mod != "text" else None
+            # Always send `modalities` explicitly. Omitting the field makes
+            # vllm-omni's server fall back to text+audio output even for
+            # text-only requests (the talker runs unconditionally), inflating
+            # work and emitting unwanted audio chunks. Sending ["text"] tells
+            # the server to skip the talker.
+            modalities_arg = [output_mod]
 
             payload: dict = {
                 "model": model.get_hf_url(),
@@ -950,8 +955,7 @@ class VLLMOmni(InferenceSystem):
                 **model.get_model_kwargs(req_type),
                 **additional_model_kwargs,
             }
-            if modalities_arg is not None:
-                payload["modalities"] = modalities_arg
+            payload["modalities"] = modalities_arg
 
             # Match vllm-omni bench headers (`patch.py:354-358`).
             headers = {
