@@ -643,7 +643,7 @@ class CodePredictorEngine(BaseEngine):
             )
         
         if self.enable_nvtx:
-            range_push("code_pred.batched.preprocesss", synchronize=True)
+            range_push("code_pred.batched.preprocesss", synchronize=False)
         bs = len(batch.request_ids)
         engine_inputs=CodePredictorEngineInputs(
             request_ids=batch.request_ids,
@@ -669,7 +669,7 @@ class CodePredictorEngine(BaseEngine):
         )
 
         if self.enable_nvtx:
-            range_pop(synchronize=True)
+            range_pop(synchronize=False)
 
         if self.enable_nvtx:
             range_push("code_pred.batched.forward")
@@ -693,7 +693,7 @@ class CodePredictorEngine(BaseEngine):
 
         submodule = self.submodules[batch.node_name]
         if self.enable_nvtx:
-            range_push("code_pred.prepare_iputs", synchronize=True)
+            range_push("code_pred.prepare_iputs", synchronize=False)
         
         node_inputs: list[ARNodeInputs] = []
         for rid in batch.request_ids:
@@ -705,7 +705,7 @@ class CodePredictorEngine(BaseEngine):
                 )
             )
         if self.enable_nvtx:
-            range_pop(synchronize=True)
+            range_pop(synchronize=False)
 
         # NO autocast for float32 Code Predictor inference. HF and
         # vllm-omni found that fused/autocast kernels degrade audio quality
@@ -721,7 +721,7 @@ class CodePredictorEngine(BaseEngine):
                     outputs=output.per_request_output_tensors.get(rid, {}),
                 )
             if self.enable_nvtx:
-                range_pop(synchronize=True)
+                range_pop(synchronize=False)
             return output
 
     def remove_request(self, request_id: str) -> None:

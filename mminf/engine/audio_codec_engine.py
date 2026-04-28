@@ -159,7 +159,7 @@ class AudioCodecEngine(BaseEngine):
         )
 
         if self.enable_nvtx:
-            range_push("codec.batched.preprocess", synchronize=True)
+            range_push("codec.batched.preprocess", synchronize=False)
         packed = submodule.preprocess(
             graph_walk=batch.graph_walk,
             engine_inputs=engine_inputs,
@@ -194,14 +194,14 @@ class AudioCodecEngine(BaseEngine):
             )
 
             if self.enable_nvtx:
-                range_push(f"codec.preprocess.{i}", synchronize=True)
+                range_push(f"codec.preprocess.{i}", synchronize=False)
             preprocessed = submodule.preprocess(
                 batch.graph_walk,
                 engine_inputs=engine_inputs,
                 inputs=inputs,
             )
             if self.enable_nvtx:
-                range_pop(synchronize=True)
+                range_pop(synchronize=False)
     
             if self.enable_nvtx:
                 range_push(f"codec.forward.{i}")
