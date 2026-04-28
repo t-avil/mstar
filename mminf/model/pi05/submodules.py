@@ -20,6 +20,7 @@ from mminf.communication.tensors import NameToTensorList
 from mminf.conductor.request_info import CurrentForwardPassInfo
 from mminf.engine.base import NodeBatch
 from mminf.engine.cache_manager import BatchedCacheManager
+from mminf.engine.cuda_graph_config import BasicBatchedCudaGraphConfig, FlashInferPackedCudaGraphConfig
 from mminf.model.submodule_base import ARNodeInputs, ARNodeSubmodule, ModelInputsFromEngine, NodeInputs, NodeSubmodule
 from mminf.model.pi05.components.action_expert import Pi05ActionExpert, Pi05TimeMLP
 from mminf.model.pi05.components.flow_matching import sincos_timestep_embedding
@@ -202,6 +203,10 @@ class Pi05LLMSubmodule(ARNodeSubmodule):
         ".norm.",   # final RMSNorm / adaRMS norm
     )
 
+    # For the default image size and a simple text prompt, one request is about 400 tokens
+    PREFILL_TOKEN_BUCKETS = [512, 1024, 1800] # 2048 was giving OOM
+    PREFILL_CAPTURE_BATCH_SIZES = [1, 2, 4]
+
     def __init__(
         self,
         embed_tokens: nn.Embedding,
@@ -242,6 +247,9 @@ class Pi05LLMSubmodule(ARNodeSubmodule):
         self._image_embed_scale = math.sqrt(config.hidden_size)
         self._text_embed_scale = float(config.hidden_size)
 
+        # cached on first action Euler step
+        self._fraction: torch.Tensor | None = None
+
     def to(self, *args, **kwargs):
         """Apply standard ``to()`` then upcast norm parameters back to fp32.
 
@@ -269,14 +277,8 @@ class Pi05LLMSubmodule(ARNodeSubmodule):
         - ``action_gen``: all requests in a batch are at the same Euler
           iteration (guaranteed by the Loop primitive), so their suffix tokens
           can be concatenated and processed in a single action expert forward.
-
-        NOTE: Batching is disabled for now pending investigation of a
-        deadlock in the batched prefill path. The forward_batched()
-        implementation is ready and tested in-process; the issue is in
-        the interaction with the AREngine's _execute_batched flow.
         """
-        # TODO: re-enable once the deadlock is resolved.
-        return False
+        return True
 
     def get_needed_cache_labels(
         self,
@@ -288,6 +290,22 @@ class Pi05LLMSubmodule(ARNodeSubmodule):
     # ------------------------------------------------------------------
     # preprocess
     # ------------------------------------------------------------------
+
+    def _get_timestep_emb_fraction(self) -> torch.Tensor:
+        if self._fraction is not None:
+            return self._fraction
+        device = self.get_device()
+        dim = self.config.action_hidden_size
+        half = dim // 2
+        # Geometric progression of frequencies between min_period and max_period.
+        # Use float64 for the frequency computation to match the openpi reference;
+        # bf16 has only ~3 digits of precision and rounds higher-frequency
+        # components, which compounds through time_mlp -> adaRMS -> 18 layers.
+        self._fraction = torch.linspace(
+            0.0, 1.0, half, device=device,
+            dtype=torch.float64
+        )
+        return self._fraction
 
     def preprocess(
         self,
@@ -315,6 +333,42 @@ class Pi05LLMSubmodule(ARNodeSubmodule):
     def _embed_tokens_scaled(self, ids: torch.Tensor) -> torch.Tensor:
         emb = self.embed_tokens(ids)
         return emb * self._text_embed_scale
+    
+    def get_cuda_graph_configs(
+        self, device: torch.device,
+    ) -> list[BasicBatchedCudaGraphConfig | FlashInferPackedCudaGraphConfig]:
+        prefill_packed = {
+            num_tokens: {
+                "prefix_embs": torch.zeros(num_tokens, self.config.hidden_size, device=device)
+            }
+            for num_tokens in self.PREFILL_TOKEN_BUCKETS
+        }
+        return [
+            # Action generation always has latents of the same size, so it is a similar
+            # paradigm to AR decode and can use the batched cuda graphs
+            BasicBatchedCudaGraphConfig(
+                capture_graph_walk="action_gen", requires_cfg=False, labels=["main"],
+                single_request_inputs=ARNodeInputs(
+                    input_seq_len=self.config.action_horizon,
+                    tensor_inputs={
+                        "noisy_actions": torch.zeros(
+                            self.config.action_horizon, self.config.action_dim, device=device
+                        ),
+                        "ts": torch.zeros(1, device=device, dtype=torch.long)
+                    }
+                ),
+                capture_batch_sizes=[1, 2, 4]
+            ),
+            FlashInferPackedCudaGraphConfig(
+                capture_graph_walk="prefill",
+                packed_seq_len_to_inputs=prefill_packed,
+                requires_cfg=False,
+                labels=["main"],
+                compile=True,
+                causal_attention=False,
+                capture_batch_sizes=self.PREFILL_CAPTURE_BATCH_SIZES,
+            ),
+        ]
     
     def prepare_inputs(
         self,
@@ -379,7 +433,7 @@ class Pi05LLMSubmodule(ARNodeSubmodule):
             noisy = torch.randn(
                 action_horizon, action_dim, device=device, generator=generator
             )
-            ts = torch.zeros((), device=device, dtype=torch.long)
+            ts = torch.zeros(1, device=device, dtype=torch.long)
         else:
             noisy = inputs["noisy_actions"][0]
             ts = inputs["timestep_index"][0]
@@ -412,7 +466,7 @@ class Pi05LLMSubmodule(ARNodeSubmodule):
         
     def _preprocess_prefill(
         self,
-        inputs: list[NameToTensorList],
+        inputs: list[ARNodeInputs],
         cache_manager: BatchedCacheManager,
     ) -> dict[str, torch.Tensor | Any]:
         per_request_seqs = [inp.input_embeds for inp in inputs]
@@ -425,16 +479,13 @@ class Pi05LLMSubmodule(ARNodeSubmodule):
         )
         cache_manager.plan_rope(seq_lens=seq_lens, pos_ids=None, label="main")
 
-        return {"prefix_embs": prefix_embs, "seq_lens": seq_lens}
+        return {"prefix_embs": prefix_embs}
 
     def _preprocess_action_gen(
         self,
-        inputs: list[NameToTensorList],
+        inputs: list[ARNodeInputs],
         cache_manager: BatchedCacheManager,
     ) -> dict[str, torch.Tensor | Any]:
-
-        all_noisy = [inp.tensor_inputs["noisy_actions"] for inp in inputs]
-        all_ts = [inp.tensor_inputs["ts"] for inp in inputs]
         seq_lens = [inp.input_seq_len for inp in inputs]
 
         # The action suffix attends to the frozen prefix KV cache. We pass
@@ -450,10 +501,27 @@ class Pi05LLMSubmodule(ARNodeSubmodule):
             seq_lens=seq_lens, pos_ids=None, label="main"
         )
 
+        # Concatenate noisy_actions across requests for a single forward.
+        cat_noisy = torch.cat(
+            [inp.tensor_inputs["noisy_actions"] for inp in inputs],
+            dim=0
+        ) # [N * horizon, action_dim]
+
+        all_ts = torch.cat(
+            [inp.tensor_inputs["ts"] for inp in inputs],
+            dim=0
+        )
+
         return {
-            "noisy_actions": all_noisy,
+            "noisy_actions": cat_noisy,
             "timestep_index": all_ts,
             "seq_lens": seq_lens,
+            "fraction": self._get_timestep_emb_fraction(),
+            "time_emb_buffer": torch.zeros(
+                (len(inputs), self.config.action_hidden_size),
+                device=self.get_device(),
+                dtype=cat_noisy.dtype
+            )
         }
 
     # ------------------------------------------------------------------
@@ -467,7 +535,7 @@ class Pi05LLMSubmodule(ARNodeSubmodule):
     ) -> NameToTensorList:
         cache_handle=engine_inputs.cache_manager
 
-        if graph_walk == "prefill": #NOTE: may need to rename prefix_embs (bacame input_embeds)
+        if graph_walk == "prefill":
             return self._forward_prefill(cache_handle=cache_handle, **kwargs)
         if graph_walk == "action_gen":
             return self._forward_action_gen(cache_handle=cache_handle, **kwargs)
@@ -507,6 +575,7 @@ class Pi05LLMSubmodule(ARNodeSubmodule):
         cache_manager: BatchedCacheManager,
         request_ids: list[str],
         prefix_embs: torch.Tensor,
+        **kwargs,
     ) -> dict[str, NameToTensorList]:
         """Batched prefill: single PaliGemma forward over concatenated prefixes."""
         cache_manager.set_active_label("main")
@@ -522,19 +591,21 @@ class Pi05LLMSubmodule(ARNodeSubmodule):
         self,
         cache_manager: BatchedCacheManager,
         request_ids: list[str],
-        noisy_actions: list[torch.Tensor],
-        timestep_index: list[torch.Tensor],
+        noisy_actions: torch.Tensor,
+        timestep_index: torch.Tensor,
+        fraction: torch.Tensor,
+        time_emb_buffer: torch.Tensor,
+        **kwargs
     ) -> dict[str, NameToTensorList]:
         """Batched action_gen: single action expert forward, then split per-request."""
 
-        horizon = self.config.action_horizon
-
-        # All requests share the same timestep (Loop iterates in lockstep).
-        # Concatenate noisy_actions across requests for a single forward.
-        cat_noisy = torch.cat(noisy_actions, dim=0)  # [N * horizon, action_dim]
+        horizon = self.config.action_horizon        
 
         next_actions, next_index = self._euler_step(
-            cat_noisy, timestep_index[0], cache_manager
+            noisy_actions, timestep_index,
+            fraction=fraction,
+            time_emb_buffer=time_emb_buffer,
+            cache_handle=cache_manager
         )
 
         # Split back per-request by horizon.
@@ -544,7 +615,7 @@ class Pi05LLMSubmodule(ARNodeSubmodule):
             end = start + horizon
             result[rid] = {
                 "noisy_actions": [next_actions[start:end]],
-                "timestep_index": [next_index],
+                "timestep_index": [next_index[i:i+1]],
             }
         return result
 
@@ -567,6 +638,8 @@ class Pi05LLMSubmodule(ARNodeSubmodule):
         self,
         noisy_actions,
         timestep_index,
+        fraction,
+        time_emb_buffer,
         cache_handle: BatchedCacheManager,
         **kwargs,
     ) -> NameToTensorList:
@@ -584,7 +657,10 @@ class Pi05LLMSubmodule(ARNodeSubmodule):
             timestep_index = timestep_index[0]
 
         next_actions, next_index = self._euler_step(
-            noisy_actions, timestep_index, cache_handle
+            noisy_actions, timestep_index,
+            fraction=fraction,
+            time_emb_buffer=time_emb_buffer,
+            cache_handle=cache_handle
         )
         # We ALWAYS return both loop-back edges, even on the final iteration.
         # The Loop primitive (mminf/graph/base.py:Loop) handles the final-iter
@@ -602,6 +678,8 @@ class Pi05LLMSubmodule(ARNodeSubmodule):
         self,
         noisy_actions: torch.Tensor,
         timestep_index: torch.Tensor,
+        fraction: torch.Tensor,
+        time_emb_buffer: torch.Tensor,
         cache_handle: BatchedCacheManager,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """One Euler flow-matching step. Shared by sequential and batched paths.
@@ -615,6 +693,9 @@ class Pi05LLMSubmodule(ARNodeSubmodule):
         Returns:
             (next_actions, next_timestep_index) with same shapes as inputs.
         """
+        # noisy_actions: [N * horizon, action_dim]
+        # timestep_index: [N]
+
         config = self.config
         num_steps = config.num_flow_steps
 
@@ -624,9 +705,11 @@ class Pi05LLMSubmodule(ARNodeSubmodule):
         time_emb = sincos_timestep_embedding(
             t,
             dim=config.action_hidden_size,
+            fraction=fraction,
+            output_buffer=time_emb_buffer,
             min_period=config.timestep_min_period,
             max_period=config.timestep_max_period,
-        ).squeeze(0)
+        )
         adarms_cond = self.time_mlp(time_emb)
 
         suffix = self.action_in_proj(noisy_actions)
