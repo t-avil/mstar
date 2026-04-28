@@ -209,6 +209,47 @@ default-stream sync, side-stream D→H of new tokens, fresh-rid spec
 merge with mismatch-skip) is correct and necessary for any future
 approach — it just doesn't translate to wall-clock gains on its own.
 
+### Same-thread-async attempt (Orpheus, measured)
+
+The same-thread-async path was implemented and measured:
+- `MMINF_USE_GPU_THREAD=1` falls back to the executor; default is now
+  inline submission on the main thread.
+- Sample sync (`sampling.py`) gated to a 64-call autotune-warmup budget,
+  then permanently skipped.
+- New helper `_prematerialize_for_check_stop` does a side-stream D→H of
+  every CUDA tensor in the engine output before `check_stop`, so the
+  per-rid `.item()` reads don't trigger a default-stream sync (which
+  would block on the queued GPU(N+1)).
+
+Result on Orpheus single-request decode (steady state, after autotune):
+
+| phase | inline + budgeted sync (this) | executor (prior) |
+|---|---|---|
+| `submit_spec` (engine call) | **4.15 ms** | 0.01 ms (returns instantly) |
+| `await_gpu` | 0.01 ms | 3.90 ms |
+| `fast_post` | 0.30 ms | 0.49 ms |
+| `slow_post` | 0.29 ms | 0.19 ms |
+| `iter_total` | 4.94 ms | 4.79 ms |
+
+`submit_spec` should have collapsed to ~1 ms once the sample sync was
+gone (kernel launch only, no waiting for completion). It didn't. The
+4 ms of blocking is **`wrapper.plan()`** in `cache_manager.py` (see the
+TODO at line 238): plan does two internal D→H reads of CUB-scan
+results that force a synchronous wait on the previous step's KV-state
+updates. As long as plan() is on the critical path, the engine is
+effectively synchronous regardless of whether the sample sync is in
+place — the structural overlap window the same-thread path was meant
+to open just isn't there.
+
+Net: same-thread + sample-sync removal is *correct* and the
+infrastructure (`completion_event`, side-stream D→H,
+`_prematerialize_for_check_stop`) all does what it should — but TPOT
+on Orpheus stays within noise of baseline. To actually unlock the
+~1 ms / iter win, plan() has to come off the critical path, which
+needs the double-buffered FlashInfer wrappers + plan-worker thread
+(Phase 3 below). The same-thread path is the right *foundation* for
+that work; it just doesn't deliver wins on its own.
+
 ### Plausible paths that would actually deliver overlap
 
 1. **Same-thread async with CUDA events.** Drop the executor thread.

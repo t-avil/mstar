@@ -1448,6 +1448,69 @@ class Worker:
         side.synchronize()
         return flat_cpu.tolist()
 
+    def _prematerialize_for_check_stop(
+        self,
+        output: NodeOutput,
+    ) -> NodeOutput:
+        """Side-stream D→H of every CUDA tensor in
+        ``output.per_request_output_tensors`` so the subsequent
+        ``check_stop`` reads (typically ``.item()`` on the sampled token)
+        don't trigger a default-stream sync. With same-thread async,
+        GPU(N+1)'s kernels are already queued on default stream behind
+        N's outputs by the time we get here — a default-stream sync would
+        block waiting for N+1 to finish, defeating the overlap.
+
+        Returns a fresh ``NodeOutput`` with CPU tensors for the per-rid
+        outputs, sharing the original's allocation_failed / event fields.
+        Skipped (returns ``output`` unchanged) when there's no completion
+        event (CPU execution) or when CUDA is unavailable.
+
+        AR engines emit small per-rid output dicts (sampled token + maybe
+        a code) so the cost is negligible. If a future engine emits large
+        tensors here (e.g. activations), revisit.
+        """
+        if not torch.cuda.is_available() or output.completion_event is None:
+            return output
+        if not output.per_request_output_tensors:
+            return output
+
+        if self._d2h_stream is None:
+            self._d2h_stream = torch.cuda.Stream(device=self.device)
+        side = self._d2h_stream
+        side.wait_event(output.completion_event)
+
+        cpu_per_rid: dict = {}
+        with torch.cuda.stream(side):
+            for rid, name_to_list in output.per_request_output_tensors.items():
+                if not isinstance(name_to_list, dict):
+                    cpu_per_rid[rid] = name_to_list
+                    continue
+                cpu_per_rid[rid] = {}
+                for name, tensors in name_to_list.items():
+                    if not isinstance(tensors, list):
+                        cpu_per_rid[rid][name] = tensors
+                        continue
+                    new_list = []
+                    for t in tensors:
+                        if torch.is_tensor(t) and t.is_cuda:
+                            cpu_t = torch.empty_like(
+                                t, device="cpu", pin_memory=True,
+                            )
+                            cpu_t.copy_(t, non_blocking=True)
+                            new_list.append(cpu_t)
+                        else:
+                            new_list.append(t)
+                    cpu_per_rid[rid][name] = new_list
+        side.synchronize()
+
+        return NodeOutput(
+            per_request_output_tensors=cpu_per_rid,
+            allocation_failed=output.allocation_failed,
+            alloc_pages_short=output.alloc_pages_short,
+            alloc_failed_request_id=output.alloc_failed_request_id,
+            completion_event=output.completion_event,
+        )
+
     def _slow_postprocess(
         self,
         batch: ScheduledBatch,
@@ -1518,9 +1581,13 @@ class Worker:
         # is accepted: step N+1's sampling sees the mask state from before
         # N's token was added. See ASYNC_REDESIGN.md.
         engine = self.engine_manager.get_engine(batch.node_name)
-        # check_stop_for_batch expects NodeBatch (it iterates request_ids
-        # and reads per_request_info), not ScheduledBatch.
-        new_stops = engine.check_stop_for_batch(node_batch, output)
+        # Pre-materialize tensors to CPU on a side stream gated on
+        # event(N) so check_stop's .item() doesn't full-stream-sync (which
+        # would block on the in-flight GPU(N+1) submission and erase the
+        # overlap). check_stop_for_batch expects NodeBatch (it iterates
+        # request_ids and reads per_request_info), not ScheduledBatch.
+        cpu_output = self._prematerialize_for_check_stop(output)
+        new_stops = engine.check_stop_for_batch(node_batch, cpu_output)
 
         if self.enable_nvtx:
             range_pop(synchronize=False)
@@ -1563,14 +1630,26 @@ class Worker:
         # CUDA graph capture before entering the main loop
         self.engine_manager.warmup_all()
 
-        # Single dedicated GPU thread.
-        # Set MMINF_NO_GPU_THREAD=1 to run the engine synchronously on the
-        # main thread (control experiment for the GIL-contention diagnosis;
-        # see ASYNC_REDESIGN.md "What Phase 1' actually delivers"). When
-        # enabled, every engine call returns a real Future via a fake
-        # executor whose `submit` runs the function inline.
-        no_gpu_thread = os.environ.get("MMINF_NO_GPU_THREAD", "") == "1"
-        if no_gpu_thread:
+        # Same-thread async is the default: the engine runs on the main
+        # thread inside ``execute_with_max_batch_size``, returns once
+        # kernels are submitted (the in-engine sample sync is gated by an
+        # autotune-warmup budget — see sampling.py), and the main thread
+        # then post-processes N concurrently with GPU(N+1) executing on
+        # the default stream. Sync points use ``output.completion_event``
+        # so they wait for GPU(N) only, not for the queued GPU(N+1).
+        #
+        # Set ``MMINF_USE_GPU_THREAD=1`` to fall back to the original
+        # ThreadPoolExecutor path (a single dedicated GPU thread). That
+        # path does not deliver real overlap on its own — see
+        # ASYNC_REDESIGN.md "What Phase 1' actually delivers" — but is
+        # kept as a debug toggle.
+        use_gpu_thread = os.environ.get("MMINF_USE_GPU_THREAD", "") == "1"
+        if use_gpu_thread:
+            gpu_executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix=f"mminf-gpu-{self.worker_id}"
+            )
+            logger.info("Worker %s: MMINF_USE_GPU_THREAD=1 — engine runs on dedicated GPU thread", self.worker_id)
+        else:
             class _InlineExecutor:
                 def submit(self, fn, *args, **kwargs):
                     fut: Future = Future()
@@ -1580,11 +1659,6 @@ class Worker:
                         fut.set_exception(exc)
                     return fut
             gpu_executor = _InlineExecutor()
-            logger.info("Worker %s: MMINF_NO_GPU_THREAD=1 — engine runs on main thread", self.worker_id)
-        else:
-            gpu_executor = ThreadPoolExecutor(
-                max_workers=1, thread_name_prefix=f"mminf-gpu-{self.worker_id}"
-            )
 
         # Cross-iter async-scheduling state lives on self (initialized in
         # __init__) so _remove_request can see it from message processing.

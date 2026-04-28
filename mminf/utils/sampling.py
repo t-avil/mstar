@@ -317,6 +317,19 @@ def _apply_repetition_penalty(
     return logits
 
 
+# Autotune-warmup budget for the fast-path sampler's current-stream sync.
+# See the matching comment at the call site in ``sample_tokens``.
+_autotune_sync_budget_remaining = 64
+
+
+def _consume_autotune_sync_budget() -> None:
+    global _autotune_sync_budget_remaining
+    if _autotune_sync_budget_remaining <= 0:
+        return
+    torch.cuda.current_stream().synchronize()
+    _autotune_sync_budget_remaining -= 1
+
+
 @torch.compiler.disable
 def sample_tokens(
     logits: torch.Tensor,
@@ -373,12 +386,18 @@ def sample_tokens(
             seen_mask=seen_token_mask,
             include_greedy=run_greedy,
         )
-        # NOTE: this sync is load-bearing — see git history of sampling.py
-        # for the Qwen issue it fixes. Removing/gating it caused concurrent
-        # regression on Orpheus (worker GIL contention with the GPU thread)
-        # even though both kernels run on the same stream. Leave alone
-        # unless you're prepared to do thorough multi-model verification.
-        torch.cuda.current_stream().synchronize()
+        # Budgeted current-stream sync between fused-softmax and FlashInfer
+        # top-p sampling. The original unconditional sync was added to fix
+        # a Qwen sampling issue caused by Triton-autotune timing on first
+        # calls (see git history of this file). After autotune warms up
+        # both kernels run on the same default stream and stream ordering
+        # already serializes them — at that point the sync is pure overhead
+        # AND it blocks the same-thread async path from overlapping
+        # post-processing with the just-submitted GPU(N+1) work (see
+        # worker.run + ASYNC_REDESIGN.md). 64 calls comfortably covers
+        # ~8 unique autotune keys.
+        if _autotune_sync_budget_remaining > 0:
+            _consume_autotune_sync_budget()
         result = flashinfer.sampling.top_p_sampling_from_probs(probs, top_p)
         return result[0] if isinstance(result, tuple) else result
 
