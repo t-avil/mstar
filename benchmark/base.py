@@ -124,8 +124,14 @@ class Qwen3Omni(Model):
         # qwen3_omni_model.py:521-540 defaults are thinker=0.7, talker=0.9,
         # cp=1.0, which would otherwise make output length (and therefore
         # RTF / audio duration / text token count) vary across runs.
+        # Send both `max_tokens` (OpenAI convention — vllm-omni / sglang-omni)
+        # and `max_output_tokens` (mminf's own kwarg, read in
+        # mminf/model/base.py:372-373; default MAX_OUTPUT_TOKENS=2048). Without
+        # the second key, mminf silently ignores the cap and runs to natural
+        # EOS, which on T2T was observed at ~361 tokens/req vs vllm-omni's 256.
         kwargs = {
             "max_tokens": 256,
+            "max_output_tokens": 256,
             "thinker_temperature": 0.0,
         }
         if request_type in (
