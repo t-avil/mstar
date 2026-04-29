@@ -1403,33 +1403,29 @@ class Worker:
             range_pop(synchronize=False)
 
         # Send "loop done" messages to peer workers (small ZMQ msgs, no
-        # tensor data). NOTE: the original code had this block accidentally
-        # nested under `if enable_nvtx:` — we keep that historical scoping
-        # to avoid behavior changes for the non-NVTX path. TODO(separate
-        # change): hoist out of the NVTX branch.
-        if self.enable_nvtx:
-            for request_id in batch.node_objects:
-                stop_loop_workers: dict[str, set[str]] = {}
-                for loop_name in node_batch.per_request_info[request_id].dynamic_loop_stop_signals:
-                    for worker in self.worker_graphs_manager.get_dyn_loop_workers(
-                        request_id, batch_partition, loop_name
-                    ):
-                        stop_loop_workers.setdefault(worker, set()).add(loop_name)
-                for worker, loop_names in stop_loop_workers.items():
-                    if worker == self.worker_id:
-                        continue
-                    self.communicator.send(
-                        entity_id=worker,
-                        msg=WorkerMessage(
-                            message_type=WorkerMessageType.STOP_LOOPS,
-                            body=StopLoops(
-                                request_id=request_id,
-                                loop_names=loop_names,
-                                loop_stop_times=node_batch.per_request_info[request_id].loop_stop_times,
-                                partition_name=batch_partition
-                            )
+        # tensor data).
+        for request_id in batch.node_objects:
+            stop_loop_workers: dict[str, set[str]] = {}
+            for loop_name in node_batch.per_request_info[request_id].dynamic_loop_stop_signals:
+                for worker in self.worker_graphs_manager.get_dyn_loop_workers(
+                    request_id, batch_partition, loop_name
+                ):
+                    stop_loop_workers.setdefault(worker, set()).add(loop_name)
+            for worker, loop_names in stop_loop_workers.items():
+                if worker == self.worker_id:
+                    continue
+                self.communicator.send(
+                    entity_id=worker,
+                    msg=WorkerMessage(
+                        message_type=WorkerMessageType.STOP_LOOPS,
+                        body=StopLoops(
+                            request_id=request_id,
+                            loop_names=loop_names,
+                            loop_stop_times=node_batch.per_request_info[request_id].loop_stop_times,
+                            partition_name=batch_partition
                         )
                     )
+                )
 
         if self.enable_nvtx:
             range_push("worker.store_outputs", synchronize=False)
