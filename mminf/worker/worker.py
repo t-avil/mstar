@@ -1728,45 +1728,15 @@ class Worker:
 
         # The async worker path needs decode submission to return quickly so
         # the main loop can overlap queue/tensor polling and post-processing
-        # with GPU execution. Run the engine on a dedicated 1-worker GPU
-        # thread by default; the old same-thread inline path is kept only as
-        # an opt-in debug fallback.
-        #
-        # ``MMINF_INLINE_GPU_EXECUTOR=1`` restores the old inline behavior.
-        # Keep accepting the historical ``MMINF_USE_GPU_THREAD`` variable for
-        # compatibility, but it no longer changes behavior because the GPU
-        # thread is now the default.
-        use_inline_executor = os.environ.get("MMINF_INLINE_GPU_EXECUTOR", "") == "1"
-        if not use_inline_executor:
-            gpu_executor = ThreadPoolExecutor(
-                max_workers=1, thread_name_prefix=f"mminf-gpu-{self.worker_id}"
-            )
-            if os.environ.get("MMINF_USE_GPU_THREAD", "") == "1":
-                logger.info(
-                    "Worker %s: MMINF_USE_GPU_THREAD=1 is now redundant; "
-                    "dedicated GPU thread is the default",
-                    self.worker_id,
-                )
-            logger.info(
-                "Worker %s: engine runs on dedicated GPU thread "
-                "(set MMINF_INLINE_GPU_EXECUTOR=1 to force inline mode)",
-                self.worker_id,
-            )
-        else:
-            class _InlineExecutor:
-                def submit(self, fn, *args, **kwargs):
-                    fut: Future = Future()
-                    try:
-                        fut.set_result(fn(*args, **kwargs))
-                    except BaseException as exc:
-                        fut.set_exception(exc)
-                    return fut
-            gpu_executor = _InlineExecutor()
-            logger.warning(
-                "Worker %s: MMINF_INLINE_GPU_EXECUTOR=1 enabled; "
-                "decode runs on the main thread and overlap will be limited",
-                self.worker_id,
-            )
+        # with GPU execution. Run the engine unconditionally on a dedicated
+        # 1-worker GPU thread.
+        gpu_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix=f"mminf-gpu-{self.worker_id}"
+        )
+        logger.info(
+            "Worker %s: engine runs on dedicated GPU thread",
+            self.worker_id,
+        )
         # Background postprocessing is useful for overlap, but it touches CUDA
         # tensors and tensor-manager state from a second thread. Keep it opt-in
         # while the dedicated GPU thread path is being stabilized.

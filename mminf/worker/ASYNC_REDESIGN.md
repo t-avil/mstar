@@ -212,8 +212,8 @@ approach — it just doesn't translate to wall-clock gains on its own.
 ### Same-thread-async attempt (Orpheus, measured)
 
 The same-thread-async path was implemented and measured:
-- `MMINF_USE_GPU_THREAD=1` falls back to the executor; default is now
-  inline submission on the main thread.
+- The executor-thread path is now unconditional; the measured inline
+  submission fallback has been removed.
 - Sample sync (`sampling.py`) gated to a 64-call autotune-warmup budget,
   then permanently skipped.
 - New helper `_prematerialize_for_check_stop` does a side-stream D→H of
