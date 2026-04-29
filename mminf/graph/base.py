@@ -164,6 +164,7 @@ class GraphNode(GraphSection):
     # submodule).  Must be disjoint from ``input_ids``.
     optional_input_ids: set[str] = field(default_factory=set)
     consumes_stream: bool = field(default=False)
+    enable_async_scheduling: bool = True
     _streaming_inputs: set[str] = field(default_factory=set)
     _split_off_for_streaming: bool = field(default=False)
 
@@ -267,6 +268,7 @@ class GraphNode(GraphSection):
             outputs=[edge.clone_for_next_iter() for edge in self.outputs],
             optional_input_ids=set(self.optional_input_ids),
             consumes_stream=self.consumes_stream,
+            enable_async_scheduling=self.enable_async_scheduling,
         )
         clone._streaming_inputs = set(self._streaming_inputs)
         return clone

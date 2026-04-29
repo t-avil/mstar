@@ -127,14 +127,16 @@ originates (vjepa2 still pays 1 wasted GPU step per stop).
 
 `_can_speculate(batch_N)` returns True iff:
 - `engine.engine_type() == EngineType.AR`, AND
+- every `GraphNode` in the batch has `enable_async_scheduling=True`, AND
 - `_try_speculate_next` finds at least one continuing rid whose node's
   required inputs are all loop-back (i.e. `next_node == node.name` for
   some output edge with the same name).
 
-For non-AR engines (Flow, EncDec, AudioCodec) and for AR steps that
-aren't pure loop-back (e.g. prefill → decode transitions), the worker
-falls through to the non-speculative path — drains the in-flight step,
-runs MicroScheduler, submits the next step. Same as Phase 1.
+Models can opt a node out with `GraphNode(..., enable_async_scheduling=False)`.
+For opted-out nodes, non-AR engines (Flow, EncDec, AudioCodec), and AR
+steps that aren't pure loop-back (e.g. prefill → decode transitions), the
+worker falls through to the non-speculative path — drains the in-flight
+step, runs MicroScheduler, submits the next step. Same as Phase 1.
 
 ### Cross-iter state on `Worker`
 

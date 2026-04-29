@@ -1061,6 +1061,11 @@ class Worker:
         decode transitions, flow loop bodies) and (c) cross-engine /
         cross-worker (e.g. LLM → flow). See ASYNC_REDESIGN.md.
         """
+        if any(
+            not getattr(node, "enable_async_scheduling", True)
+            for node in batch.node_objects.values()
+        ):
+            return False
         engine = self.engine_manager.get_engine(batch.node_name)
         return engine.engine_type() == EngineType.AR
 
