@@ -767,33 +767,10 @@ class VoxServe(InferenceSystem):
 # vllm-omni and sglang-omni: OpenAI-compatible chat-completions adapters
 # ---------------------------------------------------------------------------
 
-# vllm-omni accepts standard OpenAI multimodal content parts (image_url,
-# audio_url, video_url) inside `messages[].content`. Its system prompt is
-# therefore wrapped as a content-parts list to match the user-message shape.
-_SYSTEM_MESSAGE = {
-    "role": "system",
-    "content": [
-        {
-            "type": "text",
-            "text": (
-                "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, "
-                "capable of perceiving auditory and visual inputs, as well as generating text and speech."
-            ),
-        }
-    ],
-}
-
-# sglang-omni does NOT parse OpenAI-style multimodal content parts; multimodal
-# media must arrive in top-level `images`/`audios`/`videos` fields and message
-# content must be plain text. See sglang-omni's openai_api.py:_build_chat_generate_request
-# and protocol.py:ChatCompletionRequest (Bug 1 in sglang-omni_v1_profile.md).
-_SYSTEM_MESSAGE_PLAINTEXT = {
-    "role": "system",
-    "content": (
-        "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, "
-        "capable of perceiving auditory and visual inputs, as well as generating text and speech."
-    ),
-}
+# System prompts are now per-model. See benchmark/base.py:Model.get_openai_system_message
+# for the rationale (Qwen3-Omni needs "You are Qwen…", BAGEL must not receive a system role).
+# vllm-omni and sglang-omni adapters call model.get_openai_system_message() at request time
+# and prepend the resulting message — or omit the system role entirely — accordingly.
 
 
 def _build_openai_user_message(prompt: str, input_modality: str, req_input: RequestInput) -> dict:
@@ -956,9 +933,18 @@ class VLLMOmni(InferenceSystem):
             # (benchmarks/diffusion/backends.py:async_request_chat_completions).
             is_image_output = output_mod == "image"
 
+            # Build messages: prepend the model-specific system prompt only if
+            # the model declares one. Qwen3-Omni needs "You are Qwen…" for
+            # correct talker behavior; BAGEL must NOT receive it (it derails
+            # prompt handling and produces off-prompt images). See
+            # base.py:Model.get_openai_system_message and the per-model
+            # overrides for rationale.
+            system_message = model.get_openai_system_message()
+            messages = [system_message, user_message] if system_message is not None else [user_message]
+
             payload: dict = {
                 "model": model.get_hf_url(),
-                "messages": [_SYSTEM_MESSAGE, user_message],
+                "messages": messages,
                 "temperature": 0.0,  # match vllm-omni's bench (`patch.py:336`)
                 **model.get_model_kwargs(req_type),
                 **additional_model_kwargs,
@@ -1098,12 +1084,25 @@ class SGLangOmni(InferenceSystem):
                 modalities_arg = [output_mod]
             else:
                 modalities_arg = None
+            # Same per-model rationale as VLLMOmni: only Qwen3-Omni needs the
+            # "You are Qwen…" preamble; BAGEL et al. must not receive it.
+            # sglang-omni accepts plain-string content in the system role
+            # (its protocol does not parse OpenAI-style multimodal parts).
+            sys_msg_obj = model.get_openai_system_message()
+            sys_text = None
+            if sys_msg_obj is not None:
+                sc = sys_msg_obj.get("content")
+                if isinstance(sc, list):
+                    sys_text = next((p.get("text") for p in sc if isinstance(p, dict) and p.get("type") == "text"), None)
+                elif isinstance(sc, str):
+                    sys_text = sc
+            user_msg = {"role": "user", "content": req_input.prompt}
+            messages = (
+                [{"role": "system", "content": sys_text}, user_msg] if sys_text is not None else [user_msg]
+            )
             payload: dict = {
                 "model": model.get_hf_url(),
-                "messages": [
-                    _SYSTEM_MESSAGE_PLAINTEXT,
-                    {"role": "user", "content": req_input.prompt},
-                ],
+                "messages": messages,
                 "temperature": 0.0,  # match VLLMOmni — greedy for cross-system parity
                 "stream": True,
                 "stream_options": {"include_usage": True},
