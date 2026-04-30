@@ -13,7 +13,7 @@ from typing import Optional
 
 import aiohttp
 
-from benchmark.base import Model, RequestType, Status
+from benchmark.base import Bagel, Model, RequestType, Status
 from benchmark.utils import _write_wav
 
 
@@ -914,6 +914,25 @@ class VLLMOmni(InferenceSystem):
             expected_output_modalities=[output_mod],
         )
 
+        # BAGEL T2I/I2I goes through vllm-omni's dedicated diffusion endpoints
+        # (`/v1/images/generations` and `/v1/images/edits`). The chat-completions
+        # path is broken for BAGEL on this commit: with `modalities: ["image"]`
+        # set, the server returns *some* image but doesn't thread the user's
+        # text prompt into BAGEL's thinker — every prompt produces the same
+        # deterministic output (verified via curl, byte-identical 1247950-byte
+        # PNG regardless of input). This matches what vllm-omni's own
+        # diffusion bench does (`--backend openai` in
+        # benchmarks/diffusion/backends.py:async_request_openai_images).
+        if isinstance(model, Bagel) and output_mod == "image":
+            return await self._send_request_bagel_images(
+                session=session,
+                req_input=req_input,
+                base_url=base_url,
+                model=model,
+                metrics=metrics,
+                additional_model_kwargs=additional_model_kwargs,
+            )
+
         try:
             user_message = _build_openai_user_message(req_input.prompt, input_mod, req_input)
             # Always send `modalities` explicitly. Omitting the field makes
@@ -1036,6 +1055,121 @@ class VLLMOmni(InferenceSystem):
         else:
             metrics.record_completion()
 
+        return metrics
+
+    async def _send_request_bagel_images(
+        self,
+        session: aiohttp.ClientSession,
+        req_input: "RequestInput",
+        base_url: str,
+        model: "Bagel",
+        metrics: "RequestMetrics",
+        additional_model_kwargs: dict,
+    ) -> "RequestMetrics":
+        """BAGEL T2I/I2I via vllm-omni's diffusion endpoints. Mirrors what
+        `vllm-omni/benchmarks/diffusion/backends.py:async_request_openai_images`
+        does. Sidesteps two known bugs in `/v1/chat/completions`:
+
+          - T2I: with `modalities: ["image"]` the server returns the same
+            deterministic image regardless of the user prompt (server doesn't
+            thread the prompt into BAGEL's thinker on this commit).
+          - I2I: the bench's chat-completions message format produces a
+            `<|fim_middle|>{prompt}` server-side that fails BAGEL's
+            `OmniBagelProcessor.apply` validation (missing `<|im_start|>...
+            <|im_end|>` wrap).
+
+        Both `/v1/images/generations` (T2I) and `/v1/images/edits` (I2I)
+        return the OpenAI Images API shape: `{"data": [{"b64_json": "..."}]}`.
+        """
+        req_type = req_input.req_type
+        # Server side, both endpoints accept `cfg_*_scale` and other BAGEL
+        # gen-params via the model_extra fallback (same mechanism that the
+        # chat-completions handler uses) — pass them at the JSON top level
+        # for `/v1/images/generations`, and as Form fields for
+        # `/v1/images/edits`. The default 1024×1024 size matches Noah's
+        # methodology (and vllm-omni's bench example). num_inference_steps
+        # is left to BAGEL's default (50) unless overridden.
+        kwargs = {**model.get_model_kwargs(req_type), **additional_model_kwargs}
+        kwargs.pop("temperature", None)  # not meaningful for the diffusion endpoints
+        try:
+            metrics.start_time = time.monotonic()
+            if req_type == RequestType.I2I:
+                if not req_input.image_path or not req_input._image_bytes:
+                    raise RuntimeError("I2I request missing input image bytes")
+                form = aiohttp.FormData()
+                form.add_field("model", model.get_hf_url())
+                form.add_field("prompt", req_input.prompt)
+                form.add_field("n", "1")
+                form.add_field("size", "1024x1024")
+                form.add_field("response_format", "b64_json")
+                form.add_field(
+                    "image",
+                    req_input._image_bytes,
+                    filename=req_input.get_filename("image") or "input.png",
+                    content_type=mimetypes.guess_type(req_input.image_path)[0] or "image/jpeg",
+                )
+                # Pass BAGEL gen-params as Form fields. Only the keys the
+                # server's edit_images endpoint accepts (or routes via
+                # model_extra) are useful; the rest are harmless extras.
+                for k, v in kwargs.items():
+                    form.add_field(k, json.dumps(v) if not isinstance(v, str) else v)
+                async with session.post(
+                    f"{base_url}/v1/images/edits",
+                    data=form,
+                    headers={"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY', 'EMPTY')}"},
+                    read_bufsize=2**24,
+                    timeout=aiohttp.ClientTimeout(total=None, sock_read=300),
+                ) as resp:
+                    if resp.status != 200:
+                        raise Exception(f"HTTP {resp.status}: {await resp.text()}")
+                    response_json = await resp.json()
+            else:
+                # T2I → /v1/images/generations (JSON body)
+                payload: dict = {
+                    "model": model.get_hf_url(),
+                    "prompt": req_input.prompt,
+                    "n": 1,
+                    "size": "1024x1024",
+                    "response_format": "b64_json",
+                    **kwargs,
+                }
+                async with session.post(
+                    f"{base_url}/v1/images/generations",
+                    json=payload,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY', 'EMPTY')}",
+                    },
+                    read_bufsize=2**24,
+                    timeout=aiohttp.ClientTimeout(total=None, sock_read=300),
+                ) as resp:
+                    if resp.status != 200:
+                        raise Exception(f"HTTP {resp.status}: {await resp.text()}")
+                    response_json = await resp.json()
+
+            arrival_time = time.monotonic()
+            data = response_json.get("data") or []
+            if not data:
+                raise Exception(f"No image data in response: {response_json}")
+            for item in data:
+                b64 = item.get("b64_json")
+                if not b64:
+                    continue
+                metrics.record_output_chunk(
+                    modality="image",
+                    data_b64=b64,
+                    arrival_time=arrival_time,
+                    n_tokens=1,
+                )
+            usage = response_json.get("usage") or {}
+            if (ct := usage.get("completion_tokens")) is not None:
+                metrics.output_text_tokens = ct
+            if (pt := usage.get("prompt_tokens")) is not None:
+                metrics.input_tokens = pt
+        except Exception as e:
+            metrics.record_error(str(e))
+        else:
+            metrics.record_completion()
         return metrics
 
 
