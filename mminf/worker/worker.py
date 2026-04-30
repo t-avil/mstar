@@ -1975,6 +1975,12 @@ class Worker:
                         p_batch, p_node_batch, p_partition, output,
                         speculation_consumed_loop_back=spec_consumed,
                     )
+                    for rid, req_info in p_node_batch.per_request_info.items():
+                        req_info.dynamic_loop_iter_counts.update(
+                            self.worker_graphs_manager.get_dynamic_loop_iters(
+                                rid, partition=p_partition,
+                            )
+                        )
                     if phase_period:
                         _phase_record("fast_post", _time.perf_counter() - _t0)
                     _t0 = _time.perf_counter() if phase_period else 0.0
