@@ -21,11 +21,12 @@ from __future__ import annotations
 
 import math
 
+from mminf.engine.cache_manager import BatchedCacheManager
 import torch
 import torch.nn.functional as F
 from torch import nn
 
-from mminf.model.vjepa2.components.rope_utils import rotate_queries_or_keys
+from mminf.model.vjepa2.components.rope_utils import rotate_queries_or_keys, rotate_queries_or_keys_BNHD
 from mminf.model.vjepa2.config import VJepa2ACPredictorConfig
 
 
@@ -96,6 +97,31 @@ class ACRoPEAttention(nn.Module):
         width_ids = rem - w * height_ids
         return 1.0 * frame_ids, 1.0 * height_ids, 1.0 * width_ids
 
+    def _compute_positions(
+        self,
+        t_0: int,
+        h: int,
+        w: int,
+        action_tokens: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        """Compute RoPE position tensors for one cached frame step.
+
+        Separated from forward_cached so callers can hoist this computation
+        out of CUDA-graph-captured regions.  The returned tensors are ordinary
+        (non-static) GPU tensors; the CUDA-graph path instead pre-allocates
+        static GPU buffers and updates them with .copy_() before each replay.
+        """
+        spatial_ids = torch.arange(t_0 * h * w, (t_0 + 1) * h * w, device=device)
+        d_pos, h_pos, w_pos = self._separate_positions(spatial_ids, h, w)
+        h_pos = h_pos * (self.grid_size / h)
+        w_pos = w_pos * (self.grid_size / w)
+        time_pos: torch.Tensor | None = None
+        if action_tokens > 0:
+            time_pos = torch.full((action_tokens,), float(t_0), device=device, dtype=dtype)
+        return d_pos, h_pos, w_pos, time_pos
+
     def forward(
         self,
         x: torch.Tensor,
@@ -104,7 +130,28 @@ class ACRoPEAttention(nn.Module):
         h: int,
         w: int,
         action_tokens: int,
+        t_0: int = 0,
+        cache_handle: BatchedCacheManager | None = None,
+        # Pre-computed position tensors for the cached path.  When provided
+        # (CUDA-graph path), they are static GPU buffers already on device and
+        # no torch.arange / torch.full calls happen inside the captured region.
+        # When None (eager path), they are computed from t_0 here.
+        d_pos: torch.Tensor | None = None,
+        h_pos: torch.Tensor | None = None,
+        w_pos: torch.Tensor | None = None,
+        time_pos: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if cache_handle is not None:
+            if d_pos is None:
+                d_pos, h_pos, w_pos, time_pos = self._compute_positions(
+                    t_0, h, w, action_tokens, x.device, x.dtype
+                )
+            return self.forward_cached(
+                x=x,
+                d_pos=d_pos, h_pos=h_pos, w_pos=w_pos, time_pos=time_pos,
+                action_tokens=action_tokens,
+                cache_handle=cache_handle,
+            )
         b, n, c = x.size()
 
         # Position ids for the spatial part of each frame
@@ -176,6 +223,82 @@ class ACRoPEAttention(nn.Module):
         x = x.transpose(1, 2).reshape(b, n, c)
         return self.proj(x)
 
+    def forward_cached(
+        self,
+        x: torch.Tensor,                   # [B, L, C]
+        d_pos: torch.Tensor,               # [H*W]  — depth (frame) positions for spatial tokens
+        h_pos: torch.Tensor,               # [H*W]  — height positions
+        w_pos: torch.Tensor,               # [H*W]  — width positions
+        time_pos: torch.Tensor | None,     # [action_tokens] or None
+        action_tokens: int,
+        cache_handle: BatchedCacheManager,
+    ) -> torch.Tensor:
+        """Single-frame cached attention with pre-computed position tensors.
+
+        All position tensors are expected to already be on the correct device.
+        Callers must compute them via _compute_positions (or the model-level
+        _compute_rope_positions) and may store them in static GPU buffers
+        updated via .copy_() so the surrounding CUDA graph sees the new values.
+
+        Parity with the regular forward was partially validated in
+        test/modular/vjepa2/test_ac_rope_parity.py and more thoroughly in
+        test/modular/vjepa2/test_ac_kv_cache_parity.py.
+        """
+        b, n, c = x.shape
+        hd = self.head_dim
+
+        qkv: torch.Tensor = self.qkv(x).view(b, n, 3, self.num_heads, hd)
+        q, k, v = qkv.unbind(dim=2)
+
+        if action_tokens > 0:
+            q_action = q[:, :action_tokens]
+            k_action = k[:, :action_tokens]
+            v_action = v[:, :action_tokens]
+            q_spatial = q[:, action_tokens:]
+            k_spatial = k[:, action_tokens:]
+            v_spatial = v[:, action_tokens:]
+        else:
+            q_spatial, k_spatial, v_spatial = q, k, v
+
+        # 3-axis RoPE for spatial tokens
+        s = 0
+        qd = rotate_queries_or_keys_BNHD(q_spatial[..., s:s + self.d_dim], d_pos)
+        kd = rotate_queries_or_keys_BNHD(k_spatial[..., s:s + self.d_dim], d_pos)
+        s += self.d_dim
+        qh = rotate_queries_or_keys_BNHD(q_spatial[..., s:s + self.h_dim], h_pos)
+        kh = rotate_queries_or_keys_BNHD(k_spatial[..., s:s + self.h_dim], h_pos)
+        s += self.h_dim
+        qw = rotate_queries_or_keys_BNHD(q_spatial[..., s:s + self.w_dim], w_pos)
+        kw = rotate_queries_or_keys_BNHD(k_spatial[..., s:s + self.w_dim], w_pos)
+        s += self.w_dim
+        if s < hd:
+            q_spatial = torch.cat([qd, qh, qw, q_spatial[..., s:]], dim=-1)
+            k_spatial = torch.cat([kd, kh, kw, k_spatial[..., s:]], dim=-1)
+        else:
+            q_spatial = torch.cat([qd, qh, qw], dim=-1)
+            k_spatial = torch.cat([kd, kh, kw], dim=-1)
+
+        # Temporal RoPE for action tokens
+        if action_tokens > 0 and time_pos is not None:
+            qd = rotate_queries_or_keys_BNHD(q_action[..., :self.d_dim], time_pos)
+            kd = rotate_queries_or_keys_BNHD(k_action[..., :self.d_dim], time_pos)
+            q_action = torch.cat([qd, q_action[..., self.d_dim:]], dim=-1)
+            k_action = torch.cat([kd, k_action[..., self.d_dim:]], dim=-1)
+            q = torch.cat([q_action, q_spatial], dim=1)
+            k = torch.cat([k_action, k_spatial], dim=1)
+            v = torch.cat([v_action, v_spatial], dim=1)
+        else:
+            q, k, v = q_spatial, k_spatial, v_spatial
+
+        # [B, L, H, D] -> [B*L, H, D] for FlashInfer
+        q = q.reshape(b * n, self.num_heads, hd)
+        k = k.reshape(b * n, self.num_heads, hd)
+        v = v.reshape(b * n, self.num_heads, hd)
+
+        x = cache_handle.run_attention(q, k, v)
+        x = x.reshape(b, n, c)
+        return self.proj(x)
+
 
 class ACBlock(nn.Module):
     def __init__(
@@ -206,8 +329,18 @@ class ACBlock(nn.Module):
         h: int,
         w: int,
         action_tokens: int,
+        t_0: int = 0,
+        cache_handle: BatchedCacheManager | None = None,
+        d_pos: torch.Tensor | None = None,
+        h_pos: torch.Tensor | None = None,
+        w_pos: torch.Tensor | None = None,
+        time_pos: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        x = x + self.attn(self.norm1(x), attn_mask=attn_mask, t=t, h=h, w=w, action_tokens=action_tokens)
+        x = x + self.attn(
+            self.norm1(x), attn_mask=attn_mask, t=t, h=h, w=w,
+            action_tokens=action_tokens, t_0=t_0, cache_handle=cache_handle,
+            d_pos=d_pos, h_pos=h_pos, w_pos=w_pos, time_pos=time_pos,
+        )
         x = x + self.mlp(self.norm2(x))
         return x
 
@@ -285,12 +418,119 @@ class VisionTransformerPredictorAC(nn.Module):
             self._attn_mask_cache = cache
         return cache
 
+    def _compute_rope_positions(
+        self,
+        t_0: int,
+        h: int,
+        w: int,
+        action_tokens: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        """Compute RoPE position tensors for one cached rollout step.
+
+        Delegates to ACRoPEAttention._compute_positions using the first block's
+        grid_size, which is constant across all blocks for a given config.
+        Called once before the block loop so the computation is hoisted out of
+        any CUDA-graph-captured region.
+        """
+        return self.predictor_blocks[0].attn._compute_positions(
+            t_0, h, w, action_tokens, device, dtype
+        )
+
+    def _prepare_sequence(
+        self,
+        x: torch.Tensor,
+        actions: torch.Tensor,
+        states: torch.Tensor,
+        extrinsics: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, int, int, int]:
+        """Embed and interleave action/state/spatial tokens.
+
+        Returns ``(x, cond_tokens, b, t)`` where ``x`` is the full interleaved
+        sequence ``[B, T*(cond_tokens + H*W), D]`` ready for the block loop.
+        """
+        x = self.predictor_embed(x)
+        b, n_ctxt, d = x.size()
+        t = n_ctxt // (self.grid_height * self.grid_width)
+        s = self.state_encoder(states).unsqueeze(2)   # [B, T, 1, D]
+        a = self.action_encoder(actions).unsqueeze(2)
+        x = x.view(b, t, self.grid_height * self.grid_width, d)
+        if self.use_extrinsics:
+            if extrinsics is None:
+                raise ValueError("extrinsics required when use_extrinsics=True")
+            e = self.extrinsics_encoder(extrinsics).unsqueeze(2)
+            x = torch.cat([a, s, e, x], dim=2).flatten(1, 2)
+            cond_tokens = 3
+        else:
+            x = torch.cat([a, s, x], dim=2).flatten(1, 2)
+            cond_tokens = 2
+        return x, cond_tokens, b, t
+
+    def _decode_sequence(
+        self,
+        x: torch.Tensor,
+        cond_tokens: int,
+        b: int,
+        t: int,
+    ) -> torch.Tensor:
+        """Drop action/state tokens, apply norm + projection."""
+        d = x.size(-1)
+        x = x.view(b, t, cond_tokens + self.grid_height * self.grid_width, d)
+        x = x[:, :, cond_tokens:, :].flatten(1, 2)
+        x = self.predictor_norm(x)
+        x = self.predictor_proj(x)
+        return x
+
+    def make_block_loop_fn(
+        self,
+        static_cache_manager,           # BatchedCacheManager with persistent wrappers, or None
+        static_pos_bufs: dict,          # {"d_pos": Tensor, "h_pos": Tensor, ...}
+        cond_tokens: int,
+    ):
+        """Return a closure capturing the block loop for PiecewiseCudaGraphRunner.
+
+        The returned ``fn(x) -> x`` reads position tensors from
+        ``static_pos_bufs`` (which the runner updates via ``.copy_()`` before
+        each replay) and uses ``static_cache_manager`` (whose FlashInfer
+        wrapper is re-planned outside the graph before each replay).
+
+        ``advance_seq_len`` is NOT called inside this closure — the runner
+        calls it after ``graph.replay()`` so it stays outside the captured
+        region.
+        """
+        blocks = self.predictor_blocks
+        gh, gw = self.grid_height, self.grid_width
+
+        def fn(x: torch.Tensor) -> torch.Tensor:
+            d_pos   = static_pos_bufs["d_pos"]
+            h_pos   = static_pos_bufs["h_pos"]
+            w_pos   = static_pos_bufs["w_pos"]
+            time_pos = static_pos_bufs.get("time_pos")
+            for blk_num, blk in enumerate(blocks):
+                if static_cache_manager is not None:
+                    static_cache_manager.set_layer_idx(blk_num)
+                x = blk(
+                    x,
+                    attn_mask=None,
+                    t=1,                   # always 1 frame per step in rollout
+                    h=gh, w=gw,
+                    action_tokens=cond_tokens,
+                    cache_handle=static_cache_manager,
+                    d_pos=d_pos, h_pos=h_pos, w_pos=w_pos, time_pos=time_pos,
+                )
+            return x
+
+        return fn
+
     def forward(
         self,
         x: torch.Tensor,
         actions: torch.Tensor,
         states: torch.Tensor,
         extrinsics: torch.Tensor | None = None,
+        t_0: int = 0,
+        cache_handle: BatchedCacheManager | None = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -303,28 +543,24 @@ class VisionTransformerPredictorAC(nn.Module):
         Returns:
             Predicted embeddings, ``[B, N_ctxt, embed_dim]``.
         """
-        x = self.predictor_embed(x)
-        b, n_ctxt, d = x.size()
-        t = n_ctxt // (self.grid_height * self.grid_width)
-
-        s = self.state_encoder(states).unsqueeze(2)  # [B, T, 1, D]
-        a = self.action_encoder(actions).unsqueeze(2)
-        x = x.view(b, t, self.grid_height * self.grid_width, d)
-
-        if self.use_extrinsics:
-            if extrinsics is None:
-                raise ValueError("extrinsics required when use_extrinsics=True")
-            e = self.extrinsics_encoder(extrinsics).unsqueeze(2)
-            x = torch.cat([a, s, e, x], dim=2).flatten(1, 2)
-            cond_tokens = 3
-        else:
-            x = torch.cat([a, s, x], dim=2).flatten(1, 2)
-            cond_tokens = 2
+        x, cond_tokens, b, t = self._prepare_sequence(x, actions, states, extrinsics)
 
         assert self.config.is_frame_causal, "non-causal AC predictor is not implemented"
-        attn_mask = self._get_attn_mask(x.device)[: x.size(1), : x.size(1)]
 
-        for blk in self.predictor_blocks:
+        if cache_handle is None:
+            attn_mask = self._get_attn_mask(x.device)[: x.size(1), : x.size(1)]
+            d_pos = h_pos = w_pos = time_pos = None
+        else:
+            attn_mask = None
+            # Compute positions once before the block loop so this work stays
+            # outside any CUDA-graph-captured region (see PiecewiseCudaGraphRunner).
+            d_pos, h_pos, w_pos, time_pos = self._compute_rope_positions(
+                t_0, self.grid_height, self.grid_width, cond_tokens, x.device, x.dtype
+            )
+
+        for blk_num, blk in enumerate(self.predictor_blocks):
+            if cache_handle is not None:
+                cache_handle.set_layer_idx(blk_num)
             x = blk(
                 x,
                 attn_mask=attn_mask,
@@ -332,33 +568,13 @@ class VisionTransformerPredictorAC(nn.Module):
                 h=self.grid_height,
                 w=self.grid_width,
                 action_tokens=cond_tokens,
+                t_0=t_0,
+                cache_handle=cache_handle,
+                d_pos=d_pos, h_pos=h_pos, w_pos=w_pos, time_pos=time_pos,
             )
 
-        # Drop interleaved action/state(+extrinsics) tokens, keep spatial ones.
-        x = x.view(b, t, cond_tokens + self.grid_height * self.grid_width, d)
-        x = x[:, :, cond_tokens:, :].flatten(1, 2)
+        if cache_handle is not None:
+            cache_handle.advance_seq_len()
 
-        x = self.predictor_norm(x)
-        x = self.predictor_proj(x)
-        return x
+        return self._decode_sequence(x, cond_tokens, b, t)
 
-
-def _init_ac_predictor_weights(module: nn.Module, init_std: float = 0.02) -> None:
-    """Match upstream initialization + rescale_blocks scheme.
-
-    Only used when instantiating without a checkpoint (parity-test reference
-    setup).  Real deployments load weights via the weight_loader.
-    """
-    for m in module.modules():
-        if isinstance(m, nn.Linear):
-            nn.init.trunc_normal_(m.weight, std=init_std)
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.LayerNorm):
-            nn.init.constant_(m.bias, 0)
-            nn.init.constant_(m.weight, 1.0)
-
-    if isinstance(module, VisionTransformerPredictorAC):
-        for layer_id, blk in enumerate(module.predictor_blocks, start=1):
-            blk.attn.proj.weight.data.div_(math.sqrt(2.0 * layer_id))
-            blk.mlp.fc2.weight.data.div_(math.sqrt(2.0 * layer_id))

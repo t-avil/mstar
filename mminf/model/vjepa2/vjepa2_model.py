@@ -284,8 +284,17 @@ class VJepa2Model(Model):
     # ------------------------------------------------------------------
 
     def get_kv_cache_config(self) -> list[KVCacheConfig]:
-        # V-JEPA 2 has no KV cache (stateless ViT encoder + stateless predictor).
-        return []
+        # KV cache exists for the AC rollout predictor
+        if self.config.predictor_kind == "ac":
+            return [KVCacheConfig(
+                num_layers=self.config.ac_predictor.depth,
+                num_kv_heads=self.config.ac_predictor.num_heads,
+                head_dim=self.config.ac_predictor.predictor_embed_dim // self.config.ac_predictor.num_heads,
+                max_seq_len=16384, # TODO: actually compute this
+                num_qo_heads=self.config.ac_predictor.num_heads,
+                nodes=["rollout_predictor"]
+            )]
+        return [] # otherwise no kv cache
 
     def get_node_engine_types(self) -> dict[str, EngineType]:
         types: dict[str, EngineType] = {
@@ -307,11 +316,11 @@ class VJepa2Model(Model):
         if self.config.predictor_kind == "ac":
             types["ac_predictor_mpc"] = EngineType.ENC_DEC
             types["mpc_scorer"] = EngineType.ENC_DEC
+            types["rollout_predictor"] = EngineType.AR
         return types
 
     def get_graph_walk_graphs(self) -> dict[str, GraphSection]:
         predictor_inputs: list[str] = ["encoder_hidden"]
-        predictor_optional_inputs: list[str] = []
         if self.config.predictor_kind == "ac":
             predictor_inputs += ["actions", "states"]
             if self.config.ac_predictor and self.config.ac_predictor.use_extrinsics:
@@ -319,11 +328,8 @@ class VJepa2Model(Model):
         else:
             # Masked predictor: ``context_mask`` / ``target_mask`` are
             # optional (submodule builds full-coverage defaults when
-            # absent).  Declared as ``optional_input_ids`` so the graph
-            # dispatcher routes them when the caller supplies them but
-            # ``is_ready`` doesn't block waiting for them in the common
-            # no-masks case.  Phase 2 new primitive (``GraphNode.optional_input_ids``).
-            predictor_optional_inputs += ["context_mask", "target_mask"]
+            # absent). If absent, an empty ("signal-only") edge is sent
+            predictor_inputs += ["context_mask", "target_mask"]
 
         prefill_video = Sequential(
             [
@@ -335,7 +341,6 @@ class VJepa2Model(Model):
                 GraphNode(
                     name="predictor",
                     input_ids=predictor_inputs,
-                    optional_input_ids=set(predictor_optional_inputs),
                     outputs=[
                         GraphEdge(
                             next_node=EMIT_TO_CLIENT,
@@ -379,14 +384,6 @@ class VJepa2Model(Model):
         # the same node, meaning the loop-back value is ignored by the
         # node's ``input_ids`` and only survives in the accumulated cache.
         #
-        # AC rollout additionally carries ``actions`` / ``states`` (+
-        # optional ``extrinsics``) as identity loop-back edges: the client
-        # sends the full per-iter trajectory once and the submodule slices
-        # per-iter from ``iter_idx``, so the tensors don't change across
-        # iters but still need to be routed on every iter.  See
-        # ``VJepa2ACRolloutPredictorSubmodule`` for the sliding-window
-        # semantics and the P3.D "Sliding-window vs upstream growing-context"
-        # note in the plan for why we diverge from upstream.
         #
         # Two variants of the walk coexist:
         #   * batched (default): ``Loop.accumulated_outputs`` gathers the
@@ -415,16 +412,13 @@ class VJepa2Model(Model):
             GraphEdge(next_node="rollout_predictor", name="predicted_hidden"),
         ]
         if self.config.predictor_kind == "ac":
+            # NOTE: in the absence of "actions" and "states" loopback outputs,
+            # the look primitives always pass in the initial action and state inputs;
+            # no additional wiring needed because the actions and states are constant
+            # buffers across loop iterations (we just take different indices at each iter)
             rollout_inputs += ["actions", "states"]
-            rollout_loopback_outputs += [
-                GraphEdge(next_node="rollout_predictor", name="actions"),
-                GraphEdge(next_node="rollout_predictor", name="states"),
-            ]
             if self.config.ac_predictor and self.config.ac_predictor.use_extrinsics:
                 rollout_inputs.append("extrinsics")
-                rollout_loopback_outputs.append(
-                    GraphEdge(next_node="rollout_predictor", name="extrinsics")
-                )
 
         def _build_rollout_encoder_node() -> GraphNode:
             # Fresh instance per walk — GraphNode carries per-request
@@ -507,7 +501,6 @@ class VJepa2Model(Model):
         # upstream ``mpc_utils.cem`` lines 62-64 + 114.
         if self.config.predictor_kind == "ac":
             mpc_predictor_inputs: list[str] = ["encoder_hidden", "actions", "states"]
-            mpc_predictor_optional: list[str] = []
             if self.config.ac_predictor and self.config.ac_predictor.use_extrinsics:
                 mpc_predictor_inputs.append("extrinsics")
 
@@ -523,7 +516,6 @@ class VJepa2Model(Model):
                     GraphNode(
                         name="ac_predictor_mpc",
                         input_ids=mpc_predictor_inputs,
-                        optional_input_ids=set(mpc_predictor_optional),
                         outputs=[
                             GraphEdge(next_node="mpc_scorer", name="predicted_hidden"),
                         ],
@@ -694,7 +686,7 @@ class VJepa2Model(Model):
             # (see ``VJepa2ACRolloutPredictorSubmodule._rollout_step``).
             rollout_horizon = int(kwargs.get("rollout_horizon", 0) or 0)
             if rollout_horizon > 1:
-                t_ctx = self.config.grid_depth
+                t_ctx = 1
                 required = t_ctx + rollout_horizon - 1
                 act_tensor = out["actions"][0]
                 t_total = act_tensor.size(0) if act_tensor.dim() == 2 else act_tensor.size(1)
@@ -704,6 +696,12 @@ class VJepa2Model(Model):
                         f"actions/states trajectory length >= T_ctx + H - 1 = "
                         f"{t_ctx} + {rollout_horizon} - 1 = {required}; got {t_total}."
                     )
+
+                # for ACrollouut, only use the first 2 video frames as context,
+                # consistent with the vjepa2 repo notebooks/utils/mpc_utils.py cem fn
+                if "video_frames" in out:
+                    out["video_frames"] = [frames[:self.config.ac_predictor.tubelet_size] for frames in out["video_frames"]]
+
 
             # Phase 3.B: MPC walk requires a pre-encoded goal latent.  When
             # the client flags ``mpc=True`` they must also supply EITHER:
@@ -747,10 +745,8 @@ class VJepa2Model(Model):
                         tuple(out["goal_hidden"][0].shape),
                     )
 
-        # Optional user-supplied masks (masked predictor only).  These are
-        # routed via the new ``GraphNode.optional_input_ids`` primitive —
-        # the predictor node accepts them when present, the submodule
-        # builds full-coverage defaults otherwise.
+        # Optional user-supplied masks (masked predictor only). the submodule
+        # builds full-coverage defaults if notpreent.
         if self.config.predictor_kind != "ac":
             for mask_name in ("context_mask", "target_mask"):
                 m = kwargs.get(mask_name)
@@ -830,15 +826,12 @@ class VJepa2Model(Model):
                     edge = GraphEdge(next_node="predictor", name=name)
                     edge.tensor_info = input_signals[name]
                     inputs.append(edge)
-            # Optional masks (masked predictor): routed via the predictor
-            # node's ``optional_input_ids``.  When absent, the submodule
-            # builds full-coverage defaults — readiness does not block on
-            # these.
+            # Optional masks (masked predictor): When absent, the submodule
+            # builds full-coverage defaults
             for name in ("context_mask", "target_mask"):
-                if name in input_signals:
-                    edge = GraphEdge(next_node="predictor", name=name)
-                    edge.tensor_info = input_signals[name]
-                    inputs.append(edge)
+                edge = GraphEdge(next_node="predictor", name=name)
+                edge.tensor_info = input_signals.get(name, [])
+                inputs.append(edge)
 
         if walk in (self.PREFILL_VIDEO_ROLLOUT, self.PREFILL_VIDEO_ROLLOUT_STREAMING) \
                 and self.config.predictor_kind == "ac":

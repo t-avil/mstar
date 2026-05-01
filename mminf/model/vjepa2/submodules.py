@@ -27,6 +27,7 @@ import torch
 from mminf.communication.tensors import NameToTensorList
 from mminf.conductor.request_info import CurrentForwardPassInfo
 from mminf.engine.base import NodeBatch
+from mminf.engine.cache_manager import BatchedCacheManager
 from mminf.model.submodule_base import ARNodeInputs, ARNodeSubmodule, ModelInputsFromEngine, NodeInputs, NodeSubmodule
 from mminf.model.vjepa2.components.ac_predictor import VisionTransformerPredictorAC
 from mminf.model.vjepa2.components.predictor import VJEPA2Predictor
@@ -203,7 +204,7 @@ class VJepa2EncoderSubmodule(NodeSubmodule):
 
 def _build_default_masks(
     encoder_hidden: torch.Tensor,
-) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+) -> tuple[list[torch.Tensor], torch.Tensor]:
     """Build full-context / full-target masks given encoder hidden states.
 
     Matches HF's default in ``VJEPA2Model.forward`` when the caller doesn't
@@ -211,7 +212,7 @@ def _build_default_masks(
     """
     b, n, _ = encoder_hidden.shape
     ids = torch.arange(n, device=encoder_hidden.device).unsqueeze(0).repeat(b, 1)
-    return [ids], [ids]
+    return ids, ids
 
 
 class VJepa2PredictorSubmodule(ARNodeSubmodule):
@@ -276,10 +277,14 @@ class VJepa2PredictorSubmodule(ARNodeSubmodule):
         """
         encoder_hidden = _ensure_lead_batch_dim(inputs["encoder_hidden"][0], 3)
         tensor_inputs = {}
-        if "context_mask" in inputs:
-            tensor_inputs["context_mask"] = _ensure_lead_batch_dim(inputs["context_mask"][0], 2)
-        if "target_mask" in inputs:
-            tensor_inputs["target_mask"] = _ensure_lead_batch_dim(inputs["target_mask"][0], 2)
+
+        context_mask = inputs.get("context_mask")
+        target_mask = inputs.get("target_mask")
+
+        if context_mask:
+            tensor_inputs["context_mask"] = _ensure_lead_batch_dim(context_mask[0], 2)
+        if target_mask:
+            tensor_inputs["target_mask"] = _ensure_lead_batch_dim(target_mask[0], 2)
         return ARNodeInputs(
             input_embeds=encoder_hidden,
             tensor_inputs=tensor_inputs
@@ -293,19 +298,25 @@ class VJepa2PredictorSubmodule(ARNodeSubmodule):
         inputs: list[ARNodeInputs],
     ) -> dict[str, torch.Tensor]:
         # Sequential (len == 1) and batched (len > 1) share this path.
+        encoder_hidden = torch.cat([
+            inp.input_embeds for inp in inputs
+        ], dim=0)
         out: dict[str, torch.Tensor] = {
-            "encoder_hidden": torch.cat([
-                inp.input_embeds for inp in inputs
-            ], dim=0)
+            "encoder_hidden": encoder_hidden
         }
-        if "context_mask" in inputs[0].tensor_inputs:
+        has_context_mask = "context_mask" in inputs[0].tensor_inputs
+        has_target_mask = "target_mask" in inputs[0].tensor_inputs
+        
+        if has_context_mask:
             out["context_mask"] = torch.cat([
                 inp.tensor_inputs["context_mask"] for inp in inputs
             ], dim=0)
-        if "target_mask" in inputs[0].tensor_inputs:
+        if has_target_mask:
             out["target_mask"] = torch.cat([
                 inp.tensor_inputs["target_mask"] for inp in inputs
             ], dim=0)
+        if (not has_context_mask) or not(has_target_mask):
+            out["context_mask"], out["target_mask"] = _build_default_masks(encoder_hidden)
         return out
 
     def forward(
@@ -323,11 +334,9 @@ class VJepa2PredictorSubmodule(ARNodeSubmodule):
         )
         if encoder_hidden.dim() == 2:
             encoder_hidden = encoder_hidden.unsqueeze(0)
-        if context_mask is None or target_mask is None:
-            ctx_list, tgt_list = _build_default_masks(encoder_hidden)
-        else:
-            ctx_list = [context_mask]
-            tgt_list = [target_mask]
+
+        ctx_list = [context_mask]
+        tgt_list = [target_mask]
         predicted = self.predictor(encoder_hidden, ctx_list, tgt_list)
         logger.info("VJepa2PredictorSubmodule.forward: output shape=%s", tuple(predicted.shape))
         return {"predicted_hidden": [predicted]}
@@ -342,11 +351,9 @@ class VJepa2PredictorSubmodule(ARNodeSubmodule):
         **kwargs,
     ) -> dict[str, NameToTensorList]:
         request_ids = engine_inputs.request_ids
-        if context_mask is None or target_mask is None:
-            ctx_list, tgt_list = _build_default_masks(encoder_hidden)
-        else:
-            ctx_list = [context_mask]
-            tgt_list = [target_mask]
+
+        ctx_list = [context_mask]
+        tgt_list = [target_mask]
         logger.info(
             "VJepa2PredictorSubmodule.forward_batched: encoder_hidden=%s rids=%d",
             tuple(encoder_hidden.shape),
@@ -410,6 +417,63 @@ class VJepa2RolloutPredictorSubmodule(ARNodeSubmodule):
         self.num_output_frames = max(int(num_output_frames), config.tubelet_size)
         self.frames_per_second = int(frames_per_second)
         self.anticipation_seconds = float(anticipation_seconds)
+        self._piecewise_runner = None
+
+    def set_piecewise_runner(self, runner) -> None:
+        """Attach a warmed-up PiecewiseCudaGraphRunner for the layer loop."""
+        self._piecewise_runner = runner
+
+    def get_piecewise_runner_config(self) -> dict | None:
+        """Return construction args for PiecewiseCudaGraphRunner.
+
+        Called by EncoderDecoderEngine.warmup() (masked predictor uses ENC_DEC).
+        kv_cache_config / alloc_manager / buffer_manager are all None since the
+        masked predictor is stateless — no KV cache between rollout steps.
+
+        The ``position_mask`` buffer is a static [n_seq] float32 tensor holding
+        the sorted position IDs for the rollout config.  For sequential context
+        (arange(n_ctxt)) + skip target, the positions are already sorted so
+        argsort in VJEPA2Predictor.forward is identity; the buffer is filled
+        once in fn_factory and never updated at replay.
+        """
+        # n_ctxt = self.config.grid_depth * self._grid_size ** 2
+        # n_pred = self._n_pred
+        # skip = n_ctxt + self._grid_size ** 2 * self._anticipation_steps
+        # n_seq = n_ctxt + n_pred
+
+        # position_ids = torch.cat([
+        #     torch.arange(n_ctxt, dtype=torch.float32),
+        #     torch.arange(n_pred, dtype=torch.float32) + skip,
+        # ])  # [n_seq], CPU; fn_factory .copy_()s it into the GPU buffer
+
+        # predictor = self.predictor
+
+        # def fn_factory(static_cm, static_pos_bufs):
+        #     static_pos_bufs["position_mask"].copy_(position_ids)
+        #     return predictor.make_layer_loop_fn(static_cm, static_pos_bufs)
+
+        # return {
+        #     "fn_factory": fn_factory,
+        #     "embed_dim": self.config.pred_hidden_size,
+        #     "capture_seq_len": n_seq,
+        #     "capture_batch_sizes": [1, 2, 4, 8],
+        #     "pos_buf_shapes": {"position_mask": (n_seq,)},
+        #     "cache_labels": ["main"],
+        # }
+        
+        """Masked predictor rollout does not use piecewise CUDA graphs.
+
+        The non-AC predictor attends over n_ctxt + n_pred ≈ 8448 tokens using
+        plain SDPA (no FlashInfer).  At that sequence length the O(N²) attention
+        computation dominates completely — Python kernel-launch overhead is
+        negligible relative to the ~1.7 GB attention matrix per layer, so CUDA
+        graphs provide no meaningful speedup.  Attempting to capture them also
+        risks OOM on top of the already-loaded ViT-g encoder weights.
+
+        CUDA graphs are only useful for the AC predictor (capture_seq_len=258,
+        FlashInfer per-call overhead worth eliminating).
+        """
+        return None
 
     # ------------------------------------------------------------------
     # Rollout geometry (derived from config + hyperparams; shape-static)
@@ -505,8 +569,12 @@ class VJepa2RolloutPredictorSubmodule(ARNodeSubmodule):
         """Compute one rollout step for a [B, N, D] encoder_hidden.
 
         Returns ``(next_encoder_hidden [B, N, D], predicted [B, n_pred, D])``.
-        Shape math is symmetric across B, so this function is used by both
-        the sequential and batched paths.
+        Shape math is symmetric across B.
+
+        CUDA-graph path (when PiecewiseCudaGraphRunner is set): splits the
+        predictor forward into preamble (embed+sort), captured layer loop,
+        and postamble (layernorm+unsort+proj), with no KV cache involved.
+        Eager path calls predictor.forward end-to-end (unchanged).
         """
         b, n_ctxt, _ = encoder_hidden.shape
         device = encoder_hidden.device
@@ -519,10 +587,21 @@ class VJepa2RolloutPredictorSubmodule(ARNodeSubmodule):
         ctxt_positions = torch.arange(n_ctxt, device=device).unsqueeze(0).repeat(b, 1)
         skip = n_ctxt + self._grid_size * self._grid_size * self._anticipation_steps
         tgt_positions = (torch.arange(n_pred, device=device) + skip).unsqueeze(0).repeat(b, 1)
-        predicted = self.predictor(encoder_hidden, [ctxt_positions], [tgt_positions])
+
+        runner = self._piecewise_runner
+        if runner is not None and runner.can_run(b):
+            hidden_states, n_ctxt_out, argsort = self.predictor._run_forward_piecewise(
+                encoder_hidden, [ctxt_positions], [tgt_positions]
+            )
+            hidden_states = runner.run(hidden_states)
+            predicted = self.predictor._finalize_forward_piecewise(hidden_states, n_ctxt_out, argsort)
+        else:
+            predicted = self.predictor(encoder_hidden, [ctxt_positions], [tgt_positions])
+
         next_encoder_hidden = torch.cat([encoder_hidden[:, n_pred:, :], predicted], dim=1)
         return next_encoder_hidden, predicted
 
+    @torch.compiler.disable
     def forward(
         self,
         graph_walk: str,
@@ -760,6 +839,10 @@ class VJepa2ACPredictorSubmodule(ARNodeSubmodule):
 class VJepa2ACRolloutPredictorSubmodule(ARNodeSubmodule):
     """Action-conditioned autoregressive rollout — Phase 3.D.
 
+    Optionally uses a PiecewiseCudaGraphRunner to accelerate the inner block
+    loop. Set via set_piecewise_runner() after construction (typically done by
+    the engine after warmup_and_capture).
+
     **Sliding-window rollout** — diverges from upstream
     ``vjepa2/notebooks/utils/mpc_utils.py::cem`` which uses growing-context
     (``T: 1 → rollout+1``) from a single-tubelet initial encoding.  Our
@@ -801,6 +884,50 @@ class VJepa2ACRolloutPredictorSubmodule(ARNodeSubmodule):
         super().__init__()
         self.predictor = predictor
         self.config = config
+        self._piecewise_runner = None   # set via set_piecewise_runner() after warmup
+
+    def set_piecewise_runner(self, runner) -> None:
+        """Attach a warmed-up PiecewiseCudaGraphRunner for the block loop."""
+        self._piecewise_runner = runner
+
+    def get_piecewise_runner_config(self) -> dict | None:
+        """Return construction args for PiecewiseCudaGraphRunner, or None.
+
+        Called by AREngine.warmup() to build and install the runner without
+        the engine needing to know the model internals.  The returned dict
+        contains everything PiecewiseCudaGraphRunner.__init__ needs except
+        device/autocast_dtype/memory_pool (those come from the engine).
+
+        Keys:
+          fn_factory    - (static_cm, static_pos_bufs) -> fn(x) -> x
+          embed_dim     - hidden dim of the intermediate sequence
+          capture_seq_len - tokens per frame (cond_tokens + grid_h * grid_w)
+          pos_buf_shapes  - {name: shape} for per-step position tensors
+          cache_labels    - KV cache labels (always ["main"] here)
+        """
+        ac = self.config.ac_predictor
+        if ac is None:
+            return None
+        N = ac.img_size[0] // ac.patch_size   # grid_height (== grid_width for square)
+        cond_tokens = 3 if ac.use_extrinsics else 2
+        predictor = self.predictor
+
+        def fn_factory(static_cm, static_pos_bufs):
+            return predictor.make_block_loop_fn(static_cm, static_pos_bufs, cond_tokens)
+
+        return {
+            "fn_factory": fn_factory,
+            "embed_dim": ac.predictor_embed_dim,
+            "capture_seq_len": cond_tokens + N * N,
+            "capture_batch_sizes": [1, 2, 4, 8],
+            "pos_buf_shapes": {
+                "d_pos":   (N * N,),
+                "h_pos":   (N * N,),
+                "w_pos":   (N * N,),
+                "time_pos": (cond_tokens,),
+            },
+            "cache_labels": ["main"],
+        }
 
     # ------------------------------------------------------------------
     # Rollout geometry
@@ -877,15 +1004,16 @@ class VJepa2ACRolloutPredictorSubmodule(ARNodeSubmodule):
         inputs: NameToTensorList,
         **kwargs
     ) -> ARNodeInputs:
-
+        iter_idx = fwd_info.dynamic_loop_iter_counts.get("rollout_loop", 0)
+        
         encoder_hidden = _ensure_lead_batch_dim(inputs["encoder_hidden"][0], 3)
 
         tensor_inputs = {}
-        tensor_inputs["actions"] = _ensure_lead_batch_dim(inputs["actions"][0], 3)
-        tensor_inputs["states"] = _ensure_lead_batch_dim(inputs["states"][0], 3)
-
+        tensor_inputs["actions"] = _ensure_lead_batch_dim(inputs["actions"][0], 3)[:, iter_idx:iter_idx+1]
+        tensor_inputs["states"] = _ensure_lead_batch_dim(inputs["states"][0], 3)[:, iter_idx:iter_idx+1]
+        
         if "extrinsics" in inputs:
-            tensor_inputs["extrinsics"] = _ensure_lead_batch_dim(inputs["extrinsics"][0], 3)
+            tensor_inputs["extrinsics"] = _ensure_lead_batch_dim(inputs["extrinsics"][0], 3)[:, iter_idx:iter_idx+1]
 
         return ARNodeInputs(
             input_embeds=encoder_hidden,
@@ -909,68 +1037,79 @@ class VJepa2ACRolloutPredictorSubmodule(ARNodeSubmodule):
         out["states"] = torch.cat([
             inp.tensor_inputs["states"] for inp in inputs
         ], dim=0)
+
+        per_req_seq_len = out["encoder_hidden"].shape[1] + 2
         if "extrinsics" in inputs[0].tensor_inputs:
             out["extrinsics"] = torch.cat([
                 inp.tensor_inputs["extrinsics"] for inp in inputs
             ], dim=0)
+            per_req_seq_len += 1
+        
+        # plan attention
+        engine_inputs.cache_manager.plan_attention(
+            seq_lens=[per_req_seq_len] * len(inputs),
+            is_causal=False
+        )
+
         return out
 
     def _rollout_step(
         self,
-        encoder_hidden: torch.Tensor,   # [B, N, D]
-        actions: torch.Tensor,           # [B, T_total, action_embed_dim]
-        states: torch.Tensor,            # [B, T_total, action_embed_dim]
-        extrinsics: torch.Tensor | None, # [B, T_total, action_embed_dim - 1] or None
-        iter_idx: int,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """One sliding-window AC rollout step.
+        encoder_hidden: torch.Tensor,            # [B, H*W, D]
+        actions: torch.Tensor,                   # [B, 1, action_embed_dim]
+        states: torch.Tensor,                    # [B, 1, action_embed_dim]
+        t_0: int,
+        cache_handle: BatchedCacheManager,
+        extrinsics: torch.Tensor | None = None,  # [B, 1, action_embed_dim - 1] or None
+        request_ids: list[str] | None = None,    # needed by PiecewiseCudaGraphRunner
+    ) -> torch.Tensor:
+        """One AC rollout step using either the CUDA-graph or eager path.
 
-        Returns ``(next_encoder_hidden [B, N, D], predicted_new_tg [B, grid², D])``.
-        ``next_encoder_hidden`` is the shifted context for the next iter;
-        ``predicted_new_tg`` is the single new tubelet group to emit to the
-        client.  Math is symmetric across the batch dim so the same function
-        serves both the sequential and batched paths.
+        The CUDA-graph path (when PiecewiseCudaGraphRunner is attached):
+          1. Preamble (predictor_embed + action/state concat) runs eagerly.
+          2. Position tensors are computed eagerly (hoisted out of the graph).
+          3. Block loop replays the captured graph.
+          4. advance_seq_len is called by the runner after replay.
+          5. Postamble (drop action tokens, norm, proj) runs eagerly.
+
+        The eager path calls predictor.forward end-to-end (same as before).
         """
-        b, n_ctxt, _ = encoder_hidden.shape
-        t_ctx = self._grid_depth
-        window = self._window_tokens()  # grid² — one tubelet group worth of tokens
-        t_total = actions.size(1)
+        p = self.predictor
 
-        if n_ctxt != t_ctx * window:
-            raise ValueError(
-                f"encoder_hidden has {n_ctxt} tokens; expected "
-                f"T_ctx * grid² = {t_ctx} * {window} = {t_ctx * window}."
+        runner = self._piecewise_runner
+        if runner is not None and runner.can_run(encoder_hidden.size(0)):
+            # --- CUDA-graph path ---
+            x, cond_tokens, b, t = p._prepare_sequence(
+                encoder_hidden, actions, states, extrinsics
             )
-        # Per-iter slice: iter k consumes actions[:, k : k + T_ctx].
-        end = iter_idx + t_ctx
-        if end > t_total:
-            raise ValueError(
-                f"actions/states trajectory too short for iter {iter_idx}: "
-                f"need at least {end} timesteps (iter_idx + T_ctx={t_ctx}), "
-                f"got {t_total}.  Client must send T_total >= T_ctx + H - 1 "
-                "when requesting AC rollout with horizon H."
+            d_pos, h_pos, w_pos, time_pos = p._compute_rope_positions(
+                t_0, p.grid_height, p.grid_width, cond_tokens, x.device, x.dtype
             )
-        actions_h = actions[:, iter_idx:end].contiguous()
-        states_h = states[:, iter_idx:end].contiguous()
-        extrinsics_h = extrinsics[:, iter_idx:end].contiguous() if extrinsics is not None else None
+            pos_bufs = {
+                "d_pos": d_pos, "h_pos": h_pos, "w_pos": w_pos,
+            }
+            if time_pos is not None:
+                pos_bufs["time_pos"] = time_pos
 
-        predicted = self.predictor(
+            x = runner.run(
+                x=x,
+                pos_bufs=pos_bufs,
+                request_ids=request_ids,
+            )
+            # advance_seq_len already called by runner; skip it in _decode_sequence
+            return p._decode_sequence(x, cond_tokens, b, t)
+
+        # --- Eager path ---
+        return self.predictor(
             encoder_hidden,
-            actions_h,
-            states_h,
-            extrinsics=extrinsics_h,
-        )  # [B, N, D]
+            actions,
+            states,
+            extrinsics=extrinsics,
+            t_0=t_0,
+            cache_handle=cache_handle,
+        )
 
-        if predicted.shape[:2] != (b, n_ctxt):
-            raise RuntimeError(
-                f"AC predictor emitted unexpected shape {tuple(predicted.shape)}; "
-                f"expected [{b}, {n_ctxt}, D]."
-            )
-
-        new_tg = predicted[:, -window:, :]
-        next_encoder_hidden = torch.cat([encoder_hidden[:, window:, :], new_tg], dim=1)
-        return next_encoder_hidden, new_tg
-
+    @torch.compiler.disable
     def forward(
         self,
         graph_walk: str,
@@ -982,16 +1121,6 @@ class VJepa2ACRolloutPredictorSubmodule(ARNodeSubmodule):
         **kwargs,
     ) -> NameToTensorList:
         request_info = engine_inputs.single_request_info
-
-        if encoder_hidden.dim() == 2:
-            encoder_hidden = encoder_hidden.unsqueeze(0)
-        if actions.dim() == 2:
-            actions = actions.unsqueeze(0)
-        if states.dim() == 2:
-            states = states.unsqueeze(0)
-        if extrinsics is not None and extrinsics.dim() == 2:
-            extrinsics = extrinsics.unsqueeze(0)
-
         iter_idx = request_info.dynamic_loop_iter_counts.get("rollout_loop", 0)
         logger.info(
             "VJepa2ACRolloutPredictorSubmodule.forward: iter=%d encoder_hidden=%s actions=%s states=%s",
@@ -1001,8 +1130,12 @@ class VJepa2ACRolloutPredictorSubmodule(ARNodeSubmodule):
             tuple(states.shape),
         )
 
-        next_encoder_hidden, new_tg = self._rollout_step(
-            encoder_hidden, actions, states, extrinsics, iter_idx,
+        new_tg = self._rollout_step(
+            encoder_hidden, actions, states,
+            t_0=iter_idx,
+            cache_handle=engine_inputs.cache_manager,
+            extrinsics=extrinsics,
+            request_ids=engine_inputs.request_ids,
         )
 
         # Per-request early-exit — same contract as masked rollout.
@@ -1016,21 +1149,13 @@ class VJepa2ACRolloutPredictorSubmodule(ARNodeSubmodule):
             request_info.register_loop_stop("rollout_loop")
 
         logger.info(
-            "VJepa2ACRolloutPredictorSubmodule.forward: next_encoder_hidden=%s new_tg=%s",
-            tuple(next_encoder_hidden.shape),
+            "VJepa2ACRolloutPredictorSubmodule.forward: new_tg=%s",
             tuple(new_tg.shape),
         )
         out: NameToTensorList = {
-            "encoder_hidden": [next_encoder_hidden],
+            "encoder_hidden": [new_tg],
             "predicted_hidden": [new_tg],
-            # Identity loop-back: actions/states don't change across iters
-            # (client sent the full trajectory upfront), but they still need
-            # to be routed on every iter so the graph dispatcher finds them.
-            "actions": [actions],
-            "states": [states],
         }
-        if extrinsics is not None:
-            out["extrinsics"] = [extrinsics]
         return out
 
     def forward_batched(
@@ -1045,48 +1170,42 @@ class VJepa2ACRolloutPredictorSubmodule(ARNodeSubmodule):
     )  -> dict[str, NameToTensorList]:
 
         request_ids = engine_inputs.request_ids
-        per_request_info = engine_inputs.per_request_info
-
         if encoder_hidden.size(0) != len(request_ids):
             raise ValueError(
                 f"encoder_hidden batch dim {encoder_hidden.size(0)} does not "
                 f"match request count {len(request_ids)}."
             )
-        # can_batch guarantees all rids are at the same iter; read any one.
-        iter_idx = per_request_info[request_ids[0]].dynamic_loop_iter_counts.get("rollout_loop", 0)
+        
+        # Now, can_batch ensures that all requests in a batch have the same loop index
+        # TODO: this no longer needs to be the case.
+        iter_idx = engine_inputs.first_request_info.dynamic_loop_iter_counts.get(
+            "rollout_loop", 0)
 
-        logger.info(
-            "VJepa2ACRolloutPredictorSubmodule.forward_batched: iter=%d enc=%s act=%s rids=%d",
-            iter_idx,
-            tuple(encoder_hidden.shape),
-            tuple(actions.shape),
-            len(request_ids),
+        new_tg = self._rollout_step(
+            encoder_hidden, actions, states,
+            t_0=iter_idx,
+            cache_handle=engine_inputs.cache_manager,
+            extrinsics=extrinsics,
+            request_ids=engine_inputs.request_ids,
         )
 
-        next_encoder_hidden, new_tg = self._rollout_step(
-            encoder_hidden, actions, states, extrinsics, iter_idx,
-        )
+        outputs: NameToTensorList = {
+            "encoder_hidden": [new_tg],
+            "predicted_hidden": [new_tg],
+        }
 
-        # Per-rid early-exit (individual rids can drop out while others
-        # continue; the scheduler re-batches remaining rids on the next iter).
-        for rid in request_ids:
-            info = per_request_info[rid]
-            horizon = int(info.step_metadata.get("rollout_horizon", 0) or 0)
-            if horizon > 0 and iter_idx + 1 >= horizon:
-                info.register_loop_stop("rollout_loop")
-
-        per_rid: dict[str, NameToTensorList] = {}
-        for i, rid in enumerate(request_ids):
-            out_i: NameToTensorList = {
-                "encoder_hidden": [next_encoder_hidden[i : i + 1]],
-                "predicted_hidden": [new_tg[i : i + 1]],
-                "actions": [actions[i : i + 1]],
-                "states": [states[i : i + 1]],
-            }
-            if extrinsics is not None:
-                out_i["extrinsics"] = [extrinsics[i : i + 1]]
-            per_rid[rid] = out_i
+        per_rid = {
+            rid: {
+                name: tensor[i:i+1] for name, tensor in outputs.items()
+                } for i, rid in enumerate(request_ids)
+        }
         return per_rid
+    
+    def postprocess(self, request_id, request_info, outputs, **kwargs):
+        horizon = int(request_info.step_metadata.get("rollout_horizon", 0) or 0)
+        iter_idx = request_info.dynamic_loop_iter_counts.get("rollout_loop", 0)
+        if horizon > 0 and iter_idx + 1 >= horizon:
+            request_info.register_loop_stop("rollout_loop")
 
 
 # ---------------------------------------------------------------------------
