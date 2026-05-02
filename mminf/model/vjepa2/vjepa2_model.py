@@ -661,8 +661,13 @@ class VJepa2Model(Model):
             raw = tensors["video_inputs"][0]
             # Per-request override of the frame budget (e.g. to experiment
             # with longer clips on larger GPUs); defaults to the model's
-            # pretraining frames_per_clip.
+            # pretraining frames_per_clip. Clamped to whatever frames are
+            # actually present (load_video may have decoded fewer than
+            # frames_per_clip if the source video was short — e.g. AC
+            # rollout requests with the F-8 / droid-256px-8f workload
+            # ship 8-frame clips).
             target_frames = int(kwargs.get("num_frames", self.config.frames_per_clip))
+            target_frames = min(target_frames, int(raw.size(0)))
             processed = _preprocess_video(
                 raw.to(torch.float32),
                 crop_size=self.config.crop_size,
