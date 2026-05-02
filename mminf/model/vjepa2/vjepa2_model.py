@@ -587,10 +587,19 @@ class VJepa2Model(Model):
         if total is None:
             total = len(decoder)
         total = int(total)
-        logger.info("load_video: total_frames=%d, target=%d", total, target_frames)
 
-        if target_frames > total:
-            raise ValueError(f"Video too short: {total} frames, need at least frames_per_clip={target_frames}.")
+        # ``frames_per_clip`` is an architectural config (also feeds
+        # ``grid_depth`` for the predictor's attention mask) and must stay
+        # at the trained value (64). For AC rollout requests the input
+        # video may be much shorter — DROIDDataset sends 8-frame clips per
+        # the F-8 workload aligned to upstream's droid-256px-8f.yaml. Clamp
+        # the decode target to whatever frames are actually present;
+        # process_prompt's AC-rollout branch will trim further to
+        # AC_ROLLOUT_NUM_FRAMES (=8). A truly empty video still errors.
+        if total <= 0:
+            raise ValueError(f"Video has no decodable frames: {filepath}")
+        target_frames = min(target_frames, total)
+        logger.info("load_video: total_frames=%d, target=%d", total, target_frames)
 
         # HF-parity uniform sampling (``BaseVideoProcessor.sample_frames``
         # at video_processing_utils.py:253):
