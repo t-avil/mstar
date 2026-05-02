@@ -967,8 +967,8 @@ class VJepa2ACRolloutPredictorSubmodule(ARNodeSubmodule):
         ``VJepa2EncoderSubmodule.can_batch`` for the AC warm-latency
         regression that motivates this gate).
         """
-        if len(batch.request_ids) < 2:
-            return False
+        # if len(batch.request_ids) < 2:
+        #     return False
 
         iters: set[int] = set()
 
@@ -1109,7 +1109,6 @@ class VJepa2ACRolloutPredictorSubmodule(ARNodeSubmodule):
             cache_handle=cache_handle,
         )
 
-    @torch.compiler.disable
     def forward(
         self,
         graph_walk: str,
