@@ -18,3 +18,4 @@ traces/
 # output filenames
 output.png
 output_edit.png
+mminf-benchmark-cache/
