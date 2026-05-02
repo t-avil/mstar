@@ -697,10 +697,21 @@ class VJepa2Model(Model):
                         f"{t_ctx} + {rollout_horizon} - 1 = {required}; got {t_total}."
                     )
 
-                # for ACrollouut, only use the first 2 video frames as context,
-                # consistent with the vjepa2 repo notebooks/utils/mpc_utils.py cem fn
+                # AC rollout encoder context: trim video to AC_ROLLOUT_NUM_FRAMES
+                # frames per request to match upstream's published DROID training
+                # configuration (configs/train/vitg16/droid-256px-8f.yaml has
+                # `dataset_fpcs: 8`).  Each frame is then independently encoded
+                # via the self-tubelet replication trick inside
+                # VJepa2EncoderSubmodule._encode_self_tubelet — mirroring
+                # `forward_target` in app/vjepa_droid/train.py:408-415 and
+                # notebooks/energy_landscape_example.ipynb Cell 5.  Only the
+                # first frame's tokens are used as the rollout starting context
+                # (per notebook Cell 5: z_hat = z[:, :tokens_per_frame]); the
+                # other 7 frames' tokens are computed and discarded — matched
+                # FLOPs to upstream's reference inference path.
+                AC_ROLLOUT_NUM_FRAMES = 8
                 if "video_frames" in out:
-                    out["video_frames"] = [frames[:self.config.ac_predictor.tubelet_size] for frames in out["video_frames"]]
+                    out["video_frames"] = [frames[:AC_ROLLOUT_NUM_FRAMES] for frames in out["video_frames"]]
 
 
             # Phase 3.B: MPC walk requires a pre-encoded goal latent.  When
