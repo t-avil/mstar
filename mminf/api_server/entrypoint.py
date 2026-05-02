@@ -70,9 +70,20 @@ def _conductor_process_target(
     from mminf.conductor.conductor import Conductor
     from mminf.model.registry import get_model_class
 
+    # Read yaml early to extract optional `model_kwargs:` section for the model
+    # constructor. Lets a yaml override init-time model parameters (e.g.
+    # Pi05's action_horizon for the DROID benchmark variant) without code
+    # changes per model. Backward compatible: missing section → empty dict,
+    # so existing configs see identical behavior.
+    import yaml as _yaml
+    with open(config_path, "r") as _f:
+        _yaml_cfg = _yaml.safe_load(_f) or {}
+    yaml_model_kwargs = _yaml_cfg.get("model_kwargs", {}) or {}
+
     model = get_model_class(model_name)(
         model_path_hf=HF_MODELS.get(model_name, {}).get("model_path_hf", ""),
         cache_dir=cache_dir,
+        **yaml_model_kwargs,
     )
     conductor = Conductor(
         model=model,
@@ -623,6 +634,10 @@ def main():
         config = yaml.safe_load(f)
 
     model_name = config.get("model", "dummy")
+    # Forward yaml-level model_kwargs to the API-server-side lightweight
+    # model instance too, so it sees the same Pi05Config (action_horizon, etc.)
+    # as the conductor-side instance. Without this they could diverge.
+    yaml_model_kwargs = config.get("model_kwargs", {}) or {}
 
      # Create a lightweight model instance for prompt processing
     # (tokenization only — no GPU weights needed)
@@ -630,6 +645,7 @@ def main():
     model = get_model_class(model_name)(
         model_path_hf=HF_MODELS.get(model_name, {}).get("model_path_hf", ""),
         cache_dir=args.cache_dir,
+        **yaml_model_kwargs,
     )
 
     global api_server
