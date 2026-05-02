@@ -638,6 +638,7 @@ class DROIDDataset(BaseDataset):
         rollout_horizon: int = 4,
         action_dim: int | None = None,
         cache_dir: str | None = None,
+        num_video_frames: int = 8,
     ):
         assert task in ("pi05", "vjepa2_ac"), \
             f"task must be 'pi05' or 'vjepa2_ac', got {task!r}"
@@ -652,6 +653,12 @@ class DROIDDataset(BaseDataset):
         self.action_dim      = action_dim if action_dim is not None else (32 if task == "pi05" else 7)
         self.rollout_horizon = rollout_horizon
         self.cache_dir       = cache_dir
+        # Number of video frames to extract per vjepa2_ac request. Default 8
+        # matches upstream's published DROID training config
+        # (configs/train/vitg16/droid-256px-8f.yaml: dataset_fpcs: 8).
+        # Server-side encoder uses self-tubelet replication on each frame,
+        # producing 8 token-frames; only the first is used as rollout context.
+        self.num_video_frames = num_video_frames
 
         def _dl(filename):
             return hf_hub_download(
@@ -802,8 +809,10 @@ class DROIDDataset(BaseDataset):
         # Extract the episode's own frames from the chunk video so the server
         # subsamples from the right clip instead of the whole dataset.
         local_indices = self._local_frame_indices(frames)
-        # Sample ~64 evenly-spaced frames from the episode for the video input.
-        n_video = min(64, len(local_indices))
+        # Sample N evenly-spaced frames from the episode for the video input.
+        # N defaults to 8, matching upstream's published DROID training config
+        # (configs/train/vitg16/droid-256px-8f.yaml: dataset_fpcs: 8).
+        n_video = min(self.num_video_frames, len(local_indices))
         step    = max(1, len(local_indices) // n_video)
         video_local_indices = local_indices[::step][:n_video]
 
