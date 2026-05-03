@@ -49,10 +49,16 @@
 
 set -euo pipefail
 
-VIDEO="${1:?Usage: $0 <video_path.mp4> [horizon] [host] [port]  (env: STREAM=1 for per-iter streaming)}"
+if [ -f "./.env" ]; then
+    source ".env"
+else
+    echo "Error: No .env file found. Run:  \"cp .sample.env .env\" and configure it. Make sure the .env file is in your current working directory."
+    exit 1
+fi
+
+VIDEO="${1:?Usage: $0 <video_path.mp4> [horizon] [host]  (env: STREAM=1 for per-iter streaming)}"
 HORIZON="${2:-4}"
 HOST="${3:-127.0.0.1}"
-PORT="${4:-20003}"
 STREAM="${STREAM:-0}"
 URL="http://${HOST}:${PORT}/generate"
 

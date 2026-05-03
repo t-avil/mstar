@@ -587,10 +587,19 @@ class VJepa2Model(Model):
         if total is None:
             total = len(decoder)
         total = int(total)
-        logger.info("load_video: total_frames=%d, target=%d", total, target_frames)
 
-        if target_frames > total:
-            raise ValueError(f"Video too short: {total} frames, need at least frames_per_clip={target_frames}.")
+        # ``frames_per_clip`` is an architectural config (also feeds
+        # ``grid_depth`` for the predictor's attention mask) and must stay
+        # at the trained value (64). For AC rollout requests the input
+        # video may be much shorter — DROIDDataset sends 8-frame clips per
+        # the F-8 workload aligned to upstream's droid-256px-8f.yaml. Clamp
+        # the decode target to whatever frames are actually present;
+        # process_prompt's AC-rollout branch will trim further to
+        # AC_ROLLOUT_NUM_FRAMES (=8). A truly empty video still errors.
+        if total <= 0:
+            raise ValueError(f"Video has no decodable frames: {filepath}")
+        target_frames = min(target_frames, total)
+        logger.info("load_video: total_frames=%d, target=%d", total, target_frames)
 
         # HF-parity uniform sampling (``BaseVideoProcessor.sample_frames``
         # at video_processing_utils.py:253):
@@ -652,8 +661,13 @@ class VJepa2Model(Model):
             raw = tensors["video_inputs"][0]
             # Per-request override of the frame budget (e.g. to experiment
             # with longer clips on larger GPUs); defaults to the model's
-            # pretraining frames_per_clip.
+            # pretraining frames_per_clip. Clamped to whatever frames are
+            # actually present (load_video may have decoded fewer than
+            # frames_per_clip if the source video was short — e.g. AC
+            # rollout requests with the F-8 / droid-256px-8f workload
+            # ship 8-frame clips).
             target_frames = int(kwargs.get("num_frames", self.config.frames_per_clip))
+            target_frames = min(target_frames, int(raw.size(0)))
             processed = _preprocess_video(
                 raw.to(torch.float32),
                 crop_size=self.config.crop_size,
@@ -697,10 +711,21 @@ class VJepa2Model(Model):
                         f"{t_ctx} + {rollout_horizon} - 1 = {required}; got {t_total}."
                     )
 
-                # for ACrollouut, only use the first 2 video frames as context,
-                # consistent with the vjepa2 repo notebooks/utils/mpc_utils.py cem fn
+                # AC rollout encoder context: trim video to AC_ROLLOUT_NUM_FRAMES
+                # frames per request to match upstream's published DROID training
+                # configuration (configs/train/vitg16/droid-256px-8f.yaml has
+                # `dataset_fpcs: 8`).  Each frame is then independently encoded
+                # via the self-tubelet replication trick inside
+                # VJepa2EncoderSubmodule._encode_self_tubelet — mirroring
+                # `forward_target` in app/vjepa_droid/train.py:408-415 and
+                # notebooks/energy_landscape_example.ipynb Cell 5.  Only the
+                # first frame's tokens are used as the rollout starting context
+                # (per notebook Cell 5: z_hat = z[:, :tokens_per_frame]); the
+                # other 7 frames' tokens are computed and discarded — matched
+                # FLOPs to upstream's reference inference path.
+                AC_ROLLOUT_NUM_FRAMES = 8
                 if "video_frames" in out:
-                    out["video_frames"] = [frames[:self.config.ac_predictor.tubelet_size] for frames in out["video_frames"]]
+                    out["video_frames"] = [frames[:AC_ROLLOUT_NUM_FRAMES] for frames in out["video_frames"]]
 
 
             # Phase 3.B: MPC walk requires a pre-encoded goal latent.  When

@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 
 import torch
+import torch.nn.functional as F
 
 from mminf.communication.tensors import NameToTensorList
 from mminf.conductor.request_info import CurrentForwardPassInfo
@@ -151,6 +152,43 @@ class VJepa2EncoderSubmodule(NodeSubmodule):
         )
         return {"pixel_values_videos": stacked}
 
+    def _encode_self_tubelet(self, pixel_values_videos: torch.Tensor) -> torch.Tensor:
+        """Encode video via upstream's self-tubelet pattern + post-encoder LayerNorm.
+
+        Mirrors ``forward_target`` from
+        ``vjepa2/notebooks/energy_landscape_example.ipynb`` Cell 5 and
+        ``vjepa2/app/vjepa_droid/train.py:408-415``: each input frame is
+        independently encoded as a 2-frame "self-tubelet" (the frame
+        duplicated), the per-frame token outputs are flattened, then
+        F.layer_norm is applied to match the AC predictor's training
+        distribution. Finally we slice to ``tokens_per_frame`` (the first
+        frame's tokens) — matching the notebook's
+        ``z_hat = z[:, :tokens_per_frame]`` usage as the AC rollout context.
+
+        Input layout: ``[B, T, C, H, W]`` (HF VJEPA2 convention).
+        Output layout: ``[B, tokens_per_frame, D]`` — drop-in for the
+        downstream rollout predictor.
+
+        For T=8 (the F-8 / DROID training-config alignment) this runs the
+        encoder on a [B*8, 2, C, H, W] batched input — same FLOPs as
+        upstream's ``forward_target(clips)`` would do at N=8.
+        """
+        B, T, C, H, W = pixel_values_videos.shape
+        # Self-tubelet: each frame becomes a [frame[i], frame[i]] pair.
+        # [B, T, C, H, W] -> [B*T, 1, C, H, W] -> [B*T, 2, C, H, W]
+        x = pixel_values_videos.reshape(B * T, 1, C, H, W).repeat(1, 2, 1, 1, 1)
+        hidden = self.encoder(x)  # [B*T, tokens_per_frame, D]
+        D = hidden.size(-1)
+        # Reshape and flatten the temporal axis: [B*T, N, D] -> [B, T*N, D].
+        hidden = hidden.view(B, T, -1, D).flatten(1, 2)
+        # Post-encoder LayerNorm — matches notebook Cell 5 forward_target
+        # and WorldModel.encode (world_model_wrapper.py:50-51).
+        hidden = F.layer_norm(hidden, (D,))
+        # Slice to the first frame's tokens — the rollout uses single-frame
+        # context (notebook Cell 5: z_hat = z[:, :tokens_per_frame]).
+        tokens_per_frame = hidden.size(1) // T
+        return hidden[:, :tokens_per_frame].contiguous()
+
     def forward(
         self,
         graph_walk: str,
@@ -164,7 +202,7 @@ class VJepa2EncoderSubmodule(NodeSubmodule):
             pixel_values_videos.dtype,
             pixel_values_videos.device,
         )
-        hidden = self.encoder(pixel_values_videos)
+        hidden = self._encode_self_tubelet(pixel_values_videos)
         logger.info("VJepa2EncoderSubmodule.forward: output shape=%s", tuple(hidden.shape))
         return {"encoder_hidden": [hidden]}
 
@@ -195,7 +233,7 @@ class VJepa2EncoderSubmodule(NodeSubmodule):
                 f"pixel_values_videos batch dim {b_in} does not match "
                 f"request count {len(request_ids)}."
             )
-        hidden = self.encoder(pixel_values_videos)  # [B, N, D]
+        hidden = self._encode_self_tubelet(pixel_values_videos)  # [B, N, D]
         return {
             rid: {"encoder_hidden": [hidden[i : i + 1]]}
             for i, rid in enumerate(request_ids)
@@ -967,8 +1005,8 @@ class VJepa2ACRolloutPredictorSubmodule(ARNodeSubmodule):
         ``VJepa2EncoderSubmodule.can_batch`` for the AC warm-latency
         regression that motivates this gate).
         """
-        if len(batch.request_ids) < 2:
-            return False
+        # if len(batch.request_ids) < 2:
+        #     return False
 
         iters: set[int] = set()
 
@@ -1097,19 +1135,28 @@ class VJepa2ACRolloutPredictorSubmodule(ARNodeSubmodule):
                 request_ids=request_ids,
             )
             # advance_seq_len already called by runner; skip it in _decode_sequence
-            return p._decode_sequence(x, cond_tokens, b, t)
+            new_tg = p._decode_sequence(x, cond_tokens, b, t)
+        else:
+            # --- Eager path ---
+            new_tg = self.predictor(
+                encoder_hidden,
+                actions,
+                states,
+                extrinsics=extrinsics,
+                t_0=t_0,
+                cache_handle=cache_handle,
+            )
 
-        # --- Eager path ---
-        return self.predictor(
-            encoder_hidden,
-            actions,
-            states,
-            extrinsics=extrinsics,
-            t_0=t_0,
-            cache_handle=cache_handle,
-        )
+        # Per-step LayerNorm — matches the upstream notebook's step_predictor
+        # body (vjepa2/notebooks/energy_landscape_example.ipynb Cell 5;
+        # also world_model_wrapper.py:60-61 inside infer_next_action;
+        # also app/vjepa_droid/train.py:421-422 forward_predictions).
+        # The AC predictor is trained with normalize_reps=True per the
+        # published configs/train/vitg16/droid-256px-8f.yaml, so this
+        # F.layer_norm puts each rollout step's output back in the
+        # distribution the next step's predictor expects.
+        return F.layer_norm(new_tg, (new_tg.size(-1),))
 
-    @torch.compiler.disable
     def forward(
         self,
         graph_walk: str,
