@@ -141,7 +141,20 @@ class WorkerGraphQueues:
         """
         self.per_request_queues[request_id].reset()
 
-    def stop_loops(self, request_id: str, loop_names: set[str]):
+    def stop_loops(
+        self, request_id: str, loop_names: set[str]
+    ) -> set[tuple[str, str]]:
+        """Stop matching DynamicLoops and return the
+        ``(edge.name, edge.next_node)`` pairs of those loops' loop-back
+        signals — the caller uses this to drop *only* the stopped loops'
+        loop-back edges from the routing kept-list, instead of every
+        self-loop edge on the running node. Without per-loop attribution,
+        a node that participates in two distinct dynamic loops with
+        disjoint loop-back edges would lose the surviving loop's
+        loop-back tensor when the other loop stops.
+        """
+        stopped_loop_back_signals: set[tuple[str, str]] = set()
+
         def _stop_loops(section: GraphSection):
             if isinstance(section, Sequential) or isinstance(section, Parallel):
                 for sec in section.sections:
@@ -150,10 +163,15 @@ class WorkerGraphQueues:
             if isinstance(section, DynamicLoop):
                 if section.name in loop_names:
                     section.register_finished()
+                    for edge in section._loop_back_signals:
+                        stopped_loop_back_signals.add(
+                            (edge.name, edge.next_node)
+                        )
             if isinstance(section, Loop):
                 # including dynamic loops
                 _stop_loops(section._curr_iter_section)
         _stop_loops(self.per_request_queues[request_id].waiting)
+        return stopped_loop_back_signals
 
     def clear_dyn_loop_curr_iter_section(
         self, request_id: str, loop_names: set[str]
@@ -523,15 +541,23 @@ class WorkerGraphsManager:
         loop_names: set[str],
         req_info: CurrentForwardPassInfo | None = None,
         last_node_run: str | None = None
-    ):
+    ) -> set[tuple[str, str]]:
         """
         Stops dynamic loops based on stop signals. If req_info is also passed in,
         then this also updates req_info.loop_stop_times with the urrent loop indices.
+
+        Returns the union of ``(edge.name, edge.next_node)`` pairs across all
+        worker graphs for the loop-back signals of loops that were actually
+        stopped — see ``WorkerGraphQueues.stop_loops`` for why per-loop
+        attribution matters.
         """
         part_info = self.per_request_info[request_id].per_partition_info[partition]
         worker_graph_ids = part_info.graph_walk_worker_graph_ids
+        stopped_loop_back_signals: set[tuple[str, str]] = set()
         for worker_graph_id in worker_graph_ids:
-            self.queues[worker_graph_id].stop_loops(request_id, loop_names)
+            stopped_loop_back_signals |= self.queues[worker_graph_id].stop_loops(
+                request_id, loop_names
+            )
             waiting = self.queues[worker_graph_id].per_request_queues[request_id].waiting
 
             if req_info is not None and (
@@ -549,6 +575,7 @@ class WorkerGraphsManager:
                             graph=waiting,
                             fwd_idx=req_info.fwd_index
                         )
+        return stopped_loop_back_signals
 
     def get_dynamic_loop_iters(
         self, request_id: str,

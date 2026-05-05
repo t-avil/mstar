@@ -1910,20 +1910,25 @@ class Worker:
             if rid not in self.worker_graphs_manager.per_request_info:
                 continue
             fwd_info = self.worker_graphs_manager.get_fwd_info(rid, batch_partition)
-            self.worker_graphs_manager.stop_loops(
+            loop_back_signals = self.worker_graphs_manager.stop_loops(
                 rid, partition=batch_partition, loop_names=loop_names,
                 req_info=fwd_info, last_node_run=batch.node_name,
             )
             # Drop the stopped loop's loop-back inputs from this iter's output
             # routing. ``batch.node_objects[rid]`` is the running node; its
-            # outputs that point back to itself (next_node == node.name) are
-            # the loop-back edges. They were just sampled by this iter, but
-            # the loop they'd feed has been finished — keeping them in the
-            # routing kept-list re-ingests them into the post-reset queue
-            # and starts an infinite cycle.
+            # self-loop outputs (next_node == node.name) that match a stopped
+            # loop's loop-back signal were just sampled by this iter, but the
+            # loop they'd feed has been finished — keeping them in the routing
+            # kept-list re-ingests them into the post-reset queue and starts
+            # an infinite cycle. The intersection with ``loop_back_signals``
+            # is what scopes the drop to the *stopped* loops only: a node
+            # that participates in two distinct loops keeps the surviving
+            # loop's loop-back tensor.
             node = batch.node_objects[rid]
             stopped_loop_backs[rid] = {
-                edge.name for edge in node.outputs if edge.next_node == node.name
+                edge.name for edge in node.outputs
+                if edge.next_node == node.name
+                and (edge.name, edge.next_node) in loop_back_signals
             }
         return stopped_loop_backs
 
