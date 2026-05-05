@@ -945,6 +945,42 @@ class CudaGraphRunner:
                 range_pop(synchronize=False)
         return True
 
+    def reset_pre_plan_state_for_slot(
+        self,
+        graph_walk: str,
+        requires_cfg: bool,
+        batch_size: int,
+        num_tokens: int,
+        slot: int | None = None,
+    ) -> None:
+        """Clear the slot-local ``_pre_planned_labels`` and
+        ``_plan_done_event`` set by ``pre_plan_for_batch`` for the same
+        (key, slot). Used by the worker to recover from speculation
+        drops/failures: drop only the targeted slot's pre-plan state
+        rather than wiping every captured graph's slots across every
+        engine — the latter would stomp any concurrent in-flight
+        pre-plan whose flags have not yet been consumed by its matching
+        replay (currently impossible because plan_executor.max_workers=1,
+        but a latent footgun if concurrency is raised).
+        """
+        key = self._get_key_for(
+            batch_size=batch_size,
+            num_tokens=num_tokens,
+            graph_walk=graph_walk,
+            requires_cfg=requires_cfg,
+        )
+        if key is None:
+            return
+        graph_data = self.graphs.get(key)
+        if graph_data is None or not graph_data.slots:
+            return
+        if slot is None:
+            slot = 0
+        slot %= len(graph_data.slots)
+        cm = graph_data.slots[slot].static_cache_manager
+        cm._pre_planned_labels.clear()
+        cm._plan_done_event = None
+
     def run(
         self,
         graph_walk: str,

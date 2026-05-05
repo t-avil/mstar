@@ -651,6 +651,28 @@ class AREngine(BaseEngine):
             batch.metadata["cuda_graph_slot"] = slot
         return slot
 
+    def reset_pre_plan_for_batch(self, batch: NodeBatch) -> None:
+        """Clear pre-plan state on the slot that ``pre_plan_for_batch``
+        targeted for this batch. Used to recover from speculation drops
+        or pre-plan failures without disturbing other slots' valid
+        pre-plan state. No-op if no captured graph matches.
+        """
+        runner = self.submodule_management[batch.node_name].cuda_graph_runner
+        if runner is None or not runner.graphs:
+            return
+        has_cfg = any(
+            info.requires_cfg for info in batch.per_request_info.values()
+        )
+        bs = len(batch.request_ids)
+        slot = batch.metadata.get("cuda_graph_slot")
+        runner.reset_pre_plan_state_for_slot(
+            graph_walk=batch.graph_walk,
+            requires_cfg=has_cfg,
+            batch_size=bs,
+            num_tokens=bs,
+            slot=slot,
+        )
+
     def pre_plan_for_batch(
         self,
         batch: NodeBatch,

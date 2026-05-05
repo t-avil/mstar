@@ -1045,7 +1045,7 @@ class Worker:
                         "prev advance_event; skipping pre-plan",
                         self.worker_id,
                     )
-                    self._reset_skip_plan_flags()
+                    self._reset_skip_plan_flags(spec_node_batch)
                     return False
             return engine.pre_plan_for_batch(
                 spec_node_batch,
@@ -1053,33 +1053,30 @@ class Worker:
             )
         except Exception:
             logger.exception("Worker %s: plan_executor pre-plan failed", self.worker_id)
-            self._reset_skip_plan_flags()
+            self._reset_skip_plan_flags(spec_node_batch)
             return False
 
-    def _reset_skip_plan_flags(self) -> None:
-        """Clear ``_pre_planned_labels`` on every captured graph's
-        cache_manager (every slot of every key). Used to recover from
-        speculation drops / failures where the pre-plan was dispatched but
-        the spec batch never reached the GPU thread — leaving entries in
-        the set would cause the next real plan_attention call to
+    def _reset_skip_plan_flags(self, spec_node_batch: NodeBatch) -> None:
+        """Clear pre-plan state on the SPECIFIC slot that
+        ``pre_plan_for_batch`` targeted for ``spec_node_batch``.
+
+        Used to recover from speculation drops / failures where the pre-
+        plan was dispatched but the spec batch never reached the GPU
+        thread — leaving entries in the slot's ``_pre_planned_labels``
+        would cause the next real plan_attention call on that slot to
         short-circuit incorrectly.
 
-        Phase 3 double-buffer: each slot has its own cache_manager with
-        its own pre-plan state, so we walk all slots.
+        Slot-targeted (not worker-global) so that any other slot's
+        valid in-flight pre-plan whose flags have not yet been consumed
+        by the matching replay isn't stomped. The engine's
+        ``reset_pre_plan_for_batch`` looks up the same (key, slot) the
+        pre-plan path used; absent that method (non-AR engine), this is
+        a no-op (those engines don't pre-plan).
         """
-        for engine in set(self.engine_manager.node_to_engine.values()):
-            mgmt_dict = getattr(engine, "submodule_management", None)
-            if not mgmt_dict:
-                continue
-            for mgmt in mgmt_dict.values():
-                runner = getattr(mgmt, "cuda_graph_runner", None)
-                if runner is None:
-                    continue
-                for graph_data in runner.graphs.values():
-                    for slot in graph_data.slots:
-                        cm = slot.static_cache_manager
-                        cm._pre_planned_labels.clear()
-                        cm._plan_done_event = None
+        engine = self.engine_manager.get_engine(spec_node_batch.node_name)
+        reset = getattr(engine, "reset_pre_plan_for_batch", None)
+        if reset is not None:
+            reset(spec_node_batch)
 
     def _execute_on_gpu_thread(
         self,
@@ -2256,6 +2253,11 @@ class Worker:
                 speculation = None
                 yield_away_from_target = None
                 spec_plan_future: Future | None = None
+                # Tracks the NodeBatch the in-flight pre-plan targeted, so
+                # cleanup paths (alloc-fail, dropped rids, no-spec-submit)
+                # can call ``_reset_skip_plan_flags`` on the right slot
+                # rather than wiping every captured graph's slots.
+                spec_plan_target: NodeBatch | None = None
                 if (
                     pending is not None
                     and self._can_speculate(pending[0])
@@ -2331,6 +2333,7 @@ class Worker:
                                     spec_node_batch_for_plan,
                                     prev_advance_event_for_plan,
                                 )
+                                spec_plan_target = spec_node_batch_for_plan
                     else:
                         yield_away_from_target = (
                             pending[0].node_name,
@@ -2367,8 +2370,9 @@ class Worker:
                         # plan_attention call recomputes from scratch.
                         if spec_plan_future is not None:
                             spec_plan_future.result()
-                            self._reset_skip_plan_flags()
+                            self._reset_skip_plan_flags(spec_plan_target)
                             spec_plan_future = None
+                            spec_plan_target = None
                         # No in-flight GPU work now; safe to apply all
                         # pending removes.
                         self._apply_pending_removes_safe_to_drop(
@@ -2412,9 +2416,10 @@ class Worker:
                                 and dropped
                             ):
                                 spec_plan_future.result()
-                                self._reset_skip_plan_flags()
+                                self._reset_skip_plan_flags(spec_plan_target)
                                 plan_future_for_submit = None
                             spec_plan_future = None  # ownership transferred
+                            spec_plan_target = None
                             # Phase 3: attach a fresh advance_event to this
                             # batch so the NEXT iter's plan_executor can
                             # gate on advance_seq_lens(THIS batch).
@@ -2450,8 +2455,9 @@ class Worker:
                     # plan_attention runs from scratch.
                     if spec_plan_future is not None:
                         spec_plan_future.result()
-                        self._reset_skip_plan_flags()
+                        self._reset_skip_plan_flags(spec_plan_target)
                         spec_plan_future = None
+                        spec_plan_target = None
 
                     # Post-process N — runs concurrently with GPU(N+1)
                     # if we submitted one above.
