@@ -841,9 +841,11 @@ class CudaGraphRunner:
         """Pre-plan FlashInfer attention into the inactive double-buffer slot.
 
         Runs cache_manager.plan_attention against the slot's persistent
-        wrapper on a dedicated plan_stream, then sets the slot's
-        _skip_next_plan_attention flag and stashes a plan_done_event so the
-        captured graph's replay can wait on it before reading the wrapper.
+        wrapper(s) on a dedicated plan_stream, once per label in the
+        captured config (so multi-label captures like BAGEL CFG decode get
+        all labels overlapped), then populates the slot's
+        ``_pre_planned_labels`` set and stashes a plan_done_event so the
+        captured graph's replay can wait on it before reading the wrappers.
 
         Phase 3 double-buffer: the slot here is the OTHER slot from the one
         currently being replayed — main thread reserves it via
@@ -904,26 +906,37 @@ class CudaGraphRunner:
         # buffers we write here stay valid for the matching replay.
         saved_request_ids = static_cm.request_ids
         saved_active_labels = static_cm.active_labels
+        # Pre-plan every label this captured graph's preprocess will ask for.
+        # Multi-label captures (e.g. BAGEL CFG decode, labels=["main",
+        # "cfg_img"]) inline-plan once per label; we cover all of them so
+        # none falls back to inline plan_attention. Each label's wrapper has
+        # its own static buffers — sequential calls on the same plan_stream
+        # respect natural FIFO ordering, so a single plan_done_event after
+        # the last call covers every label's writes.
+        config_labels = config.labels
         try:
             static_cm.request_ids = list(request_ids) + saved_request_ids[len(request_ids):]
-            static_cm.active_labels = {rid: "main" for rid in request_ids}
             seq_lens = [1] * len(saved_request_ids)
             if plan_stream is not None:
                 with torch.cuda.stream(plan_stream):
-                    static_cm.plan_attention(
-                        seq_lens=seq_lens,
-                        dtype=self.autocast_dtype,
-                        label="main",
-                    )
+                    for label_name in config_labels:
+                        static_cm.active_labels = {rid: label_name for rid in request_ids}
+                        static_cm.plan_attention(
+                            seq_lens=seq_lens,
+                            dtype=self.autocast_dtype,
+                            label=label_name,
+                        )
                 plan_done_event = torch.cuda.Event()
                 plan_done_event.record(plan_stream)
             else:
-                static_cm.plan_attention(
-                    seq_lens=seq_lens,
-                    dtype=self.autocast_dtype,
-                    label="main",
-                )
-            static_cm._skip_next_plan_attention = True
+                for label_name in config_labels:
+                    static_cm.active_labels = {rid: label_name for rid in request_ids}
+                    static_cm.plan_attention(
+                        seq_lens=seq_lens,
+                        dtype=self.autocast_dtype,
+                        label=label_name,
+                    )
+            static_cm._pre_planned_labels = set(config_labels)
             static_cm._plan_done_event = plan_done_event
         finally:
             static_cm.request_ids = saved_request_ids

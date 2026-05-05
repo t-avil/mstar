@@ -377,8 +377,8 @@ Mechanism:
 This wakes plan_executor ~tens of µs into replay(N), so plan(N+1)'s
 ~400 µs of Python+plan_inner work overlaps with the rest of replay(N)
 (sample_and_remap ~3 ms). By the time replay(N+1) is queued behind
-sample(N), `_skip_next_plan_attention=True` and `_plan_done_event` are
-already set on the slot's cache_manager; `await_plan` on the GPU thread
+sample(N), `_pre_planned_labels` (one entry per captured-config label) and
+`_plan_done_event` are already set on the slot's cache_manager; `await_plan` on the GPU thread
 drops to **2.1 µs p50** (was 800 µs in the single-buffer attempt).
 
 ### What Phase 3 delivers (measured)

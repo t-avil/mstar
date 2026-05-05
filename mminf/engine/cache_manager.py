@@ -94,18 +94,28 @@ class BatchedCacheManager:
             kv_cache_config.max_seq_len, dtype=torch.long, device=device
         )
 
-        # Phase 3: when set to True, the next plan_attention call short-circuits.
-        # The Worker's plan_executor calls plan_attention beforehand (with real
-        # request_ids and the same cuda_graph_plan_states) so the captured
-        # graph's preprocess can skip the heavy FlashInfer wrapper.plan() —
-        # which is GIL-contended with main thread's fast/slow post in the
-        # speculative path. Set by CudaGraphRunner.pre_plan_for_batch and
-        # cleared after the next plan_attention call.
-        self._skip_next_plan_attention = False
+        # Phase 3: labels the Worker's plan_executor has pre-planned for the
+        # next batch. Each entry causes the matching plan_attention(label=L)
+        # call to short-circuit — the captured graph's preprocess skips the
+        # heavy FlashInfer wrapper.plan() (GIL-contended with main thread's
+        # fast/slow post in the speculative path). Populated by
+        # CudaGraphRunner.pre_plan_for_batch with one entry per label in the
+        # captured config; each entry is consumed by the matching
+        # plan_attention call and removed.
+        #
+        # Set-of-labels (rather than single bool) is required for multi-label
+        # captures (e.g. BAGEL CFG decode, labels=["main", "cfg_img"]): the
+        # earlier single-bool primitive short-circuited whichever label ran
+        # first regardless of whether that label was the one pre-planned, so
+        # only one of N labels got the overlap benefit.
+        self._pre_planned_labels: set[str] = set()
         # CUDA event recorded on the plan-overlap stream after the pre-planned
-        # plan() call completed. The captured graph's replay must wait on this
-        # before reading the wrapper's static buffers (which the pre-plan
-        # wrote on a different stream). None when no pre-plan was applied.
+        # plan() calls completed. The captured graph's replay must wait on
+        # this before reading any wrapper's static buffers (the pre-plan
+        # wrote them on a different stream). One event covers all labels —
+        # they're sequential on the same plan_stream, so the final event
+        # signals "all label wrappers' writes visible". None when no
+        # pre-plan was applied.
         self._plan_done_event: "torch.cuda.Event | None" = None
 
     @torch.compiler.disable
@@ -171,19 +181,19 @@ class BatchedCacheManager:
         if self.enable_nvtx:
             range_push("cache.plan_attention", synchronize=False)
         try:
-            if self._skip_next_plan_attention:
+            effective_label = label
+            if effective_label is None:
+                labels = list(self.active_labels.values())
+                assert len(set(labels)) == 1, f"All active labels must be the same, got {labels}"
+                effective_label = next(iter(self.active_labels.values()))
+            if effective_label in self._pre_planned_labels:
                 # Phase 3 fast path: plan was pre-computed by Worker.plan_executor
                 # against the same persistent wrapper. The wrapper's static
                 # buffers and FlashInfer scheduling state are already correct
                 # for this iter's seq_lens. We only need to record ps.seq_lens
                 # / ps.write_store on the matching label so downstream
                 # run_attention sees them.
-                self._skip_next_plan_attention = False
-                effective_label = label
-                if effective_label is None:
-                    labels = list(self.active_labels.values())
-                    assert len(set(labels)) == 1, f"All active labels must be the same, got {labels}"
-                    effective_label = next(iter(self.active_labels.values()))
+                self._pre_planned_labels.discard(effective_label)
                 ps = self._plan_states.get(effective_label)
                 if ps is not None:
                     ps.seq_lens = seq_lens

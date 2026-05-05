@@ -374,6 +374,22 @@ class WorkerGraphsManager:
         filter_result.kept += out.outputs
         return filter_result
 
+    def apply_spec_consumption(
+        self, request_id: str, spec_node_name: str
+    ) -> None:
+        """Mark the spec node as consumed in the queue's waiting tree, BEFORE
+        ``complete_loops`` runs for the same iter. This sets the Loop's
+        ``_curr_iter_section`` to ``None`` so that when ``complete_loops``
+        subsequently fires for the just-completed body, ``_iter_done()`` can
+        return True at the terminal iter, ``_is_done()`` matches
+        ``max_iters == curr_iter + 1``, and the Loop's ``outputs`` field
+        (e.g. BAGEL image_gen Loop's ``latents → vae_decoder``) is emitted
+        through ``LoopCompletionOutput``.
+        """
+        wg_id = self.get_worker_graph_id_for_node(request_id, spec_node_name)
+        queue = self.queues[wg_id].per_request_queues[request_id]
+        queue.update_for_spec(spec_node_name)
+
 
     def process_node_outputs(
         self, request_id: str,

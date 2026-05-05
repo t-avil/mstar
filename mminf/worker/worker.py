@@ -1057,15 +1057,15 @@ class Worker:
             return False
 
     def _reset_skip_plan_flags(self) -> None:
-        """Clear ``_skip_next_plan_attention`` on every captured graph's
+        """Clear ``_pre_planned_labels`` on every captured graph's
         cache_manager (every slot of every key). Used to recover from
         speculation drops / failures where the pre-plan was dispatched but
-        the spec batch never reached the GPU thread — leaving the flag set
-        would cause the next real plan_attention call to short-circuit
-        incorrectly.
+        the spec batch never reached the GPU thread — leaving entries in
+        the set would cause the next real plan_attention call to
+        short-circuit incorrectly.
 
         Phase 3 double-buffer: each slot has its own cache_manager with
-        its own flag, so we walk all slots.
+        its own pre-plan state, so we walk all slots.
         """
         for engine in set(self.engine_manager.node_to_engine.values()):
             mgmt_dict = getattr(engine, "submodule_management", None)
@@ -1078,7 +1078,7 @@ class Worker:
                 for graph_data in runner.graphs.values():
                     for slot in graph_data.slots:
                         cm = slot.static_cache_manager
-                        cm._skip_next_plan_attention = False
+                        cm._pre_planned_labels.clear()
                         cm._plan_done_event = None
 
     def _execute_on_gpu_thread(
@@ -1118,9 +1118,9 @@ class Worker:
             range_pop(synchronize=False)
         # Phase 3: wait for the plan_executor's pre-planned wrapper.plan()
         # call to finish before running this batch — its results land on the
-        # captured graph's persistent wrapper, and the next call to
-        # cache_manager.plan_attention will see _skip_next_plan_attention=True
-        # only because plan_executor set the flag. Wait releases the GIL.
+        # captured graph's persistent wrappers, and the next plan_attention
+        # call(s) will see the matching label in _pre_planned_labels only
+        # because plan_executor populated it. Wait releases the GIL.
         if plan_future is not None:
             if self.enable_nvtx:
                 range_push("worker.gpu_thread.await_plan", synchronize=False)
@@ -1529,6 +1529,24 @@ class Worker:
             ]
             filtered_outputs_per_request[request_id] = filtered_outputs
 
+        # Apply spec consumption BEFORE complete_loops. ``update_for_spec``
+        # is what marks the Loop's pre-emptively-allocated next-iter body as
+        # consumed (sets ``_curr_iter_section = None``). When complete_loops
+        # runs after this, it sees the post-spec Loop state and can correctly
+        # detect natural termination at ``max_iters`` — emitting ``Loop.outputs``
+        # (e.g. BAGEL image_gen Loop's ``latents → vae_decoder``) and
+        # short-circuiting the queue. Without this re-ordering, complete_loops
+        # saw a stale ``curr_iter_section=GraphNode`` (the spec-cloned body's
+        # template), ``_iter_done()`` returned False, the Loop never
+        # terminated through complete_loops, downstream nodes never got the
+        # final outputs, and the loop ran forever past max_iters.
+        if spec_node_name is not None:
+            for request_id in batch.node_objects:
+                if speculation_consumed_loop_back.get(request_id):
+                    self.worker_graphs_manager.apply_spec_consumption(
+                        request_id, spec_node_name=spec_node_name,
+                    )
+
         node_outputs = self._store_outputs_and_finish_loops(
             batch, output=output,
             filtered_outputs_per_request=filtered_outputs_per_request
@@ -1551,9 +1569,11 @@ class Worker:
                 ]
             else:
                 kept_for_routing = kept
+            # Pass spec_node_name=None now; we already applied spec consumption
+            # above so process_node_outputs shouldn't re-apply it.
             routing = self.worker_graphs_manager.process_node_outputs(
                 request_id, kept_for_routing, graph_walk=batch.graph_walk,
-                spec_node_name=spec_node_name if consumed_names else None
+                spec_node_name=None,
             )
             routing_per_request[request_id] = routing
         if self.enable_nvtx:
@@ -2421,8 +2441,8 @@ class Worker:
                     # Cleanup: if pre-plan was dispatched but no spec was
                     # submitted (spec_batch fully drained, or speculation
                     # became invalid), drain the plan future and clear the
-                    # _skip_next_plan_attention flag so the next non-spec
-                    # path's plan_attention runs from scratch.
+                    # _pre_planned_labels set so the next non-spec path's
+                    # plan_attention runs from scratch.
                     if spec_plan_future is not None:
                         spec_plan_future.result()
                         self._reset_skip_plan_flags()
