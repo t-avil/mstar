@@ -1544,6 +1544,40 @@ class Worker:
                         request_id, spec_node_name=spec_node_name,
                     )
 
+        # Stops applied in this batch consume the loop body the same way a
+        # spec replay does: the next-iter body that ``process_node_outputs``
+        # queued in the prior iter (``_curr_iter_section = GraphNode(...)``)
+        # is no longer wanted, because the loop is terminating. If we don't
+        # clear it now, the upcoming ``complete_loops`` call recurses into
+        # ``GraphNode.complete_loops``, which returns ``new_waiting=self``,
+        # restoring ``_curr_iter_section`` to the GraphNode. Then
+        # ``_iter_done()`` is False (curr_iter_section is non-None even
+        # though _finished=True and _waiting_for_execution is empty), the
+        # Loop never reports done, the worker graph never emits
+        # WORKER_GRAPHS_DONE with completed_worker_graph_ids, the partition
+        # never reaches partition_done=True at the conductor, and the
+        # request hangs forever.
+        #
+        # The no-spec scenarios that hit this on Q3-Omni:
+        #   1. Fairness yield at the spec gate above — Thinker shares
+        #      worker_1 with Talker; after each Thinker iter, Talker has
+        #      ready work, so ``has_ready_excluding(Thinker, thinker_decode)``
+        #      returns True, ``must_yield_for_fairness`` is True, and the
+        #      iter applying the stop never even calls
+        #      ``_try_speculate_next``. spec_node_name stays None and
+        #      apply_spec_consumption is skipped from the spec branch.
+        #   2. Non-AR engines (e.g. ``code_predictor`` with custom
+        #      enable_async_scheduling) where ``_can_speculate`` returns
+        #      False outright.
+        # In both, ``_apply_pending_stops_to_batch`` correctly registers the
+        # stop, but the next-iter body is left dangling on the Loop without
+        # this call.
+        for request_id in stopped_loop_backs:
+            if request_id in batch.node_objects:
+                self.worker_graphs_manager.apply_spec_consumption(
+                    request_id, spec_node_name=batch.node_name,
+                )
+
         node_outputs = self._store_outputs_and_finish_loops(
             batch, output=output,
             filtered_outputs_per_request=filtered_outputs_per_request
