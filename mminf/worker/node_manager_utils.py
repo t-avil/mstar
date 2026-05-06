@@ -141,7 +141,20 @@ class WorkerGraphQueues:
         """
         self.per_request_queues[request_id].reset()
 
-    def stop_loops(self, request_id: str, loop_names: set[str]):
+    def stop_loops(
+        self, request_id: str, loop_names: set[str]
+    ) -> set[tuple[str, str]]:
+        """Stop matching DynamicLoops and return the
+        ``(edge.name, edge.next_node)`` pairs of those loops' loop-back
+        signals — the caller uses this to drop *only* the stopped loops'
+        loop-back edges from the routing kept-list, instead of every
+        self-loop edge on the running node. Without per-loop attribution,
+        a node that participates in two distinct dynamic loops with
+        disjoint loop-back edges would lose the surviving loop's
+        loop-back tensor when the other loop stops.
+        """
+        stopped_loop_back_signals: set[tuple[str, str]] = set()
+
         def _stop_loops(section: GraphSection):
             if isinstance(section, Sequential) or isinstance(section, Parallel):
                 for sec in section.sections:
@@ -150,10 +163,42 @@ class WorkerGraphQueues:
             if isinstance(section, DynamicLoop):
                 if section.name in loop_names:
                     section.register_finished()
+                    for edge in section._loop_back_signals:
+                        stopped_loop_back_signals.add(
+                            (edge.name, edge.next_node)
+                        )
             if isinstance(section, Loop):
                 # including dynamic loops
                 _stop_loops(section._curr_iter_section)
         _stop_loops(self.per_request_queues[request_id].waiting)
+        return stopped_loop_back_signals
+
+    def clear_dyn_loop_curr_iter_section(
+        self, request_id: str, loop_names: set[str]
+    ):
+        """Set ``_curr_iter_section = None`` on matching dynamic loops.
+
+        Called from ``_finalize_slow_postprocess`` when a stop has been
+        detected for a loop whose iter ALSO advanced during the same batch's
+        fast postprocess. Without this, the eventual ``register_finished``
+        leaves the loop in a state where ``_iter_done()`` is False
+        (because ``_curr_iter_section`` still points at the just-started
+        next-iter body), so the worker graph never reports done.
+        """
+        def _clear(section: GraphSection):
+            if section is None:
+                return
+            if isinstance(section, Sequential) or isinstance(section, Parallel):
+                for sec in section.sections:
+                    _clear(sec)
+                return
+            if isinstance(section, Loop):
+                # Recurse first to handle nested dynamic loops; mutating an
+                # outer loop's _curr_iter_section here would lose the path.
+                _clear(section._curr_iter_section)
+                if isinstance(section, DynamicLoop) and section.name in loop_names:
+                    section._curr_iter_section = None
+        _clear(self.per_request_queues[request_id].waiting)
 
     def get_dynamic_loop_iters(self, request_id: str) -> dict[str, int]:
         iter_dict = {}
@@ -347,11 +392,28 @@ class WorkerGraphsManager:
         filter_result.kept += out.outputs
         return filter_result
 
+    def apply_spec_consumption(
+        self, request_id: str, spec_node_name: str
+    ) -> None:
+        """Mark the spec node as consumed in the queue's waiting tree, BEFORE
+        ``complete_loops`` runs for the same iter. This sets the Loop's
+        ``_curr_iter_section`` to ``None`` so that when ``complete_loops``
+        subsequently fires for the just-completed body, ``_iter_done()`` can
+        return True at the terminal iter, ``_is_done()`` matches
+        ``max_iters == curr_iter + 1``, and the Loop's ``outputs`` field
+        (e.g. BAGEL image_gen Loop's ``latents → vae_decoder``) is emitted
+        through ``LoopCompletionOutput``.
+        """
+        wg_id = self.get_worker_graph_id_for_node(request_id, spec_node_name)
+        queue = self.queues[wg_id].per_request_queues[request_id]
+        queue.update_for_spec(spec_node_name)
+
 
     def process_node_outputs(
         self, request_id: str,
         outputs: list[GraphEdge],
         graph_walk: str,
+        spec_node_name: str | None = None
     ) -> NodeOutputRouting:
         """
         After a node has finished processing, use its outputs to update
@@ -362,6 +424,12 @@ class WorkerGraphsManager:
         worker, and directs external outputs to worker graphs on the appropriate
         (different) worker.
         """
+        # (-1) if spec node name, update graph accordingly
+        if spec_node_name is not None:
+            wg_id = self.get_worker_graph_id_for_node(request_id, spec_node_name)
+            queue = self.queues[wg_id].per_request_queues[request_id]
+            queue.update_for_spec(spec_node_name)
+
         # (0) separate streaming edges — they bypass the queue system
         streaming_edges = [edge for edge in outputs if edge.is_streaming]
         non_streaming_outputs = [edge for edge in outputs if not edge.is_streaming]
@@ -473,15 +541,23 @@ class WorkerGraphsManager:
         loop_names: set[str],
         req_info: CurrentForwardPassInfo | None = None,
         last_node_run: str | None = None
-    ):
+    ) -> set[tuple[str, str]]:
         """
         Stops dynamic loops based on stop signals. If req_info is also passed in,
         then this also updates req_info.loop_stop_times with the urrent loop indices.
+
+        Returns the union of ``(edge.name, edge.next_node)`` pairs across all
+        worker graphs for the loop-back signals of loops that were actually
+        stopped — see ``WorkerGraphQueues.stop_loops`` for why per-loop
+        attribution matters.
         """
         part_info = self.per_request_info[request_id].per_partition_info[partition]
         worker_graph_ids = part_info.graph_walk_worker_graph_ids
+        stopped_loop_back_signals: set[tuple[str, str]] = set()
         for worker_graph_id in worker_graph_ids:
-            self.queues[worker_graph_id].stop_loops(request_id, loop_names)
+            stopped_loop_back_signals |= self.queues[worker_graph_id].stop_loops(
+                request_id, loop_names
+            )
             waiting = self.queues[worker_graph_id].per_request_queues[request_id].waiting
 
             if req_info is not None and (
@@ -499,6 +575,7 @@ class WorkerGraphsManager:
                             graph=waiting,
                             fwd_idx=req_info.fwd_index
                         )
+        return stopped_loop_back_signals
 
     def get_dynamic_loop_iters(
         self, request_id: str,
@@ -513,6 +590,18 @@ class WorkerGraphsManager:
                 self.queues[worker_graph_id].get_dynamic_loop_iters(request_id)
             )
         return iter_counts
+
+    def clear_dyn_loop_curr_iter_section(
+        self, request_id: str,
+        partition: str,
+        loop_names: set[str],
+    ):
+        part_info = self.per_request_info[request_id].per_partition_info[partition]
+        worker_graph_ids = part_info.graph_walk_worker_graph_ids
+        for worker_graph_id in worker_graph_ids:
+            self.queues[worker_graph_id].clear_dyn_loop_curr_iter_section(
+                request_id, loop_names
+            )
 
     def add_request(
         self, request_id: str,
