@@ -4,6 +4,7 @@
 
 
 import logging
+import os
 from typing import Any
 
 import torch
@@ -71,21 +72,11 @@ class ViTEncoderSubmodule(NodeSubmodule):
         inputs: NameToTensorList,
         **kwargs
     ) -> NodeInputs:
-        """Convert raw images to packed ViT input format.
-
-        Full implementation should include prepare_vit_images logic from BAGEL:
-        - Dynamic resolution computation and SigLIP2 image preprocessing
-        - Patch splitting and flattening
-        - Position ID computation from image grid
-        - Packing multiple images with cu_seqlens for FlashAttention
-        """
-
         image_inputs = inputs["image_inputs"]
 
         image_tensor = self.vae_transform.resize_transform(image_inputs[0])
         image_tensor = self.transform(image_tensor)
 
-        num_tokens = image_tensor.shape[0]
         device = image_tensor.device
 
         position_ids = get_flattened_position_ids_extrapolate(
@@ -94,26 +85,28 @@ class ViTEncoderSubmodule(NodeSubmodule):
             max_num_patches_per_side=self.vit_max_num_patch_per_side
         ).to(device)
         pixel_values = patchify(image_tensor, self.vit_patch_size)
+        # patchify yields (num_patches, p²·C); pre-patchify image_tensor is
+        # (C, H, W), so its .shape[0] is the channel count, not the patch
+        # count flashattn / cu_seqlens needs.
+        num_tokens = pixel_values.shape[0]
 
-        # Compute cu_seqlens for FlashAttention
-        vit_token_seqlens = torch.tensor(
-            [num_tokens], dtype=torch.int32, device=device
+        cu_seqlens = torch.tensor(
+            [0, num_tokens], dtype=torch.int32, device=device
         )
-        cu_seqlens = torch.nn.functional.pad(
-            torch.cumsum(vit_token_seqlens, dim=0), (1, 0)
-        ).to(torch.int32)
-        max_seqlen = int(num_tokens)
 
-        tensor_inputs = {
-            "packed_pixel_values": pixel_values,
-            "packed_position_ids": position_ids,
-        }
-        kwargs = {
-            "cu_seqlens": cu_seqlens,
-            "max_seqlen": max_seqlen,
-        }
-        return NodeInputs(tensor_inputs=tensor_inputs, kwargs=kwargs)
-
+        return NodeInputs(
+            tensor_inputs={
+                "packed_pixel_values": pixel_values,
+                "packed_position_ids": position_ids,
+            },
+            kwargs={
+                "cu_seqlens": cu_seqlens,
+                "max_seqlen": num_tokens,
+                # CPU-side per-image token count, so the batched preprocess
+                # can build cu_seqlens without a GPU→CPU sync per request.
+                "_num_tokens_per_image_cpu": [num_tokens],
+            },
+        )
 
     def forward(
         self,
@@ -124,10 +117,6 @@ class ViTEncoderSubmodule(NodeSubmodule):
         max_seqlen: int,
         **kwargs,
     ) -> NameToTensorList:
-        logger.debug(
-            "Running BAGEL ViT with packed_pixel_values shape=%s, packed_position_ids shape=%s",
-            packed_pixel_values.shape, packed_position_ids.shape
-        )
         features = self.vit_model(
             packed_pixel_values=packed_pixel_values,
             packed_flattened_position_ids=packed_position_ids,
@@ -135,9 +124,80 @@ class ViTEncoderSubmodule(NodeSubmodule):
             max_seqlen=max_seqlen,
         )
         features = self.connector(features)
-        pos_emb = self.vit_pos_embed(packed_position_ids)
-        features = features + pos_emb
+        features = features + self.vit_pos_embed(packed_position_ids)
         return {"img_emb": [features]}
+
+    def can_batch(self, batch: NodeBatch, model_inputs: list[NodeInputs]) -> bool:
+        # Opt-in via MMINF_VIT_BATCHING=1. Off by default because flashattn
+        # varlen reductions across packed images produce small bf16 drift,
+        # which at greedy temperature=0 can flip downstream LLM argmax.
+        if os.environ.get("MMINF_VIT_BATCHING", "0") != "1":
+            return False
+        return batch.graph_walk == "prefill_vit" and len(model_inputs) > 1
+
+    def max_batch_size(self, graph_walk: str):
+        if graph_walk == "prefill_vit":
+            return 32
+        return None
+
+    def preprocess(
+        self,
+        graph_walk: str,
+        engine_inputs: ModelInputsFromEngine,
+        inputs: list[NodeInputs],
+    ) -> dict[str, Any]:
+        packed_pixel_values = torch.cat(
+            [inp.tensor_inputs["packed_pixel_values"] for inp in inputs], dim=0
+        )
+        packed_position_ids = torch.cat(
+            [inp.tensor_inputs["packed_position_ids"] for inp in inputs], dim=0
+        )
+        per_image_lens: list[int] = []
+        seq_lens: list[int] = []
+        for inp in inputs:
+            tokens_per_image: list[int] = inp.kwargs["_num_tokens_per_image_cpu"]
+            per_image_lens.extend(tokens_per_image)
+            seq_lens.append(sum(tokens_per_image))
+        cu_lens_cpu = [0]
+        for n in per_image_lens:
+            cu_lens_cpu.append(cu_lens_cpu[-1] + n)
+        cu_seqlens = torch.tensor(
+            cu_lens_cpu, dtype=torch.int32, device=packed_pixel_values.device
+        )
+        return {
+            "packed_pixel_values": packed_pixel_values,
+            "packed_position_ids": packed_position_ids,
+            "cu_seqlens": cu_seqlens,
+            "max_seqlen": max(per_image_lens) if per_image_lens else 0,
+            "seq_lens": seq_lens,
+        }
+
+    def forward_batched(
+        self,
+        graph_walk: str,
+        engine_inputs: ModelInputsFromEngine,
+        packed_pixel_values: torch.Tensor,
+        packed_position_ids: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
+        seq_lens: list[int],
+        **kwargs,
+    ) -> dict[str, NameToTensorList]:
+        features = self.vit_model(
+            packed_pixel_values=packed_pixel_values,
+            packed_flattened_position_ids=packed_position_ids,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+        )
+        features = self.connector(features)
+        features = features + self.vit_pos_embed(packed_position_ids)
+
+        out: dict[str, NameToTensorList] = {}
+        offset = 0
+        for rid, n in zip(engine_inputs.request_ids, seq_lens, strict=True):
+            out[rid] = {"img_emb": [features[offset:offset + n]]}
+            offset += n
+        return out
 
 
 class VAEEncoderSubmodule(NodeSubmodule):

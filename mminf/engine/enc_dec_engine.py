@@ -33,6 +33,15 @@ class EncoderDecoderEngine(BaseEngine):
     def engine_type(self) -> EngineType:
         return EngineType.ENC_DEC
 
+    def get_max_batch_size(self, node_name: str, graph_walk: str):
+        # Defer to the submodule so per-walk caps (e.g. ViT prefill_vit) are
+        # honored; ``execute_with_max_batch_size`` then auto-chunks oversized
+        # batches.
+        submodule = self.submodules.get(node_name)
+        if submodule is None:
+            return None
+        return submodule.max_batch_size(graph_walk)
+
     def load_model(
         self,
         submodules: dict[str, NodeSubmodule],
@@ -172,12 +181,9 @@ class EncoderDecoderEngine(BaseEngine):
                         fullgraph=False,
                     )
                     logger.info("EncDecEngine: torch.compile applied to %s.forward", node_name)
-                if hasattr(submodule, 'forward_batched'):
-                    submodule.forward_batched = torch.compile(
-                        submodule.forward_batched,
-                        fullgraph=False,
-                    )
-                    logger.info("EncDecEngine: torch.compile applied to %s.forward_batched", node_name)
+                # forward_batched is intentionally left eager — Inductor
+                # would pay a ~30s one-shot trace cost for dynamic varlen
+                # shapes on the first call, which dwarfs the per-call win.
             except Exception:
                 logger.warning("EncDecEngine: torch.compile failed for %s, using eager mode",
                                node_name, exc_info=True)

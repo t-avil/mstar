@@ -11,7 +11,7 @@
 
 
 import torch
-import torch.nn.functional as F
+from flash_attn import flash_attn_varlen_func
 from torch import nn
 from transformers.activations import ACT2FN
 
@@ -22,29 +22,22 @@ def run_attention(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    max_seqlen: int,
     causal: bool = False,
-):
-    """
-    q,k,v: (total_tokens, num_heads, head_dim)
-    cu_seqlens: (batch + 1)
-    """
-
-    # (1, heads, seq, dim)
-    q = q.permute(1, 0, 2).unsqueeze(0)
-    k = k.permute(1, 0, 2).unsqueeze(0)
-    v = v.permute(1, 0, 2).unsqueeze(0)
-
-    out = F.scaled_dot_product_attention(
-        q,
-        k,
-        v,
-        attn_mask=None,
-        dropout_p=0.0,
-        is_causal=causal,
+    scale: float | None = None,
+) -> torch.Tensor:
+    # cu_seqlens isolates per-image attention when multiple images are packed.
+    # flashinfer's varlen kernels silently miscompute at SigLIP2's head_dim=72.
+    return flash_attn_varlen_func(
+        q, k, v,
+        cu_seqlens_q=cu_seqlens,
+        cu_seqlens_k=cu_seqlens,
+        max_seqlen_q=max_seqlen,
+        max_seqlen_k=max_seqlen,
+        causal=causal,
+        softmax_scale=scale,
     )
-
-    # back to (seq, heads, dim)
-    return out.squeeze(0).permute(1, 0, 2)
 
 
 class RotaryEmbedding2D(torch.nn.Module):
@@ -203,6 +196,8 @@ class BagelViTAttention(nn.Module):
             q,
             k,
             v,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
             causal=False,
         )
 
