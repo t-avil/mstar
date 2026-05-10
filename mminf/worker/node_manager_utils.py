@@ -4,23 +4,8 @@ from dataclasses import dataclass, field
 
 from mminf.communication.tensors import TensorCommunicationManager
 from mminf.conductor.request_info import CurrentForwardPassInfo, PerLabelSeqInfo
-from mminf.graph.base import (
-    DynamicLoop,
-    FilteredEdges,
-    GraphEdge,
-    GraphNode,
-    GraphSection,
-    Loop,
-    Parallel,
-    Sequential,
-    TensorPointerInfo,
-)
-from mminf.graph.loop_index import build_loop_index_tree, update_loop_index_tree
-from mminf.graph.request_queues import (
-    PerRequestNodeQueues,
-    ProcessedInputs,
-    format_graph_edge_list,
-)
+from mminf.graph.base import GraphEdge, GraphNode
+from mminf.graph.graph_io import WorkerGraphIO, WorkerGraphIOZ
 from mminf.graph.special_destinations import EMIT_TO_CLIENT, SPECIAL_DESTINATIONS
 from mminf.model.base import WorkerGraph
 from mminf.streaming.stream_buffer import StreamBuffer
@@ -59,56 +44,64 @@ class WorkerGraphQueues:
     graph_walks: set[str] # e.g., this worker graph is active during decode and image_gen
                           # but not the prefill graph walk
     worker_graph: WorkerGraph
-    per_request_queues: dict[str, PerRequestNodeQueues] # request_id -> queue
+    per_request_queues: dict[str, WorkerGraphIO]
     tensor_manager: TensorCommunicationManager
 
-    def process_new_inputs(self, request_id: str, inputs: list[GraphEdge]) -> ProcessedInputs:
-        """
-        Add new inputs for a request, and update waiting/ready nodes accordingly.
-        Returns any signals that should be sent to other worker graphs.
-        """
-        return self.per_request_queues[request_id].process_new_inputs(inputs)
+    def __post_init__(self):
+        self.nodes = set(self.worker_graph.section.get_nodes().keys())
+        self.loops = set(self.worker_graph.section.get_loops().keys())
 
-    def process_new_streaming_inputs(self, request_id: str, inputs: list[GraphEdge]) -> ProcessedInputs:
+    def process_new_inputs(self, request_id: str, inputs: list[GraphEdge]) -> set[int]:
         """
         Add new inputs for a request, and update waiting/ready nodes accordingly.
-        Returns any signals that should be sent to other worker graphs.
+        This should work for both regular and streaming inputs.
+        Returns a the indices of any inputs that were not ingested
         """
-        return self.per_request_queues[request_id].process_streaming_input(inputs)
+        assert request_id in self.per_request_queues, \
+            f"Tried to process new inputs for unknown request ID {request_id}"
+        not_ingested = set()
+        queue = self.per_request_queues[request_id]
+        for i, inp in enumerate(inputs):
+            if not queue.ingest_input(inp):
+                not_ingested.add(i)
+        return not_ingested
 
     def is_done(self, request_id) -> bool:
-        q = self.per_request_queues[request_id]
-        return q.waiting is None and len(q.ready) == 0 and len(q.waiting_for_stream) == 0
+        assert request_id in self.per_request_queues, \
+            f"Tried to check queue done state for unknown request ID {request_id}"
+        queue = self.per_request_queues[request_id]
+        return queue.wg_state_registry.is_done
 
     def add_request(self, request_id: str):
         """
         Initialize queues for a new request
         """
         section_copy = deepcopy(self.worker_graph.section)
-        section_copy.register_communication_info(
+        queue = WorkerGraphIO(section_copy)
+        queue.register_communication_info(
             self.tensor_manager, request_id
         )
-        self.per_request_queues[request_id] = PerRequestNodeQueues(
-            waiting=section_copy,
-            full_section=section_copy,
-            worker_graph_id=self.worker_graph_id
-        )
+        self.per_request_queues[request_id] = queue
 
     def remove_request(self, request_id: str):
         """
         Delete queues for a completed/removed request (saw EOS)
         """
-        if request_id in self.per_request_queues:
-            del self.per_request_queues[request_id]
+        self.per_request_queues.pop(request_id, None)
 
-    def get_ready_node_names(self) -> dict[str, str]:
+    def get_ready_node_names(self) -> dict[str, set[str]]:
         """
         Returns mapping of request id to ready node names for that request
         """
         return {
-            request_id: [s.name for s in q.ready] \
+            request_id: q.ready_node_names \
                 for (request_id, q) in self.per_request_queues.items()
         }
+    
+    def get_ready_for_streaming(self, request_id: str):
+        assert request_id in self.per_request_queues, \
+            f"Tried to check ready for streaming for unknown request ID {request_id}"
+        return self.per_request_queues[request_id].ready_for_streaming
 
     def pop_ready_nodes(
         self, request_id: str, node_names: list[str]
@@ -120,11 +113,9 @@ class WorkerGraphQueues:
         nodes = []
         if request_id in self.per_request_queues:
             q = self.per_request_queues[request_id]
-            pop_idxs = set(
-                [i for i, node in enumerate(q.ready) if node.name in set(node_names)]
-            )
-            nodes = [q.ready[i] for i in pop_idxs]
-            q.ready = [node for i, node in enumerate(q.ready) if i not in pop_idxs]
+            for name in node_names:
+                q.ready_node_names.discard(name)
+                nodes.append(q.nodes[name])
         return nodes
 
     def push_back_node(
@@ -132,99 +123,29 @@ class WorkerGraphQueues:
     ) -> None:
         """Push a previously popped node back onto the ready queue (e.g., after OOM hold)."""
         if request_id in self.per_request_queues:
-            self.per_request_queues[request_id].ready.append(node)
+            self.per_request_queues[request_id].ready_node_names.add(node.name)
 
     def reset(self, request_id):
         """
         At the end of a worker graph, reset the queues for a request so it can
         be used for the next full model forward pass.
         """
-        self.per_request_queues[request_id].reset()
+        self.per_request_queues[request_id].clear()
 
     def stop_loops(
         self, request_id: str, loop_names: set[str]
-    ) -> set[tuple[str, str]]:
-        """Stop matching DynamicLoops and return the
-        ``(edge.name, edge.next_node)`` pairs of those loops' loop-back
-        signals — the caller uses this to drop *only* the stopped loops'
-        loop-back edges from the routing kept-list, instead of every
-        self-loop edge on the running node. Without per-loop attribution,
-        a node that participates in two distinct dynamic loops with
-        disjoint loop-back edges would lose the surviving loop's
-        loop-back tensor when the other loop stops.
-        """
-        stopped_loop_back_signals: set[tuple[str, str]] = set()
-
-        def _stop_loops(section: GraphSection):
-            if isinstance(section, Sequential) or isinstance(section, Parallel):
-                for sec in section.sections:
-                    _stop_loops(sec)
-                return
-            if isinstance(section, DynamicLoop):
-                if section.name in loop_names:
-                    section.register_finished()
-                    for edge in section._loop_back_signals:
-                        stopped_loop_back_signals.add(
-                            (edge.name, edge.next_node)
-                        )
-            if isinstance(section, Loop):
-                # including dynamic loops
-                _stop_loops(section._curr_iter_section)
-        _stop_loops(self.per_request_queues[request_id].waiting)
-        return stopped_loop_back_signals
-
-    def clear_dyn_loop_curr_iter_section(
-        self, request_id: str, loop_names: set[str]
     ):
-        """Set ``_curr_iter_section = None`` AND ``register_finished`` on
-        matching dynamic loops.
-
-        Called from ``_finalize_slow_postprocess`` when a stop has been
-        detected for a loop whose iter ALSO advanced during the same batch's
-        fast postprocess. Two effects matter:
-
-        1. Clearing ``_curr_iter_section`` so the eventual ``stop_loops``
-           call (via ``_pending_stops``) doesn't leave ``_iter_done`` False
-           and prevent the worker graph from reporting done.
-        2. Marking ``_finished=True`` immediately. Without this, anything
-           that triggers ``_update_ready_waiting`` between now and the
-           next ``fast_postprocess`` (e.g. ``_poll_stream_buffers``
-           ingesting a streaming chunk for a downstream partition) sees
-           ``_iter_done=True`` + ``_is_done=False`` and calls
-           ``_advance_one_iter`` — quietly bumping the iter past where
-           the loop is meant to terminate, leaving the queue's view of
-           the loop one step ahead of reality.
-        """
-        def _clear(section: GraphSection):
-            if section is None:
-                return
-            if isinstance(section, Sequential) or isinstance(section, Parallel):
-                for sec in section.sections:
-                    _clear(sec)
-                return
-            if isinstance(section, Loop):
-                # Recurse first to handle nested dynamic loops; mutating an
-                # outer loop's _curr_iter_section here would lose the path.
-                _clear(section._curr_iter_section)
-                if isinstance(section, DynamicLoop) and section.name in loop_names:
-                    section._curr_iter_section = None
-                    section.register_finished()
-        _clear(self.per_request_queues[request_id].waiting)
+        assert request_id in self.per_request_queues, \
+            f"Tried to stop loops for unknown request ID {request_id}"
+        queue = self.per_request_queues[request_id]
+        for name in loop_names:
+            queue.register_loop_finish_signal(name)
 
     def get_dynamic_loop_iters(self, request_id: str) -> dict[str, int]:
-        iter_dict = {}
-        def _get_iters(section: GraphSection):
-            if isinstance(section, Sequential) or isinstance(section, Parallel):
-                for sec in section.sections:
-                    _get_iters(sec)
-                return
-            if isinstance(section, DynamicLoop):
-                iter_dict[section.name] = section.curr_iter
-            if isinstance(section, Loop):
-                # including dynamic loops
-                _get_iters(section._curr_iter_section)
-        _get_iters(self.per_request_queues[request_id].waiting)
-        return iter_dict
+        assert request_id in self.per_request_queues, \
+            f"Tried to get dynamic loop iters for unknown request ID {request_id}"
+        queue = self.per_request_queues[request_id]
+        return queue.get_loop_indices()
 
 
 @dataclass
@@ -348,26 +269,6 @@ class WorkerGraphsManager:
                 inputs = self.queues[worker_graph_id].process_new_inputs(request_id, inputs).for_other_worker_graphs
         return inputs
 
-    def process_new_streaming_inputs(
-        self,
-        request_id: str,
-        inputs: list[GraphEdge],
-    ):
-        """
-        Updates queues with new inputs for a request.
-
-        Routes inputs to the worker graphs of the currently-active walks
-        for each partition this request participates in.
-        """
-        for part_info in self.per_request_info[request_id].per_partition_info.values():
-            worker_graph_ids = part_info.graph_walk_worker_graph_ids
-            for worker_graph_id in worker_graph_ids:
-                inputs = self.queues[worker_graph_id].process_new_streaming_inputs(
-                    request_id, inputs
-                ).for_other_worker_graphs
-        return inputs
-
-
     def get_worker_graph_id_for_node(
         self, request_id: str, node_name: str
     ) -> str:
@@ -378,12 +279,6 @@ class WorkerGraphsManager:
                         (node_name in self.all_worker_graph_ids_to_nodes[gid]):
                 return gid
         raise RuntimeError(f"Could not find worker graph for node {node_name}, request {request_id}")
-
-
-    def get_waiting_node(
-        self, request_id: str, worker_graph_id: str
-    ):
-        return self.queues[worker_graph_id].per_request_queues[request_id].waiting
 
 
     def complete_loops(
@@ -418,7 +313,6 @@ class WorkerGraphsManager:
         wg_id = self.get_worker_graph_id_for_node(request_id, spec_node_name)
         queue = self.queues[wg_id].per_request_queues[request_id]
         queue.update_for_spec(spec_node_name)
-
 
     def process_node_outputs(
         self, request_id: str,
