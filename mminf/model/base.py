@@ -71,9 +71,9 @@ def _divide_into_worker_graphs(
     Given a graph, break it into worker graphs
     """
     if isinstance(graph, GraphNode):
-        graph._streaming_inputs = input_streams.intersection(graph.input_names)
-        if len(graph._streaming_inputs) > 0:
-            graph.consumes_stream = True
+        # Mutate via the GraphNode helper so the ReadySignals instances built in
+        # __post_init__ keep referencing the live set (they captured by reference).
+        graph._register_streaming(input_streams.intersection(graph.input_names))
 
         return [
             WorkerGraph(
@@ -167,9 +167,8 @@ def _divide_into_worker_graphs(
                 outputs=graph.outputs,
                 name=graph.name,
                 accumulated_outputs=graph.accumulated_outputs,
-                _external_input=ext_inps,
-                _loop_back_inputs=graph._loop_back_inputs
-                
+                _external_inputs=ext_inps,
+                _loop_back_inputs=graph._loop_back_inputs,
             )
         return loop_section_worker_graphs
 
