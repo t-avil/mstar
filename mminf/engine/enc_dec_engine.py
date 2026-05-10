@@ -33,6 +33,15 @@ class EncoderDecoderEngine(BaseEngine):
     def engine_type(self) -> EngineType:
         return EngineType.ENC_DEC
 
+    def get_max_batch_size(self, node_name: str, graph_walk: str):
+        # Defer to the submodule so per-walk caps (e.g. ViT prefill_vit) are
+        # honored; ``execute_with_max_batch_size`` then auto-chunks oversized
+        # batches.
+        submodule = self.submodules.get(node_name)
+        if submodule is None:
+            return None
+        return submodule.max_batch_size(graph_walk)
+
     def load_model(
         self,
         submodules: dict[str, NodeSubmodule],
@@ -123,7 +132,22 @@ class EncoderDecoderEngine(BaseEngine):
                     if self.enable_nvtx:
                         range_pop(synchronize=False)
 
-                    if submodule.can_batch(batch, node_inputs):
+                    use_batched = submodule.can_batch(batch, node_inputs)
+                    codec_runner = getattr(submodule, "_codec_graph_runner", None)
+                    if (
+                        use_batched
+                        and codec_runner is not None
+                        and codec_runner.can_run(len(batch.request_ids), batch.graph_walk)
+                    ):
+                        outputs = codec_runner.run(
+                            graph_walk=batch.graph_walk,
+                            request_ids=batch.request_ids,
+                            inputs=node_inputs,
+                            per_request_info=batch.per_request_info,
+                            submodule=submodule,
+                        )
+                        output = NodeOutput(per_request_output_tensors=outputs)
+                    elif use_batched:
                         output = self._execute_batched(batch, node_inputs, submodule)
                     else:
                         output = self._execute_sequential(batch, node_inputs, submodule)
@@ -157,15 +181,34 @@ class EncoderDecoderEngine(BaseEngine):
                         fullgraph=False,
                     )
                     logger.info("EncDecEngine: torch.compile applied to %s.forward", node_name)
-                if hasattr(submodule, 'forward_batched'):
-                    submodule.forward_batched = torch.compile(
-                        submodule.forward_batched,
-                        fullgraph=False,
-                    )
-                    logger.info("EncDecEngine: torch.compile applied to %s.forward_batched", node_name)
+                # forward_batched is intentionally left eager — Inductor
+                # would pay a ~30s one-shot trace cost for dynamic varlen
+                # shapes on the first call, which dwarfs the per-call win.
             except Exception:
                 logger.warning("EncDecEngine: torch.compile failed for %s, using eager mode",
                                node_name, exc_info=True)
+
+            # CodecCudaGraphRunner — opt-in via get_cuda_graph_configs().
+            # Captures the submodule's batched forward as a CUDA graph for
+            # fixed-shape batches (e.g. ViT encoder with homogeneous camera counts).
+            # Runs after torch.compile so the compiled forward_batched is captured.
+            codec_configs = submodule.get_cuda_graph_configs(self.device)
+            if codec_configs:
+                try:
+                    from mminf.engine.cuda_graph_runner import CodecCudaGraphRunner
+                    codec_runner = CodecCudaGraphRunner(node_name, submodule, self.device)
+                    codec_runner.warmup_and_capture()
+                    if codec_runner.graphs:
+                        submodule._codec_graph_runner = codec_runner
+                        logger.info(
+                            "EncDecEngine: CodecCudaGraphRunner installed for %s (%d bs buckets)",
+                            node_name, len(codec_runner.graphs),
+                        )
+                except Exception:
+                    logger.warning(
+                        "EncDecEngine: CodecCudaGraphRunner capture failed for %s, using eager mode",
+                        node_name, exc_info=True,
+                    )
 
             # PiecewiseCudaGraphRunner — opt-in via get_piecewise_runner_config().
             # No KV cache infrastructure needed: kv_cache_config=None skips all

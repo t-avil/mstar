@@ -35,7 +35,7 @@ from mminf.engine.cuda_graph_config import (
 from mminf.engine.kv_store import KVCacheConfig, PagedAllocationManager
 from mminf.model.submodule_base import ARNodeInputs, ARNodeSubmodule, ModelInputsFromEngine, NodeSubmodule
 from mminf.utils.profiler import mark, range_pop, range_push
-from mminf.utils.sampling import Sampler
+from mminf.utils.sampling import SamplerBuffers, Sampler, SamplingConfig, make_sampler_from_buffers
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +179,14 @@ class CudaGraphRunner:
         # Phase 3 plan-overlap stream. Lazily created the first time pre_plan
         # is called from Worker.plan_executor.
         self._plan_stream: "torch.cuda.Stream | None" = None
+
+        self.max_bs = max(
+            [max(config.capture_batch_sizes or self.CAPTURE_BATCH_SIZES)
+            for config in self.capture_configs] or [1]
+        )
+        self.sampler_buffer: SamplerBuffers = SamplerBuffers.allocate(
+            max_batch_size=self.max_bs, device=device
+        )
 
     def warmup_and_capture(self) -> None:
         """Capture graphs for all configs and batch sizes."""
@@ -404,7 +412,12 @@ class CudaGraphRunner:
         return ModelInputsFromEngine(
             request_ids=dummy_rids,
             per_request_info=dummy_metadata,
-            cache_manager=cache_manager
+            cache_manager=cache_manager,
+            sampler=make_sampler_from_buffers(
+                bufs=self.sampler_buffer,
+                request_ids=[], sampling_configs={},
+                padded_bs=len(dummy_rids)
+            ),
         )
 
     def _make_dummy_seq_lens(
@@ -820,6 +833,35 @@ class CudaGraphRunner:
         )
         return key if key in self.graphs else None
 
+    def _get_sampler(
+        self, per_request_info: dict[str, CurrentForwardPassInfo],
+        request_ids: list[str], padded_bs: int
+    ):
+        # Per-request sampling configs are pre-staged on master GPU buffers
+        # (see ``register_request`` / ``update_request_config`` from AREngine);
+        # the per-step path is just a slot-index gather + index_select. The
+        # ``per_request_info`` argument is unused here but kept on the
+        # signature for symmetry with the older callers.
+        del per_request_info
+        return self.sampler_buffer.gather_for_request_ids(
+            request_ids=request_ids, padded_bs=padded_bs,
+        )
+
+    def register_request(
+        self, request_id: str, sampling_config: SamplingConfig | None = None,
+    ) -> None:
+        """Allocate a SamplerBuffers slot for ``request_id`` if not present."""
+        self.sampler_buffer.register_request(request_id, sampling_config)
+
+    def unregister_request(self, request_id: str) -> None:
+        """Release the SamplerBuffers slot for ``request_id``."""
+        self.sampler_buffer.unregister_request(request_id)
+
+    def update_request_config(
+        self, request_id: str, sampling_config: SamplingConfig,
+    ) -> None:
+        """Change-detect update for ``request_id``'s master sampling row."""
+        self.sampler_buffer.update_request_config(request_id, sampling_config)
 
     def reserve_slot(
         self,
@@ -1052,6 +1094,7 @@ class CudaGraphRunner:
         submodule: ARNodeSubmodule,
         slot: int | None = None,
         advance_event: "object | None" = None,
+        launch_started_event: "object | None" = None,
     ) -> dict:
         """Look up the matching captured graph and dispatch on config type.
 
@@ -1105,12 +1148,14 @@ class CudaGraphRunner:
                 key, graph_data, slot_data,
                 request_ids, inputs, per_request_info, submodule,
                 advance_event=advance_event,
+                launch_started_event=launch_started_event,
             )
         if cfg_type == CudaGraphConfigType.FLASH_INFER_PACKED:
             return self._run_flashinfer_packed(
                 key, graph_data, slot_data,
                 request_ids, inputs, per_request_info, submodule,
                 advance_event=advance_event,
+                launch_started_event=launch_started_event,
             )
         raise ValueError(f"Unknown CudaGraphConfigType: {cfg_type}")
 
@@ -1124,6 +1169,7 @@ class CudaGraphRunner:
         per_request_info: dict[str, CurrentForwardPassInfo],
         submodule: ARNodeSubmodule,
         advance_event: "object | None" = None,
+        launch_started_event: "object | None" = None,
     ) -> dict:
         """Decode-style replay. Pads real inputs to padded_bs by cloning the capture
         template, then routes through submodule.preprocess (which re-plans attention
@@ -1193,6 +1239,11 @@ class CudaGraphRunner:
             request_ids=dummy_rids,
             per_request_info=real_metadata,
             cache_manager=static_cm,
+            sampler=self._get_sampler(
+                per_request_info=per_request_info,
+                request_ids=request_ids,
+                padded_bs=padded_bs
+            )
         )
         if self.enable_nvtx:
             range_pop(synchronize=False)
@@ -1233,6 +1284,11 @@ class CudaGraphRunner:
             mark("gpu_thread.cuda_graph_start")
             range_push("gpu_thread.cuda_graph", synchronize=False)
             range_push("cg.replay", synchronize=False)
+        # Release the main thread now that all CPU-side prep is done and
+        # we're about to enter the CUDA driver. graph.replay() drops the
+        # GIL inside C++, so main-thread postprocess can overlap.
+        if launch_started_event is not None:
+            launch_started_event.set()
         graph.replay()
         if self.enable_nvtx:
             range_pop(synchronize=False)
@@ -1302,6 +1358,7 @@ class CudaGraphRunner:
         per_request_info: dict[str, CurrentForwardPassInfo],
         submodule: ARNodeSubmodule,
         advance_event: "object | None" = None,
+        launch_started_event: "object | None" = None,
     ) -> dict:
         """Prefill-style replay (vox-serve pattern).
 
@@ -1380,6 +1437,11 @@ class CudaGraphRunner:
             request_ids=dummy_rids,
             per_request_info=real_metadata,
             cache_manager=static_cm,
+            sampler=self._get_sampler(
+                per_request_info=per_request_info,
+                request_ids=request_ids,
+                padded_bs=padded_bs
+            )
         )
         if self.enable_nvtx:
             range_pop(synchronize=False)
@@ -1413,6 +1475,11 @@ class CudaGraphRunner:
             mark("gpu_thread.cuda_graph_start")
             range_push("gpu_thread.cuda_graph", synchronize=False)
             range_push("cg.replay", synchronize=False)
+        # Release the main thread now that all CPU-side prep is done and
+        # we're about to enter the CUDA driver. graph.replay() drops the
+        # GIL inside C++, so main-thread postprocess can overlap.
+        if launch_started_event is not None:
+            launch_started_event.set()
         graph.replay()
         if self.enable_nvtx:
             range_pop(synchronize=False)

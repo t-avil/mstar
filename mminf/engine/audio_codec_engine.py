@@ -26,6 +26,11 @@ class AudioCodecEngine(BaseEngine):
         self.autocast_dtype = autocast_dtype
         self.cuda_graph_runners: dict[str, CodecCudaGraphRunner] = {}
 
+        # Dedup set for "cuda graphs captured but not usable for this shape"
+        # warnings — each unique miss shape is logged at most once.
+        #TODO: Remove in production.
+        self._logged_graph_misses: set[tuple] = set()
+
     def engine_type(self) -> EngineType:
         return EngineType.AUDIO_CODEC
 
@@ -55,7 +60,7 @@ class AudioCodecEngine(BaseEngine):
                 per_request_output_tensors={rid: {} for rid in batch.request_ids}
             )
             if self.enable_nvtx:
-                range_pop()
+                range_pop(synchronize=False)
             return output
 
         try:
@@ -95,7 +100,7 @@ class AudioCodecEngine(BaseEngine):
                 return output
         finally:
             if self.enable_nvtx:
-                range_pop()
+                range_pop(synchronize=False)
 
     def _dispatch(
         self, batch: NodeBatch,
@@ -118,11 +123,55 @@ class AudioCodecEngine(BaseEngine):
         runner = self.cuda_graph_runners.get(batch.node_name)
         if runner is None:
             return False
+        bs = len(batch.request_ids)
+        #TODO: Remove in production.
         if not submodule.can_use_cuda_graphs(batch, inputs):
+            self._log_graph_miss(
+                node_name=batch.node_name,
+                graph_walk=batch.graph_walk,
+                bs=bs,
+                runner=runner,
+                reason="submodule.can_use_cuda_graphs() returned False",
+            )
             return False
-        return runner.can_run(
-            batch_size=len(batch.request_ids),
-            graph_walk=batch.graph_walk,
+        if not runner.can_run(batch_size=bs, graph_walk=batch.graph_walk):
+            self._log_graph_miss(
+                node_name=batch.node_name,
+                graph_walk=batch.graph_walk,
+                bs=bs,
+                runner=runner,
+                reason="no captured graph matches this (bs, graph_walk)",
+            )
+            return False
+        return True
+
+    def _log_graph_miss(
+        self,
+        node_name: str,
+        graph_walk: str,
+        bs: int,
+        runner: CodecCudaGraphRunner,
+        reason: str,
+    ) -> None:
+        """Warn (once per unique miss shape) when a runner exists but the
+        current request can't use a captured graph.
+        """
+        if not runner.graphs:
+            return
+        miss_key = (node_name, graph_walk, bs, reason)
+        if miss_key in self._logged_graph_misses:
+            return
+        self._logged_graph_misses.add(miss_key)
+
+        captured_for_walk = sorted(
+            {key[1] for key in runner.graphs.keys() if key[0] == graph_walk}
+        )
+        captured_walks = sorted({key[0] for key in runner.graphs.keys()})
+        logger.warning(
+            "[cuda-graph miss] node=%s graph_walk=%s requested=(bs=%d) "
+            "reason='%s' captured_bs_for_walk=%s captured_walks=%s — falling back to eager.",
+            node_name, graph_walk, bs,
+            reason, captured_for_walk or "<none>", captured_walks,
         )
 
     def _execute_with_cuda_graph(
@@ -144,7 +193,7 @@ class AudioCodecEngine(BaseEngine):
             submodule=submodule,
         )
         if self.enable_nvtx:
-            range_pop()
+            range_pop(synchronize=False)
         return NodeOutput(per_request_output_tensors=per_rid)
 
     def _execute_batched(
@@ -165,6 +214,8 @@ class AudioCodecEngine(BaseEngine):
             engine_inputs=engine_inputs,
             inputs=inputs
         )
+        if self.enable_nvtx:
+            range_pop(synchronize=False)
 
         if self.enable_nvtx:
             range_push("codec.batched.forward")
@@ -174,7 +225,7 @@ class AudioCodecEngine(BaseEngine):
             **packed
         )
         if self.enable_nvtx:
-            range_pop()
+            range_pop(synchronize=False)
         return NodeOutput(per_request_output_tensors=outputs)
 
     def _execute_sequential(
@@ -211,7 +262,7 @@ class AudioCodecEngine(BaseEngine):
                 **preprocessed
             )
             if self.enable_nvtx:
-                range_pop()
+                range_pop(synchronize=False)
         return NodeOutput(per_request_output_tensors=outputs)
 
     def warmup(self) -> None:
@@ -244,6 +295,25 @@ class AudioCodecEngine(BaseEngine):
                     "AudioCodecEngine: CUDA graphs captured for %s (%d graphs)",
                     node_name, len(runner.graphs),
                 )
+
+        # Disabling for now due to compilation delay overhead being too high
+        # for node_name, submodule in self.submodules.items():
+        #     try:
+        #         if hasattr(submodule, 'forward'):
+        #             submodule.forward = torch.compile(
+        #                 submodule.forward,
+        #                 fullgraph=False,
+        #             )
+        #             logger.info("AudioCodecEngine: torch.compile applied to %s.forward", node_name)
+        #         if hasattr(submodule, 'forward_batched'):
+        #             submodule.forward_batched = torch.compile(
+        #                 submodule.forward_batched,
+        #                 fullgraph=False,
+        #             )
+        #             logger.info("AudioCodecEngine: torch.compile applied to %s.forward_batched", node_name)
+        #     except Exception:
+        #         logger.warning("AudioCodecEngine: torch.compile failed for %s, using eager mode",
+        #                        node_name, exc_info=True)
 
     def add_request(self, request_id: str) -> None:
         pass  # stateless

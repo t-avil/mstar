@@ -5,7 +5,7 @@ import threading
 import time as _time
 from collections import defaultdict
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from time import sleep
 
@@ -35,6 +35,7 @@ from mminf.utils.ipc_format import (
     WorkerMessage,
     WorkerMessageType,
 )
+from mminf.utils.profiler import range_pop, range_push
 from mminf.worker.engine_manager import EngineManager
 from mminf.worker.micro_scheduler import MicroScheduler, ScheduledBatch
 from mminf.worker.node_manager_utils import (
@@ -70,6 +71,15 @@ class PendingPostproc:
     future: Future
     advanced_loops: dict[str, set[str]]
 
+
+@dataclass
+class Speculation:
+    scheduled_batch: ScheduledBatch
+    node_batch: NodeBatch
+    loop_back_inputs: set[str]
+    continuing_rids: set[str]
+    streaming_edges: dict[str, list[GraphEdge]] = field(default_factory=dict)
+    dropped: set[str] = field(default_factory=set)
 
 class EvictionPolicy(Enum):
     """Strategy for choosing which request to offload to CPU on OOM."""
@@ -407,6 +417,8 @@ class Worker:
         )
         req_info = self.worker_graphs_manager.per_request_info.get(body.request_id)
 
+        if self.enable_nvtx:
+            range_push("process_new_inputs.routing_update")
         # Handle producer_done signal: mark all StreamBuffers for this request as done
         if body.producer_done:
             if req_info:
@@ -431,6 +443,9 @@ class Worker:
                 partition_name=body.partition_name
             )
 
+        if self.enable_nvtx:
+            range_pop(synchronize=False)
+            range_push("process_new_inputs.start_read")
         # Start RDMA reads for non-streaming edges with tensor_info
         futures = self.tensor_manager.start_read_tensors(
             body.request_id, non_streaming,
@@ -446,6 +461,9 @@ class Worker:
                 stream_buf = req_info.stream_buffers[edge.name]
                 for info in edge.tensor_info:
                     stream_buf.pre_read_register(info.uuid)
+        if self.enable_nvtx:
+            range_pop(synchronize=False)
+            range_push("process_new_inputs.process_inputs")
 
         # Streaming signal-only edges: nothing to buffer (no tensor data)
         # This shouldn't normally happen for streaming edges
@@ -457,6 +475,8 @@ class Worker:
                 request_id=body.request_id,
                 inputs=signal_only,
             )
+        if self.enable_nvtx:
+            range_pop()
 
     def _unpersist_tensors(self, body: UnpersistTensors):
         for (uuid, ref_cnt) in body.uuid_to_ref_count.items():
@@ -532,8 +552,70 @@ class Worker:
             tensor = self.tensor_manager.get_tensor(
                 request_id=request_id, uuid=info.uuid,
             )
+
             stream_buf.put(info.uuid, tensor.clone())
             self.tensor_manager.dereference(request_id, info.uuid)
+    
+    def _pop_streaming_edge(
+        self, sbuf: StreamBuffer, edge_name: str, request_id: str
+    ) -> GraphEdge | None:
+        consumer_node = self._consumer_node_cache.get(edge_name, "")
+        synthetic_edge = sbuf.pop_waiting_edge()
+        if synthetic_edge is None and sbuf.has_chunk_ready():
+            chunk = sbuf.pop_chunk()
+            chunk_tensor = chunk.data.get("data")
+            if chunk_tensor is None:
+                # Empty chunk — producer done, no more data.
+                # Create edge with empty tensor_info.
+                synthetic_edge = GraphEdge(
+                    next_node=consumer_node,
+                    name=edge_name,
+                    tensor_info=[],
+                )
+            else:
+                # Normal chunk — store tensor and create edge with tensor_info.
+                # Local streaming tensors are routed from outputs that were
+                # already gated on the producer completion event before being
+                # stored, so avoid a default-stream sync here. If future
+                # streaming producers bypass that path, StreamChunk should
+                # carry producer events and this call site should wait on
+                # those events before storing with skip_cuda_sync=True.
+                tensor_infos = self.tensor_manager.store_and_return_tensor_info(
+                    request_id, {edge_name: [chunk_tensor]},
+                    skip_cuda_sync=True,
+                )
+                synthetic_edge = GraphEdge(
+                    next_node=consumer_node,
+                    name=edge_name,
+                    tensor_info=tensor_infos.get(edge_name, []),
+                )
+        return synthetic_edge
+
+    def _poll_stream_buffers_for_speculation(
+        self, request_id: str, node_name: str
+    ) -> list[GraphEdge]:
+        result = []
+        req_info = self.worker_graphs_manager.per_request_info.get(request_id)
+        if req_info is None:
+            return []
+        for edge_name, sbuf in req_info.stream_buffers.items():
+            consumer_node = self._consumer_node_cache.get(edge_name, "")
+            if consumer_node != node_name:
+                continue
+            edge = self._pop_streaming_edge(sbuf, edge_name, request_id)
+            if edge is not None:
+                result.append(edge)
+        return result
+    
+    def _return_speculative_streaming_edge(
+        self, request_id: str, edge: GraphEdge
+    ):
+        req_info = self.worker_graphs_manager.per_request_info.get(request_id)
+        if req_info is None:
+            return
+        sbuf = req_info.stream_buffers.get(edge.name)
+        if sbuf is not None:
+            sbuf.store_uningested_edge(edge)
 
     def _poll_stream_buffers(self) -> None:
         """Check all active StreamBuffers; when a chunk is ready, feed it as a normal input."""
@@ -541,37 +623,7 @@ class Worker:
             for edge_name, sbuf in req_info.stream_buffers.items():
                 consumer_node = self._consumer_node_cache.get(edge_name, "")
                 partition_name = self.worker_graphs_manager.get_partition_for_node(consumer_node)
-
-                synthetic_edge = sbuf.pop_waiting_edge()
-
-                if synthetic_edge is None and sbuf.has_chunk_ready():
-                    chunk = sbuf.pop_chunk()
-                    chunk_tensor = chunk.data.get("data")
-                    if chunk_tensor is None:
-                        # Empty chunk — producer done, no more data.
-                        # Create edge with empty tensor_info.
-                        synthetic_edge = GraphEdge(
-                            next_node=consumer_node,
-                            name=edge_name,
-                            tensor_info=[],
-                        )
-                    else:
-                        # Normal chunk — store tensor and create edge with tensor_info.
-                        # Local streaming tensors are routed from outputs that were
-                        # already gated on the producer completion event before being
-                        # stored, so avoid a default-stream sync here. If future
-                        # streaming producers bypass that path, StreamChunk should
-                        # carry producer events and this call site should wait on
-                        # those events before storing with skip_cuda_sync=True.
-                        tensor_infos = self.tensor_manager.store_and_return_tensor_info(
-                            request_id, {edge_name: [chunk_tensor]},
-                            skip_cuda_sync=True,
-                        )
-                        synthetic_edge = GraphEdge(
-                            next_node=consumer_node,
-                            name=edge_name,
-                            tensor_info=tensor_infos.get(edge_name, []),
-                        )
+                synthetic_edge = self._pop_streaming_edge(sbuf, edge_name, request_id)
 
                 if synthetic_edge is not None:
                     ingested = len(self.worker_graphs_manager.process_new_streaming_inputs(
@@ -592,13 +644,21 @@ class Worker:
             streaming = [e for e in edges if e.is_streaming]
             normal = [e for e in edges if not e.is_streaming]
 
+            if self.enable_nvtx:
+                range_push("check_ready-tensors.route_streaming")
             for edge in streaming:
                 self._route_streaming_tensor(request_id, edge)
+            
+            if self.enable_nvtx:
+                range_pop(synchronize=False)
+                range_push("process_new_inputs.process_inputs")
 
             if normal:
                 self.worker_graphs_manager.process_new_inputs(
                     request_id=request_id, inputs=normal,
                 )
+            if self.enable_nvtx:
+                range_pop(synchronize=False)
 
     # ------------------------------------------------------------------
     # CPU offloading
@@ -776,12 +836,21 @@ class Worker:
         # block until GPU(N+1) drains too, undoing the overlap. The event
         # was recorded right after GPU(N), so syncing on it waits only for
         # GPU(N).
+        if self.enable_nvtx:
+            from mminf.utils.profiler import range_pop, range_push
+            range_push("worker.route_outputs.store.cuda_sync", synchronize=False)
         if torch.cuda.is_available() and batch.node_objects:
             if output.completion_event is not None:
+                if self.enable_nvtx:
+                    range_push("worker.route_outputs.store.completion_event_sync", synchronize=False)
                 output.completion_event.synchronize()
+                if self.enable_nvtx:
+                    range_pop(synchronize=False)
             else:
                 torch.cuda.default_stream().synchronize()
-
+        if self.enable_nvtx:
+            range_pop(synchronize=False)
+            range_push("worker.route_outputs.store.register", synchronize=False)
 
         for request_id, node in batch.node_objects.items():
             # output name to list of tensors
@@ -824,6 +893,8 @@ class Worker:
                 for info in edge.tensor_info:
                     self.tensor_manager.dereference(request_id, info.uuid)
 
+        if self.enable_nvtx:
+            range_pop(synchronize=False)  # worker.route_outputs.store.register
         return output_edges
 
 
@@ -1146,6 +1217,12 @@ class Worker:
             # path.
             if advance_event is not None:
                 advance_event.set()
+            # Same idea for launch_started_event: if the engine raised
+            # before reaching the deep set site, release the main-thread
+            # waiter early instead of making it eat the full timeout.
+            launch_started_event = node_batch.metadata.get("launch_started_event")
+            if launch_started_event is not None:
+                launch_started_event.set()
             if self.enable_nvtx:
                 range_pop(synchronize=False)
 
@@ -1218,7 +1295,7 @@ class Worker:
         self,
         batch_N: ScheduledBatch,
         partition_N: str | None,
-    ):
+    ) -> Speculation | None:
         """Build a speculative N+1 batch + node_batch.
 
         Returns ``(spec_batch, spec_node_batch, loop_back_inputs,
@@ -1245,16 +1322,17 @@ class Worker:
         gathering only has to handle those names.
         """
         # Find loop-back inputs from a sample node. Speculation requires that
-        # ALL of the node's required inputs are loop-back (otherwise we'd
-        # need to gather other inputs from tensor_manager, and the queue
-        # state for those isn't necessarily ready in this iter).
+        # ALL of the node's required inputs are loop-back or streaming
+        # (otherwise we'd need to gather other inputs from tensor_manager,
+        #  and the queue state for those isn't necessarily ready in this iter).
         sample_node = next(iter(batch_N.node_objects.values()))
         loop_back_inputs = self._loop_back_input_names(sample_node)
         if not loop_back_inputs:
             return None
         for input_name in sample_node.input_ids:
-            if input_name not in loop_back_inputs:
-                # Has a non-loop-back required input — speculation skipped.
+            if input_name not in loop_back_inputs \
+                    and input_name not in sample_node._streaming_inputs:
+                # Has a non-loop-back / streaming required input — speculation skipped.
                 # (E.g. a node that takes both a loop-back tensor and a fresh
                 # external input on each iter.)
                 return None
@@ -1287,6 +1365,34 @@ class Worker:
             per_request_info[rid] = self.worker_graphs_manager.get_fwd_info(
                 rid, partition_N
             )
+        
+        streaming_edges: dict[str, list[GraphEdge]] = {}
+        if sample_node._streaming_inputs:
+            has_streaming_ready = []
+            for rid in continuing:
+                streaming_edges[rid] = self._poll_stream_buffers_for_speculation(
+                    rid, batch_N.node_name
+                )
+                if len(streaming_edges[rid]) < len(sample_node._streaming_inputs):
+                    for edge in streaming_edges[rid]:
+                        self._return_speculative_streaming_edge(rid, edge)
+                    
+                    new_node_objects.pop(rid, None)
+                    per_request_inputs.pop(rid, None)
+                    per_request_info.pop(rid, None)
+                    new_request_to_worker_graph.pop(rid, None)
+                else:
+                    has_streaming_ready.append(rid)
+                    for edge in streaming_edges[rid]:
+                        per_request_inputs[rid][edge.name] = [
+                            self.tensor_manager.get_tensor(
+                                request_id=rid, uuid=info.uuid,
+                            )
+                            for info in edge.tensor_info
+                        ]
+            continuing = has_streaming_ready
+            if not continuing:
+                return None
 
         # ── merge in fresh rids whose decode-loop node is ready right now ──
         # Speculation should only consume work compatible with the in-flight
@@ -1350,22 +1456,24 @@ class Worker:
             )
             spec_batch.node_objects[rid].clear_outputs()
 
-        return spec_batch, spec_node_batch, loop_back_inputs, set(continuing)
+        return Speculation(
+            scheduled_batch=spec_batch,
+            node_batch=spec_node_batch,
+            loop_back_inputs=loop_back_inputs,
+            continuing_rids=set(continuing),
+            streaming_edges=streaming_edges
+        )
 
     def _thread_outputs_to_speculative(
-        self,
-        spec_node_batch: NodeBatch,
-        output_N: NodeOutput,
-        loop_back_inputs: set[str],
-        continuing_rids: set[str],
-    ) -> tuple[set[str], set[str]]:
+        self, speculation: Speculation, output_N: NodeOutput
+    ):
         """Replace placeholder inputs in ``spec_node_batch`` with N's actual
         output tensors, for the subset of rids that came from batch_N
         (``continuing_rids``). Fresh rids merged into the speculative batch
         already had their inputs gathered from tensor_manager; we leave
         those alone.
 
-        Returns ``(threaded_continuing, dropped)``:
+        Sets ``(threaded_continuing, dropped)``:
         - ``threaded_continuing``: continuing rids whose loop-back outputs
           were successfully threaded.
         - ``dropped``: continuing rids whose required loop-back output was
@@ -1374,33 +1482,41 @@ class Worker:
         """
         threaded_continuing: set[str] = set()
         dropped: set[str] = set()
-        for rid in list(spec_node_batch.request_ids):
-            if rid not in continuing_rids:
+        for rid in list(speculation.node_batch.request_ids):
+            if rid not in speculation.continuing_rids:
                 continue  # fresh rid — inputs already gathered.
             rid_outputs = output_N.per_request_output_tensors.get(rid, {})
             ok = True
-            for input_name in loop_back_inputs:
+            for input_name in speculation.loop_back_inputs:
                 tensors = rid_outputs.get(input_name, [])
                 if not tensors:
                     ok = False
                     break
-                spec_node_batch.per_request_input_tensors[rid][input_name] = list(tensors)
+                speculation.node_batch.per_request_input_tensors[rid][input_name] \
+                    = list(tensors)
             if ok:
                 threaded_continuing.add(rid)
             else:
                 dropped.add(rid)
+
+                # also give back its streaming inputs, if any
+                for edge in speculation.streaming_edges.get(rid, []):
+                    self._return_speculative_streaming_edge(rid, edge)
+                speculation.streaming_edges.pop(rid, None)
+
         if dropped:
             logger.warning(
                 "Speculation: dropped rids %s (no loop-back output from N)",
                 sorted(dropped),
             )
-            spec_node_batch.request_ids = [
-                r for r in spec_node_batch.request_ids if r not in dropped
+            speculation.node_batch.request_ids = [
+                r for r in speculation.node_batch.request_ids if r not in dropped
             ]
             for r in dropped:
-                spec_node_batch.per_request_input_tensors.pop(r, None)
-                spec_node_batch.per_request_info.pop(r, None)
-        return threaded_continuing, dropped
+                speculation.node_batch.per_request_input_tensors.pop(r, None)
+                speculation.node_batch.per_request_info.pop(r, None)
+        speculation.continuing_rids = threaded_continuing
+        speculation.dropped = dropped
 
     # ------------------------------------------------------------------
     # Post-processing — split into fast (intra-worker routing, no value
@@ -1516,6 +1632,7 @@ class Worker:
 
         if self.enable_nvtx:
             range_push("worker.route_outputs", synchronize=False)
+            range_push("worker.filter_outputs", synchronize=False)
         filtered_outputs_per_request: dict[str, list[GraphEdge]] = {}
         for request_id, node in batch.node_objects.items():
             request_output_tensors = output.per_request_output_tensors.get(
@@ -1525,6 +1642,9 @@ class Worker:
                 e for e in node.outputs if e.name in request_output_tensors
             ]
             filtered_outputs_per_request[request_id] = filtered_outputs
+        if self.enable_nvtx:
+            range_pop(synchronize=False)
+            range_push("worker.route_outputs.store", synchronize=False)
 
         # Apply spec consumption BEFORE complete_loops. ``update_for_spec``
         # is what marks the Loop's pre-emptively-allocated next-iter body as
@@ -1578,16 +1698,39 @@ class Worker:
                     request_id, spec_node_name=batch.node_name,
                 )
 
+        if self.enable_nvtx:
+            range_pop(synchronize=False)
+            range_push("worker.store_outputs_and_finish_loops", synchronize=False)
         node_outputs = self._store_outputs_and_finish_loops(
             batch, output=output,
             filtered_outputs_per_request=filtered_outputs_per_request
         )
 
+        if self.enable_nvtx:
+            range_pop(synchronize=False)
+            range_push("worker.process_node_outputs", synchronize=False)
         routing_per_request: dict[str, NodeOutputRouting] = {}
         for request_id, node in batch.node_objects.items():
             kept = node_outputs[request_id].kept
             consumed_names = speculation_consumed_loop_back.get(request_id, set())
-            if consumed_names:
+            if request_id in stopped_loop_backs:
+                # Wasted speculative iter: this body ran AFTER EOS was
+                # detected (stop sat in _pending_stops while the
+                # speculatively-built batch was already on the GPU), so
+                # every output it produced is post-termination garbage.
+                # Drop them all — including streaming edges to downstream
+                # partitions (e.g. codec_tokens → Code2Wav, which would
+                # otherwise tack a final junk frame onto the audio) — and
+                # dereference the tensors that ``store_outputs_and_finish_loops``
+                # already allocated UUIDs for. We still call
+                # ``process_node_outputs`` with empty kept so the queue's
+                # is_done check fires and ``WORKER_GRAPHS_DONE`` gets
+                # emitted.
+                for edge in kept:
+                    for info in edge.tensor_info:
+                        self.tensor_manager.dereference(request_id, info.uuid)
+                kept_for_routing = []
+            elif consumed_names:
                 # Dereference the loop-back UUIDs that store_outputs_and_finish_loops
                 # allocated; speculation already holds the tensor via Python ref.
                 for edge in kept:
@@ -1608,6 +1751,7 @@ class Worker:
             )
             routing_per_request[request_id] = routing
         if self.enable_nvtx:
+            range_pop(synchronize=False)
             range_pop(synchronize=False)
 
         # Send "loop done" messages to peer workers (small ZMQ msgs, no
@@ -2331,12 +2475,12 @@ class Worker:
                         # ['cuda_graph_slot']; the engine forwards it to
                         # the runner.
                         if speculation is not None:
-                            spec_batch_for_plan, spec_node_batch_for_plan, *_ = speculation
+                            spec_node_batch_for_plan = speculation.node_batch
                             engine = self.engine_manager.get_engine(
-                                spec_batch_for_plan.node_name
+                                speculation.node_batch.node_name
                             )
                             if hasattr(engine, "reserve_replay_slot"):
-                                engine.reserve_replay_slot(spec_node_batch_for_plan)
+                                engine.reserve_replay_slot(speculation.node_batch)
                         # Kick off pre-planning on the plan_executor NOW —
                         # its Python work runs while the main thread is in
                         # await_gpu (releases GIL). plan_executor waits on
@@ -2351,9 +2495,8 @@ class Worker:
                             speculation is not None
                             and plan_executor is not None
                         ):
-                            spec_batch_for_plan, spec_node_batch_for_plan, *_ = speculation
                             engine = self.engine_manager.get_engine(
-                                spec_batch_for_plan.node_name
+                                speculation.node_batch.node_name
                             )
                             if hasattr(engine, "pre_plan_for_batch"):
                                 prev_advance_event_for_plan: threading.Event | None = None
@@ -2364,7 +2507,7 @@ class Worker:
                                 spec_plan_future = plan_executor.submit(
                                     self._pre_plan_for_speculative_batch,
                                     engine,
-                                    spec_node_batch_for_plan,
+                                    speculation.node_batch,
                                     prev_advance_event_for_plan,
                                 )
                                 spec_plan_target = spec_node_batch_for_plan
@@ -2384,7 +2527,7 @@ class Worker:
                     if self.enable_nvtx:
                         range_push("worker.await_gpu", synchronize=False)
                     _t0 = _time.perf_counter() if phase_period else 0.0
-                    output = p_future.result()
+                    output: NodeOutput = p_future.result()
                     if phase_period:
                         _phase_record("await_gpu", _time.perf_counter() - _t0)
                     if self.enable_nvtx:
@@ -2396,6 +2539,10 @@ class Worker:
                         # depended on N's outputs which are unusable now.
                         # Per design: discard speculation, retry batch_N.
                         self._handle_allocation_failure(p_batch, p_node_batch)
+                        if speculation is not None:
+                            for rid, streaming_edges in speculation.streaming_edges.items():
+                                for edge in streaming_edges:
+                                    self._return_speculative_streaming_edge(rid, edge)
                         speculation = None
                         # If a pre-plan was dispatched, wait for it to finish
                         # so its wrapper.plan() side effects don't leak into
@@ -2417,25 +2564,26 @@ class Worker:
                     spec_consumed: dict[str, set[str]] = {}
                     spec_node_name = None
                     if speculation is not None:
-                        spec_batch, spec_node_batch, loop_back_inputs, continuing_rids = speculation
-                        threaded_continuing, dropped = self._thread_outputs_to_speculative(
-                            spec_node_batch, output, loop_back_inputs, continuing_rids,
+                        self._thread_outputs_to_speculative(
+                            speculation, output
                         )
                         # Drop continuing rids whose thread-through failed
                         # (engine produced no output for them). Fresh rids
                         # in spec_batch are unaffected — they had their
                         # inputs gathered from tensor_manager.
-                        for rid in dropped:
-                            spec_batch.node_objects.pop(rid, None)
-                            spec_batch.request_to_worker_graph.pop(rid, None)
+                        for rid in speculation.dropped:
+                            speculation.scheduled_batch.node_objects.pop(rid, None)
+                            speculation.scheduled_batch.request_to_worker_graph.pop(rid, None)
+                        spec_batch = speculation.scheduled_batch
+                        spec_node_batch = speculation.node_batch
                         if spec_batch.node_objects:
                             spec_node_name = spec_batch.node_name
                             # Only continuing rids consumed loop-back from
                             # batch_N — fresh rids' loop-back doesn't exist
                             # in batch_N's output dict, so fast_postprocess
                             # has nothing to deref/skip for them.
-                            for rid in threaded_continuing:
-                                spec_consumed[rid] = set(loop_back_inputs)
+                            for rid in speculation.continuing_rids:
+                                spec_consumed[rid] = set(speculation.loop_back_inputs)
                             if self.enable_nvtx:
                                 range_push("worker.submit_spec", synchronize=False)
                             _t0 = _time.perf_counter() if phase_period else 0.0
@@ -2447,7 +2595,7 @@ class Worker:
                             plan_future_for_submit = spec_plan_future
                             if (
                                 spec_plan_future is not None
-                                and dropped
+                                and speculation.dropped
                             ):
                                 spec_plan_future.result()
                                 self._reset_skip_plan_flags(spec_plan_target)
@@ -2459,6 +2607,14 @@ class Worker:
                             # gate on advance_seq_lens(THIS batch).
                             spec_advance_event = threading.Event()
                             spec_node_batch.metadata["advance_event"] = spec_advance_event
+
+                            # Block the main thread until the GPU executor
+                            # thread is about to launch CUDA kernels (set
+                            # deep in the engine: before graph.replay() in
+                            # CudaGraphRunner, or before forward/forward_batched
+                            # in the eager AR path).
+                            spec_launch_started_event = threading.Event()
+                            spec_node_batch.metadata["launch_started_event"] = spec_launch_started_event
                             spec_future = gpu_executor.submit(
                                 self._execute_on_gpu_thread,
                                 spec_batch, spec_node_batch,
@@ -2469,10 +2625,7 @@ class Worker:
                             if self.enable_nvtx:
                                 range_push("worker.gpu_submit_queued", synchronize=False)
                                 range_pop(synchronize=False)
-                            # Give the GPU executor thread a chance to enter
-                            # CUDA launch code before the main thread resumes
-                            # Python-heavy postprocess.
-                            sleep(0)
+                            spec_launch_started_event.wait(timeout=0.005)
                             if phase_period:
                                 _phase_record("submit_spec", _time.perf_counter() - _t0)
                             if self.enable_nvtx:

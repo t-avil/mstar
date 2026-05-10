@@ -13,6 +13,7 @@ from mminf.conductor.request_info import CurrentForwardPassInfo
 from mminf.engine.base import NodeBatch
 from mminf.engine.cache_manager import BatchedCacheManager
 from mminf.engine.kv_store import PositionInfo
+from mminf.utils.sampling import BaseSampler, CudaGraphableSampler
 
 if TYPE_CHECKING:
     from mminf.engine.cuda_graph_config import CudaGraphConfig
@@ -133,6 +134,8 @@ class ModelInputsFromEngine:
     request_ids: list[str]
     per_request_info: dict[str, CurrentForwardPassInfo]
     cache_manager: BatchedCacheManager | None = None
+    preallocated_buffers: dict[str, torch.Tensor] = field(default_factory=dict)
+    sampler: BaseSampler | None = None
 
     @property
     def single_request_info(self):
@@ -216,7 +219,10 @@ class NodeSubmodule(torch.nn.Module):
         model_inputs: list[NodeInputs],
     ):
         return False # batching disabled by default
-
+    
+    def max_batch_size(self, graph_walk: str):
+        return None
+    
     # Note: do not import CudaGraphConfig; it causes a circular import situation
     def get_cuda_graph_configs(self, device: torch.device) -> list[CudaGraphConfig]:
         """TODO: add cuda graph support for pi05.
@@ -229,15 +235,29 @@ class NodeSubmodule(torch.nn.Module):
     ) -> bool:
         """Return True if this submodule supports CUDA graphs for ``batch``.
 
-        Default: derives from ``get_cuda_graph_configs`` — if the submodule
-        declared a capture for this batch's graph_walk, CUDA graphs are
-        supported. Subclasses can override to reject on batch shape /
-        metadata (e.g. codec submodules that need homogeneous frame counts).
+        Default: derives from ``get_cuda_graph_configs`` — if any declared
+        config can replay for this batch's graph_walk, CUDA graphs are
+        supported. We check ``cfg.replay_graph_walks`` (not just
+        ``cfg.capture_graph_walk``) so aliased walks — e.g. Qwen3-Omni's
+        ``prefill_audio`` reusing the ``prefill_text`` capture, or
+        ``prefill_vision`` reusing its own — are correctly admitted at the
+        eligibility gate. The runner's ``_config_for`` already looks up by
+        ``replay_graph_walks``; this keeps the gate consistent so aliased
+        walks don't silently fall through to the eager path.
+
+        ``replay_graph_walks`` is always a superset of ``{capture_graph_walk}``
+        (see ``CudaGraphConfig.__init__``), so this never narrows what the
+        previous code accepted — only widens it for configs that explicitly
+        declared aliases.
+
+        Subclasses can override to reject on batch shape / metadata (e.g.
+        codec submodules that need homogeneous frame counts).
         """
         if not hasattr(self, "_cached_cuda_graph_walks"):
-            self._cached_cuda_graph_walks = {
-                cfg.capture_graph_walk for cfg in self.get_cuda_graph_configs(device=torch.device("cpu"))
-            }
+            walks: set[str] = set()
+            for cfg in self.get_cuda_graph_configs(device=torch.device("cpu")):
+                walks.update(cfg.replay_graph_walks)
+            self._cached_cuda_graph_walks = walks
         return batch.graph_walk in self._cached_cuda_graph_walks
 
     def postprocess(

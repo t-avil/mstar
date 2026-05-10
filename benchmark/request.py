@@ -719,7 +719,8 @@ class OurSystem(InferenceSystem):
             # input_modalities field so the API server routes them correctly.
             input_mod = req_type.get_input_modalities()
             if "," in input_mod or input_mod not in ("text",):
-                form.add_field("input_modalities", input_mod)
+                # TODO: if a request does not have text as an input modality, this must be revisited
+                form.add_field("input_modalities", ",".join([input_mod, "text"]))
 
             for modality in req_input.get_all_filepaths():
                 file_content = req_input.get_bytes(modality)

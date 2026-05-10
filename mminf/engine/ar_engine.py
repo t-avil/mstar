@@ -59,6 +59,10 @@ class AREngine(BaseEngine):
         self.device = None
         self.autocast_dtype = autocast_dtype
 
+        # Dedup set for "cuda graphs captured but not usable for this shape"
+        # warnings — each unique miss shape is logged at most once.
+        self._logged_graph_misses: set[tuple] = set()
+
     def engine_type(self) -> EngineType:
         return EngineType.AR
 
@@ -235,6 +239,28 @@ class AREngine(BaseEngine):
         # are baked into the graphs.
         self._compile_submodules()
 
+    def get_max_batch_size(self, node_name, graph_walk):
+        if node_name not in self.submodule_management:
+            return
+        submod_max_bs = self.submodule_management[node_name].submodule.max_batch_size(graph_walk)
+        submod_mg = self.submodule_management[node_name]
+        if submod_mg.cuda_graph_runner is None:
+            return submod_max_bs
+        
+        runner = submod_mg.cuda_graph_runner
+        configs = [
+            cfg for cfg in runner.capture_configs \
+                if graph_walk in cfg.replay_graph_walks
+        ]
+        if not configs:
+            return submod_max_bs
+        max_cuda_graph_bs = max([
+            max(cfg.capture_batch_sizes or runner.CAPTURE_BATCH_SIZES) for cfg in configs
+        ])
+        if submod_max_bs is not None:
+            return min(max_cuda_graph_bs, submod_max_bs)
+        return max_cuda_graph_bs
+
     def _sample_decode_outputs(
         self,
         node_name: str,
@@ -269,7 +295,7 @@ class AREngine(BaseEngine):
 
     def _execute_batched(
         self, batch: NodeBatch, submodule: ARNodeSubmodule,
-        inputs: list[ARNodeInputs]
+        inputs: list[ARNodeInputs], sampler: Sampler,
     ) -> NodeOutput:
         """Execute batch with BatchedCacheManager for true vectorized batching."""
         cache_manager = self._create_cache_manager(
@@ -278,7 +304,8 @@ class AREngine(BaseEngine):
         engine_inputs = ModelInputsFromEngine(
             request_ids=batch.request_ids,
             per_request_info=batch.per_request_info,
-            cache_manager=cache_manager
+            cache_manager=cache_manager,
+            sampler=sampler
         )
         if self.enable_nvtx:
             range_push("ar.batched.preprocess", synchronize=False)
@@ -292,6 +319,12 @@ class AREngine(BaseEngine):
 
         if self.enable_nvtx:
             range_push("ar.batched.forward")
+        # Signal the main thread that we're about to enter CUDA launch
+        # code. PyTorch drops the GIL inside the C++ kernel-launch path,
+        # so main can resume Python-heavy postprocess in parallel.
+        launch_started_event = batch.metadata.get("launch_started_event")
+        if launch_started_event is not None:
+            launch_started_event.set()
         batched_output = submodule.forward_batched(
             graph_walk=batch.graph_walk,
             engine_inputs=engine_inputs,
@@ -340,7 +373,8 @@ class AREngine(BaseEngine):
     def _execute_sequential(
         self, batch: NodeBatch,
         submodule: ARNodeSubmodule,
-        inputs: list[ARNodeInputs]
+        inputs: list[ARNodeInputs],
+        sampler: Sampler,
     ) -> NodeOutput:
         """Original per-request execution with CacheHandle."""
         per_request_outputs = {}
@@ -353,7 +387,8 @@ class AREngine(BaseEngine):
                 per_request_info={
                     rid: batch.per_request_info[rid]
                 },
-                cache_manager=cache_manager
+                cache_manager=cache_manager,
+                sampler=sampler,
             )
 
             if self.enable_nvtx:
@@ -368,6 +403,11 @@ class AREngine(BaseEngine):
 
             if self.enable_nvtx:
                 range_push("ar.seq.forward")
+            # Signal on the first rid only — subsequent forwards for
+            # other rids continue to release the GIL inside PyTorch C++.
+            launch_started_event = batch.metadata.get("launch_started_event")
+            if launch_started_event is not None and not launch_started_event.is_set():
+                launch_started_event.set()
             output = submodule.forward(
                 graph_walk=batch.graph_walk,
                 engine_inputs=engine_inputs,
@@ -401,8 +441,6 @@ class AREngine(BaseEngine):
         submodule = submod_mgmt.submodule
         if submodule is None:
             return False
-        if not submodule.can_use_cuda_graphs(batch, inputs):
-            return False
         runner = submod_mgmt.cuda_graph_runner
         if runner is None:
             return False
@@ -411,12 +449,67 @@ class AREngine(BaseEngine):
             batch.per_request_info[rid].requires_cfg
             for rid in batch.request_ids
         )
+        bs = len(batch.request_ids)
+        #TODO: Remove in production
         num_tokens = sum(inp.input_seq_len for inp in inputs)
-        return runner.can_run(
-            batch_size=len(batch.request_ids),
+
+        if not submodule.can_use_cuda_graphs(batch, inputs):
+            self._log_graph_miss(
+                node_name=batch.node_name,
+                graph_walk=batch.graph_walk,
+                bs=bs, num_tokens=num_tokens, requires_cfg=has_cfg,
+                runner=runner,
+                reason="submodule.can_use_cuda_graphs() returned False",
+            )
+            return False
+
+        if not runner.can_run(
+            batch_size=bs,
             num_tokens=num_tokens,
             graph_walk=batch.graph_walk,
             requires_cfg=has_cfg,
+        ):
+            self._log_graph_miss(
+                node_name=batch.node_name,
+                graph_walk=batch.graph_walk,
+                bs=bs, num_tokens=num_tokens, requires_cfg=has_cfg,
+                runner=runner,
+                reason="no captured graph matches this (bs, num_tokens, graph_walk, requires_cfg)",
+            )
+            return False
+        return True
+
+    def _log_graph_miss(
+        self,
+        node_name: str,
+        graph_walk: str,
+        bs: int,
+        num_tokens: int,
+        requires_cfg: bool,
+        runner: CudaGraphRunner,
+        reason: str,
+    ) -> None:
+        """Warn (once per unique miss shape) when a runner exists but the
+        current request can't use a captured graph. Helps diagnose decode
+        slowness from unexpected eager fallbacks.
+        """
+        if not runner.graphs:
+            return  # nothing was ever captured — not actionable, skip noise
+        miss_key = (node_name, graph_walk, bs, num_tokens, requires_cfg, reason)
+        if miss_key in self._logged_graph_misses:
+            return
+        self._logged_graph_misses.add(miss_key)
+
+        captured_for_walk = sorted(
+            {(k.bs, k.num_tokens) for k in runner.graphs.keys()
+             if k.graph_walk == graph_walk and k.requires_cfg == requires_cfg}
+        )
+        captured_walks = sorted({k.graph_walk for k in runner.graphs.keys()})
+        logger.warning(
+            "[cuda-graph miss] node=%s graph_walk=%s requested=(bs=%d, num_tokens=%d, requires_cfg=%s) "
+            "reason='%s' captured_shapes_for_walk=%s captured_walks=%s — falling back to eager.",
+            node_name, graph_walk, bs, num_tokens, requires_cfg,
+            reason, captured_for_walk or "<none>", captured_walks,
         )
 
     def _execute_with_cuda_graph(
@@ -448,6 +541,7 @@ class AREngine(BaseEngine):
             submodule=submodule,
             slot=batch.metadata.get("cuda_graph_slot"),
             advance_event=batch.metadata.get("advance_event"),
+            launch_started_event=batch.metadata.get("launch_started_event"),
         )
 
         return NodeOutput(per_request_output_tensors=batched_output)
@@ -480,10 +574,16 @@ class AREngine(BaseEngine):
 
                 if self.enable_nvtx:
                     range_push("ar.sampler_config", synchronize=False)
+                runner = submod_mgmt.cuda_graph_runner
                 for rid, info in batch.per_request_info.items():
                     sampling_config = info.sampling_config.get(batch.node_name)
-                    sampling_config = {} if sampling_config is None else asdict(sampling_config)
-                    submod_mgmt.sampler.set_config(rid, **sampling_config)
+                    sampling_kwargs = {} if sampling_config is None else asdict(sampling_config)
+                    submod_mgmt.sampler.set_config(rid, **sampling_kwargs)
+                    # Mirror into the cuda-graph runner's master GPU buffers.
+                    # update_request_config is change-detected, so steady-state
+                    # requests pay only a dict comparison here — no GPU work.
+                    if runner is not None and sampling_config is not None:
+                        runner.update_request_config(rid, sampling_config)
                 if self.enable_nvtx:
                     range_pop(synchronize=False)
 
@@ -491,6 +591,10 @@ class AREngine(BaseEngine):
                     with torch.amp.autocast("cuda", enabled=True, dtype=self.autocast_dtype):
                         # run prepare inputs
                         node_inputs: list[ARNodeInputs] = []
+                        if self.enable_nvtx:
+                            range_push(
+                                f"ar.prepare_inputs"
+                            )
                         for rid in batch.request_ids:
                             labels = cache_mgmt.alloc_manager.get_labels(rid)
                             pos_info = {
@@ -506,6 +610,8 @@ class AREngine(BaseEngine):
                                     pos_info=pos_info
                                 )
                             )
+                        if self.enable_nvtx:
+                            range_pop(synchronize=True)
 
                         # Priority: CUDA graph > batched > sequential
                         if self._can_use_cuda_graph(batch, node_inputs):
@@ -523,7 +629,8 @@ class AREngine(BaseEngine):
                                 range_push("ar.batched_path", synchronize=False)
                             try:
                                 output = self._execute_batched(
-                                    batch, submodule, node_inputs
+                                    batch, submodule, node_inputs,
+                                    sampler=submod_mgmt.sampler
                                 )
                             finally:
                                 if self.enable_nvtx:
@@ -533,7 +640,8 @@ class AREngine(BaseEngine):
                                 range_push("ar.sequential_path", synchronize=False)
                             try:
                                 output = self._execute_sequential(
-                                    batch, submodule, node_inputs
+                                    batch, submodule, node_inputs,
+                                    sampler=submod_mgmt.sampler
                                 )
                             finally:
                                 if self.enable_nvtx:
@@ -742,6 +850,11 @@ class AREngine(BaseEngine):
         for submodule_mgmt in self.submodule_management.values():
             submodule_mgmt.kv_management.alloc_manager.add_request(request_id, cache_labels or ["main"])
             submodule_mgmt.sampler.add_request(request_id)
+            # Mirror into the cuda-graph runner's master sampler buffers so
+            # the per-step path can index_select instead of rebuilding from
+            # Python (see ``SamplerBuffers.gather_for_request_ids``).
+            if submodule_mgmt.cuda_graph_runner is not None:
+                submodule_mgmt.cuda_graph_runner.register_request(request_id)
 
     def remove_request(self, request_id: str) -> None:
         for submodule_mgmt in self.submodule_management.values():
@@ -750,6 +863,8 @@ class AREngine(BaseEngine):
                 cache_mgmt.cpu_page_pool.remove_request(request_id)
             cache_mgmt.alloc_manager.remove_request(request_id)
             submodule_mgmt.sampler.remove_request(request_id)
+            if submodule_mgmt.cuda_graph_runner is not None:
+                submodule_mgmt.cuda_graph_runner.unregister_request(request_id)
 
     def pause_request(
         self, request_id: str, cache_label: str = "main",

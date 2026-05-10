@@ -124,7 +124,7 @@ class ZMQCommunicator(BaseCommunicator):
             self.push_sockets[entity_id] = sock
         self.push_sockets[entity_id].send_pyobj(msg)
 
-    def get_all_new_messages(self) -> list:
+    def get_all_new_messages(self, blocking=False) -> list:
         messages = []
         while True:
             try:

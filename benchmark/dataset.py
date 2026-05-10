@@ -409,6 +409,10 @@ class Food101Dataset(BaseDataset):
             cache_dir=cache_dir,
             trust_remote_code=True,
         )
+        # Shuffle with a fixed seed so we get class-diverse images while
+        # remaining deterministic across runs (so the same N images appear in
+        # the same order on every benchmark invocation).
+        raw = raw.shuffle(seed=42)
         raw = raw.select(range(min(100, len(raw))))
 
         # Build label lookup (int -> class name string)
@@ -840,6 +844,251 @@ class DROIDDataset(BaseDataset):
         )
 
     # ------------------------------------------------------------------
+class VideoMMEDataset(BaseDataset):
+    """
+    Dataset loader for Video-MME (https://video-mme.github.io/).
+
+    Auto-downloads from the HuggingFace dataset ``zhaochenyang20/Video_MME`` on
+    first use, matching the load-from-HF pattern used by Food101/LibriSpeech/
+    UCF101. This particular mirror is used because it ships the videos as
+    individual mp4s plus per-chunk metadata jsonl, whereas the canonical
+    ``lmms-lab/Video-MME`` distributes a single parquet plus 20 video zip
+    archives that would need extraction. Caller may override with a local
+    path via ``data_dir``.
+
+    Expected layout (matches the HF repo):
+        <root>/data/test_part_*.jsonl
+        <root>/videos/<videoID>.mp4
+
+    Each jsonl row is one MCQ over a video. The prompt sent to the server
+    is the question with its multiple-choice options appended, asking the
+    model to answer with a single letter.
+    """
+
+    HF_REPO = "zhaochenyang20/Video_MME"
+
+    def __init__(
+        self,
+        num_requests: int = 100,
+        req_type: RequestType = RequestType.V2T,
+        data_dir: str | None = None,
+        cache_dir: str | None = None,
+        jsonl_glob: str = "data/*.jsonl",
+    ):
+        assert req_type.get_input_modalities() == "video", (
+            f"VideoMMEDataset requires a video input RequestType, got {req_type}"
+        )
+        self._num_requests = num_requests
+
+        if data_dir is None:
+            data_dir = self._auto_download(cache_dir)
+        self.data_dir = data_dir
+
+        jsonl_paths = sorted(glob.glob(os.path.join(data_dir, jsonl_glob)))
+        if not jsonl_paths:
+            raise FileNotFoundError(
+                f"No Video-MME jsonl files matched {os.path.join(data_dir, jsonl_glob)}"
+            )
+
+        rows: list[dict] = []
+        for p in jsonl_paths:
+            with open(p) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    rows.append(json.loads(line))
+
+        self.items: list[RequestInput] = []
+        for row in rows:
+            video_path = os.path.join(data_dir, row["video_path"])
+            if not os.path.exists(video_path):
+                continue
+            options = "\n".join(row.get("options", []))
+            prompt = (
+                f"{row['question']}\n{options}\n"
+                "Answer with the letter (A, B, C, or D) of the correct option."
+            )
+            self.items.append(RequestInput(
+                req_type=req_type,
+                prompt=prompt,
+                video_path=video_path,
+            ))
+
+        if not self.items:
+            raise RuntimeError(
+                f"VideoMMEDataset loaded 0 usable rows from {data_dir} -- "
+                f"check that videos/ contains the .mp4 files referenced by the jsonl."
+            )
+
+        self.items = self._resize_data(self.items)
+
+    @classmethod
+    def _auto_download(cls, cache_dir: str | None) -> str:
+        from huggingface_hub import snapshot_download
+        print(f"Downloading Video-MME from HuggingFace ({cls.HF_REPO})...")
+        path = snapshot_download(
+            repo_id=cls.HF_REPO,
+            repo_type="dataset",
+            cache_dir=cache_dir,
+            allow_patterns=["data/*.jsonl", "videos/*.mp4"],
+        )
+        print(f"Video-MME ready at {path}")
+        return path
+
+    @property
+    def num_requests(self) -> int:
+        return self._num_requests
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def __getitem__(self, idx: int) -> RequestInput:
+        return self.items[idx]
+
+
+class SeedTTSDataset(BaseDataset):
+    """
+    Dataset loader for Seed-TTS — the same TTS benchmark vllm-omni uses
+    (vllm-omni CLI flag `--dataset-name seed-tts`; upstream:
+    https://github.com/BytedanceSpeech/seed-tts-eval).
+
+    Auto-downloads on first use from Bytedance's official Google Drive link
+    (the README of the seed-tts-eval repo points at this same archive). The
+    archive is ~1.2 GB and extracts to `seedtts_testset/{en,zh}/...`. Caller
+    may override with a local path via `data_dir`.
+
+    Expected post-extraction layout:
+        <root>/seedtts_testset/{en,zh}/meta.lst
+        <root>/seedtts_testset/{en,zh}/prompt-wavs/<utt_id>.wav
+
+    `meta.lst` is pipe-separated, one row per request:
+        utt_id | prompt_transcript | prompt_wav_relative_path | text_to_synthesize
+
+    LIMITATION: Seed-TTS is a *zero-shot voice cloning* benchmark. Each row
+    pairs a target sentence with a reference utterance (the WAV + its
+    transcript) that the model is supposed to mimic. To stay symmetric with
+    `VideoMMEDataset` and the existing `RequestType.T2S` path (which only
+    carries text input), this loader emits plain T2S requests using the
+    target sentence as the prompt and DROPS the reference WAV / ref_text.
+    That exercises mminf's TTS serving path but does NOT evaluate voice
+    cloning fidelity (WER vs ground-truth, SIM vs reference speaker).
+
+    For voice-clone eval you would need to either (a) extend `RequestInput`
+    + `OurSystem` to carry `ref_audio` / `ref_text` and have mminf's server
+    accept them, or (b) point the `VLLMOmni` adapter at vllm-omni's
+    `/v1/audio/speech` and pass them in `extra_body` (mirrors what
+    `vllm_omni/benchmarks/data_modules/seed_tts_dataset.py` does).
+    """
+
+    # Bytedance's official Drive link from the README of github.com/BytedanceSpeech/seed-tts-eval.
+    # File is a 1.2GB GNU tar containing `seedtts_testset/`.
+    GDRIVE_FILE_ID = "1GlSjVfSHkW3-leKKBlfrjuuTGqQ_xaLP"
+    EXTRACTED_ROOT_NAME = "seedtts_testset"
+
+    def __init__(
+        self,
+        num_requests: int = 100,
+        req_type: RequestType = RequestType.T2S,
+        locale: str = "en",
+        data_dir: str | None = None,
+        cache_dir: str | None = None,
+    ):
+        assert req_type == RequestType.T2S, (
+            f"SeedTTSDataset is a TTS benchmark; req_type must be T2S, got {req_type}"
+        )
+        if locale not in ("en", "zh"):
+            raise ValueError(f"locale must be 'en' or 'zh', got {locale!r}")
+
+        self._num_requests = num_requests
+        self.locale = locale
+
+        if data_dir is None:
+            data_dir = self._auto_download(cache_dir)
+        self.data_dir = data_dir
+
+        meta_path = os.path.join(data_dir, locale, "meta.lst")
+        if not os.path.isfile(meta_path):
+            raise FileNotFoundError(
+                f"Seed-TTS meta not found: {meta_path}. "
+                f"Expected layout: <root>/{locale}/meta.lst from "
+                f"github.com/BytedanceSpeech/seed-tts-eval. If you have a "
+                f"local copy, point --seed-tts-dir at the directory that "
+                f"contains the {locale}/ subfolder."
+            )
+
+        self.items: list[RequestInput] = []
+        with open(meta_path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split("|")
+                # Format: utt_id|prompt_transcript|prompt_wav_rel|text_to_synthesize
+                if len(parts) < 4:
+                    continue
+                target_text = parts[3].strip()
+                if not target_text:
+                    continue
+                self.items.append(RequestInput(
+                    req_type=req_type,
+                    prompt=target_text,
+                ))
+
+        if not self.items:
+            raise RuntimeError(
+                f"SeedTTSDataset loaded 0 usable rows from {meta_path} -- "
+                f"check that the meta.lst follows the 4-pipe seed-tts-eval format."
+            )
+
+        self.items = self._resize_data(self.items)
+
+    @classmethod
+    def _auto_download(cls, cache_dir: str | None) -> str:
+        """Download + extract the Bytedance Seed-TTS test set tarball.
+
+        Returns the path to the extracted `seedtts_testset/` directory. The
+        download is skipped if the extracted directory already exists with a
+        valid en/meta.lst (so re-runs are instant).
+        """
+        import tarfile
+
+        root = os.path.expanduser(cache_dir or "~/.cache/mminf-benchmark")
+        os.makedirs(root, exist_ok=True)
+        extract_root = os.path.join(root, cls.EXTRACTED_ROOT_NAME)
+
+        # Fast path: already extracted.
+        if os.path.isfile(os.path.join(extract_root, "en", "meta.lst")):
+            return extract_root
+
+        archive_path = os.path.join(root, "seedtts_testset.tar")
+        if not os.path.isfile(archive_path):
+            try:
+                import gdown
+            except ImportError as e:
+                raise ImportError(
+                    "Seed-TTS auto-download needs `gdown` (pip install gdown), "
+                    "or pass --seed-tts-dir pointing at a local copy of the "
+                    "extracted seedtts_testset/ directory."
+                ) from e
+            print(
+                f"Downloading Seed-TTS from Google Drive "
+                f"(id={cls.GDRIVE_FILE_ID}, ~1.2 GB) -> {archive_path} ..."
+            )
+            url = f"https://drive.google.com/uc?id={cls.GDRIVE_FILE_ID}"
+            gdown.download(url, archive_path, quiet=False)
+
+        print(f"Extracting Seed-TTS to {root} ...")
+        with tarfile.open(archive_path, "r") as tar:
+            tar.extractall(path=root)
+
+        if not os.path.isfile(os.path.join(extract_root, "en", "meta.lst")):
+            raise RuntimeError(
+                f"Seed-TTS extraction produced unexpected layout at {extract_root}. "
+                f"Expected en/meta.lst inside."
+            )
+        print(f"Seed-TTS ready at {extract_root}")
+        return extract_root
 
     @property
     def num_requests(self) -> int:

@@ -187,14 +187,19 @@ class Qwen3OmniThinkerModel(nn.Module):
         self.lm_head = nn.Linear(tc.hidden_size, tc.vocab_size, bias=False)
 
     def _deepstack_process(
-        self, hidden_states: torch.Tensor, visual_pos_masks: torch.Tensor, visual_embeds: torch.Tensor
+        self, hidden_states: torch.Tensor, visual_embeds: torch.Tensor
     ):
-        visual_pos_masks = visual_pos_masks.to(hidden_states.device)
-        visual_embeds = visual_embeds.to(hidden_states.device, hidden_states.dtype)
-        hidden_states = hidden_states.clone()
-        local_this = hidden_states[visual_pos_masks, :] + visual_embeds
-        hidden_states[visual_pos_masks, :] = local_this
+        # visual_embeds = visual_embeds.to(hidden_states.device, hidden_states.dtype)
+        # hidden_states = hidden_states.clone()
+
+        # NOTE: must ensure that visual_embeds is the same shape as hidden_states,
+        # and zero where we do not have visual tokens!!
+        hidden_states += visual_embeds
         return hidden_states
+    
+    def set_qkv_proj_weights(self):
+        for layer in self.model.layers:
+            layer.self_attn.set_qkv_proj_weight()
 
     def forward(
         self,
@@ -204,7 +209,6 @@ class Qwen3OmniThinkerModel(nn.Module):
         mrope_section: Optional[list[int]] = None,
         mrope_pos_advance: Optional[list[int]] = None,
         deepstack_visual_embeds: list[torch.Tensor] | None = None,
-        visual_pos_masks: torch.Tensor | None = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         """
         Args:
@@ -246,7 +250,6 @@ class Qwen3OmniThinkerModel(nn.Module):
             if deepstack_visual_embeds is not None and layer_idx in range(len(deepstack_visual_embeds)):
                 hidden_states = self._deepstack_process(
                     hidden_states,
-                    visual_pos_masks,
                     deepstack_visual_embeds[layer_idx],
                 )
 
