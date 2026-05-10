@@ -92,10 +92,7 @@ class ReadySignals:
     is_ready: bool = False
     is_ready_for_streaming: bool = False
 
-    def update(
-        self, edge: GraphEdge,
-        
-    ):
+    def update(self, edge: GraphEdge):
         assert edge.name in self.input_names, \
             f"Node {self.node_name} does not take input named {edge.name}"
         assert edge.name not in self.ready_inputs, \
@@ -150,17 +147,29 @@ class GraphNode(GraphSection):
         )
 
     def _register_streaming(self, streaming_inputs: set[str]):
+        # Mutate the existing set in place so that the ReadySignals instances
+        # built in __post_init__ (which capture self._streaming_inputs by
+        # reference) stay in sync. Rebinding the attribute would leave them
+        # pointing at the original empty set.
         if not streaming_inputs:
             return
-        self._consumes_stream = True
-        self._streaming_inputs = set(streaming_inputs)
+        self.consumes_stream = True
+        self._streaming_inputs.clear()
+        self._streaming_inputs.update(streaming_inputs)
 
     def ingest_input(self, edge: GraphEdge):
         if edge.name not in self.ready_signals.ready_names:
             self.ready_signals.update(edge)
-        else:
+        elif edge.name not in self.ready_next_iter.ready_names:
             # already have this input for the current iteration — buffer for the next loop iter
             self.ready_next_iter.update(edge)
+        else:
+            raise RuntimeError(
+                f"Node {self.name!r} received a third copy of input {edge.name!r}: "
+                f"ready_signals and ready_next_iter are both populated. The runtime is "
+                f"producing more loop iterations of inputs than the node can buffer "
+                f"(only 1-deep speculation is supported)."
+            )
         self._managing_registry.register_ingested_input(edge)
 
     def get_inputs_outputs(self):
@@ -560,7 +569,7 @@ class WorkerGraphStateRegistry(GraphStateRegistry):
         self.ready_streaming_next_iter = set()
 
         self.nodes = graph_section.get_nodes()
-    
+
     def register_ingested_input(self, graph_edge: GraphEdge):
         node = self.nodes[graph_edge.next_node]
         if node.ready_signals.is_ready:
@@ -568,13 +577,24 @@ class WorkerGraphStateRegistry(GraphStateRegistry):
             self.ready_for_streaming.discard(node.name)
         elif node.ready_signals.is_ready_for_streaming:
             self.ready_for_streaming.add(node.name)
-        
+
         if node.ready_next_iter.is_ready:
             self.ready_next_iter.add(node.name)
             self.ready_streaming_next_iter.discard(node.name)
         elif node.ready_next_iter.is_ready_for_streaming:
             self.ready_streaming_next_iter.add(node.name)
-    
+
+    def mark_entity_complete(self, entity_name: str) -> NodeCompletionOutput:
+        # Top-level entities have no outer loop to drive a reset_for_iter, so
+        # we clear the entity's ready_signals here so the same node can be
+        # ingested for a future forward pass without ingest_input falling
+        # through to ready_next_iter.
+        output = super().mark_entity_complete(entity_name)
+        entity = self.managed_entities.get(entity_name)
+        if isinstance(entity, GraphNode):
+            entity.ready_signals.clear()
+        return output
+
     def reset_for_iter(self):
         super().reset_for_iter()
         self.ready_names.clear()
@@ -587,3 +607,10 @@ class WorkerGraphStateRegistry(GraphStateRegistry):
         self.ready_for_streaming, self.ready_streaming_next_iter = (
             self.ready_streaming_next_iter, self.ready_for_streaming
         )
+
+    def clear(self):
+        super().clear()
+        self.ready_names.clear()
+        self.ready_for_streaming.clear()
+        self.ready_next_iter.clear()
+        self.ready_streaming_next_iter.clear()
