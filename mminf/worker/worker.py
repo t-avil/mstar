@@ -2140,7 +2140,9 @@ class Worker:
             # fire — let the standard path handle the stop there.
             has_ready_body = any(
                 rid in self.worker_graphs_manager.queues[wg].per_request_queues
-                and len(self.worker_graphs_manager.queues[wg].per_request_queues[rid].ready) > 0
+                and len(
+                    self.worker_graphs_manager.queues[wg].per_request_queues[rid].ready_node_names
+                ) > 0
                 for wg in part_info.graph_walk_worker_graph_ids
             )
             if has_ready_body:
