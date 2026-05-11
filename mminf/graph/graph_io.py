@@ -61,13 +61,15 @@ class WorkerGraphIO:
     ) -> bool:
         """Route an arriving edge to its destination node.
 
-        Returns False if next_node is not in this graph (e.g. destined for another worker).
+        Returns False when the edge isn't claimed here: ``next_node`` not in
+        this graph, OR the node exists but rejected the edge (name mismatch
+        / both ready slots full — see GraphNode.ingest_input). Callers should
+        treat the False return as "try the next destination" (cross-worker
+        routing or StreamBuffer re-queue).
         """
         if graph_edge.next_node not in self.nodes:
             return False
-        node = self.nodes[graph_edge.next_node]
-        node.ingest_input(graph_edge)
-        return True
+        return self.nodes[graph_edge.next_node].ingest_input(graph_edge)
     
     def mark_node_complete(
         self, node_name: str

@@ -163,20 +163,36 @@ class GraphNode(GraphSection):
         self._streaming_inputs.clear()
         self._streaming_inputs.update(streaming_inputs)
 
-    def ingest_input(self, edge: GraphEdge):
+    def ingest_input(self, edge: GraphEdge) -> bool:
+        """Try to ingest an arriving edge.
+
+        Returns True on success, False when the edge is rejected:
+          - ``edge.name`` is not in ``self.input_names`` (cross-walk routing
+            of a persisted output to a same-named node whose input set
+            doesn't match — e.g. Q3-Omni ``talker_input_embeds → Talker``
+            during ``talker_last_prefill``, where the current Talker's
+            inputs don't include it; the conductor handles the cross-walk
+            handoff via ``persist=True`` separately), or
+          - both ``ready_signals`` and ``ready_next_iter`` already hold
+            this name (streaming backpressure — producer is more than one
+            iter ahead of the consumer; the StreamBuffer at the worker
+            level will re-queue the dropped chunk).
+
+        Callers that route edges (WorkerGraphIO, process_new_inputs) use
+        the False return as "this wg didn't claim it" and fall through to
+        cross-worker / external routing.
+        """
+        if edge.name not in self.input_names:
+            return False
         if edge.name not in self.ready_signals.ready_names:
             self.ready_signals.update(edge)
         elif edge.name not in self.ready_next_iter.ready_names:
             # already have this input for the current iteration — buffer for the next loop iter
             self.ready_next_iter.update(edge)
         else:
-            raise RuntimeError(
-                f"Node {self.name!r} received a third copy of input {edge.name!r}: "
-                f"ready_signals and ready_next_iter are both populated. The runtime is "
-                f"producing more loop iterations of inputs than the node can buffer "
-                f"(only 1-deep speculation is supported)."
-            )
+            return False
         self._managing_registry.register_ingested_input(edge)
+        return True
 
     def get_inputs_outputs(self):
         output_names = {out.name for out in self.outputs}
