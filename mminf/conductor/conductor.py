@@ -84,7 +84,7 @@ def _worker_process_target(
 
     from mminf.worker.worker import Worker
     logger.debug("Launching worker %s with graph nodes %s", worker_id, str(
-        [wg.section.get_node_names() for wg in my_worker_graphs]
+        [set(wg.section.get_nodes()) for wg in my_worker_graphs]
     ))
     worker = Worker(
         worker_id=worker_id,
@@ -247,11 +247,11 @@ class Conductor:
             worker_graph_id: worker_graph.graph_walks for worker_graph_id, worker_graph in self.worker_graphs.items()
         }
         self._all_worker_graph_ids_to_nodes: dict[str, set[str]] = {
-            worker_graph_id: worker_graph.section.get_node_names()
+            worker_graph_id: set(worker_graph.section.get_nodes())
             for worker_graph_id, worker_graph in self.worker_graphs.items()
         }
-        self._all_worker_graph_ids_to_dyn_loops = {
-            worker_graph_id: worker_graph.section.get_dyn_loop_names()
+        self._all_worker_graph_ids_to_dyn_loops: dict[str, set[str]] = {
+            worker_graph_id: set(worker_graph.section.get_loops())
             for worker_graph_id, worker_graph in self.worker_graphs.items()
         }
 
@@ -324,7 +324,7 @@ class Conductor:
             worker_graph = self.worker_graphs[worker_graph_id]
             if graph_walk not in worker_graph.graph_walks:
                 continue
-            nodes = set(worker_graph.section.get_node_names())
+            nodes = set(worker_graph.section.get_nodes())
 
             if worker_id not in inputs_per_worker:
                 inputs_per_worker[worker_id] = []
