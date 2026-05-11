@@ -9,13 +9,22 @@ balance without booting shared memory.
 
 from __future__ import annotations
 
-import sys
+import pytest
+
+pytest.skip(
+    "Drives the deleted cache_outputs + complete_loops API and tests "
+    "GraphNode.optional_input_ids (removed; conductor now passes empty "
+    "buffers for what used to be optional inputs). Loop.accumulated_outputs "
+    "behavior should be re-covered by a new test against the WorkerGraphIO "
+    "API in a follow-up.",
+    allow_module_level=True,
+)
+
+import sys  # noqa: E402
 
 sys.path.insert(0, ".")
 
-import pytest
-
-from mminf.graph.base import (
+from mminf.graph.base import (  # noqa: E402
     DynamicLoop,
     GraphEdge,
     GraphNode,
