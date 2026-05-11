@@ -18,8 +18,8 @@ from mminf.communication.tensors import NameToTensorList, create_tensor_communic
 from mminf.conductor.request_info import CurrentForwardPassInfo
 from mminf.engine.base import EngineType, NodeBatch, NodeOutput
 from mminf.engine.kv_store import KVCacheConfig, StoreWritePolicy, TransferEngineInfo
-from mminf.graph.base import FilteredEdges, GraphEdge
-from mminf.graph.request_queues import format_graph_edge_list
+from mminf.graph.base import GraphEdge
+from mminf.graph.graph_io import format_graph_edge_list
 from mminf.model.base import Model, WorkerGraph
 from mminf.streaming.stream_buffer import StreamBuffer
 from mminf.utils.ipc_format import (
@@ -39,6 +39,7 @@ from mminf.utils.profiler import range_pop, range_push
 from mminf.worker.engine_manager import EngineManager
 from mminf.worker.micro_scheduler import MicroScheduler, ScheduledBatch
 from mminf.worker.node_manager_utils import (
+    FilteredEdges,
     NodeOutputRouting,
     WorkerGraphQueues,
     WorkerGraphsManager,
