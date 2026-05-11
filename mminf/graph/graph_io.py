@@ -1,41 +1,11 @@
 from mminf.graph.base import *
+from mminf.graph.loop_indices import NestedLoopIndices  # re-exported for backward compat
 
 
 def format_graph_edge_list(lst: list[GraphEdge]) -> str:
     return ", ".join([f"{edge.name} -> {edge.next_node}" for edge in lst])
 
 
-@dataclass
-class NestedLoopIndices:
-    loop_name_order: list[str] # from outer to inner
-    loop_indices: dict[str]
-    fwd_pass_idx: int
-
-    def label_context_gt(self, other: "NestedLoopIndices", target_loop_name: str) -> bool:
-        """
-        Whether the iter indices of "self" are greater than the indices of
-        "other", specifically in the path leading up to (but not including)
-        "target_loop_name".
-
-        For instance, if we are stopping the loop "target_label" but don't
-        want to double-stop it, we can keep track of the last time it was
-        stopped and only stop it again `new_time.label_context_gt(prev, label)`.
-        """
-        if self.fwd_pass_idx > other.fwd_pass_idx:
-            return True
-        if self.fwd_pass_idx < other.fwd_pass_idx:
-            return False
-        for name in self.loop_name_order:
-            if name == target_loop_name:
-                break
-
-            our_idx, their_idx = self.loop_indices.get(name, 0), other.loop_indices.get(name, 0)
-            if our_idx > their_idx:
-                return True
-            if our_idx < their_idx:
-                return False
-        return False
-            
 
 class WorkerGraphIO:
     """Primary interface between the worker execution loop and a computation graph.
