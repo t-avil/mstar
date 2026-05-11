@@ -122,6 +122,12 @@ class GraphNode(GraphSection):
     input_names: set[str]
     outputs: list[GraphEdge]
     consumes_stream: bool = False
+    # When False, the worker's speculation gate (``_can_speculate``) refuses to
+    # build a speculative N+1 batch for this node. Models opt out of spec for
+    # nodes whose forward pass mutates global state in ways the spec path
+    # doesn't account for — e.g. BAGEL's flow-loop LLM / combine_cfg, where
+    # the CFG-parallel branches need their KV caches snapshotted in lockstep.
+    enable_async_scheduling: bool = True
 
     _streaming_inputs: set[str] = field(default_factory=set)
 
