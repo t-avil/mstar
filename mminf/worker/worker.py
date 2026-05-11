@@ -268,7 +268,7 @@ class Worker:
             walks = model.get_graph_walk_graphs()
             for conn in self._my_consumer_connections:
                 for section in walks.values():
-                    if hasattr(section, 'input_ids') and conn.edge_name in section.input_ids:
+                    if hasattr(section, 'input_names') and conn.edge_name in section.input_names:
                         self._consumer_node_cache[conn.edge_name] = section.name
 
     def _get_node_names_for_partition(self, partition_name: str, model: Model) -> list[str]:
@@ -627,10 +627,14 @@ class Worker:
                 synthetic_edge = self._pop_streaming_edge(sbuf, edge_name, request_id)
 
                 if synthetic_edge is not None:
-                    ingested = len(self.worker_graphs_manager.process_new_streaming_inputs(
+                    # Streaming edges go through the same path as regular ones —
+                    # ReadySignals.is_ready_for_streaming flips on as soon as
+                    # the streaming inputs are the only ones missing. Empty
+                    # leftover list means the edge was claimed.
+                    leftovers = self.worker_graphs_manager.process_new_inputs(
                         request_id=request_id, inputs=[synthetic_edge],
-                    )) == 0
-                    if not ingested:
+                    )
+                    if leftovers:
                         sbuf.store_uningested_edge(synthetic_edge)
                     elif sbuf.reached_final_chunk:
                         req_info.per_partition_info[partition_name].stream_partition_done = True
@@ -867,7 +871,15 @@ class Worker:
             if not request_output_tensors:
                 continue  # Node produced no outputs (e.g., KV-cache-only prefill step)
 
-            output_tensor_info = self.tensor_manager.store_and_populate_graph_edges(
+            # store_and_populate_graph_edges populates tensor_info on
+            # ``filtered_outputs`` in place — that's the SAME list of
+            # GraphEdge objects we passed in, so the kept list inside
+            # ``output_edges[request_id]`` picks up the tensor_info too.
+            # The legacy ``waiting_node.cache_outputs(output_tensor_info)``
+            # call is gone: ``LoopStateRegistry.mark_entity_complete``
+            # (invoked via the ``complete_loops`` shim below) now calls
+            # ``Loop.maybe_cache_output(entity.outputs)`` internally.
+            self.tensor_manager.store_and_populate_graph_edges(
                 request_id=request_id,
                 tensors=request_output_tensors,
                 graph_edges=filtered_outputs,
@@ -881,9 +893,6 @@ class Worker:
             worker_graph_id = self.worker_graphs_manager.get_worker_graph_id_for_node(
                 request_id, node_name=node.name
             )
-            waiting_node = self.worker_graphs_manager.get_waiting_node(request_id, worker_graph_id)
-            if waiting_node is not None:
-                waiting_node.cache_outputs(output_tensor_info)
             output_edges[request_id] = self.worker_graphs_manager.complete_loops(
                 request_id, worker_graph_id, output_edges[request_id].kept,
                 done_node=batch.node_name
@@ -1330,7 +1339,7 @@ class Worker:
         loop_back_inputs = self._loop_back_input_names(sample_node)
         if not loop_back_inputs:
             return None
-        for input_name in sample_node.input_ids:
+        for input_name in sample_node.input_names:
             if input_name not in loop_back_inputs \
                     and input_name not in sample_node._streaming_inputs:
                 # Has a non-loop-back / streaming required input — speculation skipped.
@@ -1352,13 +1361,24 @@ class Worker:
         if not continuing:
             return None
 
-        # Clone GraphNode + ScheduledBatch metadata for the speculated step.
+        # Reuse the same GraphNode objects for the speculated step — they
+        # carry no per-iter mutable state that batch_N still needs after this
+        # iter's fast_postprocess. The colleague's Phase 2 plan eliminated
+        # ``clone_for_next_iter`` deliberately: spec batches now share the
+        # registry's node, and ``ingest_for_speculation`` previews readiness
+        # without touching ``ready_signals`` or ``ready_next_iter``.
+        #
+        # Caveat: with ``MMINF_USE_POSTPROC_THREAD=1`` the slow_postprocess
+        # of batch_N could race iter-K+1's ``_store_outputs_and_finish_loops``
+        # write to ``node.outputs[i].tensor_info``. That env-var path is opt-in
+        # and untested with spec; keep it off when enabling spec on a busy
+        # partition.
         new_node_objects = {}
         new_request_to_worker_graph = {}
         per_request_inputs = {}
         per_request_info = {}
         for rid in continuing:
-            new_node_objects[rid] = batch_N.node_objects[rid].clone_for_next_iter()
+            new_node_objects[rid] = batch_N.node_objects[rid]
             new_request_to_worker_graph[rid] = batch_N.request_to_worker_graph[rid]
             # Placeholder inputs for continuing rids — filled in by
             # _thread_outputs_to_speculative once GPU(N) returns.
@@ -1455,7 +1475,10 @@ class Worker:
                     rid, partition=partition_N,
                 )
             )
-            spec_batch.node_objects[rid].clear_outputs()
+            # Clear tensor_info on the (shared) node's outputs so iter K+1's
+            # _store_outputs writes into clean edges, not stacked on top of
+            # iter K's tensor_info that was just routed.
+            spec_batch.node_objects[rid].reset_outputs()
 
         return Speculation(
             scheduled_batch=spec_batch,
@@ -1647,57 +1670,18 @@ class Worker:
             range_pop(synchronize=False)
             range_push("worker.route_outputs.store", synchronize=False)
 
-        # Apply spec consumption BEFORE complete_loops. ``update_for_spec``
-        # is what marks the Loop's pre-emptively-allocated next-iter body as
-        # consumed (sets ``_curr_iter_section = None``). When complete_loops
-        # runs after this, it sees the post-spec Loop state and can correctly
-        # detect natural termination at ``max_iters`` — emitting ``Loop.outputs``
-        # (e.g. BAGEL image_gen Loop's ``latents → vae_decoder``) and
-        # short-circuiting the queue. Without this re-ordering, complete_loops
-        # saw a stale ``curr_iter_section=GraphNode`` (the spec-cloned body's
-        # template), ``_iter_done()`` returned False, the Loop never
-        # terminated through complete_loops, downstream nodes never got the
-        # final outputs, and the loop ran forever past max_iters.
-        if spec_node_name is not None:
-            for request_id in batch.node_objects:
-                if speculation_consumed_loop_back.get(request_id):
-                    self.worker_graphs_manager.apply_spec_consumption(
-                        request_id, spec_node_name=spec_node_name,
-                    )
-
-        # Stops applied in this batch consume the loop body the same way a
-        # spec replay does: the next-iter body that ``process_node_outputs``
-        # queued in the prior iter (``_curr_iter_section = GraphNode(...)``)
-        # is no longer wanted, because the loop is terminating. If we don't
-        # clear it now, the upcoming ``complete_loops`` call recurses into
-        # ``GraphNode.complete_loops``, which returns ``new_waiting=self``,
-        # restoring ``_curr_iter_section`` to the GraphNode. Then
-        # ``_iter_done()`` is False (curr_iter_section is non-None even
-        # though _finished=True and _waiting_for_execution is empty), the
-        # Loop never reports done, the worker graph never emits
-        # WORKER_GRAPHS_DONE with completed_worker_graph_ids, the partition
-        # never reaches partition_done=True at the conductor, and the
-        # request hangs forever.
-        #
-        # The no-spec scenarios that hit this on Q3-Omni:
-        #   1. Fairness yield at the spec gate above — Thinker shares
-        #      worker_1 with Talker; after each Thinker iter, Talker has
-        #      ready work, so ``has_ready_excluding(Thinker, thinker_decode)``
-        #      returns True, ``must_yield_for_fairness`` is True, and the
-        #      iter applying the stop never even calls
-        #      ``_try_speculate_next``. spec_node_name stays None and
-        #      apply_spec_consumption is skipped from the spec branch.
-        #   2. Non-AR engines (e.g. ``code_predictor`` with custom
-        #      enable_async_scheduling) where ``_can_speculate`` returns
-        #      False outright.
-        # In both, ``_apply_pending_stops_to_batch`` correctly registers the
-        # stop, but the next-iter body is left dangling on the Loop without
-        # this call.
-        for request_id in stopped_loop_backs:
-            if request_id in batch.node_objects:
-                self.worker_graphs_manager.apply_spec_consumption(
-                    request_id, spec_node_name=batch.node_name,
-                )
+        # NOTE (Phase D rewrite): the apply_spec_consumption / update_for_spec
+        # dance that used to live here is gone. In the old design, a Loop kept
+        # a pre-built ``_curr_iter_section`` for the next iter that had to be
+        # explicitly cleared so ``complete_loops`` could see the loop as done.
+        # In the new design, the Loop holds no next-iter section — iteration
+        # state is just ``curr_iter`` plus per-node ``ready_signals`` /
+        # ``ready_next_iter`` slots, and ``Loop.complete_iter`` consults
+        # ``_finish_signal`` directly. Both the natural-termination case
+        # (``max_iters`` reached) and the stop case (``register_loop_finish_signal``)
+        # are handled by ``mark_node_complete`` → ``LoopStateRegistry`` chain
+        # below.
+        del spec_node_name  # parameter retained for backward-compat with callers
 
         if self.enable_nvtx:
             range_pop(synchronize=False)
@@ -1744,11 +1728,8 @@ class Worker:
                 ]
             else:
                 kept_for_routing = kept
-            # Pass spec_node_name=None now; we already applied spec consumption
-            # above so process_node_outputs shouldn't re-apply it.
             routing = self.worker_graphs_manager.process_node_outputs(
                 request_id, kept_for_routing, graph_walk=batch.graph_walk,
-                spec_node_name=None,
             )
             routing_per_request[request_id] = routing
         if self.enable_nvtx:
@@ -2028,16 +2009,11 @@ class Worker:
         for _rid, req_info in node_batch.per_request_info.items():
             req_info.dynamic_loop_stop_signals.clear()
 
-        if advanced_loops:
-            for rid, stops in result.new_stops.items():
-                advanced = advanced_loops.get(rid)
-                if not advanced:
-                    continue
-                to_clear = stops & advanced
-                if to_clear:
-                    self.worker_graphs_manager.clear_dyn_loop_curr_iter_section(
-                        rid, partition=batch_partition, loop_names=to_clear,
-                    )
+        # (Phase D rewrite) The clear_dyn_loop_curr_iter_section call that
+        # used to live here is gone — Loop._finish_signal + Loop.complete_iter
+        # handle the "loop just advanced + stop arrived" case naturally now.
+        # ``advanced_loops`` is kept on the signature for backward-compat with
+        # callers that still pass it; we no longer need it here.
 
         if self.enable_nvtx:
             range_pop(synchronize=False)
@@ -2166,13 +2142,12 @@ class Worker:
     def _finalize_orphan_stop(self, rid: str, partition: str | None) -> None:
         """Force-complete loops for an orphan stop and emit
         WORKER_GRAPHS_DONE for any worker graph that became done.
-        Called from ``_apply_pending_stops_to_batch`` for rids whose
-        stop isn't covered by the current batch. ``stop_loops`` has
-        already been called at this point (so ``_finished=True``); this
-        method drives complete_loops for the bodies sitting in `ready`
-        — calling it with each ready body's name removes that name from
-        the loop's ``_waiting_for_execution``, after which ``_is_done``
-        returns True and the loop emits its accumulated outputs.
+
+        Called from ``_drain_orphan_pending_stops`` when a stop arrives for
+        a rid+partition with no in-flight batch, no scheduled batch, and no
+        ready body — i.e. the loop has nothing to drive ``mark_node_complete``,
+        so we must force ``Loop.complete_iter`` ourselves on every loop that
+        already has ``_finish_signal=True``.
         """
         per_request_info = self.worker_graphs_manager.per_request_info.get(rid)
         if per_request_info is None:
@@ -2183,15 +2158,19 @@ class Worker:
         completed_wg_ids: list[str] = []
         for wg_id in part_info.graph_walk_worker_graph_ids:
             queue = self.worker_graphs_manager.queues[wg_id]
-            per_req_q = queue.per_request_queues.get(rid)
-            if per_req_q is None:
+            wgio = queue.per_request_queues.get(rid)
+            if wgio is None:
                 continue
-            per_req_q.ready.clear()
-
-            # TODO this is hacky, just trying to get something working
-            for name in per_req_q.waiting.get_node_names():
-                out = per_req_q.waiting.complete_loops(name)
-                per_req_q.waiting = out.new_waiting
+            # No more bodies should run — stop_loops already registered finish
+            # signals upstream; clearing ready_node_names prevents the
+            # micro_scheduler from picking up anything still queued.
+            wgio.ready_node_names.clear()
+            # Drive complete_iter on any loop that's been stopped but hasn't
+            # finalized yet. The done branch chains up through the registry
+            # tree, so nested loops terminate in order.
+            for loop in list(wgio.loops.values()):
+                if loop._finish_signal and not loop.is_done:
+                    loop.complete_iter()
             if queue.is_done(rid):
                 completed_wg_ids.append(wg_id)
                 queue.reset(rid)
@@ -2749,7 +2728,7 @@ class Worker:
                             request_id, partition=batch_partition,
                         )
                     )
-                    batch.node_objects[request_id].clear_outputs()
+                    batch.node_objects[request_id].reset_outputs()
                 if self.enable_nvtx:
                     range_pop(synchronize=False)
 
