@@ -418,7 +418,6 @@ class WorkerGraphsManager:
         # the cross-worker routing pass below.
         routed_to_this_worker: list[GraphEdge] = []
         external_outputs: list[GraphEdge] = []
-        touched_wg_ids: set[str] = set()
         for edge in non_streaming_outputs:
             wg_id = self.walk_node_to_worker_graph_id.get((graph_walk, edge.next_node))
             if wg_id is not None and wg_id in self.queues:
@@ -429,13 +428,18 @@ class WorkerGraphsManager:
                     external_outputs.extend(leftover)
                 else:
                     routed_to_this_worker.append(edge)
-                    touched_wg_ids.add(wg_id)
             else:
                 external_outputs.append(edge)
 
-        # Any worker graph that just ingested an edge may have become done.
+        # Sweep all worker graphs the request is registered with for THIS walk
+        # to see which became done. A wg can become done without having
+        # ingested any edge in this call — e.g. when the just-completed node's
+        # outputs all target EMPTY_DESTINATION / EMIT_TO_CLIENT / a streaming
+        # partition (Orpheus prefill, BAGEL vae_decoder, Code2Wav).
         completed_worker_graph_ids: list[str] = []
-        for wg_id in touched_wg_ids:
+        for wg_id in self.per_request_info[request_id].worker_graph_ids:
+            if graph_walk not in self.all_worker_graph_ids_to_graph_walks[wg_id]:
+                continue
             queue = self.queues[wg_id]
             if queue.is_done(request_id):
                 completed_worker_graph_ids.append(wg_id)
