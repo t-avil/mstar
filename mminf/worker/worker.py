@@ -1368,11 +1368,16 @@ class Worker:
         # registry's node, and ``ingest_for_speculation`` previews readiness
         # without touching ``ready_signals`` or ``ready_next_iter``.
         #
-        # Caveat: with ``MMINF_USE_POSTPROC_THREAD=1`` the slow_postprocess
-        # of batch_N could race iter-K+1's ``_store_outputs_and_finish_loops``
-        # write to ``node.outputs[i].tensor_info``. That env-var path is opt-in
-        # and untested with spec; keep it off when enabling spec on a busy
-        # partition.
+        # Generalization note: the spec gate above requires all inputs to be
+        # loop-back or streaming, so we never gather inputs from
+        # ``ready_next_iter`` here — placeholder slots get filled from N's
+        # outputs by ``_thread_outputs_to_speculative`` and fresh-rid inputs
+        # come from the scheduler-popped node's ``ready_signals.ready_inputs``
+        # below. If a future change lifts that restriction (e.g. lets a spec
+        # node take a non-loop-back input that may have arrived early and
+        # landed in ``ready_next_iter`` because ``ready_signals`` was still
+        # full from this iter), the fresh-rid gather loop will need to union
+        # both slots before reading.
         new_node_objects = {}
         new_request_to_worker_graph = {}
         per_request_inputs = {}
@@ -2282,19 +2287,13 @@ class Worker:
                 "pre-runs on a dedicated thread",
                 self.worker_id,
             )
-        # Background postprocessing is useful for overlap, but it touches CUDA
-        # tensors and tensor-manager state from a second thread. Keep it opt-in
-        # while the dedicated GPU thread path is being stabilized.
-        use_postproc_thread = os.environ.get("MMINF_USE_POSTPROC_THREAD", "") == "1"
-        postproc_executor = None
-        if use_postproc_thread:
-            postproc_executor = ThreadPoolExecutor(
-                max_workers=1, thread_name_prefix=f"mminf-postproc-{self.worker_id}"
-            )
-            logger.info(
-                "Worker %s: slow postprocess runs on dedicated postproc thread",
-                self.worker_id,
-            )
+        # Background postprocessing on a dedicated thread was removed in the
+        # graph refactor: with spec batches now sharing the registry's
+        # GraphNode (no clone_for_next_iter), running slow_postprocess(N)
+        # concurrent with iter K+1's _store_outputs_and_finish_loops races on
+        # node.outputs[i].tensor_info. A safe re-introduction requires either
+        # a per-batch output snapshot or restoring some form of spec-batch
+        # cloning — flesh out either path in a follow-up before re-enabling.
 
         # Cross-iter async-scheduling state lives on self (initialized in
         # __init__) so _remove_request can see it from message processing.
@@ -2365,8 +2364,6 @@ class Worker:
             from mminf.utils.profiler import range_pop, range_push
             try:
                 _iter_start = _time.perf_counter() if phase_period else 0.0
-                if postproc_executor is not None:
-                    self._drain_completed_postprocess(pending_postproc)
                 self._apply_pending_removes_safe_to_drop(
                     self._in_flight_rids | self._postproc_inflight_rids
                 )
@@ -2650,36 +2647,18 @@ class Worker:
                     if phase_period:
                         _phase_record("fast_post", _time.perf_counter() - _t0)
                     _t0 = _time.perf_counter() if phase_period else 0.0
-                    if postproc_executor is not None:
-                        postproc_future = postproc_executor.submit(
-                            self._compute_slow_postprocess,
-                            p_batch, p_node_batch, output, routing,
-                        )
-                        self.wakeup_event.register_future(postproc_future)
-                        self._postproc_inflight_rids.update(p_batch.node_objects.keys())
-                        pending_postproc.append(
-                            PendingPostproc(
-                                batch=p_batch,
-                                node_batch=p_node_batch,
-                                partition=p_partition,
-                                routing=routing,
-                                future=postproc_future,
-                                advanced_loops=advanced_loops,
-                            )
-                        )
-                    else:
-                        result = self._compute_slow_postprocess(
-                            p_batch, p_node_batch, output, routing,
-                        )
-                        new_stops = self._finalize_slow_postprocess(
-                            p_batch, p_node_batch, p_partition, routing, result,
-                            advanced_loops=advanced_loops,
-                        )
-                        if new_stops:
-                            for rid, stops in new_stops.items():
-                                self._pending_stops.setdefault(
-                                    (rid, p_partition), set()
-                                ).update(stops)
+                    result = self._compute_slow_postprocess(
+                        p_batch, p_node_batch, output, routing,
+                    )
+                    new_stops = self._finalize_slow_postprocess(
+                        p_batch, p_node_batch, p_partition, routing, result,
+                        advanced_loops=advanced_loops,
+                    )
+                    if new_stops:
+                        for rid, stops in new_stops.items():
+                            self._pending_stops.setdefault(
+                                (rid, p_partition), set()
+                            ).update(stops)
                     if phase_period:
                         _phase_record("slow_post", _time.perf_counter() - _t0)
 
