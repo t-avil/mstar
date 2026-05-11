@@ -413,29 +413,32 @@ class WorkerGraphsManager:
         to_conductor = [edge for edge in non_streaming_outputs if edge.persist]
         new_token_outputs = [edge for edge in non_streaming_outputs if edge.conductor_new_token]
 
-        # (2) process all internal-facing outputs
-        worker_graph_ids = [
-            gid
-            for gid in self.per_request_info[request_id].worker_graph_ids
-            if graph_walk in self.all_worker_graph_ids_to_graph_walks[gid]
-        ]
-
-        completed_worker_graph_ids = []
+        # (2) route each output edge to its destination worker graph via the
+        # inverted index. Local wg -> ingest; absent/non-local -> defer to
+        # the cross-worker routing pass below.
         routed_to_this_worker: list[GraphEdge] = []
-        external_outputs: list[GraphEdge] = non_streaming_outputs
-        for worker_graph_id in worker_graph_ids:
-            queue = self.queues[worker_graph_id]
-            # Track which edges this wg claimed: anything that was in
-            # external_outputs going in but NOT coming out was ingested here.
-            before_ids = {id(e) for e in external_outputs}
-            external_outputs = queue.process_new_inputs(request_id, external_outputs)
-            after_ids = {id(e) for e in external_outputs}
-            for e in non_streaming_outputs:
-                if id(e) in before_ids and id(e) not in after_ids:
-                    routed_to_this_worker.append(e)
+        external_outputs: list[GraphEdge] = []
+        touched_wg_ids: set[str] = set()
+        for edge in non_streaming_outputs:
+            wg_id = self.walk_node_to_worker_graph_id.get((graph_walk, edge.next_node))
+            if wg_id is not None and wg_id in self.queues:
+                leftover = self.queues[wg_id].process_new_inputs(request_id, [edge])
+                if leftover:
+                    # The edge's next_node maps here but the queue declined
+                    # (e.g. wg has no per-request io for this rid yet).
+                    external_outputs.extend(leftover)
+                else:
+                    routed_to_this_worker.append(edge)
+                    touched_wg_ids.add(wg_id)
+            else:
+                external_outputs.append(edge)
 
+        # Any worker graph that just ingested an edge may have become done.
+        completed_worker_graph_ids: list[str] = []
+        for wg_id in touched_wg_ids:
+            queue = self.queues[wg_id]
             if queue.is_done(request_id):
-                completed_worker_graph_ids.append(worker_graph_id)
+                completed_worker_graph_ids.append(wg_id)
                 queue.reset(request_id)
 
         # (3) get mapping of worker to external outputs
@@ -531,21 +534,29 @@ class WorkerGraphsManager:
         part_info = self.per_request_info[request_id].per_partition_info[partition]
         worker_graph_ids = part_info.graph_walk_worker_graph_ids
         stopped_loop_back_signals: set[NameAndDest] = set()
+        # In disaggregated mode the same Loop name can exist on multiple worker
+        # graphs (each with its own _finish_signal), so this still has to fan out.
         for worker_graph_id in worker_graph_ids:
-            wg = self.queues[worker_graph_id]
-            stopped_loop_back_signals |= wg.stop_loops(request_id, loop_names)
-            if req_info is not None and last_node_run is not None and \
-                    last_node_run in self.all_worker_graph_ids_to_nodes.get(worker_graph_id, set()):
-                wgio = wg.per_request_queues.get(request_id)
-                if wgio is None:
-                    continue
-                for name in loop_names:
-                    if name not in wgio.loops:
-                        continue
-                    req_info.loop_stop_times[name] = wgio.get_nested_loop_idxs(
-                        fwd_pass_idx=req_info.fwd_index,
-                        target_loop_name=name,
-                    )
+            stopped_loop_back_signals |= self.queues[worker_graph_id].stop_loops(
+                request_id, loop_names,
+            )
+
+        # loop_stop_times is a single observation per loop, so we only need
+        # the worker graph that owns the last-run node. Direct index lookup
+        # instead of iterating.
+        if req_info is not None and last_node_run is not None:
+            graph_walk = self.get_graph_walk(request_id, partition)
+            owner_wg_id = self.walk_node_to_worker_graph_id.get(
+                (graph_walk, last_node_run)
+            )
+            if owner_wg_id is not None and owner_wg_id in self.queues:
+                wgio = self.queues[owner_wg_id].per_request_queues.get(request_id)
+                if wgio is not None:
+                    for name in loop_names & wgio.loops.keys():
+                        req_info.loop_stop_times[name] = wgio.get_nested_loop_idxs(
+                            fwd_pass_idx=req_info.fwd_index,
+                            target_loop_name=name,
+                        )
         return stopped_loop_back_signals
 
     def finish_loops(
