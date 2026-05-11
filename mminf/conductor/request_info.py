@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Any
 
-from mminf.graph.loop_index import IterIndexTree
+from mminf.graph.loop_indices import NestedLoopIndices
 from mminf.utils.sampling import SamplingConfig
 
 
@@ -74,7 +74,7 @@ class CurrentForwardPassInfo:
 
     # set of names of loops to stop
     dynamic_loop_stop_signals: set[str] = field(default_factory=set)
-    loop_stop_times: dict[str, IterIndexTree] = field(default_factory=dict)
+    loop_stop_times: dict[str, NestedLoopIndices] = field(default_factory=dict)
     dynamic_loop_iter_counts: dict[str, int] = field(default_factory=dict)
 
     def register_loop_stop(self, loop_name: str):
