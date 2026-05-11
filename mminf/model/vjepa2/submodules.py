@@ -419,7 +419,7 @@ class VJepa2RolloutPredictorSubmodule(ARNodeSubmodule):
             x_pred_input = cat([x_pred_input[:, N_pred:], x_pred], dim=1)
             x_accumulate = cat([x_accumulate, x_pred], dim=1)
 
-    In mminf this becomes a ``DynamicLoop`` whose section is a single node
+    In mminf this becomes a ``Loop`` whose section is a single node
     wrapping this submodule.  On each iter:
 
       * The loop-back ``encoder_hidden`` carries the sliding window state.
@@ -664,7 +664,7 @@ class VJepa2RolloutPredictorSubmodule(ARNodeSubmodule):
             tuple(encoder_hidden.shape),
         )
         next_encoder_hidden, predicted = self._rollout_step(encoder_hidden)
-        # Per-request early-exit.  The DynamicLoop's ``max_iters`` is a
+        # Per-request early-exit.  The Loop's ``max_iters`` is a
         # config-level upper bound (``max_rollout_horizon``); the caller's
         # ``rollout_horizon`` — snapshotted into ``step_metadata`` by
         # ``VJepa2Model.get_initial_forward_pass_args`` — shortens the loop
