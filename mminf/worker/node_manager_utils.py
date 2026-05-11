@@ -23,6 +23,20 @@ class NodeAndGraphWalk:
 
 
 @dataclass
+class FilteredEdges:
+    """Output edges of a finished node split into the kept set (to be routed)
+    and the filtered-out set (must be dereferenced because they fed a loop
+    whose iteration is being skipped or terminated).
+
+    Legacy shape carried by worker.py's ``_store_outputs_and_finish_loops``
+    pending the Phase E rewrite, which will switch to
+    ``NodeCompletionOutput`` (output_edges + filtered_signals).
+    """
+    kept: list[GraphEdge] = field(default_factory=list)
+    filtered_out: list[GraphEdge] = field(default_factory=list)
+
+
+@dataclass
 class NodeOutputRouting:
     routed_to_this_worker_graph: list[GraphEdge]
     persist: list[GraphEdge] # outputs that are going back to the conductor
