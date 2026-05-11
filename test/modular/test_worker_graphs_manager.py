@@ -7,10 +7,13 @@ Covers:
 - ``process_new_inputs`` returns leftover edges that no wg claimed
 - ``stop_loops`` returns the loop-back ``set[(name, dest)]``
 - ``finish_loops`` returns the new ``LoopFinishOutput`` dataclass
-- ``apply_spec_consumption`` / ``get_waiting_node`` / ``clear_dyn_loop_curr_iter_section``
-  are no-ops (legacy shims preserved for worker.py)
-- ``process_new_streaming_inputs`` aliases ``process_new_inputs``
-- Legacy ``complete_loops`` shim wraps ``mark_node_complete``
+- Legacy ``complete_loops`` shim wraps ``mark_node_complete`` (still used by
+  worker.py's ``_store_outputs_and_finish_loops``)
+
+Phase F removed the obsolete shims (``apply_spec_consumption``,
+``get_waiting_node``, ``clear_dyn_loop_curr_iter_section``,
+``process_new_streaming_inputs``) and their tests now that worker.py no
+longer calls them.
 """
 from dataclasses import dataclass, field
 
@@ -238,39 +241,6 @@ def test_finish_loops_returns_dataclass():
     assert isinstance(out, LoopFinishOutput)
     assert out.loop_back_signals == {("token", "ar_decode"), ("kv_cache", "ar_decode")}
     assert out.affected_node_names == {"ar_decode"}
-
-
-def test_apply_spec_consumption_is_noop():
-    mgr, _, _ = _make_manager()
-    # Should not raise even when called for a non-existent node — the legacy
-    # signature is preserved, but the body is a deliberate no-op.
-    assert mgr.apply_spec_consumption("rid", "ar_decode") is None
-    assert mgr.apply_spec_consumption("rid", "anything") is None
-
-
-def test_get_waiting_node_returns_none():
-    mgr, wg_id, _ = _make_manager()
-    # Caching is internal to LoopStateRegistry now; this shim returns None.
-    assert mgr.get_waiting_node("rid", wg_id) is None
-
-
-def test_clear_dyn_loop_curr_iter_section_is_noop():
-    mgr, _, _ = _make_manager()
-    # The new design doesn't maintain a separate _curr_iter_section to clear.
-    assert mgr.clear_dyn_loop_curr_iter_section(
-        "rid", "default", {"ar_loop"}
-    ) is None
-
-
-def test_process_new_streaming_inputs_aliases_process_new_inputs():
-    mgr, _, _ = _make_manager()
-    # Same routing semantics as process_new_inputs.
-    leftovers = mgr.process_new_streaming_inputs("rid", [
-        GraphEdge(name="prompt", next_node="prefill"),
-    ])
-    assert leftovers == []
-    assert mgr.queues[next(iter(mgr.queues))].per_request_queues["rid"] \
-        .nodes["prefill"].ready_signals.is_ready
 
 
 def test_complete_loops_shim_returns_filtered_edges():
