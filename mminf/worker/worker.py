@@ -775,11 +775,12 @@ class Worker:
 
         for request_id, node in batch.node_objects.items():
             tensors = {}
-            for input_name in node.ready_inputs:
+            ready_inputs = node.ready_signals.ready_inputs
+            for input_name, edge in ready_inputs.items():
                 tensors[input_name] = [
                     self.tensor_manager.get_tensor(
                         request_id=request_id, uuid=info.uuid
-                    ) for info in node.ready_inputs[input_name].tensor_info
+                    ) for info in edge.tensor_info
                 ]
             per_request_inputs[request_id] = tensors
             per_request_info[request_id] = self.worker_graphs_manager.get_fwd_info(request_id, batch_partition)
@@ -799,7 +800,7 @@ class Worker:
     def _cleanup_consumed_inputs(self, batch: ScheduledBatch) -> None:
         """Free input tensors that were consumed by the just-executed node."""
         for request_id, node in batch.node_objects.items():
-            for graph_edge in node.ready_inputs.values():
+            for graph_edge in node.ready_signals.ready_inputs.values():
                 if graph_edge._persist_for_loop:
                     continue
                 for info in graph_edge.tensor_info:
@@ -1440,12 +1441,12 @@ class Worker:
                     self.worker_graphs_manager.queues[wg_id].push_back_node(rid, node)
                     continue
                 tensors = {}
-                for input_name in node.ready_inputs:
+                for input_name, edge in node.ready_signals.ready_inputs.items():
                     tensors[input_name] = [
                         self.tensor_manager.get_tensor(
                             request_id=rid, uuid=info.uuid,
                         )
-                        for info in node.ready_inputs[input_name].tensor_info
+                        for info in edge.tensor_info
                     ]
                 per_request_inputs[rid] = tensors
                 per_request_info[rid] = self.worker_graphs_manager.get_fwd_info(
