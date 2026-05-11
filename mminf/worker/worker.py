@@ -127,7 +127,7 @@ class Worker:
                 for walk_name in pdef.graph_walks:
                     section = walks.get(walk_name)
                     if section:
-                        for node_name in section.get_node_names():
+                        for node_name in section.get_nodes():
                             node_to_partition[node_name] = pdef.name
 
         self.communicator = ZMQCommunicator(
@@ -149,7 +149,7 @@ class Worker:
 
         node_names = set()
         for wg in my_worker_graphs:
-            node_names.update(wg.section.get_node_names())
+            node_names.update(wg.section.get_nodes())
 
         self.engine_manager = EngineManager.build(
             node_names,
@@ -248,7 +248,7 @@ class Worker:
         if self.partition_topology:
             my_node_names = set()
             for wg in my_worker_graphs:
-                my_node_names.update(wg.section.get_node_names())
+                my_node_names.update(wg.section.get_nodes())
             for conn in self.partition_topology.connections:
                 # Check if any graph walk graph node for the consumer partition is on this worker
                 # by checking if the streaming edge's next_node is in my nodes
@@ -311,7 +311,7 @@ class Worker:
 
         # Collect this worker's AR graph walks
         for wg in my_worker_graphs:
-            for node_name in wg.section.get_node_names():
+            for node_name in wg.section.get_nodes():
                 if _is_ar(node_name):
                     my_ar_walks_nodes.update([(walk, node_name) for walk in wg.graph_walks])
 
