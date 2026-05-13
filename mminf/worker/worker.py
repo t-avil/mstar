@@ -1284,11 +1284,6 @@ class Worker:
         decode transitions, flow loop bodies) and (c) cross-engine /
         cross-worker (e.g. LLM → flow).
         """
-        # Debug knob: ``MMINF_DISABLE_SPEC=1`` forces every batch through the
-        # non-spec path. Useful for bisecting whether a quality regression
-        # lives in the speculation chain vs. the base scheduling/loop path.
-        if os.environ.get("MMINF_DISABLE_SPEC", "") == "1":
-            return False
         if any(
             not getattr(node, "enable_async_scheduling", True)
             for node in batch.node_objects.values()
