@@ -1310,6 +1310,17 @@ class Worker:
         """
         return {edge.name for edge in node.outputs if edge.next_node == node.name}
 
+    def _get_wgio_for_rid(self, batch: ScheduledBatch, rid: str):
+        """Per-rid WorkerGraphIO for the wg that owns this rid in this batch.
+
+        Speculation needs the WorkerGraphIO to drive ``ingest_for_speculation`` /
+        ``ready_for_speculation``. Each rid has its own deepcopied wgio (see
+        ``WorkerGraphQueues.add_request``), so graph state mutations are
+        isolated per request.
+        """
+        wg_id = batch.request_to_worker_graph[rid]
+        return self.worker_graphs_manager.queues[wg_id].per_request_queues[rid]
+
     def _try_speculate_next(
         self,
         batch_N: ScheduledBatch,
@@ -1335,26 +1346,24 @@ class Worker:
             current speculation chain to drain before they can be
             scheduled — a major regression for concurrent throughput.
 
-        Speculation requires the loop body's required inputs to be a subset
-        of its loop-back outputs (i.e. every input name has a same-name
-        ``next_node == node.name`` output edge), so the fresh-rid input
-        gathering only has to handle those names.
+        Readiness gate (G.1): per-rid ``ingest_for_speculation`` populates
+        each rid's ``speculative_signals`` with the spec node's anticipated
+        loop-back outputs plus any already-arrived streaming edges; the
+        strict gate inside ``WorkerGraphIO.ready_for_speculation`` then fires
+        only when ``speculative_signals`` covers every ``input_name``. The
+        worker checks the first rid's gate (per-rid graph shape is
+        identical; only state differs) and treats that as the batch-wide
+        decision.
         """
-        # Find loop-back inputs from a sample node. Speculation requires that
-        # ALL of the node's required inputs are loop-back or streaming
-        # (otherwise we'd need to gather other inputs from tensor_manager,
-        #  and the queue state for those isn't necessarily ready in this iter).
+        # Cheap pre-filter: a non-loop-back node can't be a same-node spec
+        # target. The real readiness gate runs after the streaming poll below,
+        # where ``ingest_for_speculation`` populates each rid's
+        # ``speculative_signals`` and we read ``ready_for_speculation`` to
+        # decide whether the next iter is speculatively schedulable.
         sample_node = next(iter(batch_N.node_objects.values()))
         loop_back_inputs = self._loop_back_input_names(sample_node)
         if not loop_back_inputs:
             return None
-        for input_name in sample_node.input_names:
-            if input_name not in loop_back_inputs \
-                    and input_name not in sample_node._streaming_inputs:
-                # Has a non-loop-back / streaming required input — speculation skipped.
-                # (E.g. a node that takes both a loop-back tensor and a fresh
-                # external input on each iter.)
-                return None
 
         continuing = []
         for rid in batch_N.node_objects:
@@ -1373,20 +1382,15 @@ class Worker:
         # Reuse the same GraphNode objects for the speculated step — they
         # carry no per-iter mutable state that batch_N still needs after this
         # iter's fast_postprocess. The colleague's Phase 2 plan eliminated
-        # ``clone_for_next_iter`` deliberately: spec batches now share the
-        # registry's node, and ``ingest_for_speculation`` previews readiness
-        # without touching ``ready_signals`` or ``ready_next_iter``.
+        # ``clone_for_next_iter`` deliberately: spec batches share the
+        # registry's node, and ``ingest_for_speculation`` (below) previews
+        # readiness without touching ``ready_signals`` or ``ready_next_iter``.
         #
-        # Generalization note: the spec gate above requires all inputs to be
-        # loop-back or streaming, so we never gather inputs from
-        # ``ready_next_iter`` here — placeholder slots get filled from N's
-        # outputs by ``_thread_outputs_to_speculative`` and fresh-rid inputs
-        # come from the scheduler-popped node's ``ready_signals.ready_inputs``
-        # below. If a future change lifts that restriction (e.g. lets a spec
-        # node take a non-loop-back input that may have arrived early and
-        # landed in ``ready_next_iter`` because ``ready_signals`` was still
-        # full from this iter), the fresh-rid gather loop will need to union
-        # both slots before reading.
+        # Placeholder slots are filled from N's outputs by
+        # ``_thread_outputs_to_speculative`` after await; fresh-rid inputs come
+        # from the scheduler-popped node's ``ready_signals.ready_inputs`` below.
+        # G.2 will replace the placeholder+thread dance with a direct
+        # promotion of ``speculative_signals`` after ``_store_outputs(N)`` runs.
         new_node_objects = {}
         new_request_to_worker_graph = {}
         per_request_inputs = {}
@@ -1411,7 +1415,7 @@ class Worker:
                 if len(streaming_edges[rid]) < len(sample_node._streaming_inputs):
                     for edge in streaming_edges[rid]:
                         self._return_speculative_streaming_edge(rid, edge)
-                    
+
                     new_node_objects.pop(rid, None)
                     per_request_inputs.pop(rid, None)
                     per_request_info.pop(rid, None)
@@ -1428,6 +1432,41 @@ class Worker:
             continuing = has_streaming_ready
             if not continuing:
                 return None
+
+        # G.1 readiness gate: per-rid ``ingest_for_speculation`` on the spec
+        # node's anticipated outputs (loop-back) plus already-arrived streaming
+        # edges. The strict gate inside ``WorkerGraphIO`` fires only when the
+        # node's ``speculative_signals`` covers every input_name, which is the
+        # graph-layer canonical "ready to speculate" signal.
+        #
+        # Per-rid: each rid has its own deepcopied wgio, so the spec slot must
+        # be populated per-rid. Gate decision uses the first rid (all rids
+        # share graph shape; only state differs).
+        for rid in continuing:
+            wgio = self._get_wgio_for_rid(batch_N, rid)
+            rid_node = batch_N.node_objects[rid]
+            for edge in rid_node.outputs:
+                if edge.next_node == rid_node.name:
+                    wgio.ingest_for_speculation(edge)
+            for edge in streaming_edges.get(rid, []):
+                wgio.ingest_for_speculation(edge)
+
+        first_wgio = self._get_wgio_for_rid(batch_N, continuing[0])
+        gate_match = next(
+            (info for info in first_wgio.ready_for_speculation
+             if info.node_name == batch_N.node_name and info.is_new_loop_iter),
+            None,
+        )
+        if gate_match is None:
+            # Gate refused — roll back speculative state for surviving rids and
+            # return the streaming edges we committed to them. (Poll-failed
+            # rids' streaming edges were already returned inline above and
+            # aren't in ``continuing``.)
+            for rid in continuing:
+                self._get_wgio_for_rid(batch_N, rid).clear_speculative_inputs()
+                for edge in streaming_edges.get(rid, []):
+                    self._return_speculative_streaming_edge(rid, edge)
+            return None
 
         # ── merge in fresh rids whose decode-loop node is ready right now ──
         # Speculation should only consume work compatible with the in-flight
@@ -1493,6 +1532,16 @@ class Worker:
             # _store_outputs writes into clean edges, not stacked on top of
             # iter K's tensor_info that was just routed.
             spec_batch.node_objects[rid].reset_outputs()
+
+        # G.1: data path still goes through ``_thread_outputs_to_speculative``
+        # (placeholder dict overwritten from N's outputs after await), so the
+        # speculative_signals slot has done its job — flip it back to empty so
+        # the next outer iter's ingest_for_speculation isn't a no-op. G.2 will
+        # MOVE this clear to after the gather (post-await + post-_store_outputs)
+        # so the gather can read the populated spec slot.
+        for rid in continuing:
+            if rid in batch_N.node_objects:
+                self._get_wgio_for_rid(batch_N, rid).clear_speculative_inputs()
 
         return Speculation(
             scheduled_batch=spec_batch,

@@ -1,0 +1,177 @@
+"""Pin down the graph-layer surface that the worker's speculation path uses.
+
+These tests do not spin up a worker — instead they exercise the
+``ingest_for_speculation`` / ``ready_for_speculation`` API in the exact shape
+that ``Worker._try_speculate_next`` relies on after Phase G.1:
+
+  - Per-rid wgios (deep-copied from the same graph) maintain independent
+    ``speculative_signals`` state, so ingesting on one rid does not leak into
+    another.
+  - Ingesting every loop-back output of a node populates the strict gate to
+    fire with ``is_new_loop_iter=True``, which is what the worker checks.
+  - ``clear_speculative_inputs`` resets the slot so the next outer iter's
+    ingestion isn't a no-op (the ``edge.name in node.speculative_signals
+    .ready_names`` short-circuit in ``WorkerGraphIO.ingest_for_speculation``).
+  - On the gate-failure rollback path: partial ingestion does NOT advance the
+    strict gate even when ``ready_signals`` happens to be full from the
+    in-flight iter (the canonical Phase A-fix invariant, re-validated for the
+    worker's call pattern).
+"""
+from copy import deepcopy
+
+import pytest
+
+from mminf.graph.base import GraphEdge, GraphNode, Loop, Sequential
+from mminf.graph.graph_io import WorkerGraphIO
+
+
+def _ar_loop_graph(max_iters: int = 5):
+    """Two-input AR decode loop (token + kv_cache), all loop-back, no streaming."""
+    return Sequential(sections=[
+        GraphNode(
+            name="prefill",
+            input_names={"prompt"},
+            outputs=[
+                GraphEdge(name="token", next_node="ar_decode"),
+                GraphEdge(name="kv_cache", next_node="ar_decode"),
+            ],
+        ),
+        Loop(
+            name="ar_loop",
+            section=GraphNode(
+                name="ar_decode",
+                input_names={"token", "kv_cache"},
+                outputs=[
+                    GraphEdge(name="token", next_node="ar_decode"),
+                    GraphEdge(name="kv_cache", next_node="ar_decode"),
+                ],
+            ),
+            outputs=[],
+            max_iters=max_iters,
+        ),
+    ])
+
+
+def _per_rid_wgios(num_rids: int) -> list[WorkerGraphIO]:
+    """Mirror ``WorkerGraphQueues.add_request`` — deepcopy the section per rid
+    so each gets independent state."""
+    section_template = _ar_loop_graph()
+    return [WorkerGraphIO(deepcopy(section_template)) for _ in range(num_rids)]
+
+
+def _ingest_all_loop_back(wgio: WorkerGraphIO, node_name: str) -> None:
+    """Mirror the per-rid loop in worker.py G.1: ingest every loop-back output
+    of ``node_name`` into ``wgio``'s ``speculative_signals``."""
+    rid_node = wgio.nodes[node_name]
+    for edge in rid_node.outputs:
+        if edge.next_node == rid_node.name:
+            wgio.ingest_for_speculation(edge)
+
+
+def test_per_rid_speculative_state_is_isolated():
+    """G.1 assumes per-rid wgios are independent: deep-copying the graph
+    section yields wgios whose ``speculative_signals`` slots do not share state.
+
+    Without this, ingesting anticipated outputs for one rid would leak into
+    another rid's gate decision — a bug that would make the worker's gate
+    check on the first rid an unreliable proxy for the rest of the batch."""
+    wgios = _per_rid_wgios(num_rids=3)
+    _ingest_all_loop_back(wgios[0], "ar_decode")
+
+    # First rid's gate fires.
+    spec0 = wgios[0].ready_for_speculation
+    assert len(spec0) == 1
+    assert spec0[0].node_name == "ar_decode"
+    assert spec0[0].is_new_loop_iter is True
+
+    # Other rids: untouched.
+    for wgio in wgios[1:]:
+        assert wgio.ready_for_speculation == []
+        assert wgio.nodes["ar_decode"].speculative_signals.ready_names == set()
+
+
+def test_first_rid_gate_match_shape():
+    """G.1 inspects ``first_wgio.ready_for_speculation`` for the specific
+    ``SpeculativeNodeInfo`` shape: node_name matching the in-flight batch's
+    node_name AND is_new_loop_iter=True. Pin both fields down."""
+    wgio = _per_rid_wgios(1)[0]
+    _ingest_all_loop_back(wgio, "ar_decode")
+
+    matches = [
+        info for info in wgio.ready_for_speculation
+        if info.node_name == "ar_decode" and info.is_new_loop_iter
+    ]
+    assert len(matches) == 1
+
+
+def test_clear_speculative_inputs_resets_for_next_outer_iter():
+    """G.1's end-of-function clear (and the abort-path clear) must reset the
+    slot, otherwise the next outer iter's ingest_for_speculation hits the
+    ``edge.name in node.speculative_signals.ready_names`` short-circuit and
+    becomes a no-op — gate would silently never fire after the first call."""
+    wgio = _per_rid_wgios(1)[0]
+    _ingest_all_loop_back(wgio, "ar_decode")
+    assert wgio.ready_for_speculation  # fires once
+
+    wgio.clear_speculative_inputs()
+    assert wgio.ready_for_speculation == []
+    assert wgio.nodes["ar_decode"].speculative_signals.ready_names == set()
+
+    # Next outer iter: ingestion must work again.
+    _ingest_all_loop_back(wgio, "ar_decode")
+    assert len(wgio.ready_for_speculation) == 1
+
+
+def test_gate_fails_when_only_partial_outputs_ingested():
+    """If the spec node has multiple loop-back outputs and the worker only
+    ingests SOME of them, the strict gate must refuse — G.1's worker-side
+    rollback path depends on this so we don't speculate on an incompletely
+    anticipated node."""
+    wgio = _per_rid_wgios(1)[0]
+    # Pre-load ready_signals to simulate the in-flight iter holding its
+    # inputs; the strict gate is on speculative_signals ALONE, not the union.
+    ar_decode = wgio.nodes["ar_decode"]
+    ar_decode.ready_signals.update(GraphEdge(name="token", next_node="ar_decode"))
+    ar_decode.ready_signals.update(GraphEdge(name="kv_cache", next_node="ar_decode"))
+    assert ar_decode.ready_signals.is_ready
+
+    # Worker ingests only ONE of the two anticipated outputs.
+    wgio.ingest_for_speculation(GraphEdge(name="token", next_node="ar_decode"))
+    assert wgio.ready_for_speculation == []
+
+
+def test_gate_fires_on_full_ingest_after_partial_was_attempted():
+    """Sequence: partial ingest → no gate, full ingest → gate fires. Mirrors
+    the worker's per-rid loop iterating all of ``rid_node.outputs`` even when
+    the first few don't yet cover ``input_names``."""
+    wgio = _per_rid_wgios(1)[0]
+    wgio.ingest_for_speculation(GraphEdge(name="token", next_node="ar_decode"))
+    assert wgio.ready_for_speculation == []
+
+    wgio.ingest_for_speculation(GraphEdge(name="kv_cache", next_node="ar_decode"))
+    ready = wgio.ready_for_speculation
+    assert len(ready) == 1
+    assert ready[0].is_new_loop_iter is True
+
+
+def test_non_loop_back_node_does_not_appear_in_ready_for_speculation():
+    """The worker only ingests outputs whose ``next_node == node.name`` (the
+    loop-back filter in G.1's per-rid loop). A non-loop-back downstream
+    destination would only see one of its inputs and never satisfy the strict
+    gate. This is the worker-side invariant that lets us avoid spurious spec
+    fires on, e.g., the prefill → ar_decode hop."""
+    # Build a graph where prefill outputs land on ar_decode (non-loop-back
+    # destination from prefill's perspective).
+    section = _ar_loop_graph()
+    wgio = WorkerGraphIO(section)
+
+    # Ingest prefill's outputs (mirror what the worker would do IF it were
+    # speculating on prefill — which it would NOT, since prefill has no
+    # loop-back outputs; but we want to confirm the safety net.)
+    prefill_node = wgio.nodes["prefill"]
+    for edge in prefill_node.outputs:
+        if edge.next_node == prefill_node.name:
+            wgio.ingest_for_speculation(edge)
+
+    # ar_decode received nothing speculative; no gate.
+    assert wgio.ready_for_speculation == []
