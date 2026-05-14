@@ -29,6 +29,18 @@ class GraphEdge:
     output_modality: str = field(default="")  # text | image | video | audio
     _persist_for_loop: bool = field(default=False)
 
+    def clone(self):
+        return GraphEdge(
+            next_node=self.next_node,
+            name=self.name,
+            tensor_info=self.tensor_info[:],
+            persist=self.persist,
+            conductor_new_token=self.conductor_new_token,
+            is_streaming=self.is_streaming,
+            output_modality=self.output_modality,
+            _persist_for_loop=self._persist_for_loop
+        )
+
 
 NameAndDest = tuple[str, str]
 @dataclass

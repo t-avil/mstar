@@ -1547,7 +1547,7 @@ class Worker:
             completion_output = self.worker_graphs_manager.mark_node_complete(
                 rid, wg_id, batch_N.node_name
             )
-            real_outputs = deepcopy(completion_output.output_edges)
+            real_outputs = [edge.clone() for edge in completion_output.output_edges]
 
             # Get output routing
             routing_per_request[rid] = self.worker_graphs_manager.process_node_outputs(
