@@ -639,7 +639,6 @@ class VJepa2RolloutPredictorSubmodule(ARNodeSubmodule):
         next_encoder_hidden = torch.cat([encoder_hidden[:, n_pred:, :], predicted], dim=1)
         return next_encoder_hidden, predicted
 
-    @torch.compiler.disable
     def forward(
         self,
         graph_walk: str,
@@ -728,6 +727,11 @@ class VJepa2RolloutPredictorSubmodule(ARNodeSubmodule):
         iter_idx = request_info.dynamic_loop_iter_counts.get("rollout_loop", 0)
         horizon = int(request_info.step_metadata.get("rollout_horizon", 0) or 0)
         if horizon > 0 and iter_idx + 1 >= horizon:
+            logger.info(
+                "VJepa2RolloutPredictorSubmodule.forward: horizon H=%d reached at iter=%d; stopping rollout_loop.",
+                horizon,
+                iter_idx,
+            )
             return {"rollout_loop"}
 
 

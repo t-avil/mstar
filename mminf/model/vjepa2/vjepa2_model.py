@@ -441,6 +441,8 @@ class VJepa2Model(Model):
             name="rollout_predictor",
             input_names=rollout_inputs,
             outputs=list(rollout_loopback_outputs),
+            # dynamic rollout loop; don't want async scheduling to overshoot by one
+            enable_async_scheduling=False
         )
         rollout_loop_batched = Loop(
             name=self.ROLLOUT_LOOP_NAME,
@@ -473,6 +475,8 @@ class VJepa2Model(Model):
                     output_modality="video",
                 ),
             ],
+            # dynamic rollout loop; don't want async scheduling to overshoot by one
+            enable_async_scheduling=False
         )
         rollout_loop_streaming = Loop(
             name=self.ROLLOUT_LOOP_NAME,
