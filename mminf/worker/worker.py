@@ -1404,10 +1404,17 @@ class Worker:
     # ------------------------------------------------------------------
     # Postprocessing
     # ------------------------------------------------------------------
+    def _cleanup_consumed_inputs(self, batch: ScheduledBatch) -> None:
+        """Free input tensors that were consumed by the just-executed node."""
+        for node in batch.node_objects.values():
+            node.ready_signals.clear()
+
+
     def _postprocess_batch(
         self, batch_N: PendingBatch,
         output: NodeOutput,
     ):
+        self._cleanup_consumed_inputs(batch_N.batch)
         # If any nodes in the batch have "overstayed" their loop stop, then make
         # sure to not route their outputs
         valid_rids = set(batch_N.node_batch.request_ids)
@@ -1850,11 +1857,11 @@ class Worker:
                             _phase_record("speculate", _time.perf_counter() - _t0)
                         if self.enable_nvtx:
                             range_pop(synchronize=False)
-                    if speculation is None:
+                    else:
                         yield_away_from_target = (
                             pending.node_name,
                             pending.graph_walk,
-                        ) if pending is not None else None
+                        )
                         batch = self.scheduler.get_next_batch(
                             self.worker_graphs_manager,
                             exclude_target=yield_away_from_target,

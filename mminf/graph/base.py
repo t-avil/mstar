@@ -125,6 +125,8 @@ class ReadySignals:
     def clear(self):
         if self._tensor_manager is not None:
             for edge in self.ready_inputs.values():
+                if edge._persist_for_loop:
+                    continue
                 for info in edge.tensor_info:
                     self._tensor_manager.dereference(self._request_id, info.uuid)
         self.ready_inputs.clear()
@@ -201,6 +203,8 @@ class GraphNode(GraphSection):
         Returns True on success, False when the edge is rejected; e.g., this
         is a streaming edge that we are not redy for and needs to get re-queued 
         """
+        if edge.next_node != self.name:
+            return False
         if edge.name not in self.input_names:
             return False
         if edge.name not in self.ready_signals.ready_names:
@@ -292,29 +296,29 @@ class Sequential(GraphSection):
         ext_outputs: list[GraphEdge] = []
         ext_inputs: set[NameAndDest] = set()
         loop_back: set[NameAndDest] = set()
+        internal_signals: set[NameAndDest] = set()
 
         for sec in self.sections:
             io = sec.get_inputs_outputs()
-            loop_back.update(io.loop_back)
-            ext_inputs |= io.ext_inputs
 
-            internal_signals = {
+            loop_back |= io.loop_back
+            ext_inputs |= io.ext_inputs
+            ext_outputs.extend(io.ext_outputs)
+
+            internal_signals |= {
                 (edge.name, edge.next_node) for edge in ext_outputs \
                     if (edge.name, edge.next_node) in ext_inputs
             }
-            new_loop_backs = {
+            loop_back |= {
                 (edge.name, edge.next_node) for edge in io.ext_outputs \
                     if edge.next_node in nodes_so_far
             }
+
             ext_outputs = [
                 edge for edge in ext_outputs \
-                    if (edge.name, edge.next_node) not in internal_signals
-            ] + [
-                edge for edge in io.ext_outputs \
-                    if (edge.name, edge.next_node) not in new_loop_backs
+                    if (edge.name, edge.next_node) not in (internal_signals | loop_back)
             ]
-            
-            ext_inputs -= internal_signals
+            ext_inputs -= (internal_signals | loop_back)
 
             nodes_so_far.update(sec.get_nodes().keys())
         return NodeInputsOutputs(
@@ -344,8 +348,15 @@ class Parallel(GraphSection):
         ext_inputs: set[NameAndDest] = set()
         loop_back: set[NameAndDest] = set()
         ext_outputs: list[GraphEdge] = []
+
+        nodes = set(self.get_nodes().keys())
         for sec in self.sections:
             sec_io = sec.get_inputs_outputs()
+
+            sec_io.ext_inputs = set({(name, dest) for name, dest in sec_io.ext_inputs if dest not in nodes})
+            sec_io.loop_back |= set({(name, dest) for name, dest in sec_io.ext_inputs if dest in nodes})
+            sec_io.ext_outputs = [edge for edge in sec_io.ext_outputs  if edge.next_node not in nodes]
+
             ext_inputs.update(sec_io.ext_inputs)
             loop_back.update(sec_io.loop_back)
             ext_outputs.extend(sec_io.ext_outputs)
@@ -495,9 +506,7 @@ class Loop(GraphSection):
 
         # In the disaggregated case, we need filter self.outputs for outputs
         # that this subgraph actually produces
-        outputs_we_produce = set([edge.name for edge in io.ext_outputs]).union(
-            set([name for name, _ in io.loop_back])
-        )
+        outputs_we_produce = set([edge.name for edge in io.ext_outputs]) | set([name for name, _ in io.loop_back])
         self.outputs = [edge for edge in self.outputs if edge.name in outputs_we_produce]
         self.accumulated_outputs = [edge for edge in self.accumulated_outputs if edge.name in outputs_we_produce]
 
