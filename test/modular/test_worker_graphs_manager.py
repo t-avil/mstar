@@ -6,9 +6,6 @@ Covers:
 - ``mark_node_complete`` returns the registry's ``NodeCompletionOutput``
 - ``process_new_inputs`` returns leftover edges that no wg claimed
 - ``stop_loops`` returns the loop-back ``set[(name, dest)]``
-- ``finish_loops`` returns the ``LoopFinishOutput`` dataclass
-- Legacy ``complete_loops`` shim wraps ``mark_node_complete`` (still used by
-  worker.py's ``_store_outputs_and_finish_loops``)
 """
 from dataclasses import dataclass, field
 
@@ -21,9 +18,6 @@ from mminf.conductor.request_info import (
 from mminf.graph.base import GraphEdge, GraphNode, Loop, Sequential
 from mminf.model.base import WorkerGraph
 from mminf.worker.node_manager_utils import (
-    FilteredEdges,
-    LoopFinishOutput,
-    NodeAndGraphWalk,
     WorkerGraphQueues,
     WorkerGraphsManager,
 )
@@ -221,39 +215,6 @@ def test_stop_loops_snapshots_loop_stop_times_when_req_info_provided():
     assert snapshot is not None
     assert snapshot.fwd_pass_idx == fwd_info.fwd_index
     assert snapshot.loop_name_order == ["ar_loop"]
-
-
-def test_finish_loops_returns_dataclass():
-    mgr, wg_id, _ = _make_manager()
-    mgr.process_new_inputs("rid", [GraphEdge(name="prompt", next_node="prefill")])
-    mgr.mark_node_complete("rid", wg_id, "prefill")
-
-    out = mgr.finish_loops(
-        request_id="rid",
-        partition="default",
-        loop_names={"ar_loop"},
-    )
-    assert isinstance(out, LoopFinishOutput)
-    assert out.loop_back_signals == {("token", "ar_decode"), ("kv_cache", "ar_decode")}
-    assert out.affected_node_names == {"ar_decode"}
-
-
-def test_complete_loops_shim_returns_filtered_edges():
-    mgr, wg_id, _ = _make_manager()
-    mgr.process_new_inputs("rid", [GraphEdge(name="prompt", next_node="prefill")])
-
-    # The legacy complete_loops shim is what worker.py's _store_outputs_and_finish_loops
-    # still calls. It must return a FilteredEdges and route the prefill outputs to `kept`
-    # (no loop-back filtering since prefill is top-level).
-    prefill_outputs = list(mgr.queues[wg_id].per_request_queues["rid"].nodes["prefill"].outputs)
-    result = mgr.complete_loops("rid", wg_id, prefill_outputs, "prefill")
-
-    assert isinstance(result, FilteredEdges)
-    assert result.filtered_out == []
-    kept_names = sorted((e.name, e.next_node) for e in result.kept)
-    # Both caller-provided edges survive (none in filtered_signals); no extra
-    # loop terminal outputs because prefill isn't loop-managed.
-    assert kept_names == [("kv_cache", "ar_decode"), ("token", "ar_decode")]
 
 
 def test_complete_loops_shim_drops_loop_back_on_loop_done():

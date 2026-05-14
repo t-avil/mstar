@@ -40,7 +40,6 @@ from mminf.utils.profiler import range_pop, range_push
 from mminf.worker.engine_manager import EngineManager
 from mminf.worker.micro_scheduler import MicroScheduler, ScheduledBatch
 from mminf.worker.node_manager_utils import (
-    FilteredEdges,
     NodeOutputRouting,
     WorkerGraphQueues,
     WorkerGraphsManager,
@@ -1414,7 +1413,12 @@ class Worker:
         self, batch_N: PendingBatch,
         output: NodeOutput,
     ):
+        if self.enable_nvtx:
+            range_push("worker.postprocess.cleanup_inputs", synchronize=False)
         self._cleanup_consumed_inputs(batch_N.batch)
+        if self.enable_nvtx:
+            range_pop(synchronize=False)
+            range_push("worker.postprocess.pending_loop_stops", synchronize=False)
         # If any nodes in the batch have "overstayed" their loop stop, then make
         # sure to not route their outputs
         valid_rids = set(batch_N.node_batch.request_ids)
@@ -1437,10 +1441,18 @@ class Worker:
         # pending stops are only needed for one iteration, so can be cleared now
         self._pending_loop_stops.clear()
 
+        if self.enable_nvtx:
+            range_pop(synchronize=False)
+            range_push("worker.postprocess.update_lru", synchronize=False)
+
         # Update LRU
         t = _time.monotonic()
         for rid in batch_N.node_batch.request_ids:
             self._last_active[(rid, batch_N.node_name)] = t
+        
+        if self.enable_nvtx:
+            range_pop(synchronize=False)
+            range_push("worker.postprocess.synchronize_completion_event", synchronize=False)
         
         # Wait for batch N's completion event before proceeding
         # TODO: may need to refine this based on how it affects performance?
@@ -1454,6 +1466,10 @@ class Worker:
             else:
                 torch.cuda.default_stream().synchronize()
         
+        if self.enable_nvtx:
+            range_pop(synchronize=False)
+            range_push("worker.postprocess.check_stop", synchronize=False)
+        
         for rid, req_info in batch_N.node_batch.per_request_info.items():
             new_iters = self.worker_graphs_manager.get_dynamic_loop_iters(
                 rid, partition=batch_N.partition,
@@ -1464,6 +1480,10 @@ class Worker:
         engine = self.engine_manager.get_engine(batch_N.node_name)
         cpu_output = self._prematerialize_for_check_stop(output)
         new_stops = engine.check_stop_for_batch(batch_N.node_batch, cpu_output)
+
+        if self.enable_nvtx:
+            range_pop(synchronize=False)
+            range_push("worker.postprocess.stop_loops", synchronize=False)
 
         # Stop loops, if applicable
         for rid, loop_names in new_stops.items():
@@ -1504,6 +1524,9 @@ class Worker:
                     )
                 )
         
+        if self.enable_nvtx:
+            range_pop(synchronize=False)
+            range_push("worker.postprocess.route_outputs", synchronize=False)
         # Mark nodes complete and route
         routing_per_request: dict[str, NodeOutputRouting] = {}
         for rid, wg_id in batch_N.batch.request_to_worker_graph.items():
@@ -1530,10 +1553,15 @@ class Worker:
             routing_per_request[rid] = self.worker_graphs_manager.process_node_outputs(
                 rid, outputs=real_outputs, graph_walk=batch_N.graph_walk
             )
+        
+        if self.enable_nvtx:
+            range_pop(synchronize=False)
+            range_push("worker.postprocess.register_outputs", synchronize=False)
         self._register_outputs(batch_N.batch, routing_per_request)
         
         # send outputs
         if self.enable_nvtx:
+            range_pop(synchronize=False)
             range_push("worker.send_outputs", synchronize=False)
 
         # TODO: wire up the new token path (currently unused for any of the models)
@@ -1740,7 +1768,7 @@ class Worker:
         # Background postprocessing on a dedicated thread was removed in the
         # graph refactor: with spec batches now sharing the registry's
         # GraphNode (no clone_for_next_iter), running slow_postprocess(N)
-        # concurrent with iter K+1's _store_outputs_and_finish_loops races on
+        # concurrent with iter K+1's _postprocess_batch races on
         # node.outputs[i].tensor_info. A safe re-introduction requires either
         # a per-batch output snapshot or restoring some form of spec-batch
         # cloning — flesh out either path in a follow-up before re-enabling.
@@ -1845,10 +1873,11 @@ class Worker:
                             (pending.node_name, pending.graph_walk),
                         )
                     )
-                    if (
+                    must_yield_away = (
                         consecutive_spec_steps < max_consecutive_spec
                         and not must_yield_for_fairness
-                    ):
+                    )
+                    if must_yield_away:
                         if self.enable_nvtx:
                             range_push("worker.speculate", synchronize=False)
                         _t0 = _time.perf_counter() if phase_period else 0.0
@@ -1857,11 +1886,11 @@ class Worker:
                             _phase_record("speculate", _time.perf_counter() - _t0)
                         if self.enable_nvtx:
                             range_pop(synchronize=False)
-                    else:
+                    if speculation is None:
                         yield_away_from_target = (
                             pending.node_name,
                             pending.graph_walk,
-                        )
+                        ) if must_yield_away else None
                         batch = self.scheduler.get_next_batch(
                             self.worker_graphs_manager,
                             exclude_target=yield_away_from_target,
@@ -1869,6 +1898,7 @@ class Worker:
                         if batch is not None:
                             node_batch = self._build_node_batch(batch)
                             batch_partition = self.worker_graphs_manager.get_partition_for_node(batch.node_name)
+                            logger.debug(f"Yield away: {batch.node_name} {node_batch.request_ids}")
                             speculation = Speculation(
                                 scheduled_batch=batch,
                                 node_batch=node_batch,
@@ -2003,8 +2033,8 @@ class Worker:
                             )
                             self.wakeup_event.register_future(spec_future)
                             if self.enable_nvtx:
-                                range_push("worker.gpu_submit_queued", synchronize=False)
                                 range_pop(synchronize=False)
+                                range_push("worker.gpu_submit_queued", synchronize=False)
                             spec_launch_started_event.wait(timeout=0.005)
                             if phase_period:
                                 _phase_record("submit_spec", _time.perf_counter() - _t0)
@@ -2031,7 +2061,11 @@ class Worker:
                     # find that parts of postprocess need to be performed on another
                     # thread, we can reconsider the structure, but otherwise this
                     # works for now and is cleaner
+                    if self.enable_nvtx:
+                        range_push("worker.postprocess_batch", synchronize=False)
                     self._postprocess_batch(pending, output)
+                    if self.enable_nvtx:
+                        range_pop(synchronize=False)
 
                     # Removes for any rid not in the in-flight spec step
                     # are safe to apply now.
@@ -2103,6 +2137,7 @@ class Worker:
                     None, fallthrough_advance_event,
                 )
                 self.wakeup_event.register_future(future)
+                logger.debug(f"Scheduling: {batch.node_name} {node_batch.request_ids}")
                 _set_pending(PendingBatch(
                     batch=batch,
                     node_batch=node_batch,

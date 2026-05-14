@@ -23,33 +23,6 @@ class NodeAndGraphWalk:
 
 
 @dataclass
-class FilteredEdges:
-    """Output edges of a finished node split into the kept set (to be routed)
-    and the filtered-out set (must be dereferenced because they fed a loop
-    whose iteration is being skipped or terminated).
-    """
-    kept: list[GraphEdge] = field(default_factory=list)
-    filtered_out: list[GraphEdge] = field(default_factory=list)
-
-
-@dataclass
-class LoopFinishOutput:
-    """Per-rid summary of what changed when one or more loops were stopped.
-
-    ``loop_back_signals`` — the (name, dest) loop-back edges of the stopped
-    loops; the caller must exclude these from output routing on the iter
-    that triggered the stop, or risk re-ingesting them into a freshly-reset
-    queue (which would schedule another iter and lead to an EOS loop).
-
-    ``affected_node_names`` — the names of nodes inside the stopped loops
-    whose ready-state may have been invalidated by the stop (informational;
-    callers can use it to scope ready-set cleanups if needed).
-    """
-    loop_back_signals: set[NameAndDest] = field(default_factory=set)
-    affected_node_names: set[str] = field(default_factory=set)
-
-
-@dataclass
 class NodeOutputRouting:
     routed_to_this_worker_graph: list[GraphEdge]
     persist: list[GraphEdge] # outputs that are going back to the conductor
@@ -561,33 +534,6 @@ class WorkerGraphsManager:
                             target_loop_name=name,
                         )
         return stopped_loop_back_signals
-
-    def finish_loops(
-        self, request_id: str,
-        partition: str,
-        loop_names: set[str],
-    ) -> LoopFinishOutput:
-        """Structured-return variant of ``stop_loops`` (no req_info side
-        effect). Returns a per-rid dataclass instead of a bare set.
-        """
-        part_info = self.per_request_info[request_id].per_partition_info[partition]
-        loop_back_signals: set[NameAndDest] = set()
-        affected_node_names: set[str] = set()
-        for worker_graph_id in part_info.graph_walk_worker_graph_ids:
-            wg = self.queues[worker_graph_id]
-            loop_back_signals |= wg.stop_loops(request_id, loop_names)
-            wgio = wg.per_request_queues.get(request_id)
-            if wgio is None:
-                continue
-            for name in loop_names:
-                loop = wgio.loops.get(name)
-                if loop is None:
-                    continue
-                affected_node_names.update(loop.section.get_nodes().keys())
-        return LoopFinishOutput(
-            loop_back_signals=loop_back_signals,
-            affected_node_names=affected_node_names,
-        )
 
     def get_dynamic_loop_iters(
         self, request_id: str,

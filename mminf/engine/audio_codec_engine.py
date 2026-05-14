@@ -191,6 +191,7 @@ class AudioCodecEngine(BaseEngine):
             inputs=inputs,
             per_request_info=batch.per_request_info,
             submodule=submodule,
+            launch_started_event=batch.metadata.get("launch_started_event")
         )
         if self.enable_nvtx:
             range_pop(synchronize=False)
@@ -219,6 +220,12 @@ class AudioCodecEngine(BaseEngine):
 
         if self.enable_nvtx:
             range_push("codec.batched.forward")
+         # Signal the main thread that we're about to enter CUDA launch
+        # code. PyTorch drops the GIL inside the C++ kernel-launch path,
+        # so main can resume Python-heavy postprocess in parallel.
+        launch_started_event = batch.metadata.get("launch_started_event")
+        if launch_started_event is not None:
+            launch_started_event.set()
         outputs = submodule.forward_batched(
             graph_walk=batch.graph_walk,
             engine_inputs=engine_inputs,
@@ -256,6 +263,12 @@ class AudioCodecEngine(BaseEngine):
 
             if self.enable_nvtx:
                 range_push(f"codec.forward.{i}")
+            # Signal the main thread that we're about to enter CUDA launch
+            # code. PyTorch drops the GIL inside the C++ kernel-launch path,
+            # so main can resume Python-heavy postprocess in parallel.
+            launch_started_event = batch.metadata.get("launch_started_event")
+            if launch_started_event is not None:
+                launch_started_event.set()
             outputs[rid] = submodule.forward(
                 batch.graph_walk,
                 engine_inputs=engine_inputs,
