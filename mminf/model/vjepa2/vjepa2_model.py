@@ -403,7 +403,7 @@ class VJepa2Model(Model):
         #     Orpheus LLM -> SNAC), which isn't what per-iter client
         #     emit requires.
         # Both walks route to the SAME ``rollout_predictor`` node name
-        # (same submodule, same engine type, same ``register_loop_stop``
+        # (same submodule, same engine type, same ``check_stop``
         # semantics) — only the emit topology differs.  Gated per-request
         # via ``model_kwargs["stream_rollout"]`` in ``_initial_walk``.
         rollout_inputs: list[str] = ["encoder_hidden"]
@@ -435,12 +435,14 @@ class VJepa2Model(Model):
         # -- Batched (Phase 2 + 3.D): accumulated_outputs, one message at
         # -- loop completion.  ``max_iters`` is a config-level upper bound
         # -- baked in at graph-build time; the per-request horizon is
-        # -- enforced inside the submodule via ``register_loop_stop`` when
+        # -- enforced inside the submodule via ``check_stop`` when
         # -- iter_idx + 1 reaches it.
         rollout_section_batched = GraphNode(
             name="rollout_predictor",
             input_names=rollout_inputs,
             outputs=list(rollout_loopback_outputs),
+            # dynamic rollout loop; don't want async scheduling to overshoot by one
+            enable_async_scheduling=False
         )
         rollout_loop_batched = Loop(
             name=self.ROLLOUT_LOOP_NAME,
@@ -473,6 +475,8 @@ class VJepa2Model(Model):
                     output_modality="video",
                 ),
             ],
+            # dynamic rollout loop; don't want async scheduling to overshoot by one
+            enable_async_scheduling=False
         )
         rollout_loop_streaming = Loop(
             name=self.ROLLOUT_LOOP_NAME,
@@ -890,7 +894,7 @@ class VJepa2Model(Model):
         step_metadata: dict = {"is_prefill": True}
         if walk in (self.PREFILL_VIDEO_ROLLOUT, self.PREFILL_VIDEO_ROLLOUT_STREAMING):
             # Per-request horizon enforced by ``VJepa2RolloutPredictorSubmodule``
-            # via ``register_loop_stop`` once iter_idx + 1 reaches it.  The
+            # via ``check_stop`` once iter_idx + 1 reaches it.  The
             # graph's Loop is always built with ``max_iters=config.max_rollout_horizon``.
             # Streaming variant uses the same horizon logic — the submodule
             # doesn't distinguish walks.

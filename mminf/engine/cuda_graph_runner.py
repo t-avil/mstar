@@ -2011,6 +2011,7 @@ class CodecCudaGraphRunner:
         inputs: list[ARNodeInputs],
         per_request_info: dict[str, CurrentForwardPassInfo],
         submodule: NodeSubmodule,
+        launch_started_event: "object | None" = None,
     ) -> dict[str, dict[str, list[torch.Tensor]]]:
         """End-to-end replay: preprocess + replay + per-rid output split.
 
@@ -2069,6 +2070,11 @@ class CodecCudaGraphRunner:
             mark("gpu_thread.cuda_graph_start")
             range_push("gpu_thread.cuda_graph", synchronize=False)
             range_push("codec_cg.replay", synchronize=False)
+        # Release the main thread now that all CPU-side prep is done and
+        # we're about to enter the CUDA driver. graph.replay() drops the
+        # GIL inside C++, so main-thread postprocess can overlap.
+        if launch_started_event is not None:
+            launch_started_event.set()
         self.graphs[key].replay()
         if self.enable_nvtx:
             range_pop(synchronize=False)

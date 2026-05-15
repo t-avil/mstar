@@ -526,7 +526,6 @@ class BagelModel(Model):
                         GraphEdge(next_node="LLM", name="latents"),
                         GraphEdge(next_node="LLM", name="time_index"),
                     ],
-                    enable_async_scheduling=False
                 ),
                 max_iters=self.config.num_timesteps - 1,
                 outputs=[
@@ -595,6 +594,7 @@ class BagelModel(Model):
                             GraphEdge(next_node="combine_cfg", name="latents"),
                             GraphEdge(next_node="combine_cfg", name="time_index"),
                         ],
+                        enable_async_scheduling=False
                     ),
                 ]),
                 max_iters=self.config.num_timesteps - 1,

@@ -273,6 +273,60 @@ def test_loop_finish_signal_also_signals_last_iter():
     assert loop._finish_signal is True
 
 
+def test_prefill_to_decode_transition_gate_shape():
+    """A prefill → decode forward transition is the canonical non-same-node
+    speculation case. The worker ingests prefill's outputs (which target
+    ar_decode); ar_decode becomes speculatively ready.
+
+    ``is_new_loop_iter`` is True because ``("token", "ar_decode")`` matches
+    ``ar_loop._loop_back_inputs`` (the loop's input edge set; populated by
+    ``GraphNode.get_inputs_outputs`` whenever an input name also appears in
+    the node's outputs). The graph layer doesn't distinguish "prefill's
+    output to ar_decode" from "ar_decode's loop-back to itself" — both fire
+    a new loop iter. The worker distinguishes the two cases at a different
+    level: ``gate_match.node_name == batch_N.node_name`` means same-node
+    loop-body; ``!=`` means forward transition.
+    """
+    wgio = _per_rid_wgios(1)[0]
+    prefill_node = wgio.nodes["prefill"]
+    # Ingest every prefill output (the worker's per-rid loop does this for
+    # every edge in ``sample_node.outputs``, not just loop-back).
+    for edge in prefill_node.outputs:
+        wgio.ingest_for_speculation(edge)
+
+    ready = wgio.ready_for_speculation
+    assert len(ready) == 1
+    assert ready[0].node_name == "ar_decode"
+    assert ready[0].is_new_loop_iter is True  # enters ar_loop's iter 0
+    assert ready[0].loop_name == "ar_loop"
+    # The key difference from same-node-loop-body: the gate target's name
+    # differs from prefill's. The worker uses this to decide whether to
+    # treat the spec as a loop continuation or a forward transition.
+    assert ready[0].node_name != prefill_node.name
+
+
+def test_consumed_edges_pair_shape_for_forward_transition():
+    """The worker computes ``consumed_edges`` for the spec batch as
+    ``{(edge.name, edge.next_node) for edge in sample_node.outputs if
+    edge.next_node == spec_target_node_name}``. Verify the shape: for a
+    prefill→decode transition, the consumed pairs target ar_decode."""
+    wgio = _per_rid_wgios(1)[0]
+    prefill_node = wgio.nodes["prefill"]
+    spec_target_name = "ar_decode"
+
+    consumed = {
+        (edge.name, edge.next_node)
+        for edge in prefill_node.outputs
+        if edge.next_node == spec_target_name
+    }
+    assert consumed == {("token", "ar_decode"), ("kv_cache", "ar_decode")}
+    # All next_node fields equal the spec target — the worker-side filter in
+    # ``_fast_postprocess_route`` uses these pairs to skip routing prefill's
+    # outputs to ar_decode's ``ready_signals`` (the spec already consumed
+    # them via ``speculative_signals``).
+    assert all(dest == spec_target_name for _, dest in consumed)
+
+
 def test_non_loop_back_node_does_not_appear_in_ready_for_speculation():
     """The worker only ingests outputs whose ``next_node == node.name`` (the
     loop-back filter in its per-rid loop). A non-loop-back downstream

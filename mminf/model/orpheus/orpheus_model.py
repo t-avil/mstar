@@ -433,6 +433,12 @@ class OrpheusModel(Model):
         )
 
         language_model.eval()
+        # Fuse q/k/v_proj into qkv_proj and gate_proj/up_proj into gate_up_proj
+        # per layer. Must run after weight loading so per-Linear weights are
+        # populated; the originals are nulled out and the forward path uses
+        # F.linear against the fused buffers.
+        language_model.consolidate_fused_weights()
+
         return OrpheusLLMSubmodule(
             language_model=language_model,
             config=self.config,
