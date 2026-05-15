@@ -1874,10 +1874,10 @@ class Worker:
                         )
                     )
                     must_yield_away = (
-                        consecutive_spec_steps < max_consecutive_spec
-                        and not must_yield_for_fairness
+                        consecutive_spec_steps >= max_consecutive_spec
+                        or must_yield_for_fairness
                     )
-                    if must_yield_away:
+                    if not must_yield_away:
                         if self.enable_nvtx:
                             range_push("worker.speculate", synchronize=False)
                         _t0 = _time.perf_counter() if phase_period else 0.0
