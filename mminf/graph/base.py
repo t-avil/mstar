@@ -145,7 +145,28 @@ class ReadySignals:
         self.ready_names.clear()
         self.is_ready = False
         self.is_ready_for_streaming = False
-        
+
+    def remove(self, edge_name: str) -> "GraphEdge | None":
+        """Reverse ``update(edge)`` without dereferencing tensor_info.
+
+        Used by the worker's speculation rollback path when a streaming chunk
+        was ingested for a readiness check and the rid was subsequently
+        dropped. The chunk is handed back to its StreamBuffer's uningested
+        cache; the StreamBuffer remains responsible for the tensor lifecycle,
+        so we must not dereference here.
+
+        Returns the removed edge, or None if no such name was present.
+        """
+        edge = self.ready_inputs.pop(edge_name, None)
+        if edge is None:
+            return None
+        self.ready_names.discard(edge_name)
+        self.is_ready = self.input_names.issubset(self.ready_names)
+        self.is_ready_for_streaming = self.is_ready or self.input_names.issuperset(
+            self.ready_names | self.streaming_inputs
+        )
+        return edge
+
 
 @dataclass
 class GraphNode(GraphSection):

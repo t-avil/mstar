@@ -1262,13 +1262,26 @@ class Worker:
             streaming_edges = self._poll_stream_buffers_for_speculation(
                 rid, spec_node_info.node_name
             )
+            # Track which slot each ingest landed in so we can roll back if
+            # the readiness check below fails. ``ingest_input`` returns success
+            # without telling us which slot it used, so peek the slot state
+            # before the call.
+            ingested_into_ready_signals: list[GraphEdge] = []
+            ingested_into_ready_next_iter: list[GraphEdge] = []
             for edge in streaming_edges:
-                ingested = node.ingest_input(
-                    edge, can_buffer=speculating_same_node
+                already_in_ready_signals = (
+                    edge.name in node.ready_signals.ready_names
                 )
-                if not ingested:
+                if node.ingest_input(
+                    edge, can_buffer=speculating_same_node
+                ):
+                    if already_in_ready_signals:
+                        ingested_into_ready_next_iter.append(edge)
+                    else:
+                        ingested_into_ready_signals.append(edge)
+                else:
                     self._return_speculative_streaming_edge(rid, edge)
-            
+
             # Check if the node is ready after ingesting the streaming edges
             wgio.ingest_for_speculation(
                 batch_N_node.outputs, batch_N_node.name
@@ -1280,6 +1293,20 @@ class Worker:
             wgio.clear_speculative_inputs()
             node._speculatively_scheduled = False # reset in case this rid gets dropped
             if not fully_ready:
+                # Roll back the streaming edges we just ingested so the
+                # chunks don't sit in the spec target's ready_signals /
+                # ready_next_iter unused. Return each chunk to its
+                # StreamBuffer's uningested cache so a future scheduling
+                # of this node consumes it normally. The registry's
+                # ``ready_names`` / ``ready_next_iter`` sets weren't
+                # touched (gated by ``_speculatively_scheduled=True``
+                # above), so no registry-state rollback is needed.
+                for edge in ingested_into_ready_signals:
+                    node.ready_signals.remove(edge.name)
+                    self._return_speculative_streaming_edge(rid, edge)
+                for edge in ingested_into_ready_next_iter:
+                    node.ready_next_iter.remove(edge.name)
+                    self._return_speculative_streaming_edge(rid, edge)
                 continue
 
             # prepare speculative batch
