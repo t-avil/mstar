@@ -102,10 +102,11 @@ class WorkerGraphIO:
         dest_nodes = set()
         next_iter_nodes = set()
 
-        reg = self.nodes[source_node]._managing_registry
-        inside_loop = isinstance(reg, LoopStateRegistry)
-        loop_back_inputs = set() if not inside_loop else reg.loop._loop_back_inputs
-        loop_name = None if not inside_loop else reg.loop.name 
+        source_reg = self.nodes[source_node]._managing_registry
+        source_inside_loop = isinstance(source_reg, LoopStateRegistry)
+        loop_back_inputs = (
+            set() if not source_inside_loop else source_reg.loop._loop_back_inputs
+        )
 
         for edge in edges:
             if edge.next_node not in self.nodes:
@@ -117,7 +118,7 @@ class WorkerGraphIO:
 
             if (edge.name, edge.next_node) in loop_back_inputs:
                 next_iter_nodes.add(edge.next_node)
-        
+
         ready_for_spec = []
         for dest in dest_nodes:
             node = self.nodes[dest]
@@ -125,10 +126,20 @@ class WorkerGraphIO:
                 check_next_iter=dest == source_node,
                 allow_streaming=True
             ):
+                # ``loop_name`` is the destination's enclosing loop — that's
+                # what callers need to inspect ``curr_iter`` / ``max_iters`` /
+                # ``_finish_signal`` for the loop-completion filter. Source's
+                # loop is irrelevant once we know which node is the spec target.
+                dest_reg = node._managing_registry
+                dest_loop_name = (
+                    dest_reg.loop.name
+                    if isinstance(dest_reg, LoopStateRegistry)
+                    else None
+                )
                 ready_for_spec.append(SpeculativeNodeInfo(
                     node_name=dest,
                     is_new_loop_iter=dest in next_iter_nodes,
-                    loop_name=loop_name
+                    loop_name=dest_loop_name,
                 ))
         return ready_for_spec
 
