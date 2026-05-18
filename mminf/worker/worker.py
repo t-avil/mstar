@@ -2077,6 +2077,15 @@ class Worker:
                                 speculative_new_iter=speculation.is_new_iter,
                                 loop_name=speculation.loop_name,
                             )
+                        elif speculation.plan_future is not None:
+                            # All continuing rids were dropped post-thread,
+                            # so no spec batch was submitted. Drain the
+                            # orphaned pre-plan future and reset the engine's
+                            # skip flags so the next plan_attention call
+                            # recomputes from scratch instead of trusting
+                            # stale wrapper buffers from this aborted spec.
+                            speculation.plan_future.result()
+                            self._reset_skip_plan_flags(speculation.node_batch)
 
                     # Post-process N (routing stage) — runs concurrently with
                     # GPU(N+1) if we submitted one above. State advance +
