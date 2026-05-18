@@ -656,10 +656,12 @@ class WorkerGraphStateRegistry(GraphStateRegistry):
 
     def register_ingested_input(self, graph_edge: GraphEdge):
         node = self.nodes[graph_edge.next_node]
+        # If node._speculatively_scheduled, the node is already executing as
+        # a spec batch. We don't want to double-queue it (either for the
+        # current iter via ``ready_names`` or for the next iter via
+        # ``ready_next_iter`` — both eventually feed the scheduler) so we
+        # gate every queue add on the flag.
         if node.ready_signals.is_ready:
-            # If node._speculatively_scheduled, not only is the node ready,
-            # but it is already executing. We don't want to double-queue it,
-            # so we omit adding it to the ready queue
             if not node._speculatively_scheduled:
                 self.ready_names.add(node.name)
             self.ready_for_streaming.discard(node.name)
@@ -668,10 +670,12 @@ class WorkerGraphStateRegistry(GraphStateRegistry):
                 self.ready_for_streaming.add(node.name)
 
         if node.ready_next_iter.is_ready:
-            self.ready_next_iter.add(node.name)
+            if not node._speculatively_scheduled:
+                self.ready_next_iter.add(node.name)
             self.ready_streaming_next_iter.discard(node.name)
         elif node.ready_next_iter.is_ready_for_streaming:
-            self.ready_streaming_next_iter.add(node.name)
+            if not node._speculatively_scheduled:
+                self.ready_streaming_next_iter.add(node.name)
 
     def mark_entity_complete(self, entity_name: str) -> NodeCompletionOutput:
         # Top-level entities have no outer loop to drive a reset_for_iter, so
