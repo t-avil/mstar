@@ -327,6 +327,27 @@ class AudioCodecEngine(BaseEngine):
         #     except Exception:
         #         logger.warning("AudioCodecEngine: torch.compile failed for %s, using eager mode",
         #                        node_name, exc_info=True)
+    
+    def get_max_batch_size(self, node_name, graph_walk):
+        if node_name not in self.submodules:
+            return
+        submod_max_bs = self.submodules[node_name].max_batch_size(graph_walk)
+        if node_name not in self.cuda_graph_runners:
+            return submod_max_bs
+        
+        runner = self.cuda_graph_runners[node_name]
+        configs = [
+            cfg for cfg in runner.capture_configs \
+                if graph_walk in cfg.replay_graph_walks
+        ]
+        if not configs:
+            return submod_max_bs
+        max_cuda_graph_bs = max([
+            max(cfg.capture_batch_sizes or runner.DEFAULT_CAPTURE_BATCH_SIZES) for cfg in configs
+        ])
+        if submod_max_bs is not None:
+            return min(max_cuda_graph_bs, submod_max_bs)
+        return max_cuda_graph_bs
 
     def check_stop_for_batch(
         self, batch: NodeBatch, output: NodeOutput
