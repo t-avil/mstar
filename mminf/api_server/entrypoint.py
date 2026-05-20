@@ -132,47 +132,6 @@ def _shutdown_conductor_process(
 
 
 # ------------------------------------------------------------------
-# Mooncake KV store setup
-# ------------------------------------------------------------------
-def start_mooncake_master(port=8080, log_file: str | None = None):
-    cmd = [
-        "mooncake_master",
-        "--enable_http_metadata_server=true",
-        "--http_metadata_server_host=0.0.0.0",
-        f"--http_metadata_server_port={port}",
-    ]
-
-    stdout = open(log_file, "a") if log_file else subprocess.DEVNULL
-    stderr = subprocess.STDOUT
-
-    process = subprocess.Popen(
-        cmd,
-        stdout=stdout,
-        stderr=stderr,
-        process_group=os.setsid,  # start new process group
-    )
-
-    wait_for_port("localhost", 50051)
-    logger.info("Successfully started Mooncake metadata server")
-
-    return process
-
-
-def wait_for_port(host, port, timeout=10):
-    start = time.time()
-    while time.time() - start < timeout:
-        try:
-            with socket.create_connection((host, port), timeout=1):
-                return True
-        except OSError:
-            time.sleep(0.1)
-    raise RuntimeError(f"Timeout waiting for {host}:{port}")
-
-
-def stop_mooncake_master(process: subprocess.Popen):
-    os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-
-# ------------------------------------------------------------------
 # APIServer
 # ------------------------------------------------------------------
 
@@ -261,7 +220,7 @@ class APIServer:
                 "consumed_chunks": 0,
                 "input_modalities": input_modalities,
                 "output_modalities": output_modalities,
-                "final_forward_outputs": {},
+                "final_outputs": {},
             }
 
         self.preprocess_worker.new_request(PreprocessInput(
@@ -288,8 +247,12 @@ class APIServer:
         stale = [
             rid
             for rid, ts in self.recently_completed.items()
-            if not self.preprocess_worker.has_pending_tensors(rid)
-            or (now - ts) >= self._recently_completed_ttl
+            if (
+                (not self.preprocess_worker.has_pending_tensors(rid)) \
+                    and self.preprocess_worker.received_final_chunks(
+                        rid, self.pending_requests[rid]["final_outputs"]
+                    )
+            ) or (now - ts) >= self._recently_completed_ttl
         ]
         for rid in stale:
             # only set the event when there are no more pending chunks
@@ -325,8 +288,8 @@ class APIServer:
                             elif message.message_type == "request_complete":
                                 logger.info("API server received %s done", rid)
                                 self.recently_completed[rid] = time.time()
-                                self.pending_requests[rid]["final_forward_outputs"] = \
-                                    message.body.final_forward_outputs
+                                self.pending_requests[rid]["final_outputs"] = \
+                                    message.body.final_outputs
                         elif rid in self.recently_completed:
                             logger.debug("Late message for completed %s", rid)
                         else:
@@ -430,7 +393,6 @@ class APIServer:
     # ----------------------------------------------------------
 
     def cleanup(self) -> None:
-        # stop_mooncake_master(self.mooncake_pid)
         self.preprocess_worker.shutdown()
         self.running = False
         if hasattr(self, "_msg_thread") and self._msg_thread.is_alive():

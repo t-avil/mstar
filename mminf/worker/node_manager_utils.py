@@ -6,6 +6,7 @@ from mminf.communication.tensors import TensorCommunicationManager
 from mminf.conductor.request_info import CurrentForwardPassInfo, PerLabelSeqInfo
 from mminf.graph.base import GraphEdge, GraphNode, NameAndDest, NodeCompletionOutput, TensorPointerInfo
 from mminf.graph.graph_io import WorkerGraphIO, format_graph_edge_list
+from mminf.graph.loop_indices import NestedLoopIndices
 from mminf.graph.special_destinations import EMIT_TO_CLIENT, SPECIAL_DESTINATIONS
 from mminf.model.base import WorkerGraph
 from mminf.streaming.stream_buffer import StreamBuffer
@@ -221,6 +222,7 @@ class PerRequestInfo:
     pending_new_tokens: dict[str, list[int]] = field(default_factory=dict)
     stream_buffers: dict[str, StreamBuffer] = field(default_factory=dict)  # edge_name -> StreamBuffer
     current_output_chunks: list[str] = field(default_factory=list)
+    output_loop_indices: dict[str, NestedLoopIndices] = field(default_factory=dict)
 
     per_partition_info: dict[str, PerPartitionInfo] = field(default_factory=dict)
 
@@ -273,7 +275,6 @@ class WorkerGraphsManager:
         part_info = req_info.per_partition_info[partition_name]
 
         if current_fwd_info is not None:
-            partition_name = partition_name or getattr(current_fwd_info, 'partition_name', 'default')
             graph_walk = current_fwd_info.graph_walk
             if self.get_graph_walk(request_id, partition_name) != graph_walk:
                 part_info.graph_walk_worker_graph_ids = [
@@ -364,6 +365,16 @@ class WorkerGraphsManager:
         and ``filtered_signals`` (loop-back (name, dest) pairs to drop).
         """
         return self.queues[worker_graph_id].mark_node_complete(request_id, node_name)
+    
+    def register_output_loop_indices(
+        self, request_id: str,
+        loop_indices: NestedLoopIndices,
+        output_name: str
+    ):
+        self.per_request_info[request_id].output_loop_indices[output_name] = loop_indices
+    
+    def get_output_loop_indices(self, request_id: str):
+        return self.per_request_info[request_id].output_loop_indices
 
     def process_node_outputs(
         self, request_id: str,
@@ -530,10 +541,17 @@ class WorkerGraphsManager:
                 if wgio is not None:
                     for name in loop_names & wgio.loops.keys():
                         req_info.loop_stop_times[name] = wgio.get_nested_loop_idxs(
-                            fwd_pass_idx=req_info.fwd_index,
                             target_loop_name=name,
                         )
         return stopped_loop_back_signals
+    
+    def get_nested_loop_idxs_for_node(
+        self, request_id: str, partition: str, node_name: str
+    ) -> NestedLoopIndices:
+        graph_walk = self.get_graph_walk(request_id, partition)
+        wgid = self.walk_node_to_worker_graph_id[ (graph_walk, node_name)]
+        wgio = self.queues[wgid].per_request_queues.get(request_id)
+        return wgio.get_nested_loop_idxs_for_node(node_name)
 
     def get_dynamic_loop_iters(
         self, request_id: str,

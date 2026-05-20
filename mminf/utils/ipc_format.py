@@ -113,6 +113,7 @@ class WorkerGraphsDone(MessageBody):
     partition_name: str = field(default="default")
     partition_done: bool = field(default=False)
     stream_tokens_consumed: dict[str, int] = field(default_factory=dict)  # edge_name -> tokens consumed from stream
+    output_loop_indices: dict[str, NestedLoopIndices] = field(default_factory=dict)
 
 
 @dataclass

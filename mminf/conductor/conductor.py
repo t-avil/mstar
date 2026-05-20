@@ -23,6 +23,7 @@ from mminf.conductor.request_info import (
 from mminf.engine.base import EngineType
 from mminf.engine.kv_store import KVCacheConfig
 from mminf.graph.base import GraphEdge, TensorPointerInfo
+from mminf.graph.loop_indices import NestedLoopIndices
 from mminf.model.base import ForwardPassArgs, Model, WorkerGraph
 from mminf.utils.ipc_format import (
     ConductorMessageType,
@@ -122,6 +123,9 @@ class RequestData:
 
     # Per-streaming-connection state (keyed by "from_partition->to_partition")
     streaming_connections: dict[str, StreamingConnectionState] = field(default_factory=dict)
+
+    # for api server recv bookeeping
+    final_outputs: dict[str, NestedLoopIndices] = field(default_factory=dict)
 
     def remove_persist_signal_uuids(self, uuids: list[str]):
         uuids = set(uuids)
@@ -560,20 +564,13 @@ class Conductor:
             )
             self.communicator.send(worker_id, msg)
 
-        # Build output dict: output_name -> final forward pass number
-        final_forward_outputs: dict[str, int] = {}
-        for pstate in request_data.partition_states.values():
-            for output_name in pstate.curr_forward_outputs:
-                # fwd_pass_number was already incremented past the last pass
-                final_forward_outputs[output_name] = max(0, pstate.fwd_pass_number - 1)
-
         self.communicator.send(
             "api_server",
             APIServerMessage(
                 message_type="request_complete",
                 body=RequestComplete(
                     request_id=request_id,
-                    final_forward_outputs=final_forward_outputs,
+                    final_outputs=request_data.final_outputs,
                 )
             )
         )
@@ -599,6 +596,7 @@ class Conductor:
         partition_name = body.partition_name
 
         pstate = request_data.partition_states.get(partition_name)
+        request_data.final_outputs.update(body.output_loop_indices)
         if pstate is None:
             logger.warning(
                 "WorkerGraphsDone for unknown partition %s (request %s)",

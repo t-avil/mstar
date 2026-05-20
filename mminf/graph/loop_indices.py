@@ -1,10 +1,3 @@
-"""Loop-iteration index snapshots used for cross-process stop-time ordering.
-
-Replaces the old ``mminf.graph.loop_index.IterIndexTree``. Lives in its own
-module (rather than ``graph_io.py``) so that ``ipc_format`` and
-``conductor.request_info`` can import it without dragging the runtime
-``WorkerGraphIO`` machinery into their import chain.
-"""
 from dataclasses import dataclass
 
 
@@ -18,9 +11,9 @@ class NestedLoopIndices:
     """
     loop_name_order: list[str]   # outer → inner
     loop_indices: dict[str, int]
-    fwd_pass_idx: int
+    wg_fwd_pass_idx: int
 
-    def label_context_gt(self, other: "NestedLoopIndices", target_loop_name: str) -> bool:
+    def label_context_gt(self, other: "NestedLoopIndices", target_loop_name: str | None=None) -> bool:
         """Whether ``self``'s iter indices are strictly greater than ``other``'s,
         in the path leading up to (but not including) ``target_loop_name``.
 
@@ -28,12 +21,12 @@ class NestedLoopIndices:
         to double-stop it, we can keep the last time it was stopped and only
         re-stop it again when ``new_time.label_context_gt(prev, target) == True``.
         """
-        if self.fwd_pass_idx > other.fwd_pass_idx:
+        if self.wg_fwd_pass_idx > other.wg_fwd_pass_idx:
             return True
-        if self.fwd_pass_idx < other.fwd_pass_idx:
+        if self.wg_fwd_pass_idx < other.wg_fwd_pass_idx:
             return False
         for name in self.loop_name_order:
-            if name == target_loop_name:
+            if target_loop_name is not None and name == target_loop_name:
                 break
 
             our_idx = self.loop_indices.get(name, 0)
@@ -43,3 +36,10 @@ class NestedLoopIndices:
             if our_idx < their_idx:
                 return False
         return False
+    
+    def max(self, other: "NestedLoopIndices | None") -> "NestedLoopIndices":
+        if other is None:
+            return self
+        if other.label_context_gt(self):
+            return other
+        return self

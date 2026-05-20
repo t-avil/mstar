@@ -213,7 +213,7 @@ def test_stop_loops_snapshots_loop_stop_times_when_req_info_provided():
     # NestedLoopIndices snapshot should be in loop_stop_times.
     snapshot = fwd_info.loop_stop_times.get("ar_loop")
     assert snapshot is not None
-    assert snapshot.fwd_pass_idx == fwd_info.fwd_index
+    assert snapshot.wg_fwd_pass_idx == fwd_info.fwd_index
     assert snapshot.loop_name_order == ["ar_loop"]
 
 

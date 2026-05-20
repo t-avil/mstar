@@ -21,6 +21,7 @@ from mminf.engine.base import EngineType, NodeBatch, NodeOutput
 from mminf.engine.kv_store import KVCacheConfig, StoreWritePolicy, TransferEngineInfo
 from mminf.graph.base import GraphEdge, GraphNode
 from mminf.graph.graph_io import format_graph_edge_list
+from mminf.graph.loop_indices import NestedLoopIndices
 from mminf.model.base import Model, WorkerGraph
 from mminf.streaming.stream_buffer import StreamBuffer
 from mminf.utils.ipc_format import (
@@ -839,6 +840,7 @@ class Worker:
 
     def _send_outputs(
         self, request_id: str, outputs: NodeOutputRouting,
+        nested_loop_indices: NestedLoopIndices,
         graph_walk: str | None = None,
         partition_name: str | None = None,
         prematerialized_new_tokens: dict[str, list[int]] | None = None,
@@ -905,13 +907,17 @@ class Worker:
                 request_id, outputs.emit_to_client
             )
             for graph_edge in outputs.emit_to_client:
+                self.worker_graphs_manager.register_output_loop_indices(
+                    request_id=request_id, loop_indices=nested_loop_indices,
+                    output_name=graph_edge.name
+                )
                 message = APIServerMessage(
                     message_type="result_tensors",
                     body=ResultTensors(
                         request_id=request_id,
                         modality=graph_edge.output_modality,
                         graph_edge=graph_edge,
-                        fwd_pass_number=self.worker_graphs_manager.get_fwd_number(request_id, partition_name),
+                        loop_indices=nested_loop_indices,
                         metadata={}
                     )
                 )
@@ -964,6 +970,7 @@ class Worker:
                     partition_name=partition_name,
                     partition_done=p_done,
                     stream_tokens_consumed=stream_consumed,
+                    output_loop_indices=self.worker_graphs_manager.get_output_loop_indices(request_id),
                 ),
             )
             self.communicator.send("conductor", message)
@@ -1466,6 +1473,12 @@ class Worker:
         # pending stops are only needed for one iteration, so can be cleared now
         self._pending_loop_stops.clear()
 
+        per_req_nested_idxs = {
+            rid: self.worker_graphs_manager.get_nested_loop_idxs_for_node(
+                rid, batch_N.partition, batch_N.node_name
+            ) for rid in batch_N.node_batch.request_ids
+        }
+
         if self.enable_nvtx:
             range_pop(synchronize=False)
             range_push("worker.postprocess.update_lru", synchronize=False)
@@ -1593,6 +1606,7 @@ class Worker:
         for rid, routing in routing_per_request.items():
             self._send_outputs(
                 rid, routing,
+                nested_loop_indices=per_req_nested_idxs[rid],
                 graph_walk=batch_N.graph_walk,
                 partition_name=batch_N.partition,
             )

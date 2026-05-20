@@ -22,6 +22,7 @@ class WorkerGraphIO:
         self.loops = graph.get_loops()
         self.graph = graph
         self.wg_id = wg_id
+        self.num_times_run = 0
 
         # set up managing registries
         self.wg_state_registry = WorkerGraphStateRegistry(graph)
@@ -79,6 +80,7 @@ class WorkerGraphIO:
 
         The caller must route each edge in output_edges, skipping any in filtered_signals.
         """
+        prev_done_val = self.wg_state_registry.is_done
         node = self.nodes[node_name]
         completion = node.complete()
         # apply filtering, if needed
@@ -86,6 +88,9 @@ class WorkerGraphIO:
             edge for edge in completion.output_edges \
                 if (edge.name, edge.next_node) not in completion.filtered_signals
         ]
+
+        if self.wg_state_registry.is_done and not prev_done_val:
+            self.num_times_run += 1
         return completion
     
     def ingest_for_speculation(
@@ -177,20 +182,33 @@ class WorkerGraphIO:
         }
     
     def get_nested_loop_idxs(
-        self, fwd_pass_idx: int,
-        target_loop_name: str
+        self, target_loop_name: str
     ):
         def _get_loop_order(inner_loop_name: str):
             assert inner_loop_name in self.loops
             loop = self.loops[inner_loop_name]
-            if isinstance(loop._managing_registry, WorkerGraphStateRegistry):
+            if not isinstance(loop._managing_registry, LoopStateRegistry):
                 return [inner_loop_name]
-            assert isinstance(loop._managing_registry, LoopStateRegistry)
             return _get_loop_order(
                 loop._managing_registry.loop.name
             ) + [inner_loop_name]
         return NestedLoopIndices(
             loop_name_order=_get_loop_order(target_loop_name),
             loop_indices=self.get_loop_indices(),
-            fwd_pass_idx=fwd_pass_idx
+            wg_fwd_pass_idx=self.num_times_run
+        )
+    
+    def get_nested_loop_idxs_for_node(
+        self, node_name: str
+    ):
+        assert node_name in self.nodes
+        node = self.nodes[node_name]
+        if not isinstance(node._managing_registry, LoopStateRegistry):
+            return NestedLoopIndices(
+                loop_name_order=[],
+                loop_indices={},
+                wg_fwd_pass_idx=self.num_times_run
+            )
+        return self.get_nested_loop_idxs(
+            target_loop_name=node._managing_registry.loop.name
         )
