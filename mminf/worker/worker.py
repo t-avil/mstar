@@ -77,6 +77,8 @@ class Speculation:
     partition: str
     is_new_iter: bool
     is_same_node: bool
+    # rid -> edges
+    consumed_streaming_edges: dict[str, list[GraphEdge]] = field(default_factory=dict)
     is_yield_away: bool = False
     loop_name: str | None = None
     dropped: set[str] = field(default_factory=set)
@@ -1226,6 +1228,7 @@ class Worker:
         new_node_objects: dict[str, GraphNode] = {}
         new_request_to_worker_graph: dict[str, str] = {}
         per_request_inputs: dict[str, NameToTensorList] = {}
+        consumed_streaming_edges: dict[str, GraphEdge] = {}
         for rid, batch_N_node in batch_N.node_objects.items():
             wgio = self._get_wgio_for_rid(batch_N, rid)
             loop = wgio.loops.get(spec_node_info.loop_name)
@@ -1306,6 +1309,7 @@ class Worker:
             per_request_inputs[rid] = self._get_input_tensors(
                 rid, node, check_next_iter=speculating_same_node,
             )
+            consumed_streaming_edges[rid] = ingested_into_ready_next_iter + ingested_into_ready_signals
 
         if not continuing:
             return None
@@ -1376,7 +1380,8 @@ class Worker:
             partition=pending.partition,
             is_new_iter=spec_node_info.is_new_loop_iter,
             is_same_node=speculating_same_node,
-            loop_name=spec_node_info.loop_name
+            loop_name=spec_node_info.loop_name,
+            consumed_streaming_edges=consumed_streaming_edges
         )
     
     def _thread_outputs_to_speculative(
@@ -1414,6 +1419,9 @@ class Worker:
                 speculation.node_batch.per_request_info.pop(r, None)
                 speculation.scheduled_batch.request_to_worker_graph.pop(r, None)
                 speculation.scheduled_batch.node_objects.pop(r, None)
+                for edge in speculation.consumed_streaming_edges.get(rid, []):
+                    self._return_speculative_streaming_edge(rid, edge)
+                speculation.consumed_streaming_edges.pop(rid, None)
         speculation.continuing_rids = threaded_continuing
         speculation.dropped = dropped
 
@@ -1989,18 +1997,11 @@ class Worker:
                         #   (its inputs would be threaded from ``output`` below
                         #   via ``_thread_outputs_to_speculative``). Pending's
                         #   output is invalid, so the spec batch can't run.
-                        #   Cancel it: drain the pre-plan future, reset the
-                        #   engine's skip flags, and drop the Speculation.
                         #
-                        # * Yield-away spec is independent of pending — its
-                        #   inputs were gathered from tensor_manager in
-                        #   ``_try_speculate_next``'s fresh-rid path, not
-                        #   from pending's output. It MAY still be submitted.
+                        # * Yield-away spec is independent of pending.
                         #   But ``_handle_allocation_failure`` may have shifted
                         #   the engine's KV-cache state (paused/offloaded rids),
-                        #   so any pre-plan computed before that is no longer
-                        #   trusted: drain the future and reset skip flags so
-                        #   the submit below re-plans inline from scratch.
+                        #   so reset pre-plan.
                         if speculation is not None:
                             if speculation.plan_future is not None:
                                 speculation.plan_future.result()
@@ -2009,12 +2010,10 @@ class Worker:
                                 )
                                 speculation.plan_future = None
                             if not speculation.is_yield_away:
+                                for rid, edges in speculation.consumed_streaming_edges.items():
+                                    for edge in edges:
+                                        self._return_speculative_streaming_edge(rid, edge)
                                 speculation = None
-                        # Speculative inputs (e.g., streaming edges) already
-                        # ingested into the graph state stay where they are;
-                        # they'll be consumed when the node is next scheduled.
-                        # Fall through: yield-away (if any) submits below,
-                        # and we skip pending's postprocess (output invalid).
 
                     if speculation is not None:
                         spec_batch = speculation.scheduled_batch
