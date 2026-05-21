@@ -629,7 +629,7 @@ class Pi05LLMSubmodule(ARNodeSubmodule):
     )  -> dict[str, NameToTensorList]:
         """Batched forward: process all requests in a single transformer pass.
 
-        Called by ``AREngine._execute_batched`` when ``can_batch()`` returns
+        Called by ``KVCacheEngine._execute_batched`` when ``can_batch()`` returns
         True. ``packed_inputs`` comes from ``preprocess()`` which already
         concatenated per-request tensors and planned attention/RoPE for the
         full batch.
