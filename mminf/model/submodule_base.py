@@ -346,7 +346,7 @@ class ARNodeSubmodule(NodeSubmodule):
     ) -> list[str] | None:
         """Return cache labels this node needs, or None to retrieve all.
 
-        Used by AREngine to skip redundant KV cache transfers.
+        Used by KVCacheEngine to skip redundant KV cache transfers.
         Override in subclasses that only need a subset of available labels.
         """
         return None
