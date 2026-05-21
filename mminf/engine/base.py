@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any
 
 import torch
 
@@ -28,6 +29,66 @@ class NodeBatch:
     per_request_input_tensors: dict[str, NameToTensorList]
     per_request_info: dict[str, CurrentForwardPassInfo] = field(default_factory=dict)
     metadata: dict = field(default_factory=dict)
+
+
+@dataclass
+class PreparedBatch:
+    """CPU-side preparation result; carries the batch plus per-request input
+    objects produced by ``submodule.prepare_inputs``.
+
+    ``skipped_rids`` lets a submodule veto specific requests (e.g. audio codec
+    returns None for streaming inputs that don't yet have enough frames). The
+    template loop emits empty output slots for skipped rids so the worker's
+    per-rid bookkeeping stays consistent.
+
+    ``metadata`` is the per-engine extension point — KV-cache engines stash
+    cache-manager references and label sets here; stateless engines leave
+    it empty.
+    """
+    batch: NodeBatch
+    submodule: Any | None = None
+    node_inputs: list = field(default_factory=list)
+    skipped_rids: set[str] = field(default_factory=set)
+    metadata: dict = field(default_factory=dict)
+
+    @property
+    def active_request_ids(self) -> list[str]:
+        return [rid for rid in self.batch.request_ids if rid not in self.skipped_rids]
+
+    @property
+    def graph_walk(self) -> str:
+        return self.batch.graph_walk
+
+    @property
+    def node_name(self) -> str:
+        return self.batch.node_name
+
+
+@dataclass
+class PlannedBatch:
+    """Plan-state result; carries the prepared batch plus any planning artifacts
+    (FlashInfer attention plan handles, dispatch-mode decisions, etc.).
+
+    Engines without a separate planning step (stateless) leave ``metadata`` empty.
+    """
+    prepared: PreparedBatch
+    metadata: dict = field(default_factory=dict)
+
+    @property
+    def batch(self) -> NodeBatch:
+        return self.prepared.batch
+
+    @property
+    def submodule(self):
+        return self.prepared.submodule
+
+    @property
+    def node_inputs(self):
+        return self.prepared.node_inputs
+
+    @property
+    def active_request_ids(self) -> list[str]:
+        return self.prepared.active_request_ids
 
 
 @dataclass
@@ -77,9 +138,71 @@ class BaseEngine(ABC):
         """
         ...
 
-    @abstractmethod
+    # ── Named execution hooks ────────────────────────────────────────────
+    #
+    # Default ``execute_batch`` is a template method that calls these four
+    # hooks in order. Subclasses with custom error handling (e.g. KV-cache
+    # allocation-failure recovery) may override ``execute_batch`` entirely
+    # and call the hooks themselves; subclasses with the standard flow
+    # override only the per-phase hooks.
+    #
+    # Splitting these out lets the worker overlap CPU prep with the GPU
+    # forward (run ``prepare_batch`` for batch N+1 while ``execute_forward``
+    # for batch N is queued on the GPU), and lets new engines opt into a
+    # planning stage without changing the worker.
+
+    def prepare_batch(self, batch: NodeBatch) -> PreparedBatch:
+        """CPU-side preparation. Override to fetch submodules, run
+        ``prepare_inputs``, and report any rids that should be skipped this
+        step. The returned ``PreparedBatch`` flows into ``plan_batch``.
+
+        Default: return an empty PreparedBatch with all requests active.
+        """
+        return PreparedBatch(batch=batch)
+
+    def plan_batch(self, prepared: PreparedBatch) -> PlannedBatch:
+        """Optional planning step (e.g. FlashInfer attention plan). Wraps the
+        prepared batch with any plan-state references the forward needs.
+
+        Default: no-op pass-through. Engines with attention planning override.
+        """
+        return PlannedBatch(prepared=prepared)
+
+    def execute_forward(self, planned: PlannedBatch) -> NodeOutput:
+        """GPU forward + sampling. Required for engines that use the template.
+
+        Default raises — subclasses that opt into the template must implement
+        this; subclasses that override ``execute_batch`` wholesale can skip it.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} did not override execute_forward; either "
+            f"override it or override execute_batch wholesale."
+        )
+
+    def postprocess_batch(self, planned: PlannedBatch, output: NodeOutput) -> None:
+        """CPU-side per-rid postprocess. Default: no-op."""
+        return
+
     def execute_batch(self, batch: NodeBatch) -> NodeOutput:
-        ...
+        """Template method: prepare → plan → forward → postprocess.
+
+        Subclasses with custom error/cleanup envelopes (e.g. allocation-failure
+        recovery, finally-block state writebacks) may override this entirely
+        and call the hooks themselves to keep the cleanup invariant intact.
+        """
+        prepared = self.prepare_batch(batch)
+        if not prepared.active_request_ids:
+            return NodeOutput(
+                per_request_output_tensors={rid: {} for rid in batch.request_ids}
+            )
+        planned = self.plan_batch(prepared)
+        output = self.execute_forward(planned)
+        self.postprocess_batch(planned, output)
+        # Empty output slots for skipped rids keep worker bookkeeping consistent.
+        output.per_request_output_tensors.update(
+            {rid: {} for rid in prepared.skipped_rids}
+        )
+        return output
 
     def execute_with_max_batch_size(self, batch: NodeBatch) -> NodeOutput:
         bs = self.get_max_batch_size(batch.node_name, batch.graph_walk)
