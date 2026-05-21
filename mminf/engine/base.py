@@ -10,7 +10,7 @@ from mminf.engine.kv_store import KVCacheConfig
 
 
 class EngineType(Enum):
-    AR = "ar"
+    KV_CACHE = "kv_cache"
     FLOW = "flow"
     ENC_DEC = "enc_dec"
     AUDIO_CODEC = "audio_codec"
@@ -144,8 +144,8 @@ class BaseEngine(ABC):
         ``execute_batch`` returns. May read tensor values. Returns
         ``{request_id: {loop_name, ...}}`` for rids whose loops should stop.
 
-        Default: no stops (engines without value-driven stop conditions —
-        FlowEngine, EncoderDecoderEngine, AudioCodecEngine — return {}).
+        Default: no stops. Stateless engines override this to delegate the
+        check to the submodule; the AR engine has its own value-driven logic.
         """
         return {}
 
