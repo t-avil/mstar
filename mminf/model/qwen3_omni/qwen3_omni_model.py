@@ -176,8 +176,8 @@ class Qwen3OmniModel(Model):
         return {
             "audio_encoder": EngineType.ENC_DEC,
             "vision_encoder": EngineType.ENC_DEC,
-            "Thinker": EngineType.AR,
-            "Talker": EngineType.AR,
+            "Thinker": EngineType.KV_CACHE,
+            "Talker": EngineType.KV_CACHE,
             "Code2Wav": EngineType.AUDIO_CODEC,
         }
     
