@@ -41,7 +41,7 @@ in ``test_pi05_reference_equivalence.py``
 ``flashinfer.rope.apply_rope_pos_ids_inplace`` produces the same Q,K as
 HF Gemma's ``apply_rotary_pos_emb``. So if the action expert math is right
 on this test, plugging it into the FlashInfer cache_handle inside an
-``AREngine`` is mechanical.
+``KVCacheEngine`` is mechanical.
 """
 
 from __future__ import annotations
@@ -674,7 +674,7 @@ def test_pi05_model_loaded_via_remapper_matches_lerobot():
     :class:`Pi05Model`'s lazy submodule construction, the lerobot→mminf
     state-dict remap, and the actual ``Pi05ViTEncoderSubmodule`` and
     ``Pi05LLMSubmodule`` forward methods. The only thing it bypasses is
-    the FlashInfer/AREngine paged KV cache (replaced with the same
+    the FlashInfer/KVCacheEngine paged KV cache (replaced with the same
     ``MockCacheHandle`` used by the other integration tests, which has
     been validated against the real FlashInfer wrapper separately).
     """
@@ -900,7 +900,7 @@ class _StubTransferEngine:
 
 
 def test_pi05_areengine_load_model_with_real_weights():
-    """Smoke test: AREngine.load_model can ingest a Pi05 LLM submodule and
+    """Smoke test: KVCacheEngine.load_model can ingest a Pi05 LLM submodule and
     initialize a real BatchedCacheManager + PagedAllocationManager around it.
 
     This wires together the production code path that mminf's Worker takes
@@ -909,25 +909,25 @@ def test_pi05_areengine_load_model_with_real_weights():
 
       1. Loads ``lerobot/pi05_base`` and remaps weights into a fresh
          Pi05Model via ``load_lerobot_pi05_into_model``.
-      2. Constructs an ``AREngine`` from the model's ``KVCacheConfig`` and
+      2. Constructs an ``KVCacheEngine`` from the model's ``KVCacheConfig`` and
          calls ``load_model`` with the ``LLM`` submodule.
       3. Creates a ``BatchedCacheManager`` for one request, calls
          ``alloc_manager.add_request``, and verifies that the engine's
          ``kv_cache`` tensor has the expected shape.
-      4. Asserts the engine reports ``EngineType.AR`` and that
+      4. Asserts the engine reports ``EngineType.KV_CACHE`` and that
          ``execute_batch`` is wired up (via attribute lookup — we don't
          try to actually execute, since that requires building the full
          NodeBatch + per_request_info plumbing).
 
     What this validates: ``Pi05Model.get_kv_cache_config`` produces a
-    config that AREngine accepts; ``Pi05Model.get_submodule("LLM")`` returns
-    an nn.Module that AREngine.load_model is happy to take; the resulting
+    config that KVCacheEngine accepts; ``Pi05Model.get_submodule("LLM")`` returns
+    an nn.Module that KVCacheEngine.load_model is happy to take; the resulting
     paged KV cache has the correct dimensions for Pi0.5.
     """
     from lerobot.policies.pi05 import PI05Policy
     from safetensors.torch import load_file
 
-    from mminf.engine.ar_engine import AREngine
+    from mminf.engine.kv_cache_engine import KVCacheEngine
     from mminf.engine.base import EngineType
     from mminf.engine.kv_store import TransferEngineInfo
     from mminf.model.pi05.config import Pi05Config
@@ -982,7 +982,7 @@ def test_pi05_areengine_load_model_with_real_weights():
     for name, keys in missing.items():
         assert len(keys) == 0, f"{name} missing keys: {keys[:3]}"
 
-    # ----- Build AREngine and load_model with the real LLM submodule -----
+    # ----- Build KVCacheEngine and load_model with the real LLM submodule -----
     kv_cfg = mminf_model.get_kv_cache_config()
     # Reduce KV cache footprint so this test fits comfortably on the GPU
     # alongside the lerobot reference. Pi0.5 only needs ~772 prefix +
@@ -990,8 +990,8 @@ def test_pi05_areengine_load_model_with_real_weights():
     # is plenty.
     kv_cfg.max_num_pages = 16
 
-    engine = AREngine(kv_cache_config=kv_cfg, autocast_dtype=torch.float32)
-    assert engine.engine_type() == EngineType.AR
+    engine = KVCacheEngine(kv_cache_config=kv_cfg, autocast_dtype=torch.float32)
+    assert engine.engine_type() == EngineType.KV_CACHE
 
     llm_submodule = mminf_model.get_submodule("LLM", device=str(device))
     assert llm_submodule is not None
@@ -1044,6 +1044,6 @@ def test_pi05_areengine_load_model_with_real_weights():
     assert state.page_indices == []
 
     print(
-        f"\nAREngine wired up with kv_cache shape {tuple(engine.kv_cache.shape)},"
+        f"\nKVCacheEngine wired up with kv_cache shape {tuple(engine.kv_cache.shape)},"
         f" stub_engine.register_memory called {len(stub_engine.registered)}x"
     )
