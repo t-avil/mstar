@@ -309,9 +309,9 @@ class Worker:
             # Check local engine first, then fall back to model's type map
             engine = self.engine_manager.node_to_engine.get(node_name)
             if engine is not None:
-                return engine.engine_type() == EngineType.AR
+                return engine.engine_type() == EngineType.KV_CACHE
             if node_engine_types and node_name in node_engine_types:
-                return node_engine_types[node_name] == EngineType.AR
+                return node_engine_types[node_name] == EngineType.KV_CACHE
             return False
 
         # Collect this worker's AR graph walks
@@ -345,7 +345,7 @@ class Worker:
 
     def _add_new_request(self, body: NewRequest) -> None:
         logger.debug("Worker %s received request %s", self.worker_id, body.request_id)
-        ar_engine = self.engine_manager.get_ar_engine()
+        ar_engine = self.engine_manager.get_kv_cache_engine()
         if ar_engine is not None:
             for node_name in ar_engine.submodule_management.keys():
                 self._last_active[(body.request_id, node_name)] = _time.monotonic()
@@ -404,7 +404,7 @@ class Worker:
         self.tensor_manager.cleanup_request(body.request_id)
         self.streaming_buffers.pop(body.request_id, None)
 
-        ar_engine = self.engine_manager.get_ar_engine()
+        ar_engine = self.engine_manager.get_kv_cache_engine()
         if ar_engine is not None:
             for node_name in ar_engine.submodule_management.keys():
                 self._last_active.pop((body.request_id, node_name), None)
@@ -687,7 +687,7 @@ class Worker:
 
         Returns the victim request_id, or None if offloading wasn't possible.
         """
-        ar_engine = self.engine_manager.get_ar_engine()
+        ar_engine = self.engine_manager.get_kv_cache_engine()
         if ar_engine is None:
             return None
 
@@ -747,7 +747,7 @@ class Worker:
 
     def _try_reload_request(self, node_name: str, request_id: str) -> bool:
         """Reload an offloaded request back to GPU. Returns True if reloaded."""
-        ar_engine = self.engine_manager.get_ar_engine()
+        ar_engine = self.engine_manager.get_kv_cache_engine()
         if ar_engine is None:
             return False
 
