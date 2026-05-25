@@ -16,7 +16,12 @@ from mminf.engine.base import (
 from mminf.engine.cache_manager import BatchedCacheManager, WorkspaceBufferManager
 from mminf.engine.cpu_page_pool import CPUPagePool
 from mminf.engine.cuda_graph_runner import CudaGraphRunner
-from mminf.engine.kv_store import KVCacheConfig, PagedAllocationManager, TransferEngineInfo
+from mminf.engine.kv_store import (
+    AllocationFailedError,
+    KVCacheConfig,
+    PagedAllocationManager,
+    TransferEngineInfo,
+)
 from mminf.model.submodule_base import ARNodeInputs, ARNodeSubmodule, ModelInputsFromEngine
 from mminf.utils.profiler import range_pop, range_push
 from mminf.utils.sampling import Sampler
@@ -554,65 +559,76 @@ class KVCacheEngine(BaseEngine):
         return NodeOutput(per_request_output_tensors=batched_output)
 
     def execute_batch(self, batch: NodeBatch) -> NodeOutput:
-        """Wrap the template with the KV-cache cleanup envelope.
+        """Wrap the template with the KV-cache allocation-failure envelope.
 
-        Two invariants beyond the standard prepare/plan/forward/postprocess flow:
+        Page allocation can fail anywhere inside prepare/plan/forward/
+        postprocess (any call into ``alloc_manager.alloc``). Such failures
+        raise ``AllocationFailedError``; the worker treats them as a
+        retryable signal, so we catch here and surface them as a
+        ``NodeOutput(allocation_failed=True, ...)`` carrying the diagnostic
+        payload. Other exceptions propagate unchanged.
 
-        1. **Allocation failure** during any phase must be caught and converted
-           to a NodeOutput with ``allocation_failed=True`` so the worker can
-           offload / retry rather than propagate the RuntimeError.
-        2. **seq_info writeback** in the finally block ensures the request
-           state recorded on this engine's alloc manager is mirrored into
-           ``per_request_info`` regardless of success/failure — the conductor
-           uses these to plan the next iteration.
+        ``finalize_batch`` mirrors KV-cache seq_info back onto
+        ``batch.per_request_info``; the worker calls it in its own
+        ``finally`` so the writeback happens regardless of how this method
+        exits.
 
-        The autocast + no_grad context wraps the entire template so all four
+        The autocast + no_grad context wraps the whole template so all four
         hooks see the same dtype/grad regime.
         """
         if self.enable_nvtx:
             range_push(
                 f"engine.kv_cache.{batch.node_name}.{batch.graph_walk}.bs{len(batch.request_ids)}"
             )
-
-        submod_mgmt = self.submodule_management[batch.node_name]
-        cache_mgmt = submod_mgmt.kv_management
-        kv_cache_string = cache_mgmt.kv_cache_config.get_node_str()
         try:
-            cache_mgmt.alloc_manager.alloc_status.reset()
             try:
                 with torch.no_grad():
                     with torch.amp.autocast(
                         "cuda", enabled=True, dtype=self.autocast_dtype
                     ):
                         return super().execute_batch(batch)
-            except RuntimeError:
-                if not cache_mgmt.alloc_manager.alloc_status.success:
-                    status = cache_mgmt.alloc_manager.alloc_status
-                    logger.warning(
-                        "KV cache page allocation failed for batch "
-                        "(node=%s, walk=%s, request=%s, label=%s, "
-                        "pages_short=%d)",
-                        batch.node_name, batch.graph_walk,
-                        status.request_id, status.label,
-                        status.pages_short,
-                    )
-                    return NodeOutput(
-                        per_request_output_tensors={
-                            rid: {} for rid in batch.request_ids
-                        },
-                        allocation_failed=True,
-                        alloc_pages_short=status.pages_short,
-                        alloc_failed_request_id=status.request_id,
-                    )
-                raise
-        finally:
-            for req_id in batch.request_ids:
-                batch.per_request_info[req_id].per_label_seq_info.add(
-                    kv_cache_string,
-                    cache_mgmt.alloc_manager.get_per_label_seq_info(req_id),
+            except AllocationFailedError as err:
+                logger.warning(
+                    "KV cache page allocation failed for batch "
+                    "(node=%s, walk=%s, request=%s, label=%s, "
+                    "pages_short=%d)",
+                    batch.node_name, batch.graph_walk,
+                    err.request_id, err.label, err.pages_short,
                 )
+                return NodeOutput(
+                    per_request_output_tensors={
+                        rid: {} for rid in batch.request_ids
+                    },
+                    allocation_failed=True,
+                    alloc_pages_short=err.pages_short,
+                    alloc_failed_request_id=err.request_id,
+                )
+        finally:
             if self.enable_nvtx:
                 range_pop()
+
+    def finalize_batch(self, batch: NodeBatch) -> None:
+        """Mirror this engine's per-request KV seq_info back onto
+        ``batch.per_request_info`` so the next iter / conductor sees the
+        updated page indices, seq_len, and position_id_start.
+
+        Safe to call after a successful forward, after an allocation
+        failure, or after an unrelated exception — the writeback reads
+        the alloc manager's current state, which always reflects whatever
+        progress this batch made.
+        """
+        if batch.node_name not in self.submodule_management:
+            return
+        cache_mgmt = self.submodule_management[batch.node_name].kv_management
+        kv_cache_string = cache_mgmt.kv_cache_config.get_node_str()
+        for req_id in batch.request_ids:
+            info = batch.per_request_info.get(req_id)
+            if info is None:
+                continue
+            info.per_label_seq_info.add(
+                kv_cache_string,
+                cache_mgmt.alloc_manager.get_per_label_seq_info(req_id),
+            )
 
     def prepare_batch(self, batch: NodeBatch) -> PreparedBatch:
         """KV sync retrieve, per-request sampler config, then per-rid
