@@ -13,6 +13,25 @@ class TensorPointerInfo:
     uuid: str  # for indexing storage
     source_session_id: str  # "{HOSTNAME}:{client_engine.get_rpc_port()}"
     source_entity: str  # which {worker, api_server} the tensor is on
+    offset: int = 0 # offset, in bytes, of the read (e.g., for in-transport sharding
+                    # in tensor parallel configurations)
+    source_tp_size: int = 1
+    source_tp_rank: int = 0
+
+    def clone(self):
+        return TensorPointerInfo(
+            dims=self.dims[:],
+            dtype=self.dtype,
+            nbytes=self.nbytes,
+            address=self.address,
+            stride=self.stride[:],
+            uuid=self.uuid,
+            source_session_id=self.source_session_id,
+            source_entity=self.source_entity,
+            offset=self.offset,
+            source_tp_size=self.source_tp_size,
+            source_tp_rank=self.source_tp_rank
+        )
 
 
 @dataclass

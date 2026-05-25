@@ -389,6 +389,91 @@ class TestShardedFanout:
 # ---------------------------------------------------------------------------
 
 
+class TestFanin:
+    def test_replicated_fanin_is_one(self):
+        cfg = _make_config(
+            groups={(("B",), 2, ("decode",)): ["w0", "w1"]},
+            node_to_worker={
+                ("A", "decode"): ["w0"],
+                ("B", "decode"): ["w0", "w1"],
+            },
+            shard_dim={"x": None},
+        )
+        assert cfg.compute_fanin(
+            signal="x", source_tp_size=4,
+            dest_node="B", dest_graph_walk="decode",
+        ) == 1
+
+    @pytest.mark.parametrize("dest_rank,expected", [(0, 1), (1, 1)])
+    def test_fanin_matched_tp2_to_tp2(self, dest_rank, expected):
+        a = ShardingGroup(nodes={"A"}, tp_size=2, graph_walks={"decode"})
+        a.register_workers(["w0", "w1"], my_tp_rank=0)
+        b = ShardingGroup(nodes={"B"}, tp_size=2, graph_walks={"decode"})
+        b.register_workers(["w2", "w3"], my_tp_rank=dest_rank)
+        cfg = ShardingConfig(groups=[a, b], shard_dim={"x": 1})
+        cfg.setup({
+            ("A", "decode"): ["w0", "w1"],
+            ("B", "decode"): ["w2", "w3"],
+        })
+        assert cfg.compute_fanin(
+            signal="x", source_tp_size=2,
+            dest_node="B", dest_graph_walk="decode",
+        ) == expected
+
+    @pytest.mark.parametrize("dest_rank", [0, 1, 2, 3])
+    def test_fanin_scatter_tp1_to_tp4(self, dest_rank):
+        """Source covers entire range, every dest reads from it: fanin=1."""
+        b = ShardingGroup(nodes={"B"}, tp_size=4, graph_walks={"decode"})
+        b.register_workers(["w1", "w2", "w3", "w4"], my_tp_rank=dest_rank)
+        cfg = ShardingConfig(groups=[b], shard_dim={"x": 1})
+        cfg.setup({
+            ("A", "decode"): ["w0"],
+            ("B", "decode"): ["w1", "w2", "w3", "w4"],
+        })
+        assert cfg.compute_fanin(
+            signal="x", source_tp_size=1,
+            dest_node="B", dest_graph_walk="decode",
+        ) == 1
+
+    @pytest.mark.parametrize("dest_rank", [0, 1])
+    def test_fanin_gather_tp4_to_tp2(self, dest_rank):
+        """Each dest covers 2 source shards: fanin=2 for every dest rank."""
+        a = ShardingGroup(nodes={"A"}, tp_size=4, graph_walks={"decode"})
+        a.register_workers(["w0", "w1", "w2", "w3"], my_tp_rank=0)
+        b = ShardingGroup(nodes={"B"}, tp_size=2, graph_walks={"decode"})
+        b.register_workers(["w4", "w5"], my_tp_rank=dest_rank)
+        cfg = ShardingConfig(groups=[a, b], shard_dim={"x": 1})
+        cfg.setup({
+            ("A", "decode"): ["w0", "w1", "w2", "w3"],
+            ("B", "decode"): ["w4", "w5"],
+        })
+        assert cfg.compute_fanin(
+            signal="x", source_tp_size=4,
+            dest_node="B", dest_graph_walk="decode",
+        ) == 2
+
+    @pytest.mark.parametrize("dest_rank,expected", [(0, 1), (1, 2), (2, 1)])
+    def test_fanin_unaligned_tp2_to_tp3(self, dest_rank, expected):
+        """Non-divisible TP sizes: fanin varies per dest rank.
+
+        Source TP=2 shards [0,3) and [3,6); dest TP=3 shards [0,2), [2,4), [4,6).
+        Dest 0 reads source 0 only; dest 1 reads both; dest 2 reads source 1 only.
+        """
+        a = ShardingGroup(nodes={"A"}, tp_size=2, graph_walks={"decode"})
+        a.register_workers(["w0", "w1"], my_tp_rank=0)
+        b = ShardingGroup(nodes={"B"}, tp_size=3, graph_walks={"decode"})
+        b.register_workers(["w2", "w3", "w4"], my_tp_rank=dest_rank)
+        cfg = ShardingConfig(groups=[a, b], shard_dim={"x": 1})
+        cfg.setup({
+            ("A", "decode"): ["w0", "w1"],
+            ("B", "decode"): ["w2", "w3", "w4"],
+        })
+        assert cfg.compute_fanin(
+            signal="x", source_tp_size=2,
+            dest_node="B", dest_graph_walk="decode",
+        ) == expected
+
+
 class TestCrossGraphWalkAndAllFanouts:
     def test_dest_graph_walk_resolves_to_different_group(self):
         """Prefill TP=4 -> Decode TP=2 reshard across graph walks."""
