@@ -183,6 +183,18 @@ class BaseEngine(ABC):
         """CPU-side per-rid postprocess. Default: no-op."""
         return
 
+    def finalize_batch(self, batch: NodeBatch) -> None:
+        """Worker-driven cleanup hook called once per batch in a ``finally``,
+        regardless of whether the forward succeeded, returned an
+        ``allocation_failed`` NodeOutput, or raised. Subclasses use it to
+        mirror engine-internal state (e.g. KV-cache seq_info) back onto
+        ``batch.per_request_info`` so the next iter sees the updated values.
+
+        Must be safe to call on any batch — including one where
+        ``execute_batch`` was never reached.
+        """
+        return
+
     def execute_batch(self, batch: NodeBatch) -> NodeOutput:
         """Template method: prepare → plan → forward → postprocess.
 
