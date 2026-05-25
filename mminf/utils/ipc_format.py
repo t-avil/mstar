@@ -39,7 +39,7 @@ class WorkerMessageType(Enum):
 class NewRequest(MessageBody):
     request_id: str
     partition_worker_graph_ids: list[str]
-    worker_graph_to_worker: dict[str, str]
+    worker_graph_to_workers: dict[str, list[str]]
     initial_inputs: list[GraphEdge]
     request_info: CurrentForwardPassInfo
 

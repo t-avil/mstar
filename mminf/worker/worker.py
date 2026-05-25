@@ -17,6 +17,7 @@ from mminf.communication.communicator import CommProtocol, ZMQCommunicator
 from mminf.communication.event import EventWakeup
 from mminf.communication.tensors import NameToTensorList, create_tensor_communication_manager
 from mminf.conductor.request_info import CurrentForwardPassInfo
+from mminf.distributed.base import ShardingConfig
 from mminf.engine.base import EngineType, NodeBatch, NodeOutput
 from mminf.engine.kv_store import KVCacheConfig, StoreWritePolicy, TransferEngineInfo
 from mminf.graph.base import GraphEdge, GraphNode
@@ -118,6 +119,7 @@ class Worker:
         all_worker_graph_ids_to_graph_walks: dict[str, set[str]],
         all_worker_graph_ids_to_nodes: dict[str, set[str]],
         all_worker_graph_ids_to_dyn_loops: dict[str, set[str]],
+        sharding_config: ShardingConfig,
         hostname: str = "localhost",
         socket_path_prefix: str = "/tmp/mminf",
         tensor_comm_protocol: CommProtocol = CommProtocol.RDMA,
@@ -192,6 +194,8 @@ class Worker:
             all_worker_graph_ids_to_dyn_loops=all_worker_graph_ids_to_dyn_loops,
             all_worker_graph_ids_to_nodes=all_worker_graph_ids_to_nodes,
             node_to_partition=node_to_partition,
+            base_sharding_config=sharding_config,
+            worker_id=self.worker_id
         )
 
         self.scheduler = MicroScheduler(self.engine_manager)
@@ -353,7 +357,7 @@ class Worker:
         self.worker_graphs_manager.add_request(
             request_id=body.request_id,
             partition_worker_graph_ids=body.partition_worker_graph_ids,
-            worker_graph_to_worker=body.worker_graph_to_worker,
+            worker_graph_to_workers=body.worker_graph_to_workers,
             current_fwd_info=body.request_info
         )
         self.engine_manager.add_request(body.request_id)
@@ -371,6 +375,7 @@ class Worker:
         # Start RDMA reads for tensors that have tensor_info
         futures = self.tensor_manager.start_read_tensors(
             body.request_id, body.initial_inputs,
+            graph_walk=body.request_info.graph_walk
         )
         self.wakeup_event.register_futures(futures)
 
@@ -453,6 +458,7 @@ class Worker:
         # Start RDMA reads for non-streaming edges with tensor_info
         futures = self.tensor_manager.start_read_tensors(
             body.request_id, non_streaming,
+            graph_walk=body.request_info.graph_walk
         )
         self.wakeup_event.register_futures(futures)
         # Start RDMA reads for streaming edges with tensor_info (will be routed to buffer in _check_ready_tensors)
@@ -1573,7 +1579,8 @@ class Worker:
 
             # Get output routing
             routing_per_request[rid] = self.worker_graphs_manager.process_node_outputs(
-                rid, outputs=real_outputs, graph_walk=batch_N.graph_walk
+                rid, node_name=batch_N.node_name,
+                outputs=real_outputs, graph_walk=batch_N.graph_walk
             )
         
         if self.enable_nvtx:

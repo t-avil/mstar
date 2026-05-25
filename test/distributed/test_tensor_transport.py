@@ -19,7 +19,7 @@ from mminf.communication.tensors import (
     SharedMemoryCommunicationManager,
     create_tensor_communication_manager,
 )
-from mminf.distributed.config import ShardingConfig, ShardingGroup
+from mminf.distributed.base import ShardingConfig, ShardingGroup
 from mminf.graph.base import GraphEdge
 
 
@@ -147,16 +147,16 @@ def test_sharded_tp2_to_tp1_fanin_consolidates(make_manager, protocol):
     sender1 = make_manager("w1", protocol)
     receiver = make_manager("w2", protocol)
 
-    # Producers don't need their src group's _tp_rank set for transport
-    # bookkeeping (source_tp_rank travels in TensorPointerInfo). Consumer's
-    # dst group is auto-singleton via setup() with _tp_rank=0.
-    cfg = _setup_cfg(
-        groups=[], shard_dim={"x": 1},
-        node_to_worker={
-            ("A", "decode"): ["w0", "w1"],
-            ("B", "decode"): ["w2"],
-        },
-    )
+    # Producers need an explicit src group so setup() doesn't try to auto-
+    # generate a TP=1 singleton for a multi-worker node. Consumer's dst is
+    # auto-singleton via setup() with _tp_rank=0.
+    a_grp = ShardingGroup(nodes={"A"}, tp_size=2, graph_walks={"decode"})
+    a_grp.register_workers(["w0", "w1"], my_tp_rank=0)
+    cfg = ShardingConfig(groups=[a_grp], shard_dim={"x": 1})
+    cfg.setup({
+        ("A", "decode"): ["w0", "w1"],
+        ("B", "decode"): ["w2"],
+    })
     for m in (sender0, sender1, receiver):
         m.register_request("req1", cfg)
 
@@ -184,13 +184,13 @@ def test_fanin_buffers_partial_then_completes(make_manager, protocol):
     sender0 = make_manager("w0", protocol)
     sender1 = make_manager("w1", protocol)
     receiver = make_manager("w2", protocol)
-    cfg = _setup_cfg(
-        groups=[], shard_dim={"x": 0},
-        node_to_worker={
-            ("A", "decode"): ["w0", "w1"],
-            ("B", "decode"): ["w2"],
-        },
-    )
+    a_grp = ShardingGroup(nodes={"A"}, tp_size=2, graph_walks={"decode"})
+    a_grp.register_workers(["w0", "w1"], my_tp_rank=0)
+    cfg = ShardingConfig(groups=[a_grp], shard_dim={"x": 0})
+    cfg.setup({
+        ("A", "decode"): ["w0", "w1"],
+        ("B", "decode"): ["w2"],
+    })
     for m in (sender0, sender1, receiver):
         m.register_request("req1", cfg)
 
@@ -232,16 +232,20 @@ def test_sharded_tp4_to_tp2_fanin(make_manager, protocol):
 
     # Receiver configs differ only in dst group's _tp_rank.
     def _dst_cfg(my_rank: int) -> ShardingConfig:
+        src = ShardingGroup(nodes={"A"}, tp_size=4, graph_walks={"decode"})
+        src.register_workers(["w0", "w1", "w2", "w3"], my_tp_rank=0)
         dst = ShardingGroup(nodes={"B"}, tp_size=2, graph_walks={"decode"})
         dst.register_workers(["w4", "w5"], my_tp_rank=my_rank)
-        return _setup_cfg(
-            groups=[dst], shard_dim={"x": 0},
-            node_to_worker=node_to_worker,
-        )
+        cfg = ShardingConfig(groups=[src, dst], shard_dim={"x": 0})
+        cfg.setup(node_to_worker)
+        return cfg
 
-    sender_cfg = _setup_cfg(
-        groups=[], shard_dim={"x": 0}, node_to_worker=node_to_worker,
-    )
+    a_grp = ShardingGroup(nodes={"A"}, tp_size=4, graph_walks={"decode"})
+    a_grp.register_workers(["w0", "w1", "w2", "w3"], my_tp_rank=0)
+    b_grp = ShardingGroup(nodes={"B"}, tp_size=2, graph_walks={"decode"})
+    b_grp.register_workers(["w4", "w5"], my_tp_rank=0)
+    sender_cfg = ShardingConfig(groups=[a_grp, b_grp], shard_dim={"x": 0})
+    sender_cfg.setup(node_to_worker)
     for s in senders:
         s.register_request("req1", sender_cfg)
     receivers[0].register_request("req1", _dst_cfg(my_rank=0))

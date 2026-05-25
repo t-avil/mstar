@@ -14,7 +14,7 @@ from mminf.communication.tensors import (
     _serialize_tensor,
     create_tensor_communication_manager,
 )
-from mminf.distributed.config import ShardingConfig
+from mminf.distributed.base import ShardingConfig
 from mminf.graph.base import GraphEdge, TensorPointerInfo
 
 # ---------------------------------------------------------------------------

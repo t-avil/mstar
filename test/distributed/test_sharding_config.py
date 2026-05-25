@@ -5,11 +5,10 @@ Covers:
 - ShardingConfig.setup (explicit groups + auto-generated singletons)
 - compute_fanout for replicated and sharded signals across matched / mismatched
   TP sizes, with and without producer/consumer colocation
-- compute_all_fanouts
 """
 import pytest
 
-from mminf.distributed.config import ShardDestination, ShardingConfig, ShardingGroup
+from mminf.distributed.base import ShardDestination, ShardingConfig, ShardingGroup
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +109,7 @@ class TestSetup:
         with pytest.raises(RuntimeError, match="setup"):
             cfg.compute_fanout(
                 signal="x", source_graph_walk="decode",
-                source_node="A", dest_node="B", shard_dim_size=4,
+                source_node="A", dest_node="B", dest_graph_walk="decode", shard_dim_sizes=[4],
                 source_tp_rank=0,
             )
 
@@ -159,7 +158,7 @@ class TestReplicatedFanout:
         )
         fanout_rank0 = cfg.compute_fanout(
             signal="x", source_graph_walk="decode",
-            source_node="A", dest_node="B", shard_dim_size=1, source_tp_rank=0,
+            source_node="A", dest_node="B", dest_graph_walk="decode", shard_dim_sizes=[1], source_tp_rank=0,
         )
         workers = {d.worker for d in fanout_rank0}
         assert workers == {"w2", "w3"}
@@ -168,7 +167,7 @@ class TestReplicatedFanout:
         # Non-rank-0 source emits nothing (its worker isn't in dest, no send).
         fanout_rank1 = cfg.compute_fanout(
             signal="x", source_graph_walk="decode",
-            source_node="A", dest_node="B", shard_dim_size=1, source_tp_rank=1,
+            source_node="A", dest_node="B", dest_graph_walk="decode", shard_dim_sizes=[1], source_tp_rank=1,
         )
         assert fanout_rank1 == []
 
@@ -189,7 +188,7 @@ class TestReplicatedFanout:
         )
         fanout_rank0 = cfg.compute_fanout(
             signal="x", source_graph_walk="decode",
-            source_node="A", dest_node="B", shard_dim_size=1, source_tp_rank=0,
+            source_node="A", dest_node="B", dest_graph_walk="decode", shard_dim_sizes=[1], source_tp_rank=0,
         )
         # rank 0's worker (w0) is not in dest, so no self-target. It sends to
         # dest_workers \ source_workers = {w2}.
@@ -197,7 +196,7 @@ class TestReplicatedFanout:
 
         fanout_rank1 = cfg.compute_fanout(
             signal="x", source_graph_walk="decode",
-            source_node="A", dest_node="B", shard_dim_size=1, source_tp_rank=1,
+            source_node="A", dest_node="B", dest_graph_walk="decode", shard_dim_sizes=[1], source_tp_rank=1,
         )
         # rank 1's worker (w1) IS in dest — emits the "already in memory" marker.
         assert fanout_rank1 == [ShardDestination(worker="w1", full_tensor=True)]
@@ -214,7 +213,7 @@ class TestReplicatedFanout:
         )
         fanout = cfg.compute_fanout(
             signal="x", source_graph_walk="decode",
-            source_node="A", dest_node="B", shard_dim_size=1, source_tp_rank=0,
+            source_node="A", dest_node="B", dest_graph_walk="decode", shard_dim_sizes=[1], source_tp_rank=0,
         )
         assert fanout == [ShardDestination(worker="w0", full_tensor=True)]
 
@@ -243,15 +242,15 @@ class TestShardedFanout:
         # Source rank 0 holds [0,4), sends to dest rank 0 (w2).
         f0 = cfg.compute_fanout(
             signal="x", source_graph_walk="decode",
-            source_node="A", dest_node="B", shard_dim_size=4, source_tp_rank=0,
+            source_node="A", dest_node="B", dest_graph_walk="decode", shard_dim_sizes=[4], source_tp_rank=0,
         )
-        assert f0 == [ShardDestination(worker="w2", full_tensor=False, start_idx=0, end_idx=4)]
+        assert f0 == [ShardDestination(worker="w2", full_tensor=False, start_idxs=[0], end_idxs=[4])]
         # Source rank 1 holds [4,8), sends to dest rank 1 (w3).
         f1 = cfg.compute_fanout(
             signal="x", source_graph_walk="decode",
-            source_node="A", dest_node="B", shard_dim_size=4, source_tp_rank=1,
+            source_node="A", dest_node="B", dest_graph_walk="decode", shard_dim_sizes=[4], source_tp_rank=1,
         )
-        assert f1 == [ShardDestination(worker="w3", full_tensor=False, start_idx=4, end_idx=8)]
+        assert f1 == [ShardDestination(worker="w3", full_tensor=False, start_idxs=[4], end_idxs=[8])]
 
     def test_scatter_tp1_to_tp2(self):
         """Non-TP source -> TP=2 dest: source holds the full tensor, sends a
@@ -269,11 +268,11 @@ class TestShardedFanout:
         )
         fanout = cfg.compute_fanout(
             signal="x", source_graph_walk="decode",
-            source_node="A", dest_node="B", shard_dim_size=8, source_tp_rank=0,
+            source_node="A", dest_node="B", dest_graph_walk="decode", shard_dim_sizes=[8], source_tp_rank=0,
         )
         assert fanout == [
-            ShardDestination(worker="w1", full_tensor=False, start_idx=0, end_idx=4),
-            ShardDestination(worker="w2", full_tensor=False, start_idx=4, end_idx=8),
+            ShardDestination(worker="w1", full_tensor=False, start_idxs=[0], end_idxs=[4]),
+            ShardDestination(worker="w2", full_tensor=False, start_idxs=[4], end_idxs=[8]),
         ]
 
     def test_scatter_tp2_to_tp4(self):
@@ -293,20 +292,20 @@ class TestShardedFanout:
         # Source rank 0 holds [0,4): goes to dest ranks 0 and 1.
         f0 = cfg.compute_fanout(
             signal="x", source_graph_walk="decode",
-            source_node="A", dest_node="B", shard_dim_size=4, source_tp_rank=0,
+            source_node="A", dest_node="B", dest_graph_walk="decode", shard_dim_sizes=[4], source_tp_rank=0,
         )
         assert f0 == [
-            ShardDestination(worker="w2", full_tensor=False, start_idx=0, end_idx=2),
-            ShardDestination(worker="w3", full_tensor=False, start_idx=2, end_idx=4),
+            ShardDestination(worker="w2", full_tensor=False, start_idxs=[0], end_idxs=[2]),
+            ShardDestination(worker="w3", full_tensor=False, start_idxs=[2], end_idxs=[4]),
         ]
         # Source rank 1 holds [4,8): goes to dest ranks 2 and 3.
         f1 = cfg.compute_fanout(
             signal="x", source_graph_walk="decode",
-            source_node="A", dest_node="B", shard_dim_size=4, source_tp_rank=1,
+            source_node="A", dest_node="B", dest_graph_walk="decode", shard_dim_sizes=[4], source_tp_rank=1,
         )
         assert f1 == [
-            ShardDestination(worker="w4", full_tensor=False, start_idx=4, end_idx=6),
-            ShardDestination(worker="w5", full_tensor=False, start_idx=6, end_idx=8),
+            ShardDestination(worker="w4", full_tensor=False, start_idxs=[4], end_idxs=[6]),
+            ShardDestination(worker="w5", full_tensor=False, start_idxs=[6], end_idxs=[8]),
         ]
 
     def test_gather_tp4_to_tp2(self):
@@ -333,11 +332,11 @@ class TestShardedFanout:
         for src_rank, dst_worker, lo, hi in expected:
             f = cfg.compute_fanout(
                 signal="x", source_graph_walk="decode",
-                source_node="A", dest_node="B", shard_dim_size=2,
+                source_node="A", dest_node="B", dest_graph_walk="decode", shard_dim_sizes=[2],
                 source_tp_rank=src_rank,
             )
             assert f == [
-                ShardDestination(worker=dst_worker, full_tensor=False, start_idx=lo, end_idx=hi)
+                ShardDestination(worker=dst_worker, full_tensor=False, start_idxs=[lo], end_idxs=[hi])
             ], f"src_rank={src_rank}: {f}"
 
     def test_sharded_to_non_tp_consumer(self):
@@ -354,14 +353,14 @@ class TestShardedFanout:
         )
         f0 = cfg.compute_fanout(
             signal="x", source_graph_walk="decode",
-            source_node="A", dest_node="B", shard_dim_size=4, source_tp_rank=0,
+            source_node="A", dest_node="B", dest_graph_walk="decode", shard_dim_sizes=[4], source_tp_rank=0,
         )
-        assert f0 == [ShardDestination(worker="w2", full_tensor=False, start_idx=0, end_idx=4)]
+        assert f0 == [ShardDestination(worker="w2", full_tensor=False, start_idxs=[0], end_idxs=[4])]
         f1 = cfg.compute_fanout(
             signal="x", source_graph_walk="decode",
-            source_node="A", dest_node="B", shard_dim_size=4, source_tp_rank=1,
+            source_node="A", dest_node="B", dest_graph_walk="decode", shard_dim_sizes=[4], source_tp_rank=1,
         )
-        assert f1 == [ShardDestination(worker="w2", full_tensor=False, start_idx=4, end_idx=8)]
+        assert f1 == [ShardDestination(worker="w2", full_tensor=False, start_idxs=[4], end_idxs=[8])]
 
     def test_uneven_tp_partition_asserts(self):
         """total_size must be divisible by dest TP size."""
@@ -380,7 +379,7 @@ class TestShardedFanout:
         with pytest.raises(AssertionError, match="divisible"):
             cfg.compute_fanout(
                 signal="x", source_graph_walk="decode",
-                source_node="A", dest_node="B", shard_dim_size=3, source_tp_rank=0,
+                source_node="A", dest_node="B", dest_graph_walk="decode", shard_dim_sizes=[3], source_tp_rank=0,
             )
 
 
@@ -490,32 +489,9 @@ class TestCrossGraphWalkAndAllFanouts:
         # Source range [2,4) overlaps dest 0 [0,4). One fanout to w4.
         fanout = cfg.compute_fanout(
             signal="kv", source_graph_walk="prefill", dest_graph_walk="decode",
-            source_node="LLM", dest_node="LLM", shard_dim_size=2, source_tp_rank=1,
+            source_node="LLM", dest_node="LLM", shard_dim_sizes=[2], source_tp_rank=1,
         )
         assert fanout == [
-            ShardDestination(worker="w4", full_tensor=False, start_idx=2, end_idx=4)
+            ShardDestination(worker="w4", full_tensor=False, start_idxs=[2], end_idxs=[4])
         ]
 
-    def test_compute_all_fanouts_returns_per_rank(self):
-        cfg = _make_config(
-            groups={
-                (("A",), 2, ("decode",)): ["w0", "w1"],
-                (("B",), 2, ("decode",)): ["w2", "w3"],
-            },
-            node_to_worker={
-                ("A", "decode"): ["w0", "w1"],
-                ("B", "decode"): ["w2", "w3"],
-            },
-            shard_dim={"x": 1},
-        )
-        all_fanouts = cfg.compute_all_fanouts(
-            signal="x", source_graph_walk="decode",
-            source_node="A", dest_node="B", shard_dim_size=4,
-        )
-        assert set(all_fanouts.keys()) == {"w0", "w1"}
-        assert all_fanouts["w0"] == [
-            ShardDestination(worker="w2", full_tensor=False, start_idx=0, end_idx=4)
-        ]
-        assert all_fanouts["w1"] == [
-            ShardDestination(worker="w3", full_tensor=False, start_idx=4, end_idx=8)
-        ]

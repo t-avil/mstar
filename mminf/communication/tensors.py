@@ -8,7 +8,7 @@ from contextlib import nullcontext as _nullcontext
 from dataclasses import dataclass
 from uuid import uuid4
 
-from mminf.distributed.config import ShardingConfig
+from mminf.distributed.base import ShardingConfig
 from mminf.graph.special_destinations import EMPTY_DESTINATION
 
 try:
