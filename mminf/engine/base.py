@@ -204,6 +204,51 @@ class BaseEngine(ABC):
         )
         return output
 
+    # ── Async pre-execution hooks ────────────────────────────────────────
+    #
+    # The worker uses these to coordinate a double-buffered CUDA-graph
+    # runner: ``reserve_replay_slot`` picks the slot that the upcoming
+    # batch will replay into; ``pre_plan_for_batch`` warms the plan-state
+    # cache on that slot ahead of GPU submission so the GPU thread can
+    # skip a GIL-contended plan() call; ``reset_pre_plan_for_batch``
+    # rolls back the warmed state when the dispatched batch is dropped
+    # before it reaches the GPU.
+    #
+    # Engines without an async pre-plan surface inherit the defaults
+    # below — all three are safe no-ops, so the worker calls them
+    # unconditionally.
+
+    def reserve_replay_slot(self, batch: NodeBatch) -> int | None:
+        """Reserve a CUDA-graph replay slot for ``batch`` and stash it on
+        ``batch.metadata['cuda_graph_slot']``. Returns the slot index,
+        or ``None`` when no captured graph matches.
+        """
+        return None
+
+    def pre_plan_for_batch(
+        self,
+        batch: NodeBatch,
+        prev_completion_event: "torch.cuda.Event | None" = None,
+    ) -> bool:
+        """Off-thread CPU planning: warm plan-state caches (e.g. FlashInfer
+        attention plan) on the slot reserved by ``reserve_replay_slot``
+        so the GPU thread can skip an inline plan() call.
+
+        Called by the worker on its ``plan_executor`` thread, ahead of
+        GPU submission. Returns ``True`` when planning ran (the caller
+        should await its future before running this batch); ``False``
+        when no planning was performed (the GPU thread plans inline).
+        """
+        return False
+
+    def reset_pre_plan_for_batch(self, batch: NodeBatch) -> None:
+        """Clear any pre-plan state that ``pre_plan_for_batch`` set on the
+        slot for ``batch``. Called when the dispatched batch is dropped
+        before reaching the GPU thread, so the next plan() call on that
+        slot recomputes from scratch instead of trusting stale state.
+        """
+        return
+
     def execute_with_max_batch_size(self, batch: NodeBatch) -> NodeOutput:
         bs = self.get_max_batch_size(batch.node_name, batch.graph_walk)
         n = len(batch.request_ids)
