@@ -117,19 +117,28 @@ class KVRequestState:
 LabelToState = dict[str, KVRequestState]
 
 
-@dataclass
-class AllocationStatus:
-    """Tracks the outcome of the most recent page allocation attempt."""
-    success: bool = True
-    pages_short: int = 0       # how many pages we couldn't allocate
-    request_id: str | None = None  # which request failed
-    label: str | None = None       # which cache label failed
+class AllocationFailedError(RuntimeError):
+    """Raised by ``PagedAllocationManager.alloc`` when the page pool is too
+    small to satisfy a request. Carries the diagnostic payload (pages_short,
+    request_id, label) on the exception itself so callers across threads can
+    recover it without consulting any shared state on the manager.
+    """
 
-    def reset(self):
-        self.success = True
-        self.pages_short = 0
-        self.request_id = None
-        self.label = None
+    def __init__(
+        self,
+        pages_short: int,
+        request_id: str,
+        label: str,
+        message: str | None = None,
+    ):
+        super().__init__(
+            message
+            or f"Page allocation failed: {pages_short} page(s) short "
+               f"for request {request_id!r} label {label!r}"
+        )
+        self.pages_short = pages_short
+        self.request_id = request_id
+        self.label = label
 
 
 @dataclass
@@ -406,10 +415,6 @@ class PagedAllocationManager:
         # Stream for async GPU↔CPU page copies (Feature 3: CPU offloading)
         self._offload_stream: torch.cuda.Stream | None = None
 
-        # Tracks the outcome of the most recent allocation attempt per batch.
-        # Reset at the start of each batch by the engine.
-        self.alloc_status = AllocationStatus()
-
         # {req_id: {label: futures}}
         self.pending_reads: dict[str, dict[str, list[Future]]] = {}
 
@@ -452,15 +457,14 @@ class PagedAllocationManager:
             if num_new_pages > 0:
                 new_pages = self.page_allocator.try_allocate(num_new_pages)
                 if new_pages is None:
-                    self.alloc_status = AllocationStatus(
-                        success=False,
+                    raise AllocationFailedError(
                         pages_short=num_new_pages - self.page_allocator.num_free,
                         request_id=request_id,
                         label=label,
-                    )
-                    raise RuntimeError(
-                        f"Not enough free pages: requested {num_new_pages}, "
-                        f"available {self.page_allocator.num_free}"
+                        message=(
+                            f"Not enough free pages: requested {num_new_pages}, "
+                            f"available {self.page_allocator.num_free}"
+                        ),
                     )
                 state.page_indices.extend(new_pages)
 
