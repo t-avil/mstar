@@ -305,11 +305,12 @@ class Worker:
         my_ar_walks_nodes: set[str] = set()
         all_ar_walks_nodes: set[str] = set()
 
-        def _is_ar(node_name: str) -> bool:
-            # Check local engine first, then fall back to model's type map
+        def _uses_kv_cache(node_name: str) -> bool:
+            # Local engine instance wins via declared capability; remote
+            # nodes fall back to the model's static type map.
             engine = self.engine_manager.node_to_engine.get(node_name)
             if engine is not None:
-                return engine.engine_type() == EngineType.KV_CACHE
+                return engine.capabilities.requires_kv_cache
             if node_engine_types and node_name in node_engine_types:
                 return node_engine_types[node_name] == EngineType.KV_CACHE
             return False
@@ -317,14 +318,14 @@ class Worker:
         # Collect this worker's AR graph walks
         for wg in my_worker_graphs:
             for node_name in wg.section.get_nodes():
-                if _is_ar(node_name):
+                if _uses_kv_cache(node_name):
                     my_ar_walks_nodes.update([(walk, node_name) for walk in wg.graph_walks])
 
         # Collect all workers' AR graph walks
         for wg_id, walks in all_worker_graph_ids_to_graph_walks.items():
             nodes = all_worker_graph_ids_to_nodes.get(wg_id, set())
             for node_name in nodes:
-                if _is_ar(node_name):
+                if _uses_kv_cache(node_name):
                     all_ar_walks_nodes.update([(walk, node_name) for walk in walks])
 
         if not all_ar_walks_nodes:
