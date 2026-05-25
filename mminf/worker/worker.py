@@ -345,10 +345,9 @@ class Worker:
 
     def _add_new_request(self, body: NewRequest) -> None:
         logger.debug("Worker %s received request %s", self.worker_id, body.request_id)
-        ar_engine = self.engine_manager.get_kv_cache_engine()
-        if ar_engine is not None:
-            for node_name in ar_engine.submodule_management.keys():
-                self._last_active[(body.request_id, node_name)] = _time.monotonic()
+        now = _time.monotonic()
+        for node_name in self.engine_manager.lru_tracked_nodes():
+            self._last_active[(body.request_id, node_name)] = now
 
         self.worker_graphs_manager.add_request(
             request_id=body.request_id,
@@ -404,10 +403,8 @@ class Worker:
         self.tensor_manager.cleanup_request(body.request_id)
         self.streaming_buffers.pop(body.request_id, None)
 
-        ar_engine = self.engine_manager.get_kv_cache_engine()
-        if ar_engine is not None:
-            for node_name in ar_engine.submodule_management.keys():
-                self._last_active.pop((body.request_id, node_name), None)
+        for node_name in self.engine_manager.lru_tracked_nodes():
+            self._last_active.pop((body.request_id, node_name), None)
 
     def _handle_tensor_received(self, body: TensorReceived) -> None:
         """Sender-side cleanup: receiver confirmed RDMA read, free source buffers."""
@@ -687,36 +684,30 @@ class Worker:
 
         Returns the victim request_id, or None if offloading wasn't possible.
         """
-        ar_engine = self.engine_manager.get_kv_cache_engine()
-        if ar_engine is None:
+        engine = self.engine_manager.get_engine(node_name)
+        if not engine.capabilities.supports_cpu_offload:
             return None
 
-        submod_mgmt = ar_engine.submodule_management[node_name]
-        cache_mgmt = submod_mgmt.kv_management
-        if cache_mgmt.cpu_page_pool is None:
+        candidates_raw = engine.offload_candidates(node_name)
+        if not candidates_raw:
             return None
 
-        alloc = cache_mgmt.alloc_manager
-
-        # Gather all candidates with (rid, total_pages), split by location
+        # Split candidates by whether they belong to the in-flight batch;
+        # we prefer evicting requests not currently being executed.
         external: list[tuple[str, int]] = []
         in_batch: list[tuple[str, int]] = []
-        for rid, labels in alloc.request_states.items():
-            total_pages = sum(len(s.page_indices) for s in labels.values())
-            if total_pages == 0:
-                continue
+        for rid, total_pages in candidates_raw:
             if rid in batch_ids:
                 in_batch.append((rid, total_pages))
             else:
                 external.append((rid, total_pages))
 
-        # Prefer external victims; fall back to in-batch
         candidates = external or in_batch
         if not candidates:
             return None
 
         victim_id = self._select_eviction_victim(node_name, candidates)
-        freed = alloc.offload_request(victim_id, cache_mgmt.cpu_page_pool)
+        freed = engine.offload_request(node_name, victim_id)
         logger.info(
             "Offloaded request %s to CPU (%d GPU pages freed, "
             "policy=%s, in_batch=%s)",
@@ -747,28 +738,16 @@ class Worker:
 
     def _try_reload_request(self, node_name: str, request_id: str) -> bool:
         """Reload an offloaded request back to GPU. Returns True if reloaded."""
-        ar_engine = self.engine_manager.get_kv_cache_engine()
-        if ar_engine is None:
+        engine = self.engine_manager.get_engine(node_name)
+        if not engine.is_offloaded(node_name, request_id):
             return False
-
-        submod_mgmt = ar_engine.submodule_management[node_name]
-        cache_mgmt = submod_mgmt.kv_management
-        if cache_mgmt.cpu_page_pool is None:
-            return False
-
-        if not cache_mgmt.cpu_page_pool.is_offloaded(request_id):
-            return False
-
-        try:
-            cache_mgmt.alloc_manager.reload_request(
-                request_id, cache_mgmt.cpu_page_pool
-            )
+        if engine.reload_request(node_name, request_id):
             logger.info("Reloaded request %s from CPU to GPU", request_id)
             return True
-        except RuntimeError:
-            # Not enough GPU pages to reload; will retry later
-            logger.debug("Cannot reload request %s yet (insufficient GPU pages)", request_id)
-            return False
+        logger.debug(
+            "Cannot reload request %s yet (insufficient GPU pages)", request_id,
+        )
+        return False
 
     # ------------------------------------------------------------------
     # Batch building
