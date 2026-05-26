@@ -215,8 +215,10 @@ class StatelessEngine(BaseEngine):
                 f"engine.{self.config.name}.{batch.node_name}."
                 f"{batch.graph_walk}.bs{len(batch.request_ids)}"
             )
+        submodule = self.submodules.get(batch.node_name)
+        per_submodule_dtype = submodule.get_autocast_dtype() if submodule is not None else None
         try:
-            with self._inference_context():
+            with self._inference_context(per_submodule_dtype):
                 return super().execute_batch(batch)
         finally:
             if self.enable_nvtx:
@@ -276,17 +278,23 @@ class StatelessEngine(BaseEngine):
 
     # ─── Internals ─────────────────────────────────────────────────────
 
-    def _inference_context(self):
+    def _inference_context(self, autocast_dtype_override: torch.dtype | None = None):
         """Pick the right grad/autocast context.
 
         - With autocast: ``torch.amp.autocast(...)`` + ``torch.no_grad()``.
         - Without autocast (audio codec): ``torch.inference_mode()`` — stricter
           than no_grad and matches the reference codec implementation.
+
+        ``autocast_dtype_override`` (set when the current node's submodule
+        declares ``get_autocast_dtype()``) wins over ``self.config.autocast_dtype``.
+        ``None`` falls back to the engine-level default.
         """
-        if self.config.autocast_dtype is not None:
+        dtype = autocast_dtype_override if autocast_dtype_override is not None \
+            else self.config.autocast_dtype
+        if dtype is not None:
             return _ComposedContext(
                 torch.amp.autocast(
-                    "cuda", enabled=True, dtype=self.config.autocast_dtype
+                    "cuda", enabled=True, dtype=dtype
                 ),
                 torch.no_grad(),
             )
