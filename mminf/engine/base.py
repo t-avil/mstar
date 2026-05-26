@@ -181,16 +181,13 @@ class BaseEngine(ABC):
         """
         return PlannedBatch(prepared=prepared)
 
+    @abstractmethod
     def execute_forward(self, planned: PlannedBatch) -> NodeOutput:
-        """GPU forward + sampling. Required for engines that use the template.
-
-        Default raises — subclasses that opt into the template must implement
-        this; subclasses that override ``execute_batch`` wholesale can skip it.
+        """GPU forward + sampling. Every concrete engine implements this —
+        the default ``execute_batch`` template calls it after
+        ``prepare_batch`` and ``plan_batch``.
         """
-        raise NotImplementedError(
-            f"{type(self).__name__} did not override execute_forward; either "
-            f"override it or override execute_batch wholesale."
-        )
+        ...
 
     def postprocess_batch(self, planned: PlannedBatch, output: NodeOutput) -> None:
         """CPU-side per-rid postprocess. Default: no-op."""
