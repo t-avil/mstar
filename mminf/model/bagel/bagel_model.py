@@ -429,14 +429,14 @@ class BagelModel(Model):
 
     def get_node_engine_types(self) -> dict[str, EngineType]:
         return {
-            "vit_encoder": EngineType.ENC_DEC,
-            "vae_encoder": EngineType.ENC_DEC,
-            "init_latents": EngineType.ENC_DEC,
+            "vit_encoder": EngineType.STATELESS,
+            "vae_encoder": EngineType.STATELESS,
+            "init_latents": EngineType.STATELESS,
             "LLM": EngineType.KV_CACHE,
             "LLM_cfg_text": EngineType.KV_CACHE,
             "LLM_cfg_img": EngineType.KV_CACHE,
-            "combine_cfg": EngineType.ENC_DEC,
-            "vae_decoder": EngineType.ENC_DEC,
+            "combine_cfg": EngineType.STATELESS,
+            "vae_decoder": EngineType.STATELESS,
         }
 
     def get_worker_graphs(self, config_path: str):
