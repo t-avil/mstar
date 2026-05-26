@@ -4,7 +4,7 @@ from typing import Callable
 
 import torch
 
-from mminf.engine.base import BaseEngine
+from mminf.engine.base import BaseEngine, EngineType
 from mminf.engine.kv_cache_engine import KVCacheEngine
 from mminf.engine.kv_store import KVCacheConfig, TransferEngineInfo
 from mminf.engine.stateless_engine import (
@@ -32,11 +32,24 @@ def _make_stateless_factory(
     return factory
 
 
-# Each engine type string maps to a factory that takes (autocast_dtype,
-# enable_nvtx) and returns a freshly constructed engine. The split between
-# AR (stateful, paged KV cache) and the stateless flavors lives here.
+# Engine-type strings (``EngineType.value``) → factory. ``STATELESS`` is
+# resolved via ``STATELESS_FLAVOR_FACTORIES`` instead because its config
+# depends on the submodule (enc_dec vs audio_codec).
 ENGINE_TYPE_FACTORIES: dict[str, Callable[[torch.dtype | None, bool], BaseEngine]] = {
     "kv_cache": _make_kv_cache,
+    # Legacy stateless engine-type entries — kept while models migrate to
+    # ``EngineType.STATELESS`` + per-submodule flavor. Remove once no model
+    # declares ``ENC_DEC`` / ``AUDIO_CODEC`` directly.
+    "enc_dec": _make_stateless_factory(make_enc_dec_config),
+    "audio_codec": _make_stateless_factory(make_audio_codec_config),
+}
+
+
+# Stateless-engine flavor → factory. The submodule declares its flavor via
+# ``NodeSubmodule.get_stateless_flavor()``; the EngineManager groups
+# ``STATELESS`` nodes by that flavor so each flavor gets one engine with the
+# right config (autocast, force_float32, torch.compile, piecewise runner).
+STATELESS_FLAVOR_FACTORIES: dict[str, Callable[[torch.dtype | None, bool], BaseEngine]] = {
     "enc_dec": _make_stateless_factory(make_enc_dec_config),
     "audio_codec": _make_stateless_factory(make_audio_codec_config),
 }
@@ -68,12 +81,7 @@ class EngineManager:
         (model=None or get_submodule returns None), engines run without
         real computation.
         """
-        type_to_nodes = {}
         node_to_engine_type = model.get_node_engine_types()
-        for node_name in node_names:
-            type_to_nodes.setdefault(node_to_engine_type[node_name].value, []).append(node_name)
-
-        node_to_engine: dict[str, BaseEngine] = {}
 
         # Resolve autocast dtype: explicit YAML config wins; otherwise we
         # fall back to the Model's own preference (so models that need to
@@ -83,34 +91,56 @@ class EngineManager:
         if "autocast_dtype" in model_config:
             autocast_dtype = model_config["autocast_dtype"]
 
-        for engine_type_str, engine_node_names in type_to_nodes.items():
-            factory = ENGINE_TYPE_FACTORIES[engine_type_str]
+        # Pre-resolve submodules: needed to ask each STATELESS node's
+        # submodule for its flavor before we know which engine to build.
+        node_submodules: dict[str, torch.nn.Module | None] = {}
+        if model is not None:
+            for name in node_names:
+                node_submodules[name] = model.get_submodule(name, device)
+
+        # Group nodes by the factory key. STATELESS nodes split further by
+        # the flavor declared on the submodule; other engine types group
+        # on the engine-type string alone.
+        group_to_nodes: dict[tuple[str, str | None], list[str]] = {}
+        for name in node_names:
+            engine_type = node_to_engine_type[name]
+            if engine_type == EngineType.STATELESS:
+                sm = node_submodules.get(name)
+                flavor = sm.get_stateless_flavor() if sm is not None else "enc_dec"
+                group_key: tuple[str, str | None] = ("stateless", flavor)
+            else:
+                group_key = (engine_type.value, None)
+            group_to_nodes.setdefault(group_key, []).append(name)
+
+        node_to_engine: dict[str, BaseEngine] = {}
+        for (engine_type_str, flavor), engine_node_names in group_to_nodes.items():
+            if engine_type_str == "stateless":
+                factory = STATELESS_FLAVOR_FACTORIES[flavor]
+            else:
+                factory = ENGINE_TYPE_FACTORIES[engine_type_str]
             engine = factory(autocast_dtype, enable_nvtx)
 
-            # Extract submodules from the Model for this engine's nodes
             submodules: dict[str, torch.nn.Module] = {}
-            if model is not None:
-                for name in engine_node_names:
-                    submodule = model.get_submodule(name, device)
-                    if submodule is not None:
-                        if engine.has_autocast():
-                            submodules[name] = submodule.to(
-                                device=device,
-                                dtype=autocast_dtype
-                            )
-                        else:
-                            submodules[name] = submodule.to(
-                                device=device,
-                            )
+            for name in engine_node_names:
+                submodule = node_submodules.get(name)
+                if submodule is not None:
+                    if engine.has_autocast():
+                        submodules[name] = submodule.to(
+                            device=device,
+                            dtype=autocast_dtype,
+                        )
+                    else:
+                        submodules[name] = submodule.to(device=device)
 
             engine.load_model(
                 submodules,
                 kv_cache_config=kv_config,
                 device=device,
                 transfer_engine_info=transfer_engine_info,
-                kv_cache_type=autocast_dtype
+                kv_cache_type=autocast_dtype,
             )
-            logger.info("Engine %s loaded in on device %s", engine_type_str, str(device))
+            log_key = engine_type_str if flavor is None else f"{engine_type_str}.{flavor}"
+            logger.info("Engine %s loaded in on device %s", log_key, str(device))
 
             for name in engine_node_names:
                 node_to_engine[name] = engine
