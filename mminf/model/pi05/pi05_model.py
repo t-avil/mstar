@@ -283,7 +283,7 @@ class Pi05Model(Model):
 
     def get_node_engine_types(self) -> dict[str, EngineType]:
         return {
-            "vit_encoder": EngineType.ENC_DEC,
+            "vit_encoder": EngineType.STATELESS,
             "LLM": EngineType.KV_CACHE,
         }
 
