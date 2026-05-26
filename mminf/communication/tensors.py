@@ -373,6 +373,8 @@ class TensorCommunicationManager(ABC):
 
     def store_and_return_tensor_info(
         self, request_id: str, tensors: NameToTensorList,
+        node_name: str | None=None,
+        graph_walk: str | None=None,
         skip_cuda_sync: bool = False,
     ) -> dict[str, list[TensorPointerInfo]]:
         # CUDA sync ensures GPU writes to ``tensors`` are visible before
@@ -386,10 +388,25 @@ class TensorCommunicationManager(ABC):
         if not skip_cuda_sync and torch.cuda.is_available():
             torch.cuda.default_stream().synchronize()
         tensor_info: dict[str, list[TensorPointerInfo]] = {}
+
+        # register_request is a hard prereq on the worker side, but the API
+        # server calls this without registering. Default to "no group" / TP=1
+        # when no sharding_config is present.
+        cfg = self.sharding_configs.get(request_id)
+        if cfg is not None:
+            source_group = cfg.get_sharding_group(node_name, graph_walk)
+        else:
+            source_group = None
+        if source_group is not None:
+            source_tp_size = source_group.tp_size
+            source_tp_rank = source_group._tp_rank or 0
+        else:
+            source_tp_size, source_tp_rank = 1, 0
+
         for name, tensor_list in tensors.items():
             tensor_info[name] = []
 
-            shard_dim = self.sharding_configs[request_id].shard_dim.get(name)
+            shard_dim = cfg.shard_dim.get(name) if cfg is not None else None
             for tensor in tensor_list:
                 tensor_uuid = str(uuid4())
                 # TODO: only rearrange when (1) the tensor will be sent and
@@ -400,7 +417,8 @@ class TensorCommunicationManager(ABC):
                 self.tensor_store.put_tensor(
                     request_id=request_id, uuid=tensor_uuid, tensor=canonical,
                 )
-                self.req_uuid_to_shard_dim[request_id][tensor_uuid] = shard_dim
+                if cfg is not None:
+                    self.req_uuid_to_shard_dim[request_id][tensor_uuid] = shard_dim
 
                 logger.debug("Storing tensor name %s uuid %s", name, tensor_uuid)
                 tensor_info[name].append(TensorPointerInfo(
@@ -412,12 +430,18 @@ class TensorCommunicationManager(ABC):
                     uuid=tensor_uuid,
                     source_session_id=self.my_session_id,
                     source_entity=self.my_entity_id,
+                    source_tp_size=source_tp_size,
+                    source_tp_rank=source_tp_rank,
+                    _source_node_name=node_name,
+                    _source_graph_walk=graph_walk,
                 ))
         return tensor_info
 
     def store_and_populate_graph_edges(
         self, request_id: str, tensors: NameToTensorList,
         graph_edges: list[GraphEdge],
+        node_name: str | None=None,
+        graph_walk: str | None=None,
         skip_cuda_sync: bool = False,
     ):
         name_to_graph_edges: dict[str, list[GraphEdge]] = {}
@@ -426,6 +450,7 @@ class TensorCommunicationManager(ABC):
 
         graph_node_info = self.store_and_return_tensor_info(
             request_id=request_id, tensors=tensors,
+            node_name=node_name, graph_walk=graph_walk,
             skip_cuda_sync=skip_cuda_sync,
         )
         for name in tensors:

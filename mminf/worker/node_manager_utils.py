@@ -27,6 +27,7 @@ class NodeAndGraphWalk:
 @dataclass
 class NodeOutputRouting:
     routed_to_this_worker_graph: list[GraphEdge]
+    is_first_tp_rank: bool
     persist: list[GraphEdge] # outputs that are going back to the conductor
     to_workers: dict[str, list[GraphEdge]] # worker id to signals
     emit_to_client: list[GraphEdge] = field(default_factory=list)
@@ -400,6 +401,9 @@ class WorkerGraphsManager:
         new_token_outputs = [edge for edge in non_streaming_outputs if edge.conductor_new_token]
 
         sharding_config = self.per_request_info[request_id].sharding_config
+        group = sharding_config.get_sharding_group(node_name, graph_walk)
+        # No group → singleton/non-TP; treat as rank 0.
+        is_first_tp_rank = group is None or group._tp_rank == 0
 
         # (2) route each output edge to its destination worker graph via the
         # inverted index. Compute the per-rank fanout first; ingest *this
@@ -514,6 +518,7 @@ class WorkerGraphsManager:
             completed_worker_graph_ids=completed_worker_graph_ids,
             streaming_to_workers=streaming_to_workers,
             streaming_local=streaming_local,
+            is_first_tp_rank=is_first_tp_rank
         )
 
     def stop_loops(

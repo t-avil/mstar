@@ -106,6 +106,7 @@ class NewRequestConductor(MessageBody):
 class WorkerGraphsDone(MessageBody):
     request_id: str
     worker_graph_ids: list[str]
+    is_first_tp_rank: bool
     persist_signals: dict[str, list[TensorPointerInfo]] = field(default_factory=dict)
     new_tokens: dict[str, list[int]] = field(default_factory=dict) # name to tokens
     output_signal_names: int = field(default=0)

@@ -33,6 +33,11 @@ class ShardingGroup:
             _tp_rank=self._tp_rank
         )
 
+    def key_str(self):
+        key = "///".join(sorted(self.nodes))
+        if self.graph_walks is not None:
+            key += "|" + "///".join(sorted(self.graph_walks))
+        return key
 
 @dataclass
 class ShardDestination:
@@ -262,6 +267,11 @@ class ShardingConfig:
             dest_tp_size, dest_tp_rank = 1, 0
         else:
             dest_tp_size, dest_tp_rank = dest_group.tp_size, dest_group._tp_rank
+            assert dest_tp_rank is not None, (
+                f"compute_fanin requires dest_group._tp_rank to be set; "
+                f"call from a worker-side context (the conductor should not "
+                f"call compute_fanin)."
+            )
         # Scaled integer coords (total = source_tp_size * dest_tp_size).
         dest_lo = dest_tp_rank * source_tp_size
         dest_hi = dest_lo + source_tp_size

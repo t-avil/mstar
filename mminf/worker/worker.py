@@ -361,6 +361,10 @@ class Worker:
             current_fwd_info=body.request_info
         )
         self.engine_manager.add_request(body.request_id)
+        self.tensor_manager.register_request(
+            body.request_id,
+            self.worker_graphs_manager.per_request_info[body.request_id].sharding_config
+        )
 
         # Create StreamBuffers for consumer connections on this worker
         for conn in self._my_consumer_connections:
@@ -949,6 +953,7 @@ class Worker:
                 body=WorkerGraphsDone(
                     request_id=request_id,
                     worker_graph_ids=outputs.completed_worker_graph_ids,
+                    is_first_tp_rank=outputs.is_first_tp_rank,
                     persist_signals=self.worker_graphs_manager.flush_persist_signals(request_id),
                     new_tokens=self.worker_graphs_manager.flush_new_tokens(request_id),
                     output_signal_names=self.worker_graphs_manager.flush_output_signals(request_id),
@@ -1568,6 +1573,8 @@ class Worker:
                     request_id=rid,
                     tensors=req_output_tensors,
                     graph_edges=node.outputs,
+                    node_name=node.name,
+                    graph_walk=batch_N.graph_walk,
                     # We already synced on output.completion_event above
                     skip_cuda_sync=True,
                 )

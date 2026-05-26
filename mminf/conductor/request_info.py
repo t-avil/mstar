@@ -120,6 +120,8 @@ class PartitionState:
     new_tokens: dict[str, list[int]] = field(default_factory=dict)
     completed_worker_graph_ids: set[str] = field(default_factory=set)
     current_worker_graph_ids: set[str] = field(default_factory=set)
+    # wg_id -> count of distinct TP ranks that have reported completion
+    wg_rank_completions: dict[str, int] = field(default_factory=dict)
     num_output_tokens: int = 0
     curr_forward_outputs: list[str] = field(default_factory=list)
     per_label_seq_info: PerLabelSeqInfo = field(default_factory=PerLabelSeqInfo)

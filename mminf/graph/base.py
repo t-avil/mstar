@@ -18,6 +18,9 @@ class TensorPointerInfo:
     source_tp_size: int = 1
     source_tp_rank: int = 0
 
+    _source_node_name: str | None = None
+    _source_graph_walk: str | None = None
+
     def clone(self):
         return TensorPointerInfo(
             dims=self.dims[:],
@@ -30,7 +33,9 @@ class TensorPointerInfo:
             source_entity=self.source_entity,
             offset=self.offset,
             source_tp_size=self.source_tp_size,
-            source_tp_rank=self.source_tp_rank
+            source_tp_rank=self.source_tp_rank,
+            _source_node_name=self._source_node_name,
+            _source_graph_walk=self._source_graph_walk
         )
 
 
