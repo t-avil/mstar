@@ -150,7 +150,7 @@ class Pi05ViTEncoderSubmodule(NodeSubmodule):
         Captures the batched encoder forward for bs ∈ [1, 2, 4] during the
         'prefill' walk. Each capture slot holds one request's pixel_values:
         (num_cameras, 3, H, W). preprocess() stacks them to (bs, num_cameras,
-        3, H, W) so shape[0] == bs, satisfying CodecCudaGraphRunner's
+        3, H, W) so shape[0] == bs, satisfying StatelessCudaGraphRunner's
         leading-dim == bs requirement.
 
         compile=False because warmup() already applies torch.compile to
@@ -163,7 +163,7 @@ class Pi05ViTEncoderSubmodule(NodeSubmodule):
             BasicBatchedCudaGraphConfig(
                 capture_graph_walk="prefill",
                 single_request_inputs=ARNodeInputs(
-                    input_seq_len=0,  # not used by CodecCudaGraphRunner
+                    input_seq_len=0,  # not used by StatelessCudaGraphRunner
                     tensor_inputs={
                         "pixel_values": torch.zeros(
                             num_cameras, 3, H, W,
@@ -194,7 +194,7 @@ class Pi05ViTEncoderSubmodule(NodeSubmodule):
         inputs: list[NodeInputs],
     ) -> dict[str, torch.Tensor | Any]:
         # Stack images across requests: (bs, num_cameras, 3, H, W).
-        # Leading dim == bs satisfies CodecCudaGraphRunner's shape validation,
+        # Leading dim == bs satisfies StatelessCudaGraphRunner's shape validation,
         # and forward_batched flattens it back before the encoder call.
         all_images = [inp.tensor_inputs["pixel_values"] for inp in inputs]
         pixel_values = torch.stack(all_images, dim=0)

@@ -22,7 +22,7 @@ class CudaGraphConfig(ABC):
         compile: bool = True, # whether to run torch.compile on the submodule before cuda graph capture
         # Per-config override for the set of batch sizes to capture. None → use the
         # runner's default (AR engine default: DEFAULT_AR_CAPTURE_BATCH_SIZES;
-        # CodecCudaGraphRunner picks its own default). Useful for codec-style
+        # StatelessCudaGraphRunner picks its own default). Useful for codec-style
         # submodules where memory cost per size is high, or for AR walks where a
         # small subset is enough.
         capture_batch_sizes: list[int] | None = None

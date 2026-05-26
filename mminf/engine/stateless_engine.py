@@ -24,7 +24,7 @@ from mminf.engine.base import (
     PlannedBatch,
     PreparedBatch,
 )
-from mminf.engine.cuda_graph_runner import CodecCudaGraphRunner
+from mminf.engine.cuda_graph_runner import StatelessCudaGraphRunner
 from mminf.model.submodule_base import (
     ARNodeInputs,
     ModelInputsFromEngine,
@@ -48,7 +48,7 @@ class StatelessEngineConfig:
     - ``force_float32_submodules`` casts every submodule to ``.float()`` in
       ``load_model``. Required when ``autocast_dtype is None`` and the
       reference run is numerically sensitive (audio codec).
-    - ``cuda_graph_capable`` enables ``CodecCudaGraphRunner`` capture during
+    - ``cuda_graph_capable`` enables ``StatelessCudaGraphRunner`` capture during
       ``warmup``. Submodules still opt in by returning a non-empty list from
       ``get_cuda_graph_configs(device)``.
     - ``apply_torch_compile`` enables ``torch.compile(submodule.forward)``
@@ -95,7 +95,7 @@ def make_audio_codec_config(_autocast_dtype: torch.dtype | None = None) -> State
 class StatelessEngine(BaseEngine):
     """Single engine class for all stateless submodules.
 
-    Holds the submodules it was given, plus any ``CodecCudaGraphRunner``s
+    Holds the submodules it was given, plus any ``StatelessCudaGraphRunner``s
     captured during warmup. ``execute_batch`` runs the universal
     prepare → dispatch → postprocess skeleton; the dispatch picks between
     CUDA-graph replay, batched forward, and per-request sequential.
@@ -128,7 +128,7 @@ class StatelessEngine(BaseEngine):
         self.config = config
         self.submodules: dict[str, NodeSubmodule] = {}
         self.device: torch.device | None = None
-        self.cuda_graph_runners: dict[str, CodecCudaGraphRunner] = {}
+        self.cuda_graph_runners: dict[str, StatelessCudaGraphRunner] = {}
 
         # Dedup set for "captured graphs exist but don't match this shape"
         # warnings — each unique miss is logged at most once.
@@ -338,7 +338,7 @@ class StatelessEngine(BaseEngine):
         batch: NodeBatch,
         submodule: NodeSubmodule,
         inputs: list[NodeInputs],
-        runner: CodecCudaGraphRunner,
+        runner: StatelessCudaGraphRunner,
     ) -> bool:
         bs = len(batch.request_ids)
         # Audio codec submodules export an extra veto (e.g. SNAC's frame-count
@@ -360,7 +360,7 @@ class StatelessEngine(BaseEngine):
         self,
         batch: NodeBatch,
         bs: int,
-        runner: CodecCudaGraphRunner,
+        runner: StatelessCudaGraphRunner,
         reason: str,
     ) -> None:
         if not runner.graphs:
@@ -389,7 +389,7 @@ class StatelessEngine(BaseEngine):
         batch: NodeBatch,
         submodule: NodeSubmodule,
         inputs: list[ARNodeInputs],
-        runner: CodecCudaGraphRunner,
+        runner: StatelessCudaGraphRunner,
     ) -> NodeOutput:
         if self.enable_nvtx:
             range_push(f"{self.config.name}.cuda_graph.run")
@@ -532,7 +532,7 @@ class StatelessEngine(BaseEngine):
         if not codec_configs:
             return
         try:
-            runner = CodecCudaGraphRunner(
+            runner = StatelessCudaGraphRunner(
                 submodule_name=node_name,
                 submodule=submodule,
                 device=self.device,
@@ -542,14 +542,14 @@ class StatelessEngine(BaseEngine):
             if runner.graphs:
                 self.cuda_graph_runners[node_name] = runner
                 logger.info(
-                    "StatelessEngine[%s]: CodecCudaGraphRunner installed for %s (%d graphs)",
+                    "StatelessEngine[%s]: StatelessCudaGraphRunner installed for %s (%d graphs)",
                     self.config.name,
                     node_name,
                     len(runner.graphs),
                 )
         except Exception:
             logger.warning(
-                "StatelessEngine[%s]: CodecCudaGraphRunner capture failed for %s, using eager mode",
+                "StatelessEngine[%s]: StatelessCudaGraphRunner capture failed for %s, using eager mode",
                 self.config.name,
                 node_name,
                 exc_info=True,

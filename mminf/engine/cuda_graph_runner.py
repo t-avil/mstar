@@ -1830,7 +1830,7 @@ class CudaGraphRunner:
                 outputs[rid][k] = v
 
 
-class CodecCudaGraphRunner:
+class StatelessCudaGraphRunner:
     """CUDA graph capture/replay for stateless batched submodules.
 
     Contract (matches the AR runner so submodules look similar across engines):
