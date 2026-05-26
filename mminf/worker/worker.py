@@ -18,6 +18,7 @@ from mminf.communication.event import EventWakeup
 from mminf.communication.tensors import NameToTensorList, create_tensor_communication_manager
 from mminf.conductor.request_info import CurrentForwardPassInfo
 from mminf.distributed.base import ShardingConfig
+from mminf.distributed.communication import WorkerTPGroups
 from mminf.engine.base import EngineType, NodeBatch, NodeOutput
 from mminf.engine.kv_store import KVCacheConfig, StoreWritePolicy, TransferEngineInfo
 from mminf.graph.base import GraphEdge, GraphNode
@@ -120,16 +121,24 @@ class Worker:
         all_worker_graph_ids_to_nodes: dict[str, set[str]],
         all_worker_graph_ids_to_dyn_loops: dict[str, set[str]],
         sharding_config: ShardingConfig,
+        tp_groups: WorkerTPGroups,
         hostname: str = "localhost",
         socket_path_prefix: str = "/tmp/mminf",
         tensor_comm_protocol: CommProtocol = CommProtocol.RDMA,
         device: torch.device = torch.device("cuda"),
         enable_nvtx: bool = False,
-        tcp_transfer_device=""
+        tcp_transfer_device="",
+        dist_init_method=None
     ):
         self.worker_id = worker_id
         self.device = device
         self.enable_nvtx = enable_nvtx
+
+        if dist_init_method is None:
+            dist_init_method = f"tcp://{hostname}:29500"
+
+        self.tp_groups = tp_groups
+        self.tp_groups.init_dist(init_method=dist_init_method)
 
         # Build node_to_partition mapping from model's partitions and graph walks
         node_to_partition: dict[str, str] = {}

@@ -27,23 +27,16 @@ import torch
 from torch import nn
 
 from mminf.engine.cache_manager import BatchedCacheManager
-from mminf.model.qwen3_omni.components.attention import (
-    Qwen3OmniAttention,
-    Qwen3OmniRMSNorm,
-)
-from mminf.model.qwen3_omni.components.moe import (
-    Qwen3OmniMLP,
-    Qwen3OmniSparseMoeBlock,
-)
+from mminf.model.components import GatedMLP, RMSNorm, SparseMoeBlock
+from mminf.model.qwen3_omni.components.attention import Qwen3OmniAttention
 from mminf.model.qwen3_omni.config import Qwen3OmniModelConfig
-from mminf.utils.flashinfer_utils import run_rms_norm
 
 
 class Qwen3OmniThinkerLayer(nn.Module):
     """Single Thinker decoder layer: attention + MoE/dense MLP.
 
-    Uses MoE (``Qwen3OmniSparseMoeBlock``) for most layers, and a dense
-    ``Qwen3OmniMLP`` for layers listed in ``mlp_only_layers``.
+    Uses the shared ``SparseMoeBlock`` for most layers, and a dense
+    ``GatedMLP`` (SiLU SwiGLU) for layers listed in ``mlp_only_layers``.
 
     Args:
         config: top-level Qwen3-Omni model configuration.
@@ -57,7 +50,7 @@ class Qwen3OmniThinkerLayer(nn.Module):
         self.hidden_size = tc.hidden_size
 
         # Pre-attention layernorm
-        self.input_layernorm = Qwen3OmniRMSNorm(tc.hidden_size, eps=tc.rms_norm_eps)
+        self.input_layernorm = RMSNorm(tc.hidden_size, eps=tc.rms_norm_eps)
 
         # Self-attention with QK-norm and 3D MRoPE
         self.self_attn = Qwen3OmniAttention(
@@ -71,7 +64,7 @@ class Qwen3OmniThinkerLayer(nn.Module):
         )
 
         # Post-attention layernorm
-        self.post_attention_layernorm = Qwen3OmniRMSNorm(
+        self.post_attention_layernorm = RMSNorm(
             tc.hidden_size, eps=tc.rms_norm_eps
         )
 
@@ -84,7 +77,7 @@ class Qwen3OmniThinkerLayer(nn.Module):
             and (layer_idx + 1) % tc.decoder_sparse_step == 0
         )
         if use_moe:
-            self.mlp = Qwen3OmniSparseMoeBlock(
+            self.mlp = SparseMoeBlock(
                 hidden_size=tc.hidden_size,
                 moe_intermediate_size=tc.moe_intermediate_size,
                 num_experts=tc.num_experts,
@@ -92,9 +85,10 @@ class Qwen3OmniThinkerLayer(nn.Module):
                 norm_topk_prob=tc.norm_topk_prob,
             )
         else:
-            self.mlp = Qwen3OmniMLP(
+            self.mlp = GatedMLP(
                 hidden_size=tc.hidden_size,
                 intermediate_size=tc.intermediate_size,
+                activation="silu",
             )
 
     def forward(
@@ -116,11 +110,7 @@ class Qwen3OmniThinkerLayer(nn.Module):
         """
         # Pre-attention norm + self-attention + residual
         residual = hidden_states
-        hidden_states = run_rms_norm(
-            hidden_states,
-            self.input_layernorm.weight,
-            eps=self.input_layernorm.variance_epsilon,
-        )
+        hidden_states = self.input_layernorm(hidden_states)
         hidden_states = self.self_attn(
             hidden_states,
             cache_handle=cache_handle,
@@ -131,11 +121,7 @@ class Qwen3OmniThinkerLayer(nn.Module):
 
         # Post-attention norm + MLP/MoE + residual
         residual = hidden_states
-        hidden_states = run_rms_norm(
-            hidden_states,
-            self.post_attention_layernorm.weight,
-            eps=self.post_attention_layernorm.variance_epsilon,
-        )
+        hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
 
@@ -152,7 +138,7 @@ class Qwen3OmniThinkerTextModel(nn.Module):
         self.layers = nn.ModuleList(
             [Qwen3OmniThinkerLayer(config, layer_idx=i) for i in range(tc.num_hidden_layers)]
         )
-        self.norm = Qwen3OmniRMSNorm(tc.hidden_size, eps=tc.rms_norm_eps)
+        self.norm = RMSNorm(tc.hidden_size, eps=tc.rms_norm_eps)
 
 
 class Qwen3OmniThinkerModel(nn.Module):
@@ -270,8 +256,6 @@ class Qwen3OmniThinkerModel(nn.Module):
         cache_handle.advance_seq_lens(pos_id_ns=mrope_pos_advance)
 
         # Final layer norm
-        hidden_states = run_rms_norm(
-            hidden_states, self.model.norm.weight, eps=self.model.norm.variance_epsilon
-        )
+        hidden_states = self.model.norm(hidden_states)
 
         return hidden_states, layer_0_embed, layer_n_hidden

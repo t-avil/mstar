@@ -599,3 +599,7 @@ class Pi05Model(Model):
         ):
             mod.to_empty(device=device)
             mod.load_state_dict(buckets[name], strict=False)
+        # Fuse separate q/k/v and gate/up Linears into single buffers for
+        # the fast forward path.
+        self.paligemma.consolidate_fused_weights()
+        self.action_expert.consolidate_fused_weights()

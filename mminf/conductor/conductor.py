@@ -21,6 +21,7 @@ from mminf.conductor.request_info import (
     StreamingConnectionState,
 )
 from mminf.distributed.base import ShardingConfig
+from mminf.distributed.communication import GlobalTPConfig, WorkerTPGroups
 from mminf.engine.base import EngineType
 from mminf.engine.kv_store import KVCacheConfig
 from mminf.graph.base import GraphEdge, TensorPointerInfo
@@ -68,6 +69,7 @@ def _worker_process_target(
     all_worker_graph_ids_to_nodes: dict[str, set[str]],
     all_worker_graph_ids_to_dyn_loops: dict[str, set[str]],
     sharding_config: ShardingConfig,
+    tp_groups: WorkerTPGroups,
     hostname: str,
     socket_path_prefix: str,
     enable_nvtx: bool = False,
@@ -99,6 +101,7 @@ def _worker_process_target(
         all_worker_graph_ids_to_nodes=all_worker_graph_ids_to_nodes,
         all_worker_graph_ids_to_dyn_loops=all_worker_graph_ids_to_dyn_loops,
         sharding_config=sharding_config,
+        tp_groups=tp_groups,
         hostname=hostname,
         socket_path_prefix=socket_path_prefix,
         enable_nvtx=enable_nvtx,
@@ -150,11 +153,6 @@ class RequestData:
 
 
 class Conductor:
-    """
-    Initial in-progress conductor implementation. TODO: this is extremely
-    un-optimized, but it provides a sense of the data movement between the
-    conductor and the workers
-    """
     def __init__(
         self,
         model: Model,
@@ -190,7 +188,7 @@ class Conductor:
         self.worker_graphs = {
             worker_graph.worker_graph_id: worker_graph
             for worker_graph in model.get_worker_graphs(model_config_file)
-        }
+        }        
 
         # (1) Set up worker graph TP ranks
         # (2) Assert that streaming consumers don't have graph-walk-specific sharding config
@@ -328,6 +326,11 @@ class Conductor:
                 if group_key in self.worker_tp_group_to_tp_rank.get(i, {}):
                     group._tp_rank = self.worker_tp_group_to_tp_rank[i][group_key]
             self.per_worker_sharding_config[worker_id] = sharding_cfg
+        
+        self.tp_config = GlobalTPConfig(
+            worker_graphs=self.worker_graphs,
+            worker_ids=self.worker_ids,
+        )
 
     def _launch_workers(self):
         """Spawn one process per worker rank using spawn context."""
@@ -345,6 +348,7 @@ class Conductor:
                     "all_worker_graph_ids_to_nodes": self._all_worker_graph_ids_to_nodes,
                     "all_worker_graph_ids_to_dyn_loops": self._all_worker_graph_ids_to_dyn_loops,
                     "sharding_config": self.per_worker_sharding_config[worker_id],
+                    "tp_groups": self.tp_config.per_worker_config[worker_id],
                     "hostname": self.hostname,
                     "socket_path_prefix": self.socket_path_prefix,
                     "model": self.model,

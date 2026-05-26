@@ -1,20 +1,18 @@
 """Fused MoE entry point: plan permute, two GEMMs, activation, reduce.
 
-Designed to be a drop-in replacement for
-:func:`mminf.model.qwen3_omni.components.moe._dispatch_experts_fused`
-for bf16 / fp16 Qwen3-Omni Thinker and Talker routed-expert dispatch.
-The shared expert (Talker only) stays outside and the router stays
-outside -- this function handles only the gate_up GEMM, SwiGLU, down
-GEMM, and weighted sum over top-k.
+Drop-in replacement for
+:func:`mminf.model.components.moe.dispatch_experts_fused` for bf16 /
+fp16 routed-expert dispatch. The shared expert (when present) stays
+outside and the router stays outside — this function handles only the
+gate_up GEMM, SwiGLU, down GEMM, and weighted sum over top-k.
 """
-
 from __future__ import annotations
 
 import torch
 import triton.language as tl
 
-from mminf.model.qwen3_omni.components.fused_moe.align import moe_align_block_size
-from mminf.model.qwen3_omni.components.fused_moe.kernels import (
+from mminf.utils.fused_moe.align import moe_align_block_size
+from mminf.utils.fused_moe.kernels import (
     act_and_mul_triton,
     get_default_config,
     invoke_fused_moe_kernel,

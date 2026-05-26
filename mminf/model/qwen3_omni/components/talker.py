@@ -4,7 +4,7 @@ The Talker is a smaller MoE transformer (1024 hidden, 20 layers) that runs
 in streaming mode alongside the Thinker.  Key differences from the Thinker:
 
 1. Standard 1-D RoPE (no 3-D MRoPE).
-2. All layers are MoE with a shared expert (``Qwen3OmniTalkerSparseMoeBlock``).
+2. All layers are MoE with a shared expert (``SparseMoeBlockWithSharedExpert``).
 3. No ``lm_head`` -- uses ``codec_head`` for codec token prediction.
 4. Has ``codec_embedding`` for layer-0 codec tokens.
 5. Has ``text_projection`` and ``hidden_projection`` MLPs that project
@@ -21,14 +21,10 @@ import torch.nn.functional as F
 from torch import nn
 
 from mminf.engine.kv_cache_engine import BatchedCacheManager
-from mminf.model.qwen3_omni.components.attention import (
-    Qwen3OmniAttention,
-    Qwen3OmniRMSNorm,
-)
-from mminf.model.qwen3_omni.components.moe import Qwen3OmniTalkerSparseMoeBlock
+from mminf.model.components import GatedMLP, RMSNorm, SparseMoeBlockWithSharedExpert
+from mminf.model.qwen3_omni.components.attention import Qwen3OmniAttention
 from mminf.model.qwen3_omni.config import Qwen3OmniModelConfig, TalkerTextConfig
 from mminf.utils.attention import decode_attn_nhd, fused_qk_norm_rope
-from mminf.utils.flashinfer_utils import run_rms_norm
 
 # ---------------------------------------------------------------------------
 # Projection MLP (Thinker -> Talker)
@@ -70,7 +66,7 @@ class Qwen3OmniTalkerLayer(nn.Module):
         hidden_size = config.hidden_size
         rms_norm_eps = config.rms_norm_eps
 
-        self.input_layernorm = Qwen3OmniRMSNorm(hidden_size, rms_norm_eps)
+        self.input_layernorm = RMSNorm(hidden_size, rms_norm_eps)
         self.self_attn = Qwen3OmniAttention(
             hidden_size=hidden_size,
             num_heads=config.num_attention_heads,
@@ -81,16 +77,20 @@ class Qwen3OmniTalkerLayer(nn.Module):
             rms_norm_eps=rms_norm_eps,
             use_mrope=False,  # Standard 1-D RoPE, NOT 3-D MRoPE
         )
-        self.post_attention_layernorm = Qwen3OmniRMSNorm(hidden_size, rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(hidden_size, rms_norm_eps)
 
         # Every Talker layer is MoE (with shared expert + sigmoid gate)
-        self.mlp = Qwen3OmniTalkerSparseMoeBlock(
+        self.mlp = SparseMoeBlockWithSharedExpert(
             hidden_size=hidden_size,
             moe_intermediate_size=config.moe_intermediate_size,
             num_experts=config.num_experts,
             num_experts_per_tok=config.num_experts_per_tok,
             norm_topk_prob=config.norm_topk_prob,
-            shared_expert_intermediate_size=config.shared_expert_intermediate_size,
+            shared_expert=GatedMLP(
+                hidden_size=hidden_size,
+                intermediate_size=config.shared_expert_intermediate_size,
+                activation="silu",
+            ),
         )
 
     def forward(
@@ -100,11 +100,7 @@ class Qwen3OmniTalkerLayer(nn.Module):
     ) -> torch.Tensor:
         # ---------- self-attention with pre-norm ----------
         residual = hidden_states
-        hidden_states = run_rms_norm(
-            hidden_states,
-            self.input_layernorm.weight,
-            eps=self.input_layernorm.variance_epsilon,
-        )
+        hidden_states = self.input_layernorm(hidden_states)
         hidden_states = self.self_attn(
             hidden_states=hidden_states,
             cache_handle=cache_handle,
@@ -113,11 +109,7 @@ class Qwen3OmniTalkerLayer(nn.Module):
 
         # ---------- MoE FFN with pre-norm ----------
         residual = hidden_states
-        hidden_states = run_rms_norm(
-            hidden_states,
-            self.post_attention_layernorm.weight,
-            eps=self.post_attention_layernorm.variance_epsilon,
-        )
+        hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
 
@@ -146,7 +138,7 @@ class Qwen3OmniTalkerLanguageModel(nn.Module):
                 for layer_idx in range(config.num_hidden_layers)
             ]
         )
-        self.norm = Qwen3OmniRMSNorm(config.hidden_size, config.rms_norm_eps)
+        self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
 
         # Codec embedding for layer-0 codec tokens
         self.codec_embedding = nn.Embedding(config.vocab_size, config.hidden_size)
@@ -165,9 +157,7 @@ class Qwen3OmniTalkerLanguageModel(nn.Module):
 
         cache_handle.advance_seq_lens()
 
-        hidden_states = run_rms_norm(
-            hidden_states, self.norm.weight, eps=self.norm.variance_epsilon
-        )
+        hidden_states = self.norm(hidden_states)
         return hidden_states
 
 
@@ -256,9 +246,7 @@ class Qwen3OmniCodePredictorLayer(nn.Module):
                  num_heads: int, num_kv_heads: int, head_dim: int,
                  rms_norm_eps: float, rope_theta: float):
         super().__init__()
-        from mminf.model.qwen3_omni.components.moe import Qwen3OmniMLP
-
-        self.input_layernorm = Qwen3OmniRMSNorm(hidden_size, eps=rms_norm_eps)
+        self.input_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
         self.self_attn = Qwen3OmniAttention(
             hidden_size=hidden_size,
             num_heads=num_heads,
@@ -268,25 +256,22 @@ class Qwen3OmniCodePredictorLayer(nn.Module):
             rms_norm_eps=rms_norm_eps,
             use_mrope=False,
         )
-        self.post_attention_layernorm = Qwen3OmniRMSNorm(hidden_size, eps=rms_norm_eps)
-        self.mlp = Qwen3OmniMLP(hidden_size=hidden_size, intermediate_size=intermediate_size)
+        self.post_attention_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
+        self.mlp = GatedMLP(
+            hidden_size=hidden_size, intermediate_size=intermediate_size,
+            activation="silu",
+        )
 
     def forward(self, hidden_states, cache_handle):
         residual = hidden_states
-        hidden_states = run_rms_norm(
-            hidden_states, self.input_layernorm.weight,
-            eps=self.input_layernorm.variance_epsilon,
-        )
+        hidden_states = self.input_layernorm(hidden_states)
         hidden_states = self.self_attn(
             hidden_states=hidden_states, cache_handle=cache_handle,
         )
         hidden_states = residual + hidden_states
 
         residual = hidden_states
-        hidden_states = run_rms_norm(
-            hidden_states, self.post_attention_layernorm.weight,
-            eps=self.post_attention_layernorm.variance_epsilon,
-        )
+        hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
         return hidden_states
@@ -326,7 +311,7 @@ class Qwen3OmniCodePredictorInnerModel(nn.Module):
             )
             for _ in range(cp.num_hidden_layers)
         ])
-        self.norm = Qwen3OmniRMSNorm(cp.hidden_size, eps=cp.rms_norm_eps)
+        self.norm = RMSNorm(cp.hidden_size, eps=cp.rms_norm_eps)
 
         # Per-layer codec embeddings for residual layers 1..(G-1)
         # codec_embedding.{0} embeds layer-1 codes, ..., codec_embedding.{G-2} embeds layer-(G-1)
@@ -346,10 +331,7 @@ class Qwen3OmniCodePredictorInnerModel(nn.Module):
                 hidden_states,
                 cache_handle
             )
-        hidden_states = run_rms_norm(
-            hidden_states, self.norm.weight,
-            eps=self.norm.variance_epsilon,
-        )
+        hidden_states = self.norm(hidden_states)
         cache_handle.advance_seq_len()
         return hidden_states
 
@@ -513,13 +495,7 @@ class Qwen3OmniCodePredictor(nn.Module):
             attn = layer.self_attn
             residual = hidden_states
 
-            # Input RMSNorm -- flashinfer's rmsnorm only accepts 2D input.
-            hs_flat = run_rms_norm(
-                hidden_states.view(-1, hidden_size),
-                layer.input_layernorm.weight,
-                eps=layer.input_layernorm.variance_epsilon,
-            )
-            hidden_states = hs_flat.view(bs, seq_len, hidden_size)
+            hidden_states = layer.input_layernorm(hidden_states)
 
             total_tokens = bs * seq_len
             qkv = F.linear(hidden_states, layer.qkv_proj_weight)
@@ -564,20 +540,10 @@ class Qwen3OmniCodePredictor(nn.Module):
 
             # Post-attention RMSNorm + dense MLP.
             residual = hidden_states
-            hs_flat = run_rms_norm(
-                hidden_states.view(-1, hidden_size),
-                layer.post_attention_layernorm.weight,
-                eps=layer.post_attention_layernorm.variance_epsilon,
-            )
-            hidden_states = hs_flat.view(bs, seq_len, hidden_size)
+            hidden_states = layer.post_attention_layernorm(hidden_states)
             hidden_states = layer.mlp(hidden_states)
             hidden_states = residual + hidden_states
 
         # Final norm.
-        hs_flat = run_rms_norm(
-            hidden_states.view(-1, hidden_size),
-            self.model.norm.weight,
-            eps=self.model.norm.variance_epsilon,
-        )
-        hidden_states = hs_flat.view(bs, seq_len, hidden_size)
+        hidden_states = self.model.norm(hidden_states)
         return hidden_states

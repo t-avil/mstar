@@ -1,0 +1,159 @@
+from dataclasses import dataclass, field
+
+import torch
+import torch.distributed as dist
+
+from mminf.distributed.base import ShardingConfig
+from mminf.model.base import WorkerGraph
+
+
+class TPCommGroup:
+    def __init__(
+        self,
+        my_global_rank: int,
+        my_group_rank: int,
+        group_members: list[int]
+    ):
+        self.global_rank = my_global_rank
+        self.rank = my_group_rank
+        self.group_members = group_members
+        self.world_size = len(group_members)
+        self.device_group = None
+        self.initialized = False
+    
+    def init_process_group(self):
+        if self.initialized:
+            return
+        self.device_group = dist.new_group(ranks=self.group_members)
+        self.initialized = True
+    
+    def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
+        if dim < 0:
+            # Convert negative dim to positive
+            dim += input_.dim()
+        input_size = input_.size()
+        output_size = (input_size[0] * self.world_size,) + input_size[1:]
+        # Allocate output tensor
+        output_tensor = torch.empty(
+            output_size, dtype=input_.dtype, device=input_.device
+        )
+        # All-gather
+        dist.all_gather_into_tensor(output_tensor, input_, group=self.device_group)
+        # Reshape
+        output_tensor = output_tensor.reshape((self.world_size,) + input_size)
+        output_tensor = output_tensor.movedim(0, dim)
+        output_tensor = output_tensor.reshape(
+            input_size[:dim]
+            + (self.world_size * input_size[dim],)
+            + input_size[dim + 1 :]
+        )
+        return output_tensor
+    
+    def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
+        dist.all_reduce(input_, group=self.device_group)
+        return input_
+    
+    def reduce_scatter(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
+        world_size = self.world_size
+        # Bypass the function if we are using only 1 GPU.
+        if world_size == 1:
+            return input_
+        assert -input_.dim() <= dim < input_.dim(), (
+            f"Invalid dim ({dim}) for input tensor with shape {input_.size()}"
+        )
+
+        if dim < 0:
+            # Convert negative dim to positive.
+            dim += input_.dim()
+
+        # Note: This will produce an incorrect answer if we don't make
+        # the input_tensor contiguous. Possible bug in reduce_scatter_tensor?
+        input_tensor = input_.movedim(0, dim).contiguous()
+
+        assert input_tensor.shape[0] % world_size == 0
+        chunk_size = input_tensor.shape[0] // world_size
+        output_shape = (chunk_size,) + input_tensor.shape[1:]
+
+        output_tensor = torch.empty(
+            output_shape, dtype=input_tensor.dtype, device=input_tensor.device
+        )
+
+        # Perform reduce-scatter operation
+        dist.reduce_scatter_tensor(
+            output_tensor, input_tensor, group=self.device_group
+        )
+
+        # Reshape before returning
+        return output_tensor.movedim(0, dim).contiguous()
+    
+    def broadcast(self, tensor: torch.Tensor, src: int = 0) -> torch.Tensor:
+        """Broadcast a tensor from source rank to all ranks."""
+        if self.world_size == 1:
+            return tensor
+        dist.broadcast(tensor, self.group_members[src], self.device_group)
+        return tensor
+
+
+@dataclass
+class WorkerTPGroups:
+    num_workers: int
+    global_rank: int
+    node_to_group: dict[str, TPCommGroup] = field(default_factory=dict)
+
+    def add(self, node: str, comm_group: TPCommGroup):
+        # disallow colocation of multiple comm groups on the same node
+        assert node not in self.node_to_group, \
+            f"Node {node} already has a comm group assigned for worker {self.global_rank}"
+        self.node_to_group[node] = comm_group
+    
+    def init_dist(
+        self, init_method="tcp://127.0.0.1:29500"
+    ):
+        torch.cuda.set_device(self.global_rank)
+        dist.init_process_group(
+            backend="nccl",
+            init_method=init_method,  # rendezvous point
+            world_size=self.num_workers,
+            rank=self.global_rank,
+        )
+
+        for comm_group in self.node_to_group.values():
+            # this is in a stable order across workers (post-python 3.7, dictionaries
+            # maintain insertion order), and also no-ops if a group has already been
+            # initialized to avoid double-initialization
+            comm_group.init_process_group()
+    
+    def get_tp_config_for_node(self, node: str) -> TPCommGroup:
+        return self.node_to_group[node]
+
+
+class GlobalTPConfig:
+    def __init__(
+        self, worker_graphs: dict[str, WorkerGraph],
+        worker_ids: list[str]
+    ):
+        self.num_workers = len(worker_ids)
+        self.per_worker_config: dict[str, WorkerTPGroups] = {
+            wid: WorkerTPGroups(
+                global_rank=i, num_workers=self.num_workers
+            ) for i, wid in enumerate(worker_ids)
+        }
+
+        # (global rank, (group ranks...)) -> comm group
+        self.comm_groups: dict[tuple[int, tuple], TPCommGroup] = {}
+
+        for wg in worker_graphs.values():
+            for rank_group in wg._tp_ranks:
+                rank_group_tuple = tuple(rank_group)
+                for i, rank in enumerate(rank_group):
+                    key = (rank, rank_group_tuple)
+                    if key not in self.comm_groups:
+                        self.comm_groups[key] = TPCommGroup(
+                            my_global_rank=rank,
+                            my_group_rank=i,
+                            group_members=rank_group
+                        )
+                    for node in wg.section.get_nodes().keys():
+                        self.per_worker_config[worker_ids[rank]].add(
+                            node,  self.comm_groups[key]
+                        )
