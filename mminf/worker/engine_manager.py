@@ -12,7 +12,6 @@ from mminf.engine.stateless_engine import (
     StatelessEngineConfig,
     make_audio_codec_config,
     make_enc_dec_config,
-    make_flow_config,
 )
 from mminf.model.base import Model
 
@@ -38,7 +37,6 @@ def _make_stateless_factory(
 # AR (stateful, paged KV cache) and the stateless flavors lives here.
 ENGINE_TYPE_FACTORIES: dict[str, Callable[[torch.dtype | None, bool], BaseEngine]] = {
     "kv_cache": _make_kv_cache,
-    "flow": _make_stateless_factory(make_flow_config),
     "enc_dec": _make_stateless_factory(make_enc_dec_config),
     "audio_codec": _make_stateless_factory(make_audio_codec_config),
 }

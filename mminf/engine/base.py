@@ -12,7 +12,6 @@ from mminf.engine.kv_store import KVCacheConfig, StoreWritePolicy
 
 class EngineType(Enum):
     KV_CACHE = "kv_cache"
-    FLOW = "flow"
     ENC_DEC = "enc_dec"
     AUDIO_CODEC = "audio_codec"
 

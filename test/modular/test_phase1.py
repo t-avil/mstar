@@ -22,7 +22,6 @@ from mminf.engine.kv_store import PageAllocator
 from mminf.engine.stateless_engine import (
     StatelessEngine,
     make_enc_dec_config,
-    make_flow_config,
 )
 from mminf.graph.base import GraphEdge
 from mminf.graph.request_queues import PerRequestNodeQueues
@@ -134,17 +133,6 @@ class TestEngines:
         # Should not raise
         engine.remove_request("nonexistent")
 
-    def test_flow_engine_type(self):
-        engine = StatelessEngine(make_flow_config(torch.bfloat16))
-        assert engine.engine_type() == EngineType.FLOW
-
-    def test_flow_engine_dummy_execute(self):
-        engine = StatelessEngine(make_flow_config(torch.bfloat16))
-        batch = self._make_batch("flow", ["req1"])
-        output = engine.execute_batch(batch)
-        assert isinstance(output, NodeOutput)
-        assert "req1" in output.per_request_output_tensors
-
     def test_enc_dec_engine_type(self):
         engine = StatelessEngine(make_enc_dec_config(torch.bfloat16))
         assert engine.engine_type() == EngineType.ENC_DEC
@@ -166,7 +154,6 @@ class TestEngineManager:
     def test_from_config_dummy(self):
         configs = [
             {"engine_type": "ar", "node_names": ["LLM"], "model_config": {}},
-            {"engine_type": "flow", "node_names": ["flow"], "model_config": {}},
             {
                 "engine_type": "enc_dec",
                 "node_names": ["text_emb", "image_emb", "VAE_dec"],
@@ -175,7 +162,6 @@ class TestEngineManager:
         ]
         mgr = EngineManager.build(configs, device="cpu")
         assert mgr.get_engine("LLM").engine_type() == EngineType.KV_CACHE
-        assert mgr.get_engine("flow").engine_type() == EngineType.FLOW
         assert mgr.get_engine("text_emb").engine_type() == EngineType.ENC_DEC
         assert mgr.get_engine("VAE_dec").engine_type() == EngineType.ENC_DEC
         # text_emb and image_emb share the same engine instance

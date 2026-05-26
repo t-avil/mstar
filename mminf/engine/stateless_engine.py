@@ -80,17 +80,6 @@ def make_enc_dec_config(autocast_dtype: torch.dtype | None) -> StatelessEngineCo
     )
 
 
-def make_flow_config(autocast_dtype: torch.dtype | None) -> StatelessEngineConfig:
-    return StatelessEngineConfig(
-        engine_type=EngineType.FLOW,
-        autocast_dtype=autocast_dtype,
-        cuda_graph_capable=True,
-        apply_torch_compile=False,
-        enable_piecewise_runner=False,
-        name="flow",
-    )
-
-
 def make_audio_codec_config(_autocast_dtype: torch.dtype | None = None) -> StatelessEngineConfig:
     return StatelessEngineConfig(
         engine_type=EngineType.AUDIO_CODEC,
