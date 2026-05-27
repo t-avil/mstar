@@ -77,6 +77,12 @@ class StopLoops(MessageBody):
     partition_name: str
     loop_stop_times: dict[str, NestedLoopIndices] = field(default_factory=dict)
 
+# TODO (SHARDING): placeholder, not yet hooked up
+@dataclass
+class ScheduleTPNode(MessageBody):
+    node_name: str
+    request_ids: list[str]
+
 @dataclass
 class WorkerMessage:
     message_type: WorkerMessageType

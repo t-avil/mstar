@@ -109,6 +109,8 @@ class KVCacheEngine(BaseEngine):
             head_dim = cfg.head_dim
 
             nodes = set(cfg.nodes or submodules.keys()) & set(submodules.keys())
+            if not nodes:
+                continue  # skip KV cache configs that don't apply to any loaded submodule
             world_sizes = set([
                 tp_groups.get_tp_config_for_node(node).world_size for node in nodes
             ])

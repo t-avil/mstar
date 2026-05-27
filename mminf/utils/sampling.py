@@ -195,6 +195,14 @@ class SamplingConfig:
     top_k: int = 0
     top_p: float = 1
     repetition_penalty: float = 1
+    _seed: int = 0 # set by the conductor
+
+    def set_seed(self, seed: int):
+        self._seed = seed
+    
+    @property
+    def seed(self):
+        return self._seed
 
 
 @dataclass
@@ -261,6 +269,9 @@ class Sampler(BaseSampler):
         top_k = torch.tensor([c.top_k for c in configs], device=logits.device, dtype=torch.int32)
         top_p = torch.tensor([c.top_p for c in configs], device=logits.device)
         r_pen = torch.tensor([c.repetition_penalty for c in configs], device=logits.device)
+        seed = torch.tensor([c.seed for c in configs], device=logits.device, dtype=torch.long)
+        rand_offset = torch.zeros_like(seed)
+    
         any_rep_pen = any(c.repetition_penalty != 1.0 for c in configs)
         any_greedy = any(c.temperature == 0 for c in configs)
         any_top_k_zero = any(c.top_k == 0 for c in configs)
@@ -289,6 +300,8 @@ class Sampler(BaseSampler):
             any_greedy=any_greedy,
             any_top_k_zero=any_top_k_zero,
             all_top_k_zero=all_top_k_zero,
+            seed=seed,
+            rand_offset=rand_offset,
             consume_autotune_sync_budget=self._consume_autotune_sync_budget,
         )
 
@@ -372,6 +385,8 @@ def sample_tokens(
     any_greedy: bool | None = None,
     any_top_k_zero: bool | None = None,
     all_top_k_zero: bool | None = None,
+    seed: torch.Tensor | None = None,
+    rand_offset: torch.Tensor | None = None,
     consume_autotune_sync_budget: Callable[[], None] | None = None,
 ) -> torch.Tensor:
     """Sample tokens from logits with temperature, top-k, top-p, and repetition penalty.
@@ -442,35 +457,12 @@ def sample_tokens(
     )
     if consume_autotune_sync_budget is not None:
         consume_autotune_sync_budget()
-    result = flashinfer.sampling.top_k_top_p_sampling_from_probs(probs, top_k, top_p)
+    result = flashinfer.sampling.top_k_top_p_sampling_from_probs(
+        probs, top_k, top_p,
+        deterministic=True,
+        seed=seed, offset=rand_offset
+    )
     return result[0] if isinstance(result, tuple) else result
-
-    # # Slow path: apply rep-penalty the old way (short-circuit on mask=None to
-    # # avoid the `(rep != 1.0).any()` CPU sync when penalty is inactive).
-    # if seen_token_mask is not None and (repetition_penalty != 1.0).any():
-    #     logits = _apply_repetition_penalty(logits, seen_token_mask, repetition_penalty)
-
-    # if run_greedy:
-    #     greedy_tokens = torch.argmax(logits, dim=-1)
-    #     greedy_mask = (temperature == 0).squeeze(-1)
-    #     # For greedy requests, set temperature=1 to avoid division by zero
-    #     # (their results are masked out by torch.where at the end).
-    #     safe_temperature = temperature.masked_fill(temperature == 0, 1.0).unsqueeze(-1)
-    # else:
-    #     safe_temperature = temperature.unsqueeze(-1)
-
-    # scaled_logits = logits / safe_temperature
-
-    # safe_top_k = top_k.masked_fill(top_k == 0, vocab_size) if run_top_k_zero_fix else top_k
-
-    # result = flashinfer.sampling.top_k_top_p_sampling_from_logits(
-    #     scaled_logits, safe_top_k, top_p, filter_apply_order="joint",
-    # )
-    # sampled_tokens = result[0] if isinstance(result, tuple) else result
-
-    # if run_greedy:
-    #     return torch.where(greedy_mask, greedy_tokens, sampled_tokens)
-    # return sampled_tokens
 
 
 def _to_tensor(
@@ -608,6 +600,7 @@ class SamplerBuffers:
     _master_temperature: torch.Tensor = field(default=None, repr=False)
     _master_top_k: torch.Tensor = field(default=None, repr=False)
     _master_top_p: torch.Tensor = field(default=None, repr=False)
+    _master_seed: torch.Tensor = field(default=None, repr=False)
     _master_capacity: int = field(default=0, repr=False)
     # Per-step slot-index staging. ``_slot_idx_cpu`` is pinned so the H2D
     # copy can be issued non-blocking; ``_slot_idx_gpu`` is the device-side
@@ -621,6 +614,7 @@ class SamplerBuffers:
     _row_temp_cpu: torch.Tensor = field(default=None, repr=False)
     _row_top_k_cpu: torch.Tensor = field(default=None, repr=False)
     _row_top_p_cpu: torch.Tensor = field(default=None, repr=False)
+    _row_seed_cpu: torch.Tensor = field(default=None, repr=False)
     # Slot bookkeeping (CPU-only).
     _rid_to_slot: dict[str, int] = field(default_factory=dict, repr=False)
     _free_slots: list[int] = field(default_factory=list, repr=False)
@@ -648,6 +642,7 @@ class SamplerBuffers:
         master_temperature = torch.ones(max_batch_size, dtype=torch.float32, device=device)
         master_top_k = torch.zeros(max_batch_size, dtype=torch.int32, device=device)
         master_top_p = torch.ones(max_batch_size, dtype=torch.float32, device=device)
+        master_seed = torch.zeros(max_batch_size, dtype=torch.long, device=device)
 
         # Pinned CPU staging — small, allocated once, reused every step.
         pinned = torch.cuda.is_available() and device.type == "cuda"
@@ -656,6 +651,7 @@ class SamplerBuffers:
         row_temp_cpu = torch.zeros(1, dtype=torch.float32, pin_memory=pinned)
         row_top_k_cpu = torch.zeros(1, dtype=torch.int32, pin_memory=pinned)
         row_top_p_cpu = torch.zeros(1, dtype=torch.float32, pin_memory=pinned)
+        row_seed_cpu = torch.zeros(1, dtype=torch.long, pin_memory=pinned)
 
         return cls(
             max_batch_size=max_batch_size,
@@ -667,12 +663,14 @@ class SamplerBuffers:
             _master_temperature=master_temperature,
             _master_top_k=master_top_k,
             _master_top_p=master_top_p,
+            _master_seed=master_seed,
             _master_capacity=max_batch_size,
             _slot_idx_cpu=slot_idx_cpu,
             _slot_idx_gpu=slot_idx_gpu,
             _row_temp_cpu=row_temp_cpu,
             _row_top_k_cpu=row_top_k_cpu,
             _row_top_p_cpu=row_top_p_cpu,
+            _row_seed_cpu=row_seed_cpu,
             _free_slots=list(range(max_batch_size)),
         )
 
@@ -697,6 +695,7 @@ class SamplerBuffers:
         runs on register or actual config change (change-detection lives in
         ``update_request_config``).
         """
+        s = cfg.seed
         if cfg.temperature > 0:
             t = float(cfg.temperature)
             k = int(cfg.top_k)
@@ -709,9 +708,11 @@ class SamplerBuffers:
         self._row_temp_cpu[0] = t
         self._row_top_k_cpu[0] = k
         self._row_top_p_cpu[0] = p
+        self._row_seed_cpu[0] = s
         self._master_temperature[slot:slot + 1].copy_(self._row_temp_cpu, non_blocking=True)
         self._master_top_k[slot:slot + 1].copy_(self._row_top_k_cpu, non_blocking=True)
         self._master_top_p[slot:slot + 1].copy_(self._row_top_p_cpu, non_blocking=True)
+        self._row_seed_cpu[slot:slot + 1].copy_(self._row_seed_cpu, non_blocking=True)
 
     def _grow_master(self, new_capacity: int) -> None:
         """Double-and-copy the master buffers up to at least ``new_capacity``.
@@ -725,12 +726,15 @@ class SamplerBuffers:
         new_temp = torch.ones(new_capacity, dtype=torch.float32, device=device)
         new_top_k = torch.zeros(new_capacity, dtype=torch.int32, device=device)
         new_top_p = torch.ones(new_capacity, dtype=torch.float32, device=device)
+        new_seed = torch.zeros(new_capacity, dtype=torch.long, device=device)
         new_temp[: self._master_capacity].copy_(self._master_temperature)
         new_top_k[: self._master_capacity].copy_(self._master_top_k)
         new_top_p[: self._master_capacity].copy_(self._master_top_p)
+        new_seed[: self._master_capacity].copy_(self._master_seed)
         self._master_temperature = new_temp
         self._master_top_k = new_top_k
         self._master_top_p = new_top_p
+        self._master_seed = new_seed
         self._free_slots.extend(range(self._master_capacity, new_capacity))
         self._master_capacity = new_capacity
 
@@ -824,12 +828,11 @@ class SamplerBuffers:
         torch.index_select(
             self._master_top_p, 0, idx_view, out=self.top_p_buf[:padded_bs],
         )
-
-        # Fresh seeds + zeroed offsets, both GPU-side (no host sync).
-        torch.randint(
-            0, 2**32, (padded_bs,), dtype=torch.long,
-            device=self.seed_buf.device, out=self.seed_buf[:padded_bs],
+        torch.index_select(
+            self._master_seed, 0, idx_view, out=self.seed_buf[:padded_bs],
         )
+
+        # zeroed offsets
         self.offset_buf[:padded_bs].zero_()
 
         slices = self.slice_for_bs(padded_bs)

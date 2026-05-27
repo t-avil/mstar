@@ -604,6 +604,8 @@ class Conductor:
             sampling_config=self._get_sampling_configs(model_kwargs),
             sharding_config=self._build_request_sharding_config(worker_graph_to_workers),
         )
+        for cfg in request_data.sampling_config.values():
+            cfg.set_seed(seed)
         self.requests[body.request_id] = request_data
 
         # Collect all worker_graph_ids per worker for the NewRequest
@@ -865,6 +867,8 @@ class Conductor:
         pstate.wg_rank_completions = {}
         pstate.fwd_pass_number += 1
         pstate.random_seed += 1
+        for cfg in request_data.sampling_config.values():
+            cfg.set_seed(pstate.random_seed)
 
         self._set_partition_worker_graph_ids(
             request_id, partition_name, fwd_args.full_metadata.graph_walk,
