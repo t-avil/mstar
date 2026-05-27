@@ -15,15 +15,17 @@ from __future__ import annotations
 import torch
 from torch import nn
 
+from mminf.distributed.communication import TPCommGroup
 from mminf.engine.kv_cache_engine import BatchedCacheManager
 from mminf.model.components import DecoderLayer, RMSNorm
 from mminf.model.components.distributed import ParallelAttention, ParallelGatedMLP
 from mminf.model.orpheus.config import OrpheusModelConfig
 
 
-def _build_decoder_layer(config: OrpheusModelConfig) -> DecoderLayer:
+def _build_decoder_layer(config: OrpheusModelConfig, comm_group: TPCommGroup | None = None) -> DecoderLayer:
     return DecoderLayer(
         self_attn=ParallelAttention(
+            comm_group=comm_group,
             hidden_size=config.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
@@ -35,6 +37,7 @@ def _build_decoder_layer(config: OrpheusModelConfig) -> DecoderLayer:
             rope_old_context_len=config.rope_scaling["original_max_position_embeddings"],
         ),
         mlp=ParallelGatedMLP(
+            comm_group=comm_group,
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
             activation="silu",
@@ -45,13 +48,13 @@ def _build_decoder_layer(config: OrpheusModelConfig) -> DecoderLayer:
 
 
 class OrpheusLanguageModel(nn.Module):
-    def __init__(self, config: OrpheusModelConfig):
+    def __init__(self, config: OrpheusModelConfig, comm_group: TPCommGroup | None = None):
         super().__init__()
         self.embed_tokens = nn.Embedding(
             config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id,
         )
         self.layers = nn.ModuleList(
-            [_build_decoder_layer(config) for _ in range(config.num_hidden_layers)]
+            [_build_decoder_layer(config, comm_group=comm_group) for _ in range(config.num_hidden_layers)]
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -70,9 +73,9 @@ class OrpheusLanguageModel(nn.Module):
 
 
 class OrpheusForCausalLM(nn.Module):
-    def __init__(self, config: OrpheusModelConfig):
+    def __init__(self, config: OrpheusModelConfig, comm_group: TPCommGroup | None = None):
         super().__init__()
-        self.model = OrpheusLanguageModel(config)
+        self.model = OrpheusLanguageModel(config, comm_group=comm_group)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
     def forward(

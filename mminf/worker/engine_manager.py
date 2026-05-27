@@ -93,8 +93,8 @@ class EngineManager:
         node_submodules: dict[str, torch.nn.Module | None] = {}
         if model is not None:
             for name in node_names:
-                # TODO (SHARDING): hook up TP rank and world size into model loading
-                node_submodules[name] = model.get_submodule(name, device)
+                node_tp_group = tp_groups.get_tp_config_for_node(name)
+                node_submodules[name] = model.get_submodule(name, device, tp_group=node_tp_group)
 
         # Group nodes by the factory key. STATELESS nodes split further by
         # the flavor declared on the submodule; other engine types group

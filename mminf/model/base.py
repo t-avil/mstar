@@ -265,6 +265,8 @@ class Model(ABC):
     def get_sharding_config(self, config_path: str) -> ShardingConfig:
         with open(config_path, "r") as f:
             config = yaml.safe_load(f)
+        
+        sharding_config = self.get_default_sharding_config()
 
         # Derive sharding groups from node_groups with tp_size > 1. The
         # node_groups section drives both worker assignment and TP grouping;
@@ -273,13 +275,21 @@ class Model(ABC):
         for ng in config.get("node_groups", []):
             if ng.get("tp_size", 1) <= 1:
                 continue
+            if any(
+                node not in sharding_config.tp_enabled_nodes
+                for node in ng["node_names"]
+            ):
+                raise ValueError(
+                    f"Node group with tp_size {ng['tp_size']} contains "
+                    f"nodes not in tp_enabled_nodes {sharding_config.tp_enabled_nodes}: "
+                    f"{ng['node_names']}"
+                )
             groups.append(ShardingGroup(
                 nodes=set(ng["node_names"]),
                 tp_size=ng["tp_size"],
                 graph_walks=set(ng["graph_walks"]) if "graph_walks" in ng else None,
             ))
 
-        sharding_config = self.get_default_sharding_config()
         sharding_config.groups = groups
         sharding_config_yaml = config.get("sharding_config")
         if sharding_config_yaml is not None and "shard_dim" in sharding_config_yaml:
@@ -288,7 +298,7 @@ class Model(ABC):
 
     def get_default_sharding_config(self) -> ShardingConfig:
         return ShardingConfig(
-            groups=[], shard_dim={}
+            groups=[], tp_enabled_nodes=[], shard_dim={}
         ) # default: no sharding
 
     @abstractmethod
@@ -403,12 +413,14 @@ class Model(ABC):
         return output.cpu().numpy().tobytes()
 
     @abstractmethod
-    def get_submodule(self, node_name: str, device="cpu") -> torch.nn.Module | None:
-        """
-        Return the nn.Module for this node, or None for dummy mode.
-        The engine calls this (via EngineManager) to get the submodule it
-        will execute directly with engine-specific wrapping (KV cache,
-        FlashInfer, etc.).
+    def get_submodule(self, node_name: str, device="cpu", tp_group=None) -> torch.nn.Module | None:
+        """Return the nn.Module for this node, or None for dummy mode.
+
+        ``tp_group`` is the :class:`TPCommGroup` for this node on the
+        calling worker (``None`` when TP is not active for this node).
+        Models that support tensor parallelism should forward it to
+        parallel-linear constructors so weight shapes are partitioned at
+        init time and the weight loaders shard correctly.
         """
         pass
 

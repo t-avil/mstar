@@ -32,6 +32,7 @@ class WorkerMessageType(Enum):
     INPUT_SIGNALS = "input_signals"
     UNPERSIST_TENSORS = "unpersist"
     TENSOR_RECEIVED = "tensor_received"
+    SCHEDULE_TP = "schedule_tp"
     STOP_LOOPS = "stop_loops"
 
 
@@ -77,10 +78,11 @@ class StopLoops(MessageBody):
     partition_name: str
     loop_stop_times: dict[str, NestedLoopIndices] = field(default_factory=dict)
 
-# TODO (SHARDING): placeholder, not yet hooked up
+
 @dataclass
 class ScheduleTPNode(MessageBody):
     node_name: str
+    graph_walk: str
     request_ids: list[str]
 
 @dataclass

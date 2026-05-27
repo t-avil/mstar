@@ -159,11 +159,12 @@ class CudaGraphRunner:
         sampler: Sampler,
         buffer_manager: WorkspaceBufferManager,
         device: torch.device,
-        autocast_dtype: torch.dtype
+        autocast_dtype: torch.dtype,
+        tp_world_size: int = 1,
     ):
         self.submodule_name = submodule_name
         self.submodule = submodule
-        self.capture_configs: list[CudaGraphConfig] = submodule.get_cuda_graph_configs(device)
+        self.capture_configs: list[CudaGraphConfig] = submodule.get_cuda_graph_configs(device, tp_world_size)
         self.kv_cache_config = kv_cache_config
         self.alloc_manager = alloc_manager
         self.sampler = sampler
@@ -1848,7 +1849,7 @@ class StatelessCudaGraphRunner:
             have batch-dim first, same size as the input batch dim, so the
             runner can slice ``[:actual_bs]`` and index per request.
 
-        get_cuda_graph_configs(device) -> list[CudaGraphConfig]
+        get_cuda_graph_configs(device, tp_world_size=1) -> list[CudaGraphConfig]
             Each config's ``single_request_inputs`` is a single per-request
             ARNodeInputs (same shape as real runtime inputs). The runner
             clones it per capture batch slot, then feeds the resulting list
@@ -1877,12 +1878,13 @@ class StatelessCudaGraphRunner:
         submodule_name: str,
         submodule: nn.Module,
         device: torch.device,
+        tp_world_size: int = 1,
     ):
         self.submodule_name = submodule_name
         self.submodule = submodule
         self.device = device
         self.capture_configs: list[CudaGraphConfig] = (
-            submodule.get_cuda_graph_configs(device) if submodule is not None else []
+            submodule.get_cuda_graph_configs(device, tp_world_size) if submodule is not None else []
         )
 
         # Keyed by (graph_walk, padded_bs)

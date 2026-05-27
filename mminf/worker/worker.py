@@ -32,6 +32,7 @@ from mminf.utils.ipc_format import (
     InputSignals,
     NewRequest,
     RemoveRequest,
+    ScheduleTPNode,
     StopLoops,
     TensorReceived,
     UnpersistTensors,
@@ -211,6 +212,16 @@ class Worker:
         self.tp_rank_zero_nodes = set([
             node for node in node_names if self.tp_groups.get_tp_config_for_node(node).rank == 0
         ])
+
+        # v1: disallow multiple TP nodes in the same worker
+        self.tp_nodes = set([
+            node for node in node_names if self.tp_groups.get_tp_config_for_node(node).world_size > 1
+        ])
+        if len(self.tp_nodes) > 1:
+            raise NotImplementedError(
+                f"Multiple TP nodes {self.tp_nodes} found in worker {worker_id}; "
+                "current implementation requires at most one TP node per worker."
+            )
         self.scheduler = MicroScheduler(
             self.engine_manager,
             tp_rank_zero_nodes=self.tp_rank_zero_nodes
@@ -565,6 +576,8 @@ class Worker:
                 self._unpersist_tensors(message.body)
             elif message.message_type == WorkerMessageType.STOP_LOOPS:
                 self._stop_loops(message.body)
+            elif message.message_type == WorkerMessageType.SCHEDULE_TP:
+                self.scheduler.register_tp_follow(message.body)
 
     def _process_messages(self) -> None:
         self._process_message_list(self.communicator.get_all_new_messages())
@@ -805,6 +818,32 @@ class Worker:
             per_request_input_tensors=per_request_inputs,
             per_request_info=per_request_info
         )
+    
+    def maybe_send_zmq_to_tp_followers(
+        self, node_batch: NodeBatch
+    ):
+        if node_batch.node_name not in self.tp_nodes or \
+                node_batch.node_name not in self.tp_rank_zero_nodes:
+            return
+        # this worker is only a part of one TP group for this node,
+        # so, we can just look at the sharding_config for the first
+        # request to get the relevant workers
+        sample_rid = node_batch.request_ids[0]
+        cfg = self.worker_graphs_manager.per_request_info[sample_rid]
+        workers = cfg.sharding_config.get_sharding_group(
+            node_batch.node_name, node_batch.graph_walk
+        )._workers[1:]
+        for worker in workers:
+            self.communicator.send(
+                worker, msg=WorkerMessage(
+                    message_type=WorkerMessageType.SCHEDULE_TP,
+                    body=ScheduleTPNode(
+                        node_name=node_batch.node_name,
+                        graph_walk=node_batch.graph_walk,
+                        request_ids=node_batch.request_ids
+                    )
+                )
+            )
 
     # ------------------------------------------------------------------
     # Output handling
@@ -1173,7 +1212,8 @@ class Worker:
     def _can_speculate(self, batch: ScheduledBatch) -> bool:
         if any(
             not node.enable_async_scheduling for node in batch.node_objects.values()
-        ):
+        ) or batch.node_name in self.tp_nodes:
+            # disable speculation for TP nodes for now
             return False
         return True
 
@@ -1233,6 +1273,10 @@ class Worker:
             sample_node.outputs, sample_node.name
         )
         wgio.clear_speculative_inputs()
+
+        ready_for_spec = [
+            info for info in ready_for_spec if info.node_name not in self.tp_nodes
+        ] # disallow spec scheduling of TP nodes for now
 
         if not ready_for_spec:
             return # no nodes can be speculated
@@ -1954,6 +1998,9 @@ class Worker:
                                 is_same_node=False,
                                 is_yield_away=True
                             )
+                            
+                            # send messages to follower ranks if relevant
+                            self.maybe_send_zmq_to_tp_followers(node_batch)
                     if speculation is not None:
                         # Reserve the double-buffer slot for batch_(N+1) NOW
                         # so both pre-plan and replay (queued below) target
@@ -2184,6 +2231,9 @@ class Worker:
                 # from later iters.
                 fallthrough_engine = self.engine_manager.get_engine(batch.node_name)
                 fallthrough_engine.reserve_replay_slot(node_batch)
+
+                # send messages to follower ranks if relevant
+                self.maybe_send_zmq_to_tp_followers(node_batch)
 
                 # Attach a fresh advance_event so the next iter's
                 # plan_executor (if it speculates) can wait on this batch's

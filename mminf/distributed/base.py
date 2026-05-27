@@ -55,6 +55,7 @@ class ShardDestination:
 @dataclass
 class ShardingConfig:
     groups: list[ShardingGroup]
+    tp_enabled_nodes: set[str]
     shard_dim: dict[str, int | None]  # signal name to shard dim (None/absent for replicated)
 
     def clone_empty(self):
@@ -71,6 +72,7 @@ class ShardingConfig:
     def __post_init__(self):
         self.group_mapping: dict[NodeAndGraphWalk, ShardingGroup] = {}
         self.node_to_worker: dict[NodeAndGraphWalk, list[str]] = {}
+        self.tp_enabled_nodes = set(self.tp_enabled_nodes)
         self._setup_done = False
     
     def assert_stream_consumer_compatibility(self, streaming_consumers: set[str]):

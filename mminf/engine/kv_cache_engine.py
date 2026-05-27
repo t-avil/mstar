@@ -242,7 +242,8 @@ class KVCacheEngine(BaseEngine):
                 sampler=submodule_mgmt.sampler,
                 buffer_manager=kv_mgmt.buffer_manager,
                 device=self.device,
-                autocast_dtype=self.autocast_dtype
+                autocast_dtype=self.autocast_dtype,
+                tp_world_size=submodule_mgmt.tp_group.world_size,
             )
             runner.enable_nvtx = self.enable_nvtx
             runner.warmup_and_capture()
