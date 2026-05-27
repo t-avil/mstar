@@ -414,9 +414,9 @@ class OrpheusModel(Model):
         return None
 
     def _create_llm_submodule(self, device: str) -> NodeSubmodule:
+        from mminf.model.loader import load_weights
         from mminf.model.orpheus.components.language_model import OrpheusForCausalLM
         from mminf.model.orpheus.submodules import OrpheusLLMSubmodule
-        from mminf.model.utils import ModuleAndPrefix, load_weights_from_hf_shards
 
         local_dir = _resolve_local_hf_snapshot(
             self.model_path_hf,
@@ -425,19 +425,13 @@ class OrpheusModel(Model):
 
         with torch.device("meta"):
             language_model = OrpheusForCausalLM(self.config)
+        language_model.to_empty(device=device)
 
-        load_weights_from_hf_shards(
-            repo_dir=local_dir,
-            modules=[ModuleAndPrefix(language_model)],
-            device=device,
-        )
-
+        # ``OrpheusForCausalLM.load_weights`` walks the checkpoint stream,
+        # copies each tensor into the matching parameter, and runs the
+        # per-layer q/k/v + gate/up consolidation at the end.
+        load_weights(language_model, local_dir, device=device)
         language_model.eval()
-        # Fuse q/k/v_proj into qkv_proj and gate_proj/up_proj into gate_up_proj
-        # per layer. Must run after weight loading so per-Linear weights are
-        # populated; the originals are nulled out and the forward path uses
-        # F.linear against the fused buffers.
-        language_model.consolidate_fused_weights()
 
         return OrpheusLLMSubmodule(
             language_model=language_model,

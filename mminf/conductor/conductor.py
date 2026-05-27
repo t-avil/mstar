@@ -24,7 +24,7 @@ from mminf.distributed.base import ShardingConfig
 from mminf.distributed.communication import GlobalTPConfig, WorkerTPGroups
 from mminf.engine.base import EngineType
 from mminf.engine.kv_store import KVCacheConfig
-from mminf.graph.base import GraphEdge, TensorPointerInfo
+from mminf.graph.base import GraphEdge, NodeAndGraphWalk, TensorPointerInfo
 from mminf.graph.loop_indices import NestedLoopIndices
 from mminf.model.base import ForwardPassArgs, Model, WorkerGraph
 from mminf.utils.ipc_format import (
@@ -192,7 +192,7 @@ class Conductor:
 
         # (1) Set up worker graph TP ranks
         # (2) Assert that streaming consumers don't have graph-walk-specific sharding config
-        streaming_consumers = set()
+        self.streaming_consumers = set()
         self.node_walk_to_wg: dict[tuple[str, str], WorkerGraph] = {}
 
         # (worker idx) -> {tp_group_str: tp_rank}
@@ -206,7 +206,7 @@ class Conductor:
                 for walk in wg.graph_walks:
                     self.node_walk_to_wg[(name, walk)] = wg
                 if node.consumes_stream:
-                    streaming_consumers.add(name)
+                    self.streaming_consumers.add(name)
 
         # v1: one sharding group per worker graph. Track which group "owns"
         # each wg so we can assert single-group-per-wg.
@@ -214,7 +214,7 @@ class Conductor:
 
         for group in self.default_sharding_config.groups:
             if group.graph_walks is not None and any([
-                node in streaming_consumers for node in group.nodes
+                node in self.streaming_consumers for node in group.nodes
             ]):
                 raise RuntimeError((
                     f"Sharding group with nodes {group.nodes} includes a streaming consumer but "
@@ -417,13 +417,14 @@ class Conductor:
         config over instead.
         """
         cfg = self.default_sharding_config.clone_empty()
-        node_to_workers: dict[tuple[str, str], list[str]] = {}
+        node_to_workers: dict[NodeAndGraphWalk, list[str]] = {}
         for wg_id, worker_ids in worker_graph_to_workers.items():
             wg = self.worker_graphs[wg_id]
             for walk in wg.graph_walks:
                 for node_name in wg.section.get_nodes():
-                    node_to_workers[(node_name, walk)] = worker_ids
+                    node_to_workers[NodeAndGraphWalk(node_name, walk)] = worker_ids
         cfg.setup(node_to_workers)
+        cfg.assert_stream_consumer_compatibility(self.streaming_consumers)
         return cfg
 
     def _split_inputs_to_workers(
@@ -444,7 +445,7 @@ class Conductor:
             if not edge.tensor_info:
                 # Signal-only — broadcast to every dest worker.
                 dest_workers = sharding_config.node_to_worker.get(
-                    (edge.next_node, graph_walk), [],
+                    NodeAndGraphWalk(edge.next_node, graph_walk), [],
                 )
                 for dest_worker in dest_workers:
                     inputs_per_worker[dest_worker].append(edge.clone())

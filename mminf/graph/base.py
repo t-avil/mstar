@@ -3,6 +3,17 @@ from dataclasses import dataclass, field
 from uuid import uuid4
 
 
+@dataclass(frozen=True)
+class NodeAndGraphWalk:
+    """
+    Pair of node name and graph walk, e.g., (LLM, decode) or (flow, image_gen).
+    graph_walk may be None for streaming-consumer lookups where the graph walk
+    is not known a priori.
+    """
+    node: str
+    graph_walk: str | None
+
+
 @dataclass
 class TensorPointerInfo:
     dims: list[int]
@@ -52,6 +63,10 @@ class GraphEdge:
     # only for EMIT_TO_CLIENT
     output_modality: str = field(default="")  # text | image | video | audio
     _persist_for_loop: bool = field(default=False)
+
+    # Set for sharded configurations
+    _total_fanin: int = 1
+    _shard_dim: int | None = None
 
     def clone(self):
         return GraphEdge(

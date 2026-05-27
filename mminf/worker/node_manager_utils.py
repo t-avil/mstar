@@ -5,7 +5,14 @@ from dataclasses import dataclass, field
 from mminf.communication.tensors import TensorCommunicationManager
 from mminf.conductor.request_info import CurrentForwardPassInfo, PerLabelSeqInfo
 from mminf.distributed.base import ShardingConfig
-from mminf.graph.base import GraphEdge, GraphNode, NameAndDest, NodeCompletionOutput, TensorPointerInfo
+from mminf.graph.base import (
+    GraphEdge,
+    GraphNode,
+    NameAndDest,
+    NodeAndGraphWalk,
+    NodeCompletionOutput,
+    TensorPointerInfo,
+)
 from mminf.graph.graph_io import WorkerGraphIO, format_graph_edge_list
 from mminf.graph.loop_indices import NestedLoopIndices
 from mminf.graph.special_destinations import EMIT_TO_CLIENT, SPECIAL_DESTINATIONS
@@ -13,15 +20,6 @@ from mminf.model.base import WorkerGraph
 from mminf.streaming.stream_buffer import StreamBuffer
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class NodeAndGraphWalk:
-    """
-    Tuple of node name and graph walk, e.g., (LLM, decode) or (flow, image_gen)
-    """
-    node: str
-    graph_walk: str
 
 
 @dataclass

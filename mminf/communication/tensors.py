@@ -21,7 +21,7 @@ else:
 import torch
 
 from mminf.communication.communicator import BaseCommunicator, CommProtocol
-from mminf.graph.base import GraphEdge, TensorPointerInfo
+from mminf.graph.base import GraphEdge, NodeAndGraphWalk, TensorPointerInfo
 from mminf.utils.ipc_format import TensorReceived, WorkerMessage, WorkerMessageType
 
 logger = logging.getLogger(__name__)
@@ -350,7 +350,7 @@ class TensorCommunicationManager(ABC):
         self.sharding_configs: dict[str, ShardingConfig] = {}
         # req_id -> {name -> shards}
         self.buffered_shards: dict[str, dict[str, BufferedShards]] = {}
-        self.req_uuid_to_shard_dim: dict[str, dict[str, int | None]] = {}
+        self.uuid_to_shard_dim: dict[str, int | None] = {}
 
     # ---- shared: store ----
     def _ensure_leading_shard_dim(self, shard_dim: int | None, tensor: torch.Tensor):
@@ -418,7 +418,7 @@ class TensorCommunicationManager(ABC):
                     request_id=request_id, uuid=tensor_uuid, tensor=canonical,
                 )
                 if cfg is not None:
-                    self.req_uuid_to_shard_dim[request_id][tensor_uuid] = shard_dim
+                    self.uuid_to_shard_dim[tensor_uuid] = shard_dim
 
                 logger.debug("Storing tensor name %s uuid %s", name, tensor_uuid)
                 tensor_info[name].append(TensorPointerInfo(
@@ -492,9 +492,9 @@ class TensorCommunicationManager(ABC):
         graph_walk: str | None, info: TensorPointerInfo
     ):
         shard_dim = self.sharding_configs[request_id].shard_dim.get(name)
-        dest_group = self.sharding_configs[request_id].group_mapping.get((
-            next_node, graph_walk
-        ))
+        dest_group = self.sharding_configs[request_id].group_mapping.get(
+            NodeAndGraphWalk(next_node, graph_walk)
+        )
         dest_tp_size = dest_group.tp_size if dest_group is not None else 1
         if info.source_tp_size != dest_tp_size and shard_dim is not None:
             canonical_tensor = self.tensor_store.get_tensor(request_id, info.uuid)
@@ -511,7 +511,7 @@ class TensorCommunicationManager(ABC):
             slice_view = canonical_tensor[start:end]
             new_uuid = str(uuid4())
             self.tensor_store.put_tensor(request_id, new_uuid, slice_view)
-            self.req_uuid_to_shard_dim[request_id][new_uuid] = shard_dim
+            self.uuid_to_shard_dim[new_uuid] = shard_dim
             # Release this edge's stake on the producer's UUID — the slice now
             # owns it. The slice view keeps the underlying storage alive even
             # if the producer's UUID GCs.
@@ -526,8 +526,7 @@ class TensorCommunicationManager(ABC):
         ...
 
     def _cleanup_by_uuid(self, request_id: str, uuid: str):
-        if request_id in self.req_uuid_to_shard_dim:
-            self.req_uuid_to_shard_dim[request_id].pop(uuid, None)
+        self.uuid_to_shard_dim.pop(uuid, None)
 
     # ---- shared: polling & ACKs ----
 
@@ -576,10 +575,10 @@ class TensorCommunicationManager(ABC):
         final_ready: dict[str, list[GraphEdge]] = {}
         for req_id, edges in ready.items():
             self._collect_and_send_acks(req_id, edges)
-            shard_cfg = self.sharding_configs[req_id]
             seen_uuids = self.read_finished.setdefault(req_id, set())
             for edge in edges:
                 if not edge.tensor_info:
+                    final_ready.setdefault(req_id, []).append(edge)
                     continue
                 # Already-emitted edge re-surfacing (re-delivery / retry): skip
                 # the buffering path and pass through unchanged.
@@ -587,13 +586,9 @@ class TensorCommunicationManager(ABC):
                     final_ready.setdefault(req_id, []).append(edge)
                     continue
 
-                shard_dim = shard_cfg.shard_dim.get(edge.name)
-                if edge.name not in self.buffered_shards[req_id]:
-                    total_fanin = shard_cfg.compute_fanin(
-                        edge.name, edge.tensor_info[0].source_tp_size,
-                        dest_node=edge.next_node,
-                        dest_graph_walk=graph_walk,
-                    )
+                shard_dim = edge._shard_dim
+                if edge.name not in self.buffered_shards.get(req_id, {}):
+                    total_fanin = edge._total_fanin
                     if total_fanin > 1:
                         self.buffered_shards[req_id][edge.name] = BufferedShards(
                             total_fanin=total_fanin, shard_dim=shard_dim,
@@ -604,10 +599,10 @@ class TensorCommunicationManager(ABC):
                 for info in edge.tensor_info:
                     self.tensor_store.dereference(req_id, info.uuid, 1)
                     seen_uuids.add(info.uuid)
-                    self.req_uuid_to_shard_dim[req_id][info.uuid] = shard_dim
+                    self.uuid_to_shard_dim[info.uuid] = shard_dim
                     tensors.append(self.get_tensor(req_id, info.uuid))
 
-                if edge.name in self.buffered_shards[req_id]:
+                if edge.name in self.buffered_shards.get(req_id, {}):
                     buf = self.buffered_shards[req_id][edge.name]
                     buf.shards.setdefault(
                         edge.tensor_info[0].source_tp_rank, []
@@ -631,7 +626,7 @@ class TensorCommunicationManager(ABC):
                             # consolidated tensor is in its original layout
                             # (cat happened along the real shard_dim); record
                             # None so get_tensor doesn't try to un-rearrange.
-                            self.req_uuid_to_shard_dim[req_id][uuid_] = None
+                            self.uuid_to_shard_dim[uuid_] = None
                             new_infos.append(TensorPointerInfo(
                                 dims=tensor.shape, dtype=tensor.dtype,
                                 nbytes=tensor.nbytes, address=tensor.data_ptr(),
@@ -652,13 +647,12 @@ class TensorCommunicationManager(ABC):
     ):
         self.sharding_configs[request_id] = sharding_config
         self.buffered_shards[request_id] = {}
-        self.req_uuid_to_shard_dim[request_id] = {}
 
     # ---- shared: TensorStore delegation ----
 
     def get_tensor(self, request_id: str, uuid: str) -> torch.Tensor:
         tensor = self.tensor_store.get_tensor(request_id=request_id, uuid=uuid)
-        shard_dim = self.req_uuid_to_shard_dim.get(request_id, {}).get(uuid)
+        shard_dim = self.uuid_to_shard_dim.get(uuid)
         if shard_dim is None:
             return tensor
         return self._undo_leading_shard_dim(shard_dim, tensor)
@@ -680,8 +674,8 @@ class TensorCommunicationManager(ABC):
         self.read_finished.pop(request_id, None)
         self.buffered_shards.pop(request_id, None)
         self.sharding_configs.pop(request_id, None)
-        self.req_uuid_to_shard_dim.pop(request_id, None)
         for uuid in self.tensor_store.get_all_uuids(request_id):
+            self.uuid_to_shard_dim.pop(uuid, None)
             self.tensor_store.set_metadata(request_id, uuid, persist=False)
             if not self.tensor_store.can_gc(request_id, uuid):
                 logger.warning(

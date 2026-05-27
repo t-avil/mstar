@@ -89,3 +89,22 @@ class OrpheusForCausalLM(nn.Module):
 
     def consolidate_fused_weights(self) -> None:
         self.model.consolidate_fused_weights()
+
+    def load_weights(self, weights):
+        """Load weights from a ``(name, tensor)`` iterable into this model.
+
+        Orpheus's HF Llama checkpoint key naming already matches this
+        module's parameter paths, so no name remap or stacked-shard
+        routing is needed; each tensor is dispatched to the matching
+        parameter via the default copy. After load, the separate
+        ``q/k/v_proj`` and ``gate/up_proj`` Linears are fused into
+        single buffers for the fast forward path.
+        """
+        from mminf.model.loader import load_weights_into
+
+        loaded = load_weights_into(
+            self, weights,
+            skip_predicate=lambda n: "rotary_emb" in n,
+        )
+        self.consolidate_fused_weights()
+        return loaded

@@ -1,7 +1,8 @@
+from collections import defaultdict
 import math
 from dataclasses import dataclass
 
-from mminf.graph.base import GraphEdge
+from mminf.graph.base import GraphEdge, NodeAndGraphWalk
 
 
 @dataclass
@@ -47,8 +48,6 @@ class ShardDestination:
     end_idxs: list[int] | None = None
 
 
-NodeAndGraphWalk = tuple[str, str]
-
 
 @dataclass
 class ShardingConfig:
@@ -64,12 +63,25 @@ class ShardingConfig:
     def get_sharding_group(
         self, node: str, graph_walk: str,
     ):
-        return self.group_mapping.get((node, graph_walk))
+        return self.group_mapping.get(NodeAndGraphWalk(node, graph_walk))
     
     def __post_init__(self):
         self.group_mapping: dict[NodeAndGraphWalk, ShardingGroup] = {}
         self.node_to_worker: dict[NodeAndGraphWalk, list[str]] = {}
         self._setup_done = False
+    
+    def assert_stream_consumer_compatibility(self, streaming_consumers: set[str]):
+        """
+        Asserts that stream consumers do not have graph-walk specific worker
+        configuration
+        """
+        for node in streaming_consumers:
+            if NodeAndGraphWalk(node, None) not in self.group_mapping:
+                raise RuntimeError((
+                    f"Node {node} is a streaming consumer but has a custom graph walk -> worker "
+                    "configuration. For streaming consumers, it is disallowed to to map different "
+                    "graph walks to different workers."
+                ))
 
     def setup(
         self, node_to_workers: dict[NodeAndGraphWalk, list[str]]
@@ -80,39 +92,57 @@ class ShardingConfig:
         # called once.
         self._setup_done = True
         self.node_to_worker.update(node_to_workers)
-        graph_walks = {gw for (_node, gw) in node_to_workers.keys()}
+        graph_walks = {x.graph_walk for x in node_to_workers.keys()}
 
         for group in self.groups:
             add_none_flag = group.graph_walks is None
             gws = group.graph_walks if group.graph_walks is not None else graph_walks
             for node in group.nodes:
                 for gw in gws:
-                    if (node, gw) in node_to_workers:
-                        self.group_mapping[(node, gw)] = group
-                        group.register_workers(node_to_workers[(node, gw)])
+                    key = NodeAndGraphWalk(node, gw)
+                    if key in node_to_workers:
+                        self.group_mapping[key] = group
+                        group.register_workers(node_to_workers[key])
                     if add_none_flag:
                         # For streaming edges, we don't know the graph walk a priori,
                         # so we add this entry to the group_mapping to be able to look up
                         # streaming receivers. NOTE: we enforce that, for streaming
                         # consumers, no custom graph walk configuration is specified for TP,
                         # so all streaming consumers will have add_none_flag be True.
-                        existing = self.group_mapping.get((node, None))
+                        none_key = NodeAndGraphWalk(node, None)
+                        existing = self.group_mapping.get(none_key)
                         assert existing is None or existing is group, (
                             f"Two groups both claim node {node!r} with graph_walks=None — "
                             f"streaming consumers must have exactly one ShardingGroup."
                         )
-                        self.group_mapping[(node, None)] = group
+                        self.group_mapping[none_key] = group
 
-        for (node, gw) in node_to_workers:
-            if (node, gw) in self.group_mapping:
-                continue
+        node_and_workers_to_gws = {}
+        num_walk_combos: dict[str, int] = defaultdict(lambda: 0)
+        for node_gw, workers in node_to_workers.items():
+            (node, gw) = node_gw.node, node_gw.graph_walk
+            workers = tuple(workers)
+            if (node, workers) in node_and_workers_to_gws:
+                node_and_workers_to_gws[(node, workers)].append(gw)
+            else:
+                num_walk_combos[node] += 1
+                node_and_workers_to_gws[(node, workers)] = [gw]
+
+        for node, workers in node_and_workers_to_gws:
+            gws = node_and_workers_to_gws[(node, workers)]
             singleton = ShardingGroup(
-                nodes=[node], tp_size=1, graph_walks=[gw],
+                nodes=[node], tp_size=1, graph_walks=gws,
             )
+                
             singleton.register_workers(
-                list(node_to_workers[(node, gw)]), my_tp_rank=0
+                list(workers), my_tp_rank=0
             )
-            self.group_mapping[(node, gw)] = singleton
+            for gw in gws:
+                key = NodeAndGraphWalk(node, gw)
+                if key not in self.group_mapping:
+                    self.group_mapping[key] = singleton
+            if num_walk_combos[node] == 1:
+                self.group_mapping[NodeAndGraphWalk(node, None)] = singleton
 
     def compute_fanout(
         self, signal: str, source_graph_walk: str,
@@ -124,8 +154,8 @@ class ShardingConfig:
         if not self._setup_done:
             raise RuntimeError("Must call setup before compute_fanout")
 
-        source = (source_node, source_graph_walk)
-        dest = (dest_node, dest_graph_walk)
+        source = NodeAndGraphWalk(source_node, source_graph_walk)
+        dest = NodeAndGraphWalk(dest_node, dest_graph_walk)
         source_group = self.group_mapping.get(source)
         dest_group = self.group_mapping.get(dest)
         shard_dim = self.shard_dim.get(signal)
@@ -224,10 +254,23 @@ class ShardingConfig:
             source_tp_rank=source_tp_rank
         )
 
+        source = NodeAndGraphWalk(source_node, source_graph_walk)
+        source_group = self.group_mapping.get(source)
+        if source_group is None:
+            source_tp_size = 1
+        else:
+            source_tp_size = source_group.tp_size
+
         result = {}
         for item in fanout:
             new_edge = graph_edge.clone()
             new_edge.tensor_info = []
+            new_edge._shard_dim = self.shard_dim.get(new_edge.name)
+            new_edge._total_fanin = self.compute_fanin(
+                signal=new_edge.name, source_tp_size=source_tp_size,
+                dest_node=new_edge.next_node,
+                dest_graph_walk=dest_graph_walk
+            )
             if item.full_tensor:
                 new_edge.tensor_info = graph_edge.tensor_info
             else:
@@ -261,7 +304,7 @@ class ShardingConfig:
     ) -> int:  # number of source workers contributing to this rank's tensor
         if self.shard_dim.get(signal) is None:  # replicated
             return 1
-        dest_group = self.group_mapping.get((dest_node, dest_graph_walk))
+        dest_group = self.group_mapping.get(NodeAndGraphWalk(dest_node, dest_graph_walk))
         if dest_group is None:
             # special destination like API server
             dest_tp_size, dest_tp_rank = 1, 0

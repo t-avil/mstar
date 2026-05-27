@@ -3,7 +3,6 @@ from dataclasses import dataclass, field
 import torch
 import torch.distributed as dist
 
-from mminf.distributed.base import ShardingConfig
 from mminf.model.base import WorkerGraph
 
 
@@ -20,14 +19,27 @@ class TPCommGroup:
         self.world_size = len(group_members)
         self.device_group = None
         self.initialized = False
-    
+
+    @classmethod
+    def trivial(cls) -> "TPCommGroup":
+        """A degenerate single-rank group. All collectives are no-ops;
+        ``init_process_group`` does nothing. Useful as the default for
+        non-TP runs so the same code path works everywhere."""
+        return cls(my_global_rank=0, my_group_rank=0, group_members=[0])
+
     def init_process_group(self):
         if self.initialized:
             return
+        if self.world_size == 1:
+            # Trivial group — no NCCL init needed.
+            self.initialized = True
+            return
         self.device_group = dist.new_group(ranks=self.group_members)
         self.initialized = True
-    
+
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
+        if self.world_size == 1:
+            return input_
         if dim < 0:
             # Convert negative dim to positive
             dim += input_.dim()
@@ -48,8 +60,10 @@ class TPCommGroup:
             + input_size[dim + 1 :]
         )
         return output_tensor
-    
+
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
+        if self.world_size == 1:
+            return input_
         dist.all_reduce(input_, group=self.device_group)
         return input_
     
@@ -110,6 +124,12 @@ class WorkerTPGroups:
         self, init_method="tcp://127.0.0.1:29500"
     ):
         torch.cuda.set_device(self.global_rank)
+        if all([
+            group.world_size == 1 for group in self.node_to_group.values()
+        ]):
+            # No TP here; skip all NCCL process group initialization
+            return
+        
         dist.init_process_group(
             backend="nccl",
             init_method=init_method,  # rendezvous point
