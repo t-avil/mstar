@@ -7,7 +7,7 @@ Three submodules:
   VJepa2ACPredictorSubmodule - action-conditioned predictor (ditto).
 
 All three are stateless (no KV cache, no per-iteration state) and are
-dispatched through ``EncoderDecoderEngine``.  ``preprocess`` stacks
+dispatched through ``StatelessEngine``.  ``preprocess`` stacks
 per-request tensors into a batch (dim 0) — the single-request case
 through ``_execute_sequential`` looks like B=1 and goes through ``forward``;
 ``_execute_batched`` with B>1 goes through ``forward_batched``.
@@ -464,7 +464,7 @@ class VJepa2RolloutPredictorSubmodule(ARNodeSubmodule):
     def get_piecewise_runner_config(self) -> dict | None:
         """Return construction args for PiecewiseCudaGraphRunner.
 
-        Called by EncoderDecoderEngine.warmup() (masked predictor uses ENC_DEC).
+        Called by StatelessEngine.warmup() (masked predictor uses ENC_DEC).
         kv_cache_config / alloc_manager / buffer_manager are all None since the
         masked predictor is stateless — no KV cache between rollout steps.
 
@@ -926,7 +926,7 @@ class VJepa2ACRolloutPredictorSubmodule(ARNodeSubmodule):
     def get_piecewise_runner_config(self) -> dict | None:
         """Return construction args for PiecewiseCudaGraphRunner, or None.
 
-        Called by AREngine.warmup() to build and install the runner without
+        Called by KVCacheEngine.warmup() to build and install the runner without
         the engine needing to know the model internals.  The returned dict
         contains everything PiecewiseCudaGraphRunner.__init__ needs except
         device/autocast_dtype/memory_pool (those come from the engine).

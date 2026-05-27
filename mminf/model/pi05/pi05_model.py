@@ -283,8 +283,8 @@ class Pi05Model(Model):
 
     def get_node_engine_types(self) -> dict[str, EngineType]:
         return {
-            "vit_encoder": EngineType.ENC_DEC,
-            "LLM": EngineType.AR,
+            "vit_encoder": EngineType.STATELESS,
+            "LLM": EngineType.KV_CACHE,
         }
 
     def get_graph_walk_graphs(self) -> dict[str, GraphSection]:

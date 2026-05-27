@@ -9,7 +9,7 @@ is cheap and environment-independent:
    whose values bit-match the sequential ``forward`` path request-by-request.
    This is the critical correctness invariant — a serving system that
    quietly diverges under batching would be terrifying.
-3. ``EncoderDecoderEngine._execute_batched`` routes to ``forward_batched``
+3. ``StatelessEngine._execute_batched`` routes to ``forward_batched``
    when present and returns a ``NodeOutput`` whose per-rid slots look
    identical to what ``_execute_sequential`` would have produced.
 
@@ -33,7 +33,10 @@ from mminf.model.vjepa2.config import VJepa2Config
 # skip the module if any of these imports fail in this env.
 try:
     from mminf.engine.base import NodeBatch
-    from mminf.engine.enc_dec_engine import EncoderDecoderEngine
+    from mminf.engine.stateless_engine import (
+        StatelessEngine,
+        make_enc_dec_config,
+    )
     from mminf.model.vjepa2.submodules import (
         VJepa2EncoderSubmodule,
         VJepa2PredictorSubmodule,
@@ -318,7 +321,7 @@ class TestPredictorBatchedParity:
 
 class TestEngineRouting:
     """Covers the engine-side plumbing at
-    ``EncoderDecoderEngine._execute_batched`` — checks the new signatures
+    ``StatelessEngine._execute_batched`` — checks the new signatures
     reach the submodule correctly and that per-rid outputs flow back
     without the pre-P3.A dict-as-list bug re-appearing.
     """
@@ -339,7 +342,7 @@ class TestEngineRouting:
             },
         )
 
-        engine = EncoderDecoderEngine()
+        engine = StatelessEngine(make_enc_dec_config(torch.bfloat16))
         engine.load_model({"video_encoder": submodule}, device=torch.device("cpu"))
 
         assert submodule.can_batch(batch) is True
@@ -366,7 +369,7 @@ class TestEngineRouting:
             def preprocess(self, **_kw):
                 return {}
 
-        engine = EncoderDecoderEngine()
+        engine = StatelessEngine(make_enc_dec_config(torch.bfloat16))
         engine.load_model({"x": BrokenSubmodule()}, device=torch.device("cpu"))
 
         batch = _make_batch(

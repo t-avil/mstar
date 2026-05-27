@@ -305,26 +305,27 @@ class Worker:
         my_ar_walks_nodes: set[str] = set()
         all_ar_walks_nodes: set[str] = set()
 
-        def _is_ar(node_name: str) -> bool:
-            # Check local engine first, then fall back to model's type map
+        def _uses_kv_cache(node_name: str) -> bool:
+            # Local engine instance wins via declared capability; remote
+            # nodes fall back to the model's static type map.
             engine = self.engine_manager.node_to_engine.get(node_name)
             if engine is not None:
-                return engine.engine_type() == EngineType.AR
+                return engine.capabilities.requires_kv_cache
             if node_engine_types and node_name in node_engine_types:
-                return node_engine_types[node_name] == EngineType.AR
+                return node_engine_types[node_name] == EngineType.KV_CACHE
             return False
 
         # Collect this worker's AR graph walks
         for wg in my_worker_graphs:
             for node_name in wg.section.get_nodes():
-                if _is_ar(node_name):
+                if _uses_kv_cache(node_name):
                     my_ar_walks_nodes.update([(walk, node_name) for walk in wg.graph_walks])
 
         # Collect all workers' AR graph walks
         for wg_id, walks in all_worker_graph_ids_to_graph_walks.items():
             nodes = all_worker_graph_ids_to_nodes.get(wg_id, set())
             for node_name in nodes:
-                if _is_ar(node_name):
+                if _uses_kv_cache(node_name):
                     all_ar_walks_nodes.update([(walk, node_name) for walk in walks])
 
         if not all_ar_walks_nodes:
@@ -345,10 +346,9 @@ class Worker:
 
     def _add_new_request(self, body: NewRequest) -> None:
         logger.debug("Worker %s received request %s", self.worker_id, body.request_id)
-        ar_engine = self.engine_manager.get_ar_engine()
-        if ar_engine is not None:
-            for node_name in ar_engine.submodule_management.keys():
-                self._last_active[(body.request_id, node_name)] = _time.monotonic()
+        now = _time.monotonic()
+        for node_name in self.engine_manager.lru_tracked_nodes():
+            self._last_active[(body.request_id, node_name)] = now
 
         self.worker_graphs_manager.add_request(
             request_id=body.request_id,
@@ -404,10 +404,8 @@ class Worker:
         self.tensor_manager.cleanup_request(body.request_id)
         self.streaming_buffers.pop(body.request_id, None)
 
-        ar_engine = self.engine_manager.get_ar_engine()
-        if ar_engine is not None:
-            for node_name in ar_engine.submodule_management.keys():
-                self._last_active.pop((body.request_id, node_name), None)
+        for node_name in self.engine_manager.lru_tracked_nodes():
+            self._last_active.pop((body.request_id, node_name), None)
 
     def _handle_tensor_received(self, body: TensorReceived) -> None:
         """Sender-side cleanup: receiver confirmed RDMA read, free source buffers."""
@@ -687,36 +685,30 @@ class Worker:
 
         Returns the victim request_id, or None if offloading wasn't possible.
         """
-        ar_engine = self.engine_manager.get_ar_engine()
-        if ar_engine is None:
+        engine = self.engine_manager.get_engine(node_name)
+        if not engine.capabilities.supports_cpu_offload:
             return None
 
-        submod_mgmt = ar_engine.submodule_management[node_name]
-        cache_mgmt = submod_mgmt.kv_management
-        if cache_mgmt.cpu_page_pool is None:
+        candidates_raw = engine.offload_candidates(node_name)
+        if not candidates_raw:
             return None
 
-        alloc = cache_mgmt.alloc_manager
-
-        # Gather all candidates with (rid, total_pages), split by location
+        # Split candidates by whether they belong to the in-flight batch;
+        # we prefer evicting requests not currently being executed.
         external: list[tuple[str, int]] = []
         in_batch: list[tuple[str, int]] = []
-        for rid, labels in alloc.request_states.items():
-            total_pages = sum(len(s.page_indices) for s in labels.values())
-            if total_pages == 0:
-                continue
+        for rid, total_pages in candidates_raw:
             if rid in batch_ids:
                 in_batch.append((rid, total_pages))
             else:
                 external.append((rid, total_pages))
 
-        # Prefer external victims; fall back to in-batch
         candidates = external or in_batch
         if not candidates:
             return None
 
         victim_id = self._select_eviction_victim(node_name, candidates)
-        freed = alloc.offload_request(victim_id, cache_mgmt.cpu_page_pool)
+        freed = engine.offload_request(node_name, victim_id)
         logger.info(
             "Offloaded request %s to CPU (%d GPU pages freed, "
             "policy=%s, in_batch=%s)",
@@ -747,28 +739,16 @@ class Worker:
 
     def _try_reload_request(self, node_name: str, request_id: str) -> bool:
         """Reload an offloaded request back to GPU. Returns True if reloaded."""
-        ar_engine = self.engine_manager.get_ar_engine()
-        if ar_engine is None:
+        engine = self.engine_manager.get_engine(node_name)
+        if not engine.is_offloaded(node_name, request_id):
             return False
-
-        submod_mgmt = ar_engine.submodule_management[node_name]
-        cache_mgmt = submod_mgmt.kv_management
-        if cache_mgmt.cpu_page_pool is None:
-            return False
-
-        if not cache_mgmt.cpu_page_pool.is_offloaded(request_id):
-            return False
-
-        try:
-            cache_mgmt.alloc_manager.reload_request(
-                request_id, cache_mgmt.cpu_page_pool
-            )
+        if engine.reload_request(node_name, request_id):
             logger.info("Reloaded request %s from CPU to GPU", request_id)
             return True
-        except RuntimeError:
-            # Not enough GPU pages to reload; will retry later
-            logger.debug("Cannot reload request %s yet (insufficient GPU pages)", request_id)
-            return False
+        logger.debug(
+            "Cannot reload request %s yet (insufficient GPU pages)", request_id,
+        )
+        return False
 
     # ------------------------------------------------------------------
     # Batch building
@@ -1049,13 +1029,11 @@ class Worker:
         valid in-flight pre-plan whose flags have not yet been consumed
         by the matching replay isn't stomped. The engine's
         ``reset_pre_plan_for_batch`` looks up the same (key, slot) the
-        pre-plan path used; absent that method (non-AR engine), this is
-        a no-op (those engines don't pre-plan).
+        pre-plan path used; engines without a pre-plan surface inherit
+        ``BaseEngine``'s no-op default.
         """
         engine = self.engine_manager.get_engine(spec_node_batch.node_name)
-        reset = getattr(engine, "reset_pre_plan_for_batch", None)
-        if reset is not None:
-            reset(spec_node_batch)
+        engine.reset_pre_plan_for_batch(spec_node_batch)
 
     def _execute_on_gpu_thread(
         self,
@@ -1123,6 +1101,12 @@ class Worker:
             launch_started_event = node_batch.metadata.get("launch_started_event")
             if launch_started_event is not None:
                 launch_started_event.set()
+            # Mirror engine-internal state (e.g. KV-cache seq_info) back
+            # onto node_batch.per_request_info so the next iter's prep /
+            # routing sees the updated values. Runs regardless of success,
+            # allocation_failed, or an uncaught raise — finalize_batch
+            # reads whatever state the engine actually reached.
+            engine.finalize_batch(node_batch)
             if self.enable_nvtx:
                 range_pop(synchronize=False)
 
@@ -1951,9 +1935,8 @@ class Worker:
                             engine = self.engine_manager.get_engine(
                                 speculation.node_batch.node_name
                             )
-                            if hasattr(engine, "reserve_replay_slot"):
-                                engine.reserve_replay_slot(speculation.node_batch)
-        
+                            engine.reserve_replay_slot(speculation.node_batch)
+
                         # Kick off pre-planning on the plan_executor NOW —
                         # its Python work runs while the main thread is in
                         # await_gpu (releases GIL). plan_executor waits on
@@ -1964,18 +1947,17 @@ class Worker:
                             engine = self.engine_manager.get_engine(
                                 speculation.node_batch.node_name
                             )
-                            if hasattr(engine, "pre_plan_for_batch"):
-                                prev_advance_event_for_plan: threading.Event | None = None
-                                if pending is not None:
-                                    prev_advance_event_for_plan = (
-                                        pending.node_batch.metadata.get("advance_event")
-                                    )
-                                speculation.plan_future = plan_executor.submit(
-                                    self._pre_plan_for_speculative_batch,
-                                    engine,
-                                    speculation.node_batch,
-                                    prev_advance_event_for_plan,
+                            prev_advance_event_for_plan: threading.Event | None = None
+                            if pending is not None:
+                                prev_advance_event_for_plan = (
+                                    pending.node_batch.metadata.get("advance_event")
                                 )
+                            speculation.plan_future = plan_executor.submit(
+                                self._pre_plan_for_speculative_batch,
+                                engine,
+                                speculation.node_batch,
+                                prev_advance_event_for_plan,
+                            )
 
                 # 3. If pending: await GPU(N), submit speculated GPU(N+1)
                 # asap, then post-process N (fast then slow) overlapping
@@ -2171,8 +2153,7 @@ class Worker:
                 # counter at run time and races with main-thread reservations
                 # from later iters.
                 fallthrough_engine = self.engine_manager.get_engine(batch.node_name)
-                if hasattr(fallthrough_engine, "reserve_replay_slot"):
-                    fallthrough_engine.reserve_replay_slot(node_batch)
+                fallthrough_engine.reserve_replay_slot(node_batch)
 
                 # Attach a fresh advance_event so the next iter's
                 # plan_executor (if it speculates) can wait on this batch's

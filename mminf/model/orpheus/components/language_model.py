@@ -4,7 +4,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from mminf.engine.ar_engine import BatchedCacheManager
+from mminf.engine.kv_cache_engine import BatchedCacheManager
 from mminf.model.orpheus.config import OrpheusModelConfig
 from mminf.utils.flashinfer_utils import run_rms_norm
 

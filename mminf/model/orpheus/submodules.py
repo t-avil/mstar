@@ -6,7 +6,7 @@ from torch import nn
 
 from mminf.communication.tensors import NameToTensorList
 from mminf.conductor.request_info import CurrentForwardPassInfo
-from mminf.engine.ar_engine import BatchedCacheManager
+from mminf.engine.kv_cache_engine import BatchedCacheManager
 from mminf.engine.base import NodeBatch
 from mminf.engine.cuda_graph_config import FlashInferPackedCudaGraphConfig
 from mminf.engine.cuda_graph_runner import BasicBatchedCudaGraphConfig
@@ -307,6 +307,10 @@ class SNACDecoderSubmodule(NodeSubmodule):
         self.config = config
 
         self._orig_seq_len = {}
+
+    def get_stateless_flavor(self) -> str:
+        # SNAC runs in fp32 with no autocast and no torch.compile.
+        return "audio_codec"
 
     # _tokens_to_codes pads to multiples of 28 tokens then reshapes to
     # (N_frames, 4, 7); for a single streaming window this is 1 frame.

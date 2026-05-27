@@ -16,11 +16,13 @@ import sys  # noqa: E402
 
 sys.path.insert(0, ".")
 
-from mminf.engine.ar_engine import AREngine  # noqa: E402
+from mminf.engine.kv_cache_engine import KVCacheEngine  # noqa: E402
 from mminf.engine.base import EngineType, NodeBatch, NodeOutput
-from mminf.engine.enc_dec_engine import EncoderDecoderEngine
-from mminf.engine.flow_engine import FlowEngine
 from mminf.engine.kv_store import PageAllocator
+from mminf.engine.stateless_engine import (
+    StatelessEngine,
+    make_enc_dec_config,
+)
 from mminf.graph.base import GraphEdge
 from mminf.graph.request_queues import PerRequestNodeQueues
 from mminf.model.base import WorkerGraph
@@ -94,11 +96,11 @@ class TestEngines:
         )
 
     def test_ar_engine_type(self):
-        engine = AREngine()
-        assert engine.engine_type() == EngineType.AR
+        engine = KVCacheEngine()
+        assert engine.engine_type() == EngineType.KV_CACHE
 
     def test_ar_engine_dummy_execute(self):
-        engine = AREngine()
+        engine = KVCacheEngine()
         batch = self._make_batch("LLM", ["req1", "req2"])
         output = engine.execute_batch(batch)
         assert isinstance(output, NodeOutput)
@@ -106,7 +108,7 @@ class TestEngines:
         assert "req2" in output.per_request_output_tensors
 
     def test_ar_engine_add_remove_request(self):
-        engine = AREngine()
+        engine = KVCacheEngine()
         engine.add_request("req1")
         assert ("req1", "main") in engine.request_states
         assert engine.request_states[("req1", "main")].seq_len == 0
@@ -116,7 +118,7 @@ class TestEngines:
         assert ("req1", "main") not in engine.request_states
 
     def test_ar_engine_pause_resume(self):
-        engine = AREngine()
+        engine = KVCacheEngine()
         engine.add_request("req1")
         assert not engine.request_states[("req1", "main")].is_paused
 
@@ -127,27 +129,16 @@ class TestEngines:
         assert not engine.request_states[("req1", "main")].is_paused
 
     def test_ar_engine_remove_nonexistent(self):
-        engine = AREngine()
+        engine = KVCacheEngine()
         # Should not raise
         engine.remove_request("nonexistent")
 
-    def test_flow_engine_type(self):
-        engine = FlowEngine()
-        assert engine.engine_type() == EngineType.FLOW
-
-    def test_flow_engine_dummy_execute(self):
-        engine = FlowEngine()
-        batch = self._make_batch("flow", ["req1"])
-        output = engine.execute_batch(batch)
-        assert isinstance(output, NodeOutput)
-        assert "req1" in output.per_request_output_tensors
-
     def test_enc_dec_engine_type(self):
-        engine = EncoderDecoderEngine()
-        assert engine.engine_type() == EngineType.ENC_DEC
+        engine = StatelessEngine(make_enc_dec_config(torch.bfloat16))
+        assert engine.engine_type() == EngineType.STATELESS
 
     def test_enc_dec_engine_dummy_execute(self):
-        engine = EncoderDecoderEngine()
+        engine = StatelessEngine(make_enc_dec_config(torch.bfloat16))
         batch = self._make_batch("text_emb", ["req1", "req2", "req3"])
         output = engine.execute_batch(batch)
         assert isinstance(output, NodeOutput)
@@ -163,7 +154,6 @@ class TestEngineManager:
     def test_from_config_dummy(self):
         configs = [
             {"engine_type": "ar", "node_names": ["LLM"], "model_config": {}},
-            {"engine_type": "flow", "node_names": ["flow"], "model_config": {}},
             {
                 "engine_type": "enc_dec",
                 "node_names": ["text_emb", "image_emb", "VAE_dec"],
@@ -171,10 +161,9 @@ class TestEngineManager:
             },
         ]
         mgr = EngineManager.build(configs, device="cpu")
-        assert mgr.get_engine("LLM").engine_type() == EngineType.AR
-        assert mgr.get_engine("flow").engine_type() == EngineType.FLOW
-        assert mgr.get_engine("text_emb").engine_type() == EngineType.ENC_DEC
-        assert mgr.get_engine("VAE_dec").engine_type() == EngineType.ENC_DEC
+        assert mgr.get_engine("LLM").engine_type() == EngineType.KV_CACHE
+        assert mgr.get_engine("text_emb").engine_type() == EngineType.STATELESS
+        assert mgr.get_engine("VAE_dec").engine_type() == EngineType.STATELESS
         # text_emb and image_emb share the same engine instance
         assert mgr.get_engine("text_emb") is mgr.get_engine("image_emb")
 
@@ -186,7 +175,7 @@ class TestEngineManager:
         mgr = EngineManager.build(configs, device="cpu")
         mgr.add_request("req1")
         ar_engine = mgr.get_engine("LLM")
-        assert isinstance(ar_engine, AREngine)
+        assert isinstance(ar_engine, KVCacheEngine)
         assert ("req1", "main") in ar_engine.request_states
 
         mgr.remove_request("req1")

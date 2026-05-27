@@ -1830,7 +1830,11 @@ class Code2WavSubmodule(NodeSubmodule):
 
         self.full_seqlen = self.config.code2wav.codec_left_context_frames + \
             self.config.code2wav.codec_chunk_frames
-    
+
+    def get_stateless_flavor(self) -> str:
+        # Code2Wav vocoder runs in fp32 with no autocast and no torch.compile.
+        return "audio_codec"
+
     def cleanup_request(self, request_id):
         self._first_chunk_emitted.discard(request_id)
         self._latest_seq_len.pop(request_id, None)

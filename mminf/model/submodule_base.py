@@ -222,7 +222,32 @@ class NodeSubmodule(torch.nn.Module):
     
     def max_batch_size(self, graph_walk: str):
         return None
-    
+
+    def get_stateless_flavor(self) -> str:
+        """Flavor key picked up by ``EngineManager`` when this submodule's
+        node is declared ``EngineType.STATELESS``. The flavor selects which
+        ``StatelessEngineConfig`` factory drives engine construction
+        (autocast, force_float32, torch.compile, piecewise runner).
+
+        Default: ``"enc_dec"`` — the most common stateless flavor (encoders,
+        vae decoders, etc.). Audio-codec submodules that need no autocast
+        and float32 weights override this to return ``"audio_codec"``.
+        """
+        return "enc_dec"
+
+    def get_autocast_dtype(self) -> torch.dtype | None:
+        """Per-submodule autocast dtype override for the engine's forward
+        wrap. The engine consults this on each ``execute_batch`` and uses
+        the returned dtype instead of its own when non-``None``.
+
+        Default: ``None`` (inherit the engine's autocast dtype). To turn
+        autocast off for one specific submodule whose engine otherwise has
+        it enabled, wrap the submodule's forward with
+        ``torch.amp.autocast(enabled=False)`` — that path is engine-agnostic
+        and doesn't need this surface.
+        """
+        return None
+
     # Note: do not import CudaGraphConfig; it causes a circular import situation
     def get_cuda_graph_configs(self, device: torch.device) -> list[CudaGraphConfig]:
         """TODO: add cuda graph support for pi05.
@@ -346,7 +371,7 @@ class ARNodeSubmodule(NodeSubmodule):
     ) -> list[str] | None:
         """Return cache labels this node needs, or None to retrieve all.
 
-        Used by AREngine to skip redundant KV cache transfers.
+        Used by KVCacheEngine to skip redundant KV cache transfers.
         Override in subclasses that only need a subset of available labels.
         """
         return None

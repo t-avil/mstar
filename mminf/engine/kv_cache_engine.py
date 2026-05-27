@@ -5,11 +5,25 @@ from dataclasses import asdict, dataclass, field
 import torch
 
 from mminf.conductor.request_info import CurrentForwardPassInfo
-from mminf.engine.base import BaseEngine, EngineType, NodeBatch, NodeOutput
+from mminf.engine.base import (
+    BaseEngine,
+    EngineCapabilities,
+    EngineType,
+    NodeBatch,
+    NodeOutput,
+    PlannedBatch,
+    PreparedBatch,
+)
 from mminf.engine.cache_manager import BatchedCacheManager, WorkspaceBufferManager
 from mminf.engine.cpu_page_pool import CPUPagePool
 from mminf.engine.cuda_graph_runner import CudaGraphRunner
-from mminf.engine.kv_store import KVCacheConfig, PagedAllocationManager, TransferEngineInfo
+from mminf.engine.kv_store import (
+    AllocationFailedError,
+    KVCacheConfig,
+    PagedAllocationManager,
+    StoreWritePolicy,
+    TransferEngineInfo,
+)
 from mminf.model.submodule_base import ARNodeInputs, ARNodeSubmodule, ModelInputsFromEngine
 from mminf.utils.profiler import range_pop, range_push
 from mminf.utils.sampling import Sampler
@@ -35,7 +49,7 @@ class SubmoduleManagement:
     cuda_graph_runner: CudaGraphRunner | None = None
 
 
-class AREngine(BaseEngine):
+class KVCacheEngine(BaseEngine):
     """
     Autoregressive engine with paged KV cache.
     Uses FlashInfer for prefill/decode when available.
@@ -63,8 +77,13 @@ class AREngine(BaseEngine):
         # warnings — each unique miss shape is logged at most once.
         self._logged_graph_misses: set[tuple] = set()
 
+    capabilities = EngineCapabilities(
+        requires_kv_cache=True,
+        supports_cpu_offload=True,
+    )
+
     def engine_type(self) -> EngineType:
-        return EngineType.AR
+        return EngineType.KV_CACHE
 
     def load_model(
         self,
@@ -100,7 +119,7 @@ class AREngine(BaseEngine):
                     kv_cache_dtype=kv_cache_type,
                 )
                 logger.info(
-                    "AREngine: CPU page pool for initialized with %d pages",
+                    "KVCacheEngine: CPU page pool for initialized with %d pages",
                     cfg.cpu_offload_pages,
                 )
 
@@ -177,9 +196,9 @@ class AREngine(BaseEngine):
                     fullgraph=False,
                     dynamic=True,
                 )
-                logger.info("AREngine: torch.compile applied to %s language_model", node_name)
+                logger.info("KVCacheEngine: torch.compile applied to %s language_model", node_name)
             except Exception:
-                logger.warning("AREngine: torch.compile failed for %s, using eager mode",
+                logger.warning("KVCacheEngine: torch.compile failed for %s, using eager mode",
                                node_name, exc_info=True)
 
     def warmup(self) -> None:
@@ -207,7 +226,7 @@ class AREngine(BaseEngine):
             runner.warmup_and_capture()
             if runner.graphs:
                 submodule_mgmt.cuda_graph_runner = runner
-                logger.info("AREngine: CUDA graphs captured for %s (%d configs)",
+                logger.info("KVCacheEngine: CUDA graphs captured for %s (%d configs)",
                             node_name, len(runner.graphs))
 
             # Piecewise CUDA graph for transformer block loops (e.g. VJepa2 AC rollout).
@@ -231,7 +250,7 @@ class AREngine(BaseEngine):
                 if pcgr.graphs:
                     submodule.set_piecewise_runner(pcgr)
                     logger.info(
-                        "AREngine: PiecewiseCudaGraphRunner installed for %s (%d bs buckets)",
+                        "KVCacheEngine: PiecewiseCudaGraphRunner installed for %s (%d bs buckets)",
                         node_name, len(pcgr.graphs),
                     )
 
@@ -547,140 +566,201 @@ class AREngine(BaseEngine):
         return NodeOutput(per_request_output_tensors=batched_output)
 
     def execute_batch(self, batch: NodeBatch) -> NodeOutput:
-        if self.enable_nvtx:
-            range_push(f"engine.ar.{batch.node_name}.{batch.graph_walk}.bs{len(batch.request_ids)}")
+        """Wrap the template with the KV-cache allocation-failure envelope.
 
+        Page allocation can fail anywhere inside prepare/plan/forward/
+        postprocess (any call into ``alloc_manager.alloc``). Such failures
+        raise ``AllocationFailedError``; the worker treats them as a
+        retryable signal, so we catch here and surface them as a
+        ``NodeOutput(allocation_failed=True, ...)`` carrying the diagnostic
+        payload. Other exceptions propagate unchanged.
+
+        ``finalize_batch`` mirrors KV-cache seq_info back onto
+        ``batch.per_request_info``; the worker calls it in its own
+        ``finally`` so the writeback happens regardless of how this method
+        exits.
+
+        The autocast + no_grad context wraps the whole template so all four
+        hooks see the same dtype/grad regime.
+        """
+        if self.enable_nvtx:
+            range_push(
+                f"engine.kv_cache.{batch.node_name}.{batch.graph_walk}.bs{len(batch.request_ids)}"
+            )
+        submodule = self.submodule_management[batch.node_name].submodule
+        per_submodule_dtype = submodule.get_autocast_dtype() if submodule is not None else None
+        autocast_dtype = per_submodule_dtype if per_submodule_dtype is not None \
+            else self.autocast_dtype
+        try:
+            try:
+                with torch.no_grad():
+                    with torch.amp.autocast(
+                        "cuda", enabled=True, dtype=autocast_dtype
+                    ):
+                        return super().execute_batch(batch)
+            except AllocationFailedError as err:
+                logger.warning(
+                    "KV cache page allocation failed for batch "
+                    "(node=%s, walk=%s, request=%s, label=%s, "
+                    "pages_short=%d)",
+                    batch.node_name, batch.graph_walk,
+                    err.request_id, err.label, err.pages_short,
+                )
+                return NodeOutput(
+                    per_request_output_tensors={
+                        rid: {} for rid in batch.request_ids
+                    },
+                    allocation_failed=True,
+                    alloc_pages_short=err.pages_short,
+                    alloc_failed_request_id=err.request_id,
+                )
+        finally:
+            if self.enable_nvtx:
+                range_pop()
+
+    def finalize_batch(self, batch: NodeBatch) -> None:
+        """Mirror this engine's per-request KV seq_info back onto
+        ``batch.per_request_info`` so the next iter / conductor sees the
+        updated page indices, seq_len, and position_id_start.
+
+        Safe to call after a successful forward, after an allocation
+        failure, or after an unrelated exception — the writeback reads
+        the alloc manager's current state, which always reflects whatever
+        progress this batch made.
+        """
+        if batch.node_name not in self.submodule_management:
+            return
+        cache_mgmt = self.submodule_management[batch.node_name].kv_management
+        kv_cache_string = cache_mgmt.kv_cache_config.get_node_str()
+        for req_id in batch.request_ids:
+            info = batch.per_request_info.get(req_id)
+            if info is None:
+                continue
+            info.per_label_seq_info.add(
+                kv_cache_string,
+                cache_mgmt.alloc_manager.get_per_label_seq_info(req_id),
+            )
+
+    def prepare_batch(self, batch: NodeBatch) -> PreparedBatch:
+        """KV sync retrieve, per-request sampler config, then per-rid
+        ``submodule.prepare_inputs`` with ``pos_info`` for each cache label.
+
+        Stashes ``submod_mgmt`` in metadata so ``execute_forward`` and the
+        cleanup envelope can reach it without re-looking-up.
+        """
         submod_mgmt = self.submodule_management[batch.node_name]
         cache_mgmt = submod_mgmt.kv_management
         kv_cache_string = cache_mgmt.kv_cache_config.get_node_str()
         submodule = submod_mgmt.submodule
-        try:
-            needed_labels = self._get_needed_labels(
-                batch.node_name, batch.graph_walk, batch.per_request_info
-            )
-            cache_mgmt.alloc_manager.alloc_status.reset()
-            try:
-                if self.enable_nvtx:
-                    range_push("ar.kv_sync_retrieve", synchronize=False)
-                for req_id, info in batch.per_request_info.items():
-                    for label, seq_info in info.per_label_seq_info.get(kv_cache_string).items():
-                        if needed_labels is not None and label not in needed_labels:
-                            continue
-                        cache_mgmt.alloc_manager.sync_retrieve(
-                            req_id, label, seq_info
-                        )
-                if self.enable_nvtx:
-                    range_pop(synchronize=False)
 
-                if self.enable_nvtx:
-                    range_push("ar.sampler_config", synchronize=False)
-                runner = submod_mgmt.cuda_graph_runner
-                for rid, info in batch.per_request_info.items():
-                    sampling_config = info.sampling_config.get(batch.node_name)
-                    sampling_kwargs = {} if sampling_config is None else asdict(sampling_config)
-                    submod_mgmt.sampler.set_config(rid, **sampling_kwargs)
-                    # Mirror into the cuda-graph runner's master GPU buffers.
-                    # update_request_config is change-detected, so steady-state
-                    # requests pay only a dict comparison here — no GPU work.
-                    if runner is not None and sampling_config is not None:
-                        runner.update_request_config(rid, sampling_config)
-                if self.enable_nvtx:
-                    range_pop(synchronize=False)
+        needed_labels = self._get_needed_labels(
+            batch.node_name, batch.graph_walk, batch.per_request_info
+        )
 
-                with torch.no_grad():
-                    with torch.amp.autocast("cuda", enabled=True, dtype=self.autocast_dtype):
-                        # run prepare inputs
-                        node_inputs: list[ARNodeInputs] = []
-                        if self.enable_nvtx:
-                            range_push(
-                                f"ar.prepare_inputs"
-                            )
-                        for rid in batch.request_ids:
-                            labels = cache_mgmt.alloc_manager.get_labels(rid)
-                            pos_info = {
-                                label: cache_mgmt.alloc_manager.get_state(
-                                    rid, label
-                                ).get_pos_info() for label in labels
-                            }
-                            node_inputs.append(
-                                submodule.prepare_inputs(
-                                    graph_walk=batch.graph_walk,
-                                    fwd_info=batch.per_request_info[rid],
-                                    inputs=batch.per_request_input_tensors[rid],
-                                    pos_info=pos_info
-                                )
-                            )
-                        if self.enable_nvtx:
-                            range_pop(synchronize=True)
+        if self.enable_nvtx:
+            range_push("kv_cache.kv_sync_retrieve", synchronize=False)
+        for req_id, info in batch.per_request_info.items():
+            for label, seq_info in info.per_label_seq_info.get(kv_cache_string).items():
+                if needed_labels is not None and label not in needed_labels:
+                    continue
+                cache_mgmt.alloc_manager.sync_retrieve(req_id, label, seq_info)
+        if self.enable_nvtx:
+            range_pop(synchronize=False)
 
-                        # Priority: CUDA graph > batched > sequential
-                        if self._can_use_cuda_graph(batch, node_inputs):
-                            if self.enable_nvtx:
-                                range_push("ar.cuda_graph_path", synchronize=False)
-                            try:
-                                output = self._execute_with_cuda_graph(
-                                    batch, submodule, node_inputs
-                                )
-                            finally:
-                                if self.enable_nvtx:
-                                    range_pop(synchronize=False)
-                        elif submodule.can_batch(batch, node_inputs):
-                            if self.enable_nvtx:
-                                range_push("ar.batched_path", synchronize=False)
-                            try:
-                                output = self._execute_batched(
-                                    batch, submodule, node_inputs,
-                                    sampler=submod_mgmt.sampler
-                                )
-                            finally:
-                                if self.enable_nvtx:
-                                    range_pop(synchronize=False)
-                        else:
-                            if self.enable_nvtx:
-                                range_push("ar.sequential_path", synchronize=False)
-                            try:
-                                output = self._execute_sequential(
-                                    batch, submodule, node_inputs,
-                                    sampler=submod_mgmt.sampler
-                                )
-                            finally:
-                                if self.enable_nvtx:
-                                    range_pop(synchronize=False)
-                        for rid, info in batch.per_request_info.items():
-                            submodule.postprocess(
-                                request_id=rid,
-                                request_info=info,
-                                outputs=output.per_request_output_tensors.get(rid, {})
-                            )
-                        return output
-            except RuntimeError:
-                if not cache_mgmt.alloc_manager.alloc_status.success:
-                    status = cache_mgmt.alloc_manager.alloc_status
-                    logger.warning(
-                        "KV cache page allocation failed for batch "
-                        "(node=%s, walk=%s, request=%s, label=%s, "
-                        "pages_short=%d)",
-                        batch.node_name, batch.graph_walk,
-                        status.request_id, status.label,
-                        status.pages_short,
-                    )
-                    return NodeOutput(
-                        per_request_output_tensors={
-                            rid: {} for rid in batch.request_ids
-                        },
-                        allocation_failed=True,
-                        alloc_pages_short=status.pages_short,
-                        alloc_failed_request_id=status.request_id,
-                    )
-                raise
-        finally:
-            for req_id in batch.request_ids:
-                batch.per_request_info[req_id].per_label_seq_info.add(
-                    kv_cache_string,
-                    cache_mgmt.alloc_manager.get_per_label_seq_info(req_id)
+        if self.enable_nvtx:
+            range_push("kv_cache.sampler_config", synchronize=False)
+        runner = submod_mgmt.cuda_graph_runner
+        for rid, info in batch.per_request_info.items():
+            sampling_config = info.sampling_config.get(batch.node_name)
+            sampling_kwargs = {} if sampling_config is None else asdict(sampling_config)
+            submod_mgmt.sampler.set_config(rid, **sampling_kwargs)
+            # Mirror into the cuda-graph runner's master GPU buffers.
+            # update_request_config is change-detected, so steady-state
+            # requests pay only a dict comparison here — no GPU work.
+            if runner is not None and sampling_config is not None:
+                runner.update_request_config(rid, sampling_config)
+        if self.enable_nvtx:
+            range_pop(synchronize=False)
+
+        node_inputs: list[ARNodeInputs] = []
+        if self.enable_nvtx:
+            range_push("kv_cache.prepare_inputs")
+        for rid in batch.request_ids:
+            labels = cache_mgmt.alloc_manager.get_labels(rid)
+            pos_info = {
+                label: cache_mgmt.alloc_manager.get_state(
+                    rid, label
+                ).get_pos_info() for label in labels
+            }
+            node_inputs.append(
+                submodule.prepare_inputs(
+                    graph_walk=batch.graph_walk,
+                    fwd_info=batch.per_request_info[rid],
+                    inputs=batch.per_request_input_tensors[rid],
+                    pos_info=pos_info,
                 )
+            )
+        if self.enable_nvtx:
+            range_pop(synchronize=True)
+
+        return PreparedBatch(
+            batch=batch,
+            submodule=submodule,
+            node_inputs=node_inputs,
+            metadata={"submod_mgmt": submod_mgmt},
+        )
+
+    def execute_forward(self, planned: PlannedBatch) -> NodeOutput:
+        """Dispatch CUDA-graph / batched / sequential.
+
+        Priority: CUDA graph (largest single launch) > batched (single
+        FlashInfer plan + forward) > sequential (per-rid fallback).
+        """
+        batch = planned.batch
+        submodule = planned.submodule
+        node_inputs = planned.node_inputs
+        submod_mgmt = planned.prepared.metadata["submod_mgmt"]
+        sampler = submod_mgmt.sampler
+
+        if self._can_use_cuda_graph(batch, node_inputs):
             if self.enable_nvtx:
-                range_pop()
+                range_push("kv_cache.cuda_graph_path", synchronize=False)
+            try:
+                output = self._execute_with_cuda_graph(batch, submodule, node_inputs)
+            finally:
+                if self.enable_nvtx:
+                    range_pop(synchronize=False)
+        elif submodule.can_batch(batch, node_inputs):
+            if self.enable_nvtx:
+                range_push("kv_cache.batched_path", synchronize=False)
+            try:
+                output = self._execute_batched(
+                    batch, submodule, node_inputs, sampler=sampler
+                )
+            finally:
+                if self.enable_nvtx:
+                    range_pop(synchronize=False)
+        else:
+            if self.enable_nvtx:
+                range_push("kv_cache.sequential_path", synchronize=False)
+            try:
+                output = self._execute_sequential(
+                    batch, submodule, node_inputs, sampler=sampler
+                )
+            finally:
+                if self.enable_nvtx:
+                    range_pop(synchronize=False)
+        return output
+
+    def postprocess_batch(self, planned: PlannedBatch, output: NodeOutput) -> None:
+        batch = planned.batch
+        submodule = planned.submodule
+        for rid, info in batch.per_request_info.items():
+            submodule.postprocess(
+                request_id=rid,
+                request_info=info,
+                outputs=output.per_request_output_tensors.get(rid, {}),
+            )
 
     def _get_needed_labels(
         self, node_name: str, graph_walk: str,
@@ -881,6 +961,65 @@ class AREngine(BaseEngine):
         for submodule_mgmt in self.submodule_management.values():
             cache_mgmt = submodule_mgmt.kv_management
             cache_mgmt.alloc_manager.get_state(request_id, cache_label).is_paused = False
+
+    # ── Optional surfaces declared via ``capabilities`` ─────────────────
+
+    def lru_tracked_nodes(self) -> list[str]:
+        return list(self.submodule_management.keys())
+
+    def set_alloc_write_policy(self, policy: StoreWritePolicy) -> None:
+        for submod_mgmt in self.submodule_management.values():
+            submod_mgmt.kv_management.alloc_manager.write_policy = policy
+
+    def offload_candidates(self, node_name: str) -> list[tuple[str, int]]:
+        submod_mgmt = self.submodule_management.get(node_name)
+        if submod_mgmt is None or submod_mgmt.kv_management.cpu_page_pool is None:
+            return []
+        alloc = submod_mgmt.kv_management.alloc_manager
+        out: list[tuple[str, int]] = []
+        for rid, labels in alloc.request_states.items():
+            total_pages = sum(len(s.page_indices) for s in labels.values())
+            if total_pages > 0:
+                out.append((rid, total_pages))
+        return out
+
+    def offload_request(self, node_name: str, request_id: str) -> int:
+        submod_mgmt = self.submodule_management.get(node_name)
+        if submod_mgmt is None:
+            return 0
+        cache_mgmt = submod_mgmt.kv_management
+        if cache_mgmt.cpu_page_pool is None:
+            return 0
+        return cache_mgmt.alloc_manager.offload_request(
+            request_id, cache_mgmt.cpu_page_pool,
+        )
+
+    def reload_request(self, node_name: str, request_id: str) -> bool:
+        submod_mgmt = self.submodule_management.get(node_name)
+        if submod_mgmt is None:
+            return False
+        cache_mgmt = submod_mgmt.kv_management
+        if cache_mgmt.cpu_page_pool is None:
+            return False
+        if not cache_mgmt.cpu_page_pool.is_offloaded(request_id):
+            return False
+        try:
+            cache_mgmt.alloc_manager.reload_request(
+                request_id, cache_mgmt.cpu_page_pool,
+            )
+            return True
+        except RuntimeError:
+            # Not enough GPU pages to reload — caller will retry later.
+            return False
+
+    def is_offloaded(self, node_name: str, request_id: str) -> bool:
+        submod_mgmt = self.submodule_management.get(node_name)
+        if submod_mgmt is None:
+            return False
+        cache_mgmt = submod_mgmt.kv_management
+        if cache_mgmt.cpu_page_pool is None:
+            return False
+        return cache_mgmt.cpu_page_pool.is_offloaded(request_id)
 
     def shutdown(self) -> None:
         for submodule_mgmt in self.submodule_management.values():

@@ -28,7 +28,7 @@ from transformers import AutoTokenizer
 
 from mminf.communication.tensors import NameToTensorList
 from mminf.conductor.request_info import CurrentForwardConductorMetadata, PartitionDefinition, StreamingConnectionState
-from mminf.engine.ar_engine import KVCacheConfig
+from mminf.engine.kv_cache_engine import KVCacheConfig
 from mminf.engine.base import EngineType
 from mminf.graph.base import GraphEdge, GraphNode, GraphSection, Loop, TensorPointerInfo
 from mminf.graph.special_destinations import EMIT_TO_CLIENT, EMPTY_DESTINATION
@@ -100,8 +100,8 @@ class OrpheusModel(Model):
 
     def get_node_engine_types(self) -> dict[str, EngineType]:
         return {
-            "LLM": EngineType.AR,
-            "snac_decoder": EngineType.AUDIO_CODEC,
+            "LLM": EngineType.KV_CACHE,
+            "snac_decoder": EngineType.STATELESS,
         }
 
     # -------------------------------------------------------------------
