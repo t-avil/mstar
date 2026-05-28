@@ -164,10 +164,12 @@ class KVCacheEngine(BaseEngine):
                 node_to_kv_mgmt[node_name] = kv_mgmt
 
         for node_name, submodule in submodules.items():
+            tp_group = tp_groups.get_tp_config_for_node(node_name)
             self.submodule_management[node_name] = SubmoduleManagement(
                 submodule=submodule,
                 kv_management=node_to_kv_mgmt[node_name],
-                tp_group=tp_groups.get_tp_config_for_node(node_name)
+                tp_group=tp_group,
+                sampler=Sampler(tp_group=tp_group),
             )
 
 

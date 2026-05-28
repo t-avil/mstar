@@ -207,6 +207,19 @@ class SamplingConfig:
 
 @dataclass
 class BaseSampler(ABC):
+    def _broadcast_tokens(self, tokens: torch.Tensor) -> torch.Tensor:
+        """In-place broadcast of ``tokens`` from rank 0 to all TP ranks.
+
+        No-op for ``tp_group`` of size 1 (trivial group / non-TP) or
+        unset. Subclasses set ``self.tp_group`` so all TP ranks agree
+        on the sampled token (otherwise per-rank RNG diverges →
+        mid-sequence garbage, hangs on EOS, KV drift).
+        """
+        tp_group = getattr(self, "tp_group", None)
+        if tp_group is None or tp_group.world_size == 1:
+            return tokens
+        return tp_group.broadcast(tokens, src=0)
+
     @abstractmethod
     def sample(
         self, request_ids: list[str], logits: torch.Tensor
@@ -236,6 +249,7 @@ class Sampler(BaseSampler):
     _sampling_config: dict[str, SamplingConfig] = field(default_factory=dict)
     _seen_token_mask: dict[str, torch.Tensor]= field(default_factory=dict)
     _autotune_sync_budget_remaining: int = 64
+    tp_group: "TPCommGroup | None" = None  # noqa: F821
 
     def add_request(self, request_id: str):
         self._sampling_config[request_id] = SamplingConfig()
@@ -316,6 +330,8 @@ class Sampler(BaseSampler):
         #       (next prefill/decode) doesn't wait. The next sample() for the
         #       same rid would need to sync, but amortized over a full
         #       generation this is cheap.
+        tokens = self._broadcast_tokens(tokens)
+
         if any_rep_pen:
             for i, rid in enumerate(request_ids):
                 self._seen_token_mask[rid][tokens[i:i+1]] = True
@@ -534,6 +550,7 @@ class CudaGraphableSampler(BaseSampler):
     top_p_buf: torch.Tensor
     seed_buf: torch.Tensor
     offset_buf: torch.Tensor
+    tp_group: "TPCommGroup | None" = None  # noqa: F821
 
     @torch.compiler.disable
     def sample(self, request_ids: list[str], logits: torch.Tensor):
@@ -543,7 +560,7 @@ class CudaGraphableSampler(BaseSampler):
             self.seed_buf, self.offset_buf
         )
         self.offset_buf += 1
-        return codes
+        return self._broadcast_tokens(codes)
     
     @torch.compiler.disable
     def sample_with_config(
