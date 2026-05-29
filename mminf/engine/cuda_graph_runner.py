@@ -208,7 +208,8 @@ class CudaGraphRunner:
             for config in self.capture_configs] or [1]
         )
         self.sampler_buffer: SamplerBuffers = SamplerBuffers.allocate(
-            max_batch_size=self.max_bs, device=device
+            max_batch_size=self.max_bs, device=device,
+            tp_group=self.tp_group,
         )
 
     def warmup_and_capture(self) -> None:
