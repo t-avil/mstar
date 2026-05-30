@@ -872,8 +872,16 @@ class SamplerBuffers:
             self._master_seed, 0, idx_view, out=self.seed_buf[:padded_bs],
         )
 
-        # zeroed offsets
-        self.offset_buf[:padded_bs].zero_()
+        # offset_buf is NOT reset here. With per-request fixed seed and
+        # ``deterministic=True`` sampling, resetting offset every call
+        # would make every iteration sample with (same seed, offset=0)
+        # — identical RNG draws. Once the logits also stabilise (e.g.,
+        # Talker decode after the producer stream ends and inputs become
+        # the static TTS_EOS/pad embed), the sampler returns the same
+        # token forever and the loop never reaches its natural EOS.
+        # Letting offset accumulate from the in-graph ``offset_buf += 1``
+        # advances the RNG step per iteration so identical-logit
+        # iterations still produce different samples.
 
         slices = self.slice_for_bs(padded_bs)
         return CudaGraphableSampler(**slices)
