@@ -1,3 +1,4 @@
+import logging
 from collections import deque
 from dataclasses import dataclass, field
 
@@ -5,6 +6,8 @@ import torch
 
 from mminf.graph.base import GraphEdge
 from mminf.streaming.chunk_policy import ChunkPolicy
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -66,6 +69,20 @@ class StreamBuffer:
     def signal_done(self) -> None:
         """Producer signals no more items will arrive."""
         self.producer_done = True
+        # Diagnostic: count chunks still in flight at the moment producer
+        # claims to be done. If unread items > 0 here, we're racing —
+        # producer_done arrived before the last few chunks were ingested
+        # into the buffer.
+        in_flight = max(
+            self._num_tensors_registered - self._num_buffer_writes, 0,
+        )
+        logger.info(
+            "[DIAG-STREAM] StreamBuffer[%s/%s] signal_done: chunks_popped=%d "
+            "registered=%d buffer_writes=%d in_flight=%d buffer_len=%d",
+            self.request_id, self.edge_name, self._chunks_popped,
+            self._num_tensors_registered, self._num_buffer_writes,
+            in_flight, len(self._buffer),
+        )
 
     def _producer_done_and_all_read(self) -> bool:
         return self.producer_done and self._num_buffer_writes >= self._num_tensors_registered
@@ -86,6 +103,18 @@ class StreamBuffer:
         if (self._producer_done_and_all_read()
                 and buf_len == 0
                 and self.policy.continue_after_producer_done()):
+            # Diagnostic: first time we emit an empty chunk for this stream.
+            # Talker uses this as the TTS_EOS trigger, after which audio
+            # quality collapses. If this fires too early (before all real
+            # chunks were delivered), we have evidence of the bug.
+            if not getattr(self, "_emitted_empty_chunk", False):
+                self._emitted_empty_chunk = True
+                logger.info(
+                    "[DIAG-STREAM] StreamBuffer[%s/%s] first empty chunk: "
+                    "chunks_popped=%d (all real chunks drained, "
+                    "now emitting silence padding)",
+                    self.request_id, self.edge_name, self._chunks_popped,
+                )
             return True
         return self.policy.is_ready(buf_len)
 
