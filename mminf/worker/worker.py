@@ -596,6 +596,18 @@ class Worker:
         req_info = self.worker_graphs_manager.per_request_info.get(request_id)
         stream_buf = req_info.stream_buffers[edge.name]
 
+        if not edge.tensor_info:
+            # Diagnostic: streaming edge arrived with empty tensor_info.
+            # This drops the chunk silently — Talker sees no input on this
+            # iteration and falls back to TTS_EOS / pad embeddings, leading
+            # to the audio cutoff symptom.
+            logger.warning(
+                "[DIAG-STREAM] req %s edge %s -> %s: empty tensor_info; "
+                "chunk dropped silently. shard_dim=%s total_fanin=%s",
+                request_id, edge.name, edge.next_node,
+                edge._shard_dim, edge._total_fanin,
+            )
+
         for info in edge.tensor_info:
             tensor = self.tensor_manager.get_tensor(
                 request_id=request_id, uuid=info.uuid,
