@@ -433,10 +433,10 @@ class Model(ABC):
     def get_output_sample_rate(self, modality: str = "audio") -> int:
         """Sample rate (Hz) of audio output produced by ``postprocess``.
 
-        Audio is emitted as raw float32 PCM with no container header, so the
-        client surfaces (SDK / OpenAI-compatible endpoints) need this rate to
-        wrap it into a WAV/other container. Override per model; the 24 kHz
-        default matches the speech codecs used by the audio models here.
+        Audio is emitted as headerless 16-bit PCM, so the client surfaces
+        (SDK / OpenAI-compatible endpoints) need this rate to wrap it into a
+        WAV/other container. Override per model; the 24 kHz default matches the
+        speech codecs used by the audio models here.
         """
         return 24000
 
