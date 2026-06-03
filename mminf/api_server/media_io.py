@@ -7,7 +7,7 @@ Two directions:
   ``upload_dir``, so ``model.load_image`` / ``load_audio`` / ``load_video`` can
   read them by path. This is the same contract ``/generate`` already uses for
   multipart uploads.
-* **Outbound** — wrap raw model audio output (float32 PCM, no container header)
+* **Outbound** — wrap raw model audio output (16-bit PCM, no container header)
   into a real audio container (WAV by default) and encode image bytes (PNG) as a
   ``data:`` URL for OpenAI chat image output.
 
@@ -158,43 +158,40 @@ def resolve_media_ref(ref: str, upload_dir: Path, *, allow_remote: bool = True) 
 # Outbound: wrap raw model output for client surfaces
 # ---------------------------------------------------------------------------
 
-def pcm_f32_to_wav_bytes(pcm: bytes, sample_rate: int, num_channels: int = 1) -> bytes:
-    """Wrap raw float32 PCM (the model's audio output) into a 16-bit WAV blob."""
-    audio = np.frombuffer(pcm, dtype=np.float32)
-    audio = np.clip(audio, -1.0, 1.0)
-    pcm16 = (audio * 32767.0).astype("<i2")
+def pcm16_to_wav_bytes(pcm: bytes, sample_rate: int, num_channels: int = 1) -> bytes:
+    """Wrap raw little-endian 16-bit PCM (the model's audio output) into a WAV blob."""
     buf = io.BytesIO()
     with wave.open(buf, "wb") as wf:
         wf.setnchannels(num_channels)
         wf.setsampwidth(2)
         wf.setframerate(int(sample_rate))
-        wf.writeframes(pcm16.tobytes())
+        wf.writeframes(pcm)
     return buf.getvalue()
 
 
-def pcm_f32_to_container(pcm: bytes, sample_rate: int, fmt: str = "wav") -> tuple[bytes, str]:
-    """Encode raw float32 PCM into ``fmt``. Returns ``(bytes, mime_type)``.
+def pcm16_to_container(pcm: bytes, sample_rate: int, fmt: str = "wav") -> tuple[bytes, str]:
+    """Encode raw 16-bit PCM into ``fmt``. Returns ``(bytes, mime_type)``.
 
-    ``wav`` and ``pcm`` use the stdlib. Compressed formats need the optional
-    ``soundfile`` backend; if it is missing we fall back to WAV and log once.
+    ``wav`` and ``pcm`` use the stdlib (the bytes are already PCM_16). Compressed
+    formats need the optional ``soundfile`` backend; if it is missing we fall back
+    to WAV and log once.
     """
     fmt = (fmt or "wav").lower()
     if fmt == "wav":
-        return pcm_f32_to_wav_bytes(pcm, sample_rate), AUDIO_FORMAT_MIME["wav"]
+        return pcm16_to_wav_bytes(pcm, sample_rate), AUDIO_FORMAT_MIME["wav"]
     if fmt == "pcm":
-        audio = np.clip(np.frombuffer(pcm, dtype=np.float32), -1.0, 1.0)
-        return (audio * 32767.0).astype("<i2").tobytes(), AUDIO_FORMAT_MIME["pcm"]
+        return pcm, AUDIO_FORMAT_MIME["pcm"]
 
     try:
         import soundfile as sf  # type: ignore
 
-        audio = np.clip(np.frombuffer(pcm, dtype=np.float32), -1.0, 1.0)
+        audio = np.frombuffer(pcm, dtype="<i2")
         buf = io.BytesIO()
         sf.write(buf, audio, int(sample_rate), format=fmt.upper())
         return buf.getvalue(), AUDIO_FORMAT_MIME.get(fmt, "application/octet-stream")
     except Exception:  # noqa: BLE001 — any backend failure degrades to WAV
         logger.warning("Audio format %r unavailable (need soundfile); returning WAV", fmt)
-        return pcm_f32_to_wav_bytes(pcm, sample_rate), AUDIO_FORMAT_MIME["wav"]
+        return pcm16_to_wav_bytes(pcm, sample_rate), AUDIO_FORMAT_MIME["wav"]
 
 
 def wav_stream_header(sample_rate: int, num_channels: int = 1, bits: int = 16) -> bytes:
