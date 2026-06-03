@@ -75,7 +75,7 @@ def client_and_stub(monkeypatch):
 
 
 def _pcm(vals):
-    return np.array(vals, dtype=np.float32).tobytes()
+    return np.array(vals, dtype="<i2").tobytes()  # int16 PCM, as the models emit
 
 
 def test_models(client_and_stub):
@@ -100,7 +100,7 @@ def test_chat_text(client_and_stub):
 def test_chat_audio_output(client_and_stub):
     client, stub = client_and_stub
     stub.model_name = "qwen3_omni"
-    stub.next_chunks = [_Chunk("text", b"hi"), _Chunk("audio", _pcm([0.0, 0.5, -0.5]), {"sample_rate": 24000})]
+    stub.next_chunks = [_Chunk("text", b"hi"), _Chunk("audio", _pcm([0, 16000, -16000]), {"sample_rate": 24000})]
     body = client.post(
         "/v1/chat/completions",
         json={
@@ -118,7 +118,7 @@ def test_chat_audio_output(client_and_stub):
 def test_audio_speech(client_and_stub):
     client, stub = client_and_stub
     stub.model_name = "orpheus"
-    stub.next_chunks = [_Chunk("audio", _pcm([0.1, -0.1]), {"sample_rate": 24000})]
+    stub.next_chunks = [_Chunk("audio", _pcm([100, -100]), {"sample_rate": 24000})]
     r = client.post("/v1/audio/speech", json={"model": "orpheus", "input": "hi", "voice": "tara"})
     assert r.status_code == 200
     assert r.headers["content-type"] == "audio/wav" and r.content[:4] == b"RIFF"
