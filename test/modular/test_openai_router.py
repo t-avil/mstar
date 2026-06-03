@@ -178,3 +178,16 @@ def test_unsupported_model_404(client_and_stub):
     )
     assert r.status_code == 404
     assert r.json()["error"]["type"] == "model_not_found"
+
+
+def test_api_resolves_from_main_module(monkeypatch):
+    # Simulate `python mminf/api_server/entrypoint.py` (runs as __main__):
+    # main() sets api_server on __main__, not on the package module. _api()
+    # must still find it — this is the launch_server_*.sh launch path.
+    from mminf.api_server.openai import router as router_mod
+
+    ep = types.ModuleType("mminf.api_server.entrypoint")  # present but no api_server
+    monkeypatch.setitem(sys.modules, "mminf.api_server.entrypoint", ep)
+    stub = _StubAPI("bagel")
+    monkeypatch.setattr(sys.modules["__main__"], "api_server", stub, raising=False)
+    assert router_mod._api() is stub
