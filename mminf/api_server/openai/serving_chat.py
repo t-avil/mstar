@@ -53,7 +53,7 @@ def _build_response(model_name, request_id, chunks, sample_rate) -> dict:
     message: dict = {"role": "assistant", "content": text}
 
     if audio_pcm:
-        wav = media_io.pcm_f32_to_wav_bytes(b"".join(audio_pcm), sample_rate)
+        wav = media_io.pcm16_to_wav_bytes(b"".join(audio_pcm), sample_rate)
         message["audio"] = {
             "id": rid("audio"),
             "data": base64.b64encode(wav).decode("ascii"),
@@ -96,8 +96,7 @@ async def _stream(api, model_name, request_id, sample_rate):
             yield chunk({"content": c.data.decode("utf-8", "replace")})
         elif c.modality == "audio":
             # Streaming audio deltas are base64 16-bit PCM at the model rate.
-            pcm16, _ = media_io.pcm_f32_to_container(c.data, sample_rate, "pcm")
-            yield chunk({"audio": {"id": rid("audio"), "data": base64.b64encode(pcm16).decode("ascii")}})
+            yield chunk({"audio": {"id": rid("audio"), "data": base64.b64encode(c.data).decode("ascii")}})
         elif c.modality == "image":
             yield chunk({"content": media_io.png_to_data_url(c.data)})
     yield chunk({}, finish="stop")
