@@ -71,7 +71,12 @@ def flatten_messages(
                 if url:
                     mod, path = media_io.resolve_media_ref(url, upload_dir, allow_remote=allow_remote)
                     add_file(mod or "video", path)
-            elif ptype == "input_audio":
+            elif ptype == "audio_url":  # data:/http audio input (vllm-omni content style)
+                url = (part.get("audio_url") or {}).get("url", "")
+                if url:
+                    mod, path = media_io.resolve_media_ref(url, upload_dir, allow_remote=allow_remote)
+                    add_file(mod or "audio", path)
+            elif ptype == "input_audio":  # OpenAI-native audio input (base64 + format)
                 ia = part.get("input_audio") or {}
                 data, fmt = ia.get("data"), ia.get("format", "wav")
                 if data:
@@ -108,6 +113,9 @@ class OpenAIAdapter:
     def image_to_request(self, req, upload_dir: Path) -> SubmitArgs:  # noqa: ARG002
         raise NotImplementedError("image generation is not supported by this model")
 
+    def image_edit_to_request(self, prompt: str, image_path: str, extra_kwargs: dict) -> SubmitArgs:  # noqa: ARG002
+        raise NotImplementedError("image editing is not supported by this model")
+
 
 class BagelAdapter(OpenAIAdapter):
     """BAGEL: text chat + text-to-image. (Sampling uses model config defaults.)"""
@@ -136,6 +144,17 @@ class BagelAdapter(OpenAIAdapter):
             input_modalities=["text"],
             output_modalities=["image"],
             model_kwargs=mk,
+        )
+
+    def image_edit_to_request(self, prompt: str, image_path: str, extra_kwargs: dict) -> SubmitArgs:
+        # Image editing: the input image + prompt produce an edited image
+        # (BAGEL's I2I path). Extra kwargs (e.g. cfg_*_scale) pass through.
+        return SubmitArgs(
+            text=prompt,
+            file_paths={"image": [image_path]},
+            input_modalities=["image", "text"],
+            output_modalities=["image"],
+            model_kwargs=dict(extra_kwargs or {}),
         )
 
 
