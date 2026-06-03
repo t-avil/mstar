@@ -21,7 +21,7 @@ def test_parse_ndjson_line():
 
 
 def test_parse_result_groups_modalities():
-    pcm = np.array([0.0, 1.0], dtype=np.float32).tobytes()
+    pcm = np.array([0, 1000, -1000, 32767], dtype="<i2").tobytes()  # 4 int16 samples
     payload = {
         "request_id": "r1",
         "outputs": {
@@ -36,12 +36,13 @@ def test_parse_result_groups_modalities():
     res = MMInfClient._parse_result(payload)
     assert res.text == "hello world"
     assert res.images == [b"\x89PNG"]
-    assert res.audio is not None and res.audio.sample_rate == 24000 and len(res.audio) == 2
+    assert res.audio is not None and res.audio.sample_rate == 24000 and len(res.audio) == 4
+    assert res.audio.pcm == pcm  # raw int16 preserved
     assert len(res.raw) == 4
 
 
 def test_to_event_typing():
-    pcm = np.array([0.5], dtype=np.float32).tobytes()
+    pcm = np.array([123, -123], dtype="<i2").tobytes()
     assert MMInfClient._to_event({"modality": "text", "bytes": b"hi", "metadata": {}}).text == "hi"
     audio = MMInfClient._to_event({"modality": "audio", "bytes": pcm, "metadata": {"sample_rate": 16000}})
     assert audio.sample_rate == 16000
@@ -55,6 +56,6 @@ def test_coerce_and_build_files():
 
 
 def test_audiobuffer_wav_bytes():
-    pcm = np.array([0.0, 0.5, -0.5], dtype=np.float32).tobytes()
+    pcm = np.array([0, 16000, -16000], dtype="<i2").tobytes()
     wav = AudioBuffer(pcm, 24000).wav_bytes()
-    assert wav[:4] == b"RIFF" and wav[8:12] == b"WAVE"
+    assert wav[:4] == b"RIFF" and wav[8:12] == b"WAVE" and wav[44:] == pcm
