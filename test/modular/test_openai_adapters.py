@@ -76,6 +76,32 @@ def test_extra_body_passthrough(tmp_path):
     assert sa.model_kwargs.get("think_mode") is True
 
 
+def test_qwen3_chat_audio_url_input(tmp_path):
+    raw = b"RIFFfakewavbytes"
+    url = "data:audio/wav;base64," + base64.b64encode(raw).decode()
+    req = ChatCompletionRequest(
+        model="qwen3_omni",
+        messages=[{"role": "user", "content": [
+            {"type": "text", "text": "transcribe"},
+            {"type": "audio_url", "audio_url": {"url": url}},
+        ]}],
+    )
+    sa = adapters.Qwen3OmniAdapter().chat_to_request(req, tmp_path)
+    assert "audio" in sa.file_paths
+    assert Path(sa.file_paths["audio"][0]).read_bytes() == raw
+    assert "audio" in sa.input_modalities
+
+
+def test_bagel_image_edit(tmp_path):
+    image_path = str(tmp_path / "in.png")
+    sa = adapters.BagelAdapter().image_edit_to_request("make it neon", image_path, {"cfg_img_scale": 2.0})
+    assert sa.text == "make it neon"
+    assert sa.file_paths == {"image": [image_path]}
+    assert sa.input_modalities == ["image", "text"]
+    assert sa.output_modalities == ["image"]
+    assert sa.model_kwargs == {"cfg_img_scale": 2.0}
+
+
 def test_registry():
     assert {"bagel", "qwen3_omni", "orpheus"} <= set(adapters.ADAPTER_REGISTRY)
     assert adapters.get_adapter("pi05") is None
