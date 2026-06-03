@@ -7,7 +7,9 @@ the surface is supported, and delegates to a serving handler. The native
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+import json
+
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from mminf.api_server.openai import serving_chat, serving_images, serving_speech
@@ -97,6 +99,43 @@ async def images_generations(request: ImageGenerationRequest):
         return err
     try:
         result = await serving_images.create_images(api, model_name, adapter, request)
+    except Exception as e:  # noqa: BLE001
+        return _error(getattr(e, "status_code", 500), str(getattr(e, "detail", e)), "server_error")
+    return JSONResponse(result)
+
+
+@router.post("/v1/images/edits")
+async def images_edits(request: Request):
+    # Multipart (image file + prompt + passthrough fields), parsed manually so
+    # arbitrary model knobs (e.g. cfg_*_scale) flow through as model_kwargs.
+    api, model_name, adapter, err = _resolve("supports_images")
+    if err is not None:
+        return err
+    try:
+        form = await request.form()
+        image = form.get("image")
+        if image is None or not hasattr(image, "read"):
+            return _error(400, "images/edits requires an 'image' file upload")
+        image_bytes = await image.read()
+        prompt = form.get("prompt") or ""
+        known = {"image", "prompt", "model", "n", "size", "response_format"}
+        extra: dict = {}
+        for key, value in form.multi_items():
+            if key in known or hasattr(value, "filename"):
+                continue
+            try:
+                extra[key] = json.loads(value)
+            except (json.JSONDecodeError, TypeError):
+                extra[key] = value
+        result = await serving_images.create_image_edit(
+            api,
+            model_name,
+            adapter,
+            prompt=prompt,
+            image_bytes=image_bytes,
+            image_filename=getattr(image, "filename", None),
+            model_kwargs=extra,
+        )
     except Exception as e:  # noqa: BLE001
         return _error(getattr(e, "status_code", 500), str(getattr(e, "detail", e)), "server_error")
     return JSONResponse(result)
