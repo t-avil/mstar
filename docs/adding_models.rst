@@ -157,11 +157,13 @@ Step 3 — Declare the computation graph
   key in ``get_node_engine_types``. ``input_names`` are the tensor names that must be
   present before the node can run; ``outputs`` is a list of ``GraphEdge``.
 - ``GraphEdge(next_node, name, ...)`` — routes an output tensor named ``name`` to
-  ``next_node``. Flags: ``persist=True`` keeps the tensor for later steps,
-  ``conductor_new_token=True`` reports a generated token to the conductor, and
-  ``output_modality="audio"`` (with ``next_node=EMIT_TO_CLIENT``) streams it to the
+  ``next_node``. Flags: ``persist=True`` keeps the tensor available for later steps/walks
+  (this is how a generated token is carried from ``prefill`` into the ``decode`` loop),
+  and ``output_modality="audio"`` (with ``next_node=EMIT_TO_CLIENT``) streams it to the
   client. Special destinations live in ``mminf/graph/special_destinations.py``
-  (``EMIT_TO_CLIENT``, ``EMPTY_DESTINATION``).
+  (``EMIT_TO_CLIENT``, ``EMPTY_DESTINATION``). The conductor learns about generated tokens
+  through the ``new_tokens`` argument to ``get_partition_forward_pass_args`` (and decode
+  termination through a submodule's ``check_stop``), not through any edge flag.
 - ``Sequential([...])`` / ``Parallel([...])`` — compose subgraphs in order or
   concurrently.
 - ``Loop(name, section, max_iters, outputs)`` — an iterating subgraph whose body feeds
@@ -178,8 +180,9 @@ A minimal text generator has two walks — a one-shot ``prefill`` node and a ``d
        prefill = GraphNode(
            name="LLM",
            input_names=["text_inputs"],
+           # the generated token persists so the decode loop can pick it up
            outputs=[GraphEdge(next_node=EMPTY_DESTINATION, name="new_token",
-                              conductor_new_token=True, persist=True)],
+                              persist=True)],
        )
        decode = Loop(
            name="decode_loop",
