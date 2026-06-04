@@ -57,10 +57,38 @@ def test_qwen3_chat_audio_and_sampling(tmp_path):
 
 
 def test_orpheus_speech_maps_voice_and_sampling(tmp_path):
-    req = SpeechRequest(model="orpheus", input="hi", voice="tara", temperature=0.7, top_p=0.5)
+    req = SpeechRequest(model="orpheus", input="hi", voice="tara", temperature=0.7, top_p=0.5, seed=11)
     sa = adapters.OrpheusAdapter().speech_to_request(req, tmp_path)
     assert sa.output_modalities == ["audio"]
-    assert sa.model_kwargs == {"voice": "tara", "temperature": 0.7, "top_p": 0.5}
+    assert sa.model_kwargs == {"voice": "tara", "temperature": 0.7, "top_p": 0.5, "seed": 11}
+
+
+def test_qwen3_speech_maps_talker_sampling(tmp_path):
+    # talker_top_p was previously missing; the shared sampling helper adds it.
+    req = SpeechRequest(model="qwen3_omni", input="hi", voice="Ethan", temperature=0.5, top_p=0.7, seed=123)
+    sa = adapters.Qwen3OmniAdapter().speech_to_request(req, tmp_path)
+    assert sa.output_modalities == ["text", "audio"]
+    assert sa.model_kwargs["talker_temperature"] == 0.5
+    assert sa.model_kwargs["talker_top_p"] == 0.7
+    assert sa.model_kwargs["seed"] == 123
+    assert sa.model_kwargs["voice"] == "Ethan"
+
+
+def test_chat_and_image_honor_seed(tmp_path):
+    chat = ChatCompletionRequest(model="bagel", messages=[{"role": "user", "content": "x"}], seed=7)
+    assert adapters.BagelAdapter().chat_to_request(chat, tmp_path).model_kwargs["seed"] == 7
+    img = ImageGenerationRequest(model="bagel", prompt="a cat", seed=9)
+    assert adapters.BagelAdapter().image_to_request(img, tmp_path).model_kwargs["seed"] == 9
+
+
+def test_extra_body_non_standard_knobs_pass_through(tmp_path):
+    # top_k / repetition_penalty aren't OpenAI fields → flow via extra_body verbatim.
+    req = ChatCompletionRequest(
+        model="qwen3_omni", messages=[{"role": "user", "content": "x"}],
+        talker_top_k=50, talker_repetition_penalty=1.05,
+    )
+    mk = adapters.Qwen3OmniAdapter().chat_to_request(req, tmp_path).model_kwargs
+    assert mk["talker_top_k"] == 50 and mk["talker_repetition_penalty"] == 1.05
 
 
 def test_bagel_image(tmp_path):
