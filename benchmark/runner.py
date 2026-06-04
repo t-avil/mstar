@@ -24,6 +24,7 @@ from benchmark.dataset import (
 from benchmark.request import (
     AggregateMetrics,
     InferenceSystem,
+    OursOpenAI,
     OurSystem,
     RequestInput,
     RequestMetrics,
@@ -47,6 +48,7 @@ class DatasetType(Enum):
 
 class InferenceSystemType(Enum):
     OURS = "ours"
+    OURS_OPENAI = "ours_openai"
     VLLM_OMNI = "vllm_omni"
     VOX_SERVE = "vox_serve"
     SGLANG_OMNI = "sglang_omni"
@@ -54,6 +56,8 @@ class InferenceSystemType(Enum):
     def instantiate(self) -> InferenceSystem:
         if self == InferenceSystemType.OURS:
             return OurSystem()
+        elif self == InferenceSystemType.OURS_OPENAI:
+            return OursOpenAI()
         elif self == InferenceSystemType.VLLM_OMNI:
             return VLLMOmni()
         elif self == InferenceSystemType.VOX_SERVE:
