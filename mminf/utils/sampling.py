@@ -17,11 +17,15 @@ Usage:
 
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
+import logging
 from typing import Any, Callable
 
 import torch
 import triton
 import triton.language as tl
+
+
+logger = logging.getLogger(__name__)
 
 
 @triton.autotune(
@@ -176,8 +180,8 @@ def fused_temperature_softmax(
     mask_stride_b = seen_mask.stride(0) if apply_penalty else 0
     mask_stride_v = seen_mask.stride(1) if apply_penalty else 0
     grid = (B,)
-    # BLOCK_SIZE is picked by @triton.autotune (not passed here).
     with torch.cuda.device(logits.device):
+        # BLOCK_SIZE is picked by @triton.autotune (not passed here).
         _fused_sampling_prep_kernel[grid](
             logits, temperature, pen_ptr, mask_ptr, probs,
             V,
@@ -192,6 +196,7 @@ def fused_temperature_softmax(
 
 @dataclass
 class SamplingConfig:
+    vocab_size: int | None = None
     temperature: float = 0.6
     top_k: int = 0
     top_p: float = 1
@@ -242,19 +247,53 @@ class BaseSampler(ABC):
         )
         return samples.to(torch.int64)
 
-# TODO: add a method for adding prefill tokens to the _seen_token_mask,
-# if applying the repetition penalty to tokens from the prompt is desired
+
+@dataclass
+class SeenTokenMask:
+    request_id: str
+    _seen_token_mask: torch.Tensor | None
+
+    @classmethod
+    def new(cls, request_id: str, vocab_size: int | None, device):
+        return cls(
+            request_id=request_id,
+            _seen_token_mask=torch.zeros(
+                vocab_size, dtype=torch.bool, device=device
+            ) if vocab_size is not None else None,
+            
+        )
+
+    def add_tokens(self, tokens: torch.Tensor | int):
+        if self._seen_token_mask is None:
+            logger.warning(
+                f"Calling add_tokens on an uninitialized SeenTokenMask, i.e., "
+                "one where the vocab_size was provided in the SamplingConfig or "
+                "the SamplingConfig has not yet been registered with the Sampler.s"
+            )
+            return
+        self._seen_token_mask[tokens] = True
+
+
 @dataclass
 class Sampler(BaseSampler):
     # per request
+    device: torch.device
     _sampling_config: dict[str, SamplingConfig] = field(default_factory=dict)
-    _seen_token_mask: dict[str, torch.Tensor]= field(default_factory=dict)
+    _seen_token_mask: dict[str, SeenTokenMask]= field(default_factory=dict)
     _autotune_sync_budget_remaining: int = 64
     tp_group: "TPCommGroup | None" = None  # noqa: F821
 
     def add_request(self, request_id: str):
         self._sampling_config[request_id] = SamplingConfig()
-        # lazy init _seen_token_mask, taking vocab size from logits
+        self._seen_token_mask[request_id] =  SeenTokenMask.new(
+            request_id,
+            vocab_size=None,
+            device=self.device
+        )
+        # lazy init _seen_token_mask, taking vocab size from logits or cfg
+    
+    def get_token_mask(self, request_id: str):
+        return self._seen_token_mask[request_id]
 
     def remove_request(self, request_id: str):
         if request_id in self._sampling_config:
@@ -263,11 +302,20 @@ class Sampler(BaseSampler):
             del self._seen_token_mask[request_id]
 
     def set_config(self, request_id: str, **kwargs):
+        old_vocab_size = self._sampling_config[request_id].vocab_size
         curr_config = asdict(self._sampling_config[request_id])
         kwargs = {k: arg for k, arg in kwargs.items() if k in curr_config.keys()}
         self._sampling_config[request_id] = SamplingConfig(**{
             **curr_config, **kwargs
         })
+
+        new_vocab_size = self._sampling_config[request_id].vocab_size
+        if old_vocab_size != new_vocab_size:
+            self._seen_token_mask[request_id] = SeenTokenMask.new(
+                request_id=request_id,
+                vocab_size=new_vocab_size,
+                device=self.device
+            )
 
     def sample(
         self, request_ids: list[str], logits: torch.Tensor
@@ -292,17 +340,17 @@ class Sampler(BaseSampler):
         any_top_k_zero = any(c.top_k == 0 for c in configs)
         all_top_k_zero = all(c.top_k == 0 for c in configs)
 
-        # Only materialize the seen-token mask when at least one request has
-        # repetition penalty active — otherwise sample_tokens ignores it.
+        for rid in request_ids:
+            if self._sampling_config[rid].vocab_size is None:
+                self._seen_token_mask[rid] = SeenTokenMask.new(
+                    rid, vocab_size=logits.shape[1],
+                    device=self.device
+                )
+    
         seen_mask = None
         if any_rep_pen:
-            for rid in request_ids:
-                if rid not in self._seen_token_mask:
-                    self._seen_token_mask[rid] = torch.zeros(
-                        logits.shape[1], dtype=torch.bool, device=logits.device
-                    )
             seen_mask = torch.stack(
-                [self._seen_token_mask[rid] for rid in request_ids], dim=0,
+                [self._seen_token_mask[rid]._seen_token_mask for rid in request_ids], dim=0,
             )
 
         tokens = sample_tokens(
@@ -317,7 +365,7 @@ class Sampler(BaseSampler):
             all_top_k_zero=all_top_k_zero,
             seed=seed,
             rand_offset=rand_offset,
-            consume_autotune_sync_budget=self._consume_autotune_sync_budget,
+            cuda_sync_function=self._sync,
         )
 
         # TODO: make this scatter async. Currently runs 2 kernels per rid
@@ -335,60 +383,15 @@ class Sampler(BaseSampler):
 
         if any_rep_pen:
             for i, rid in enumerate(request_ids):
-                self._seen_token_mask[rid][tokens[i:i+1]] = True
+                self._seen_token_mask[rid].add_tokens(tokens[i:i+1])
 
         return tokens
 
-    def _consume_autotune_sync_budget(self) -> None:
+    def _sync(self) -> None:
         # Sync between Triton's fused_temperature_softmax (writes probs)
         # and FlashInfer's sampling kernel (reads probs). They live on
-        # different CUDA streams in some configurations — verified by
-        # speculation-duplication regressions on Qwen3-Omni Thinker that
-        # vanish only when the sync is unconditional. The earlier
-        # "autotune budget" hack that limited sync to the first 64 calls
-        # was based on the assumption that after Triton autotune both
-        # kernels land on the default stream; that assumption holds for
-        # Orpheus (single shape bucket) but not for Q3-Omni (multiple
-        # bs/num_tokens × Thinker/Talker combinations triggering distinct
-        # autotunes), which causes mid-sequence token doubling once the
-        # budget runs out. Keep the sync unconditional — its cost is
-        # ~10 µs per sample, well below the iter budget (3-5 ms), so it
-        # does not regress the speculative/CUDA-graph perf wins.
+        # different CUDA streams in some configurations.
         torch.cuda.current_stream().synchronize()
-
-
-@torch.compiler.disable
-def _apply_repetition_penalty(
-    logits: torch.Tensor,          # [B, V]
-    seen_mask: torch.Tensor,       # [B, V] (bool or 0/1)
-    penalty: torch.Tensor,         # [B]
-) -> torch.Tensor:
-    """
-    Apply vLLM-style sign-aware repetition penalty in-place.
-
-    seen_mask[b, v] = 1 if token v has been seen in batch element b.
-    penalty is per-batch.
-    """
-
-    if seen_mask is None or seen_mask.sum() == 0:
-        return logits
-
-    # Expand penalty to [B, 1] so it broadcasts over vocab
-    penalty = penalty.view(-1, 1)
-
-    # Only touch seen positions
-    selected = logits
-
-    penalized = torch.where(
-        selected > 0,
-        selected / penalty,
-        selected * penalty,
-    )
-
-    # Apply only where seen_mask == 1
-    logits = torch.where(seen_mask, penalized, logits)
-
-    return logits
 
 
 @torch.compiler.disable
@@ -404,7 +407,7 @@ def sample_tokens(
     all_top_k_zero: bool | None = None,
     seed: torch.Tensor | None = None,
     rand_offset: torch.Tensor | None = None,
-    consume_autotune_sync_budget: Callable[[], None] | None = None,
+    cuda_sync_function: Callable[[], None] | None = None,
 ) -> torch.Tensor:
     """Sample tokens from logits with temperature, top-k, top-p, and repetition penalty.
 
@@ -435,7 +438,6 @@ def sample_tokens(
 
     # Default to the conservative "unknown → do the work" path.
     run_greedy = True if any_greedy is None else any_greedy
-    run_top_k_zero_fix = True if any_top_k_zero is None else any_top_k_zero
 
     import flashinfer
 
@@ -450,19 +452,9 @@ def sample_tokens(
             seen_mask=seen_token_mask,
             include_greedy=run_greedy,
         )
-        # Budgeted current-stream sync between fused-softmax and FlashInfer
-        # top-p sampling. The original unconditional sync was added to fix
-        # a Qwen sampling issue caused by Triton-autotune timing on first
-        # calls (see git history of this file). After autotune warms up
-        # both kernels run on the same default stream and stream ordering
-        # already serializes them — at that point the sync is pure overhead
-        # AND it blocks the same-thread async path from overlapping
-        # post-processing with the just-submitted GPU(N+1) work (see
-        # worker.run). The budget is owned by each
-        # Sampler instance so co-located Thinker/Talker/code-predictor
-        # samplers cannot consume one another's warmup protection.
-        if consume_autotune_sync_budget is not None:
-            consume_autotune_sync_budget()
+
+        if cuda_sync_function is not None:
+            cuda_sync_function()
         result = flashinfer.sampling.top_p_sampling_from_probs(probs, top_p)
         return result[0] if isinstance(result, tuple) else result
     
@@ -472,8 +464,8 @@ def sample_tokens(
         seen_mask=seen_token_mask,
         include_greedy=run_greedy,
     )
-    if consume_autotune_sync_budget is not None:
-        consume_autotune_sync_budget()
+    if cuda_sync_function is not None:
+        cuda_sync_function()
     result = flashinfer.sampling.top_k_top_p_sampling_from_probs(
         probs, top_k, top_p,
         deterministic=True,

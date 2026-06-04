@@ -34,6 +34,7 @@ from mminf.model.submodule_base import (
     NodeSubmodule,
     StackingMethod,
 )
+from mminf.utils.sampling import SeenTokenMask
 
 logger = logging.getLogger(__name__)
 
@@ -546,7 +547,9 @@ class LLMSubmodule(ARNodeSubmodule):
         graph_walk: str,
         fwd_info: CurrentForwardPassInfo,
         inputs: NameToTensorList,
+        seen_token_mask: SeenTokenMask,
         pos_info: dict[str, PositionInfo] = {},
+        **kwargs
     ) -> ARNodeInputs:
 
         device = self.get_device()
@@ -554,9 +557,11 @@ class LLMSubmodule(ARNodeSubmodule):
 
         if graph_walk == "prefill_text":
             node_inputs.input_ids = self._preprocess_prefill_text(inputs["text_inputs"][0])
+            seen_token_mask.add_tokens(node_inputs.input_ids)
             node_inputs.input_seq_len = node_inputs.input_ids.shape[0]
 
         elif graph_walk == "decode":
+            # NOTE: newly-sampled tokens automatically added to the seen token mask
             bos = torch.tensor([self.bos_token_id], device=device)
             node_inputs.input_ids = inputs["text_inputs"][0] if len(inputs["text_inputs"]) > 0 else bos.clone()
             node_inputs.input_seq_len = 1

@@ -69,6 +69,7 @@ class BagelModelConfig:
     temperature: float = 0.6  # 0 = greedy (argmax), >0 = sampling
     top_k: int = 0            # 0 = disabled
     top_p: float = 1.0        # 1.0 = disabled
+    repetition_penalty: float = 1.05
 
     vocab_size: int = 151936
     hidden_size: int = 4096

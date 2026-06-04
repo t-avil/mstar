@@ -963,9 +963,14 @@ class BagelModel(Model):
         model_kwargs: dict | None = None,
     )  -> SamplingConfig | None:
         keys = [
-            "temperature", "top_k", "top_p",
+            "temperature", "top_k", "top_p", "repetition_penalty",
         ]
         params = {k: getattr(self.config, k) for k in keys}
+        if model_kwargs:
+            for key in keys:
+                if key in model_kwargs:
+                    params[key] = model_kwargs[key]
         return SamplingConfig(
+            vocab_size=self.config.vocab_size,
             **params
         )
