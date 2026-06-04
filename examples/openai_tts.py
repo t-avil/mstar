@@ -10,7 +10,7 @@ client = OpenAI(base_url="http://localhost:8000/v1", api_key="none")
 
 with client.audio.speech.with_streaming_response.create(
     model="orpheus",
-    input="Hello there, this is mminf speaking.",
+    input="Hello there, this is M star speaking.",
     voice="tara",
     response_format="wav",
 ) as resp:
