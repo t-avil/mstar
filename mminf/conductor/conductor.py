@@ -589,7 +589,10 @@ class Conductor:
 
         model_kwargs = body.model_kwargs or {}
         max_output_tokens = self.model.get_max_output_tokens(**model_kwargs)
-        seed = _req_id_to_seed(body.request_id)
+        # Honor an explicit per-request seed (e.g. OpenAI ``seed``) when given;
+        # otherwise derive a stable seed from the request id.
+        explicit_seed = model_kwargs.get("seed")
+        seed = int(explicit_seed) if explicit_seed is not None else _req_id_to_seed(body.request_id)
 
         partitions = self.model.get_partitions()
         topology = self.model.get_partition_topology()
