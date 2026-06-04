@@ -276,7 +276,9 @@ class PreprocessWorkerThread:
                 tensor_info.uuid] = result.metadata
 
     def _process_read_tensors(self):
+        did_work = False
         for request_id, graph_edges in self.tensor_manager.get_ready_tensors().items():
+            did_work = True
             for graph_edge in graph_edges:
                 modality = graph_edge.name.replace("_output", "")
 
@@ -312,9 +314,12 @@ class PreprocessWorkerThread:
                         request_id=request_id,
                         uuid=tensor_info.uuid
                     )
+        return did_work
 
     def _process_messages(self):
+        did_work = False
         for message in self.communicator.get_all_new_messages():
+            did_work = True
             if message.message_type == WorkerMessageType.TENSOR_RECEIVED:
                 body: TensorReceived = message.body
                 for (uuid, ref_cnt) in body.successful_tensors.items():
@@ -330,23 +335,28 @@ class PreprocessWorkerThread:
                     self.tensor_manager.set_persist(
                         body.request_id, uuid, persist=False
                     )
+        return did_work
 
     def run(self):
         while not self.stop_event.is_set():
             try:
-                self._process_messages()
+                did_work = self._process_messages()
                 if not self.in_queue.empty():
+                    did_work = True
                     self._process_input(self.in_queue.get())
                 if not self.result_tensor_queue.empty():
+                    did_work = True
                     self._read_result_tensor(self.result_tensor_queue.get())
                 if not self.cleanup_request_queue.empty():
+                    did_work = True
                     req_id = self.cleanup_request_queue.get()
                     self.tensor_manager.cleanup_request(req_id)
                     if req_id in self.tensor_uuid_to_metadata_per_request:
                         del self.tensor_uuid_to_metadata_per_request[req_id]
-                self._process_read_tensors()
+                did_work = did_work or self._process_read_tensors()
             except Exception:
                 logger.exception("PreprocessWorkerThread error")
 
-            time.sleep(0.001)
+            if not did_work:
+                time.sleep(0.001)
 
