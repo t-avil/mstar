@@ -7,6 +7,6 @@ from mminf import MMInfClient
 
 client = MMInfClient("http://localhost:8000")
 
-audio = client.tts("Hello from mminf!", voice="tara")
+audio = client.tts("Hello from M star!", voice="tara")
 audio.to_wav("out.wav")
 print(f"wrote out.wav — {len(audio)} samples @ {audio.sample_rate} Hz")
