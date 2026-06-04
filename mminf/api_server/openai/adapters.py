@@ -7,17 +7,35 @@ model supports. Output chunks are translated back to OpenAI shapes by the
 serving handlers, which are generic across models.
 
 ``model_kwargs`` is non-standardized across models, so each adapter maps the
-standard OpenAI fields (``temperature``, ``max_tokens``, ``voice``,
-``modalities`` …) onto the keys its model actually honors. New models opt in by
-adding an adapter and registering it in :data:`ADAPTER_REGISTRY`.
+standard OpenAI fields (``temperature``, ``top_p``, ``max_tokens``, ``seed``,
+``voice``, ``modalities`` …) onto the keys its model actually honors (see
+:func:`_apply_sampling`). Knobs that aren't OpenAI-standard (``top_k``,
+``repetition_penalty``, or model-namespaced keys like ``talker_top_p``) are not
+first-class fields — pass them via the OpenAI client's ``extra_body`` and they
+flow through verbatim as model_kwargs (see :func:`_passthrough`).
+
+Models whose outputs have no OpenAI-standard representation (robot actions from
+Pi0.5, world-model latents from V-JEPA 2) intentionally have **no** adapter:
+they are served only through the native ``/generate`` endpoint and the Python
+SDK, and ``/v1/*`` returns 404 for them (they do not fall back to chat). New
+OpenAI-capable models opt in by adding an adapter and registering it in
+:data:`ADAPTER_REGISTRY`.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from mminf.api_server import media_io
+
+if TYPE_CHECKING:  # for type checkers / IDEs only (annotations are lazy via __future__)
+    from mminf.api_server.openai.protocol import (
+        ChatCompletionRequest,
+        ImageGenerationRequest,
+        SpeechRequest,
+    )
 
 
 @dataclass
@@ -97,20 +115,65 @@ def _passthrough(req) -> dict:
     return dict(extra)
 
 
+def _apply_sampling(
+    req,
+    mk: dict,
+    *,
+    temperature_key: str = "temperature",
+    top_p_key: str = "top_p",
+    max_tokens_key: str | None = "max_output_tokens",
+) -> dict:
+    """Map the OpenAI-standard sampling fields onto a model's ``model_kwargs``.
+
+    Behavior is common across models, but the target key names differ (e.g.
+    Qwen3-Omni's Thinker uses ``thinker_temperature`` and its Talker
+    ``talker_temperature``), so callers pass them in. ``setdefault`` lets an
+    explicit ``extra_body`` value win over the standard field.
+
+    Handled (the OpenAI-standard scalars): ``temperature``, ``top_p``, ``seed``,
+    and ``max_tokens`` / ``max_completion_tokens``. Non-standard knobs
+    (``top_k``, ``repetition_penalty``, model-namespaced keys) are not OpenAI
+    fields — send them via ``extra_body`` and they pass through :func:`_passthrough`.
+    ``seed`` is honored by the conductor, which uses it in place of the
+    request-id-derived RNG seed.
+    """
+    temperature = getattr(req, "temperature", None)
+    if temperature is not None:
+        mk.setdefault(temperature_key, temperature)
+    top_p = getattr(req, "top_p", None)
+    if top_p is not None:
+        mk.setdefault(top_p_key, top_p)
+    seed = getattr(req, "seed", None)
+    if seed is not None:
+        mk.setdefault("seed", seed)
+    if max_tokens_key:
+        max_tokens = getattr(req, "max_completion_tokens", None) or getattr(req, "max_tokens", None)
+        if max_tokens is not None:
+            mk.setdefault(max_tokens_key, max_tokens)
+    return mk
+
+
 class OpenAIAdapter:
-    """Base adapter. Models override the methods for surfaces they support."""
+    """Base adapter. A model subclasses this and implements the surfaces it
+    supports; an unimplemented surface raises and the endpoint returns 404.
+    Models with no OpenAI-standard output have no adapter (see the module
+    docstring) and are reached only via ``/generate`` / the SDK.
+    """
 
-    supports_chat: bool = False
-    supports_speech: bool = False
-    supports_images: bool = False
+    # Each flag gates exactly one OpenAI surface:
+    supports_chat: bool = False     # POST /v1/chat/completions
+    supports_speech: bool = False   # POST /v1/audio/speech
+    supports_images: bool = False   # POST /v1/images/generations and /v1/images/edits
 
-    def chat_to_request(self, req, upload_dir: Path) -> SubmitArgs:  # noqa: ARG002
+    def chat_to_request(self, req: ChatCompletionRequest, upload_dir: Path) -> SubmitArgs:  # noqa: ARG002
+        # Output modalities vary by model: e.g. Qwen3-Omni speech output also
+        # emits text, whereas BAGEL chat is text-only.
         raise NotImplementedError("chat is not supported by this model")
 
-    def speech_to_request(self, req, upload_dir: Path) -> SubmitArgs:  # noqa: ARG002
+    def speech_to_request(self, req: SpeechRequest, upload_dir: Path) -> SubmitArgs:  # noqa: ARG002
         raise NotImplementedError("audio/speech is not supported by this model")
 
-    def image_to_request(self, req, upload_dir: Path) -> SubmitArgs:  # noqa: ARG002
+    def image_to_request(self, req: ImageGenerationRequest, upload_dir: Path) -> SubmitArgs:  # noqa: ARG002
         raise NotImplementedError("image generation is not supported by this model")
 
     def image_edit_to_request(self, prompt: str, image_path: str, extra_kwargs: dict) -> SubmitArgs:  # noqa: ARG002
@@ -118,17 +181,20 @@ class OpenAIAdapter:
 
 
 class BagelAdapter(OpenAIAdapter):
-    """BAGEL: text chat + text-to-image. (Sampling uses model config defaults.)"""
+    """BAGEL: text chat (text out) + text-to-image / image editing.
+
+    BAGEL's ``get_sampling_config`` reads the model config, so per-request
+    ``temperature`` / ``top_p`` are not honored; ``max_output_tokens`` and
+    ``seed`` are.
+    """
 
     supports_chat = True
     supports_images = True
 
-    def chat_to_request(self, req, upload_dir: Path) -> SubmitArgs:
+    def chat_to_request(self, req: ChatCompletionRequest, upload_dir: Path) -> SubmitArgs:
         text, file_paths, in_mods = flatten_messages(req.messages, upload_dir)
         mk = _passthrough(req)
-        max_tokens = req.max_completion_tokens or req.max_tokens
-        if max_tokens is not None:
-            mk["max_output_tokens"] = max_tokens
+        _apply_sampling(req, mk)
         return SubmitArgs(
             text=text,
             file_paths=file_paths or None,
@@ -137,8 +203,10 @@ class BagelAdapter(OpenAIAdapter):
             model_kwargs=mk,
         )
 
-    def image_to_request(self, req, upload_dir: Path) -> SubmitArgs:  # noqa: ARG002
+    def image_to_request(self, req: ImageGenerationRequest, upload_dir: Path) -> SubmitArgs:  # noqa: ARG002
         mk = _passthrough(req)
+        if getattr(req, "seed", None) is not None:
+            mk.setdefault("seed", req.seed)
         return SubmitArgs(
             text=req.prompt,
             input_modalities=["text"],
@@ -148,7 +216,7 @@ class BagelAdapter(OpenAIAdapter):
 
     def image_edit_to_request(self, prompt: str, image_path: str, extra_kwargs: dict) -> SubmitArgs:
         # Image editing: the input image + prompt produce an edited image
-        # (BAGEL's I2I path). Extra kwargs (e.g. cfg_*_scale) pass through.
+        # (BAGEL's I2I path). Extra kwargs (e.g. cfg_*_scale, seed) pass through.
         return SubmitArgs(
             text=prompt,
             file_paths={"image": [image_path]},
@@ -159,7 +227,13 @@ class BagelAdapter(OpenAIAdapter):
 
 
 class Qwen3OmniAdapter(OpenAIAdapter):
-    """Qwen3-Omni: multimodal chat (text + optional speech out) and TTS."""
+    """Qwen3-Omni: multimodal chat (text, optionally + speech) and TTS.
+
+    Sampling is split across two stages: the Thinker (text) takes
+    ``thinker_*`` keys, the Talker (speech) ``talker_*``. The other Talker knobs
+    (``talker_top_k``, ``talker_repetition_penalty``) aren't OpenAI fields — pass
+    them via ``extra_body``.
+    """
 
     supports_chat = True
     supports_speech = True
@@ -170,21 +244,16 @@ class Qwen3OmniAdapter(OpenAIAdapter):
             return audio_cfg["voice"]
         return getattr(req, "voice", None)
 
-    def chat_to_request(self, req, upload_dir: Path) -> SubmitArgs:
+    def chat_to_request(self, req: ChatCompletionRequest, upload_dir: Path) -> SubmitArgs:
         text, file_paths, in_mods = flatten_messages(req.messages, upload_dir)
         mk = _passthrough(req)
+        # Speech output also emits text, so request both modalities when audio is asked for.
         want_audio = bool(req.modalities and "audio" in req.modalities)
         out_mods = ["text", "audio"] if want_audio else ["text"]
-        if req.temperature is not None:
-            mk.setdefault("thinker_temperature", req.temperature)
-        if req.top_p is not None:
-            mk.setdefault("thinker_top_p", req.top_p)
+        _apply_sampling(req, mk, temperature_key="thinker_temperature", top_p_key="thinker_top_p")
         voice = self._voice(req)
         if voice:
             mk["voice"] = voice
-        max_tokens = req.max_completion_tokens or req.max_tokens
-        if max_tokens is not None:
-            mk["max_output_tokens"] = max_tokens
         return SubmitArgs(
             text=text,
             file_paths=file_paths or None,
@@ -193,14 +262,14 @@ class Qwen3OmniAdapter(OpenAIAdapter):
             model_kwargs=mk,
         )
 
-    def speech_to_request(self, req, upload_dir: Path) -> SubmitArgs:  # noqa: ARG002
+    def speech_to_request(self, req: SpeechRequest, upload_dir: Path) -> SubmitArgs:  # noqa: ARG002
         # Qwen3-Omni is a chat model; /v1/audio/speech returns the audio of its
-        # spoken response to ``input``. Text output is discarded by the handler.
+        # spoken response to ``input`` (the handler keeps only the audio).
         mk = _passthrough(req)
         if getattr(req, "voice", None):
             mk["voice"] = req.voice
-        if getattr(req, "temperature", None) is not None:
-            mk.setdefault("talker_temperature", req.temperature)
+        # Talker (speech) sampling; max_tokens is not an OpenAI speech field.
+        _apply_sampling(req, mk, temperature_key="talker_temperature", top_p_key="talker_top_p", max_tokens_key=None)
         return SubmitArgs(
             text=req.input,
             input_modalities=["text"],
@@ -210,19 +279,16 @@ class Qwen3OmniAdapter(OpenAIAdapter):
 
 
 class OrpheusAdapter(OpenAIAdapter):
-    """Orpheus: text-to-speech (audio out only)."""
+    """Orpheus: text-to-speech (audio out only). Honors temperature/top_p/seed
+    (its ``get_sampling_config`` reads model_kwargs)."""
 
     supports_speech = True
 
-    def speech_to_request(self, req, upload_dir: Path) -> SubmitArgs:  # noqa: ARG002
+    def speech_to_request(self, req: SpeechRequest, upload_dir: Path) -> SubmitArgs:  # noqa: ARG002
         mk = _passthrough(req)
         if getattr(req, "voice", None):
             mk["voice"] = req.voice
-        # Honored by Orpheus after the get_sampling_config patch.
-        if getattr(req, "temperature", None) is not None:
-            mk.setdefault("temperature", req.temperature)
-        if getattr(req, "top_p", None) is not None:
-            mk.setdefault("top_p", req.top_p)
+        _apply_sampling(req, mk, temperature_key="temperature", top_p_key="top_p", max_tokens_key=None)
         return SubmitArgs(
             text=req.input,
             input_modalities=["text"],
@@ -231,6 +297,8 @@ class OrpheusAdapter(OpenAIAdapter):
         )
 
 
+# Only models with an OpenAI-standard surface are registered. Action/world-model
+# models (pi05, vjepa2) are deliberately absent → /v1/* 404s; use /generate.
 ADAPTER_REGISTRY: dict[str, OpenAIAdapter] = {
     "bagel": BagelAdapter(),
     "qwen3_omni": Qwen3OmniAdapter(),
