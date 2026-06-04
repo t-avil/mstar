@@ -323,8 +323,8 @@ def _init_latents_and_time_index(
     config: BagelModelConfig,
     device,
     seed: int,
-    H: int=1024,
-    W: int=1024,
+    H: int,
+    W: int,
 ):
 
     h, w = (H // config.latent_downsample,
@@ -582,7 +582,8 @@ class LLMSubmodule(ARNodeSubmodule):
 
         if graph_walk in ("image_gen", "image_gen_cfg"):
             tensor_inputs = {}
-            H, W = 1024, 1024 # TODO: make this configurable?
+            H = fwd_info.step_metadata.get("height", 1024)
+            W = fwd_info.step_metadata.get("width", 1024)
 
             tensor_inputs["vae_position_ids"] = get_flattened_position_ids_extrapolate(
                 H, W,
@@ -925,6 +926,16 @@ class LLMSubmodule(ARNodeSubmodule):
 
         latents = input_embeds
 
+        # latents, vae_position_ids, time_index and empty_combined_emb are all
+        # built with a sequence length derived from the same (H, W), but they
+        # arrive as separate inputs. Under torch.compile's dynamic shapes each
+        # gets an independent symbolic dim, so Dynamo can't prove the adds below
+        # line up. Assert the relationship explicitly.
+        n_latent = latents.shape[0]
+        torch._check(vae_position_ids.shape[0] == n_latent)
+        torch._check(time_index.shape[0] == n_latent)
+        torch._check(empty_combined_emb.shape[0] == n_latent + 2)
+
         N = self.config.num_timesteps
         shift = self.config.timestep_shift
 
@@ -1074,6 +1085,13 @@ class LLMSubmodule(ARNodeSubmodule):
 
         latents = input_embeds
 
+        # See _forward_image_gen: tie the separately-passed sequence dims so
+        # torch.compile's dynamic shapes can prove the adds below line up.
+        n_latent = latents.shape[0]
+        torch._check(vae_position_ids.shape[0] == n_latent)
+        torch._check(time_index.shape[0] == n_latent)
+        torch._check(empty_combined_emb.shape[0] == n_latent + 2)
+
         pos_embed = self.latent_pos_embed(vae_position_ids)
 
         N = self.config.num_timesteps
@@ -1208,25 +1226,6 @@ class LLMSubmodule(ARNodeSubmodule):
         out["__batched_logits__"] = logits
         return out
 
-    @torch.compiler.disable
-    def _batch_get_sampling_param(
-        self,
-        per_request_info: dict[str, CurrentForwardPassInfo],
-        request_ids: list[str],
-        key: str,
-        default: float | int,
-        device,
-        dtype: torch.dtype = torch.float32,
-    ) -> float | int | torch.Tensor:
-        """Extract a sampling param. Returns scalar if uniform, tensor if per-request."""
-        values = [
-            per_request_info[rid].step_metadata.get(key, default)
-            for rid in request_ids
-        ]
-        if len(set(values)) == 1:
-            return values[0]
-        return torch.tensor(values, device=device, dtype=dtype)
-
 
     def _wrap_with_boi_eoi(self, emb: torch.Tensor) -> torch.Tensor:
         """Wrap embeddings with <|vision_start|> and <|vision_end|> tokens."""
@@ -1301,8 +1300,11 @@ class VAEDecoderSubmodule(NodeSubmodule):
         return NodeInputs(
             tensor_inputs={
                 "latents": inputs["latents"][0]
+            },
+            kwargs={
+                "image_h": fwd_info.step_metadata.get("height", 1024),
+                "image_w": fwd_info.step_metadata.get("width", 1024)
             }
-            ## NOTE: we could also add image_h, image_w as kwargs here
         )
 
 
@@ -1311,18 +1313,16 @@ class VAEDecoderSubmodule(NodeSubmodule):
         graph_walk: str,
         engine_inputs: ModelInputsFromEngine,
         latents: torch.Tensor,
-        image_h: int | torch.Tensor = 1024, # BAGEL's default image dim
-        image_w: int | torch.Tensor = 1024,
+        image_h: int,
+        image_w: int,
         **kwargs,
     ) -> NameToTensorList:
         logger.debug(
             "Running BAGEL VAE dec with latents shape %s, h %d, w %d",
             str(latents.shape), image_h, image_w
         )
-        # Convert to int if tensor (CUDA graph compatible when passed as int
-        # from metadata; tensor fallback for backwards compatibility)
-        H = image_h.item() if isinstance(image_h, torch.Tensor) else int(image_h)
-        W = image_w.item() if isinstance(image_w, torch.Tensor) else int(image_w)
+        H = image_h
+        W = image_w
 
         p = self.latent_patch_size
         h = H // self.latent_downsample
@@ -1378,9 +1378,9 @@ class CombineCFGSubmodule(NodeSubmodule):
             "v_cfg_text": inputs["v_cfg_text"][0],
             "v_cfg_img": inputs["v_cfg_img"][0],
         }
-        kwargs = fwd_info.step_metadata
         if "latents" not in inputs or len(inputs["latents"]) == 0:
-            H, W = 1024, 1024
+            H = fwd_info.step_metadata.get("height", 1024)
+            W = fwd_info.step_metadata.get("width", 1024)
             result["latents"], result["time_index"] = _init_latents_and_time_index(
                 self.config, device=device, seed=fwd_info.random_seed, H=H, W=W
             )
@@ -1392,7 +1392,7 @@ class CombineCFGSubmodule(NodeSubmodule):
             }
         return NodeInputs(
             tensor_inputs=result,
-            kwargs=kwargs
+            kwargs=fwd_info.step_metadata
         )
 
     def forward(
@@ -1424,6 +1424,16 @@ class CombineCFGSubmodule(NodeSubmodule):
 
         N = self.config.num_timesteps
         shift = self.config.timestep_shift
+
+        # latents, the three velocity tensors and time_index all share the same
+        # (H, W)-derived sequence length but arrive as separate inputs. Tie their
+        # symbolic dims so torch.compile can prove the CFG combine / Euler step
+        # below line up under dynamic shapes.
+        n_latent = latents.shape[0]
+        torch._check(v_main.shape[0] == n_latent)
+        torch._check(v_cfg_text.shape[0] == n_latent)
+        torch._check(v_cfg_img.shape[0] == n_latent)
+        torch._check(time_index.shape[0] == n_latent)
 
         # Compute timestep and step size
         t_uniform = 1.0 - time_index / (N - 1)

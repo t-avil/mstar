@@ -259,6 +259,8 @@ class BagelModel(Model):
         self.repo = Path(local_dir)
 
     def _init_language_model_components(self, device):
+        if self.llm_initialized:
+            return
         self._download_hf()
         self.llm_initialized = True
         with torch.device("meta"):
@@ -450,7 +452,59 @@ class BagelModel(Model):
                 torch.tensor(sys_tokens, dtype=torch.long)
             ]
 
+        # Image edit path: both input and output include "image". 
+        # request specifies a target width and/or height, resize the input
+        # images to be the largest that fits within that box (preserving
+        # aspect ratio) so the edited output matches the requested size.
+        is_image_edit = "image" in input_modalities and "image" in output_modalities
+        max_width = kwargs.get("width")
+        max_height = kwargs.get("height")
+        if (
+            is_image_edit
+            and tensors is not None
+            and tensors.get("image_inputs")
+        ):
+            result["image_inputs"] = [
+                self._resize_to_fit(img, max_width, max_height) 
+                for img in tensors["image_inputs"]
+            ]
+
         return result
+    
+    @staticmethod
+    def _resize_to_fit(
+        image: torch.Tensor,
+        max_width: int | None,
+        max_height: int | None,
+    ) -> torch.Tensor:
+        """Resize a c x h x w image to the largest size fitting within
+        max_width x max_height while preserving aspect ratio.
+
+        If only one of max_width / max_height is given, only that dimension
+        constrains the result. Both dimensions are capped at 1024.
+        """
+        _, h, w = image.shape
+        scales = [1024 / w, 1024 / h]
+        if max_width is not None:
+            scales.append(max_width / w)
+        if max_height is not None:
+            scales.append(max_height / h)
+        scale = min(scales)
+        new_h = max(1, round(h * scale))
+        new_w = max(1, round(w * scale))
+        if new_h == h and new_w == w:
+            return image
+        logger.info(
+            "Resizing input image from %dx%d to %dx%d (h x w)",
+            h, w, new_h, new_w,
+        )
+        resized = torch.nn.functional.interpolate(
+            image.unsqueeze(0),
+            size=(new_h, new_w),
+            mode="bilinear",
+            align_corners=False,
+        )
+        return resized.squeeze(0)
 
     def postprocess(
         self, output: torch.Tensor,
@@ -740,6 +794,8 @@ class BagelModel(Model):
             "cfg_interval": full_metadata.kwargs["cfg_interval"],
             "cfg_renorm_type": full_metadata.kwargs["cfg_renorm_type"],
             "cfg_renorm_min": full_metadata.kwargs["cfg_renorm_min"],
+            "width": full_metadata.kwargs["width"],
+            "height": full_metadata.kwargs["height"],
         }
 
     def _get_fwd_pass_inputs(
@@ -842,10 +898,20 @@ class BagelModel(Model):
             "cfg_renorm_type", "cfg_renorm_min", "think_mode",
         ]
         params = {k: getattr(self.config, k) for k in overridable_keys}
+        params["width"] = 1024
+        params["height"] = 1024
+        overridable_keys += ["width", "height"]
+
         if model_kwargs:
             for key in overridable_keys:
                 if key in model_kwargs:
                     params[key] = model_kwargs[key]
+        
+        if "image" in output_modalities and input_signals.get("image_inputs"):
+            image = input_signals["image_inputs"][0]
+            params["height"] = image.dims[1]
+            params["width"] = image.dims[2]
+            logger.info(f"Will generate an image of shape {params['height']} x {params['width']}")
 
         think_mode = params.pop("think_mode") # used for schedule logic, not stored in params
         schedule = self._build_prefill_schedule(
@@ -862,7 +928,7 @@ class BagelModel(Model):
             "target_output": target_output,
             "num_timesteps": self.config.num_timesteps,
             "think_mode": think_mode,
-            **params,  # CFG params
+            **params,  # CFG params  + gen width / height
         }
         full_metadata = CurrentForwardConductorMetadata(
             input_modalities=input_modalities,
