@@ -796,6 +796,7 @@ class BagelModel(Model):
             "cfg_renorm_min": full_metadata.kwargs["cfg_renorm_min"],
             "width": full_metadata.kwargs["width"],
             "height": full_metadata.kwargs["height"],
+            "image_preprocess": full_metadata.kwargs["image_preprocess"],
         }
 
     def _get_fwd_pass_inputs(
@@ -900,7 +901,8 @@ class BagelModel(Model):
         params = {k: getattr(self.config, k) for k in overridable_keys}
         params["width"] = 1024
         params["height"] = 1024
-        overridable_keys += ["width", "height"]
+        params["image_preprocess"] = "default"
+        overridable_keys += ["width", "height", "image_preprocess"]
 
         if model_kwargs:
             for key in overridable_keys:
