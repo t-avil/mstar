@@ -407,6 +407,30 @@ class BagelModel(Model):
     # Model ABC implementation
     # -----------------------------------------------------------------------
 
+    # System prompt for image understanding.
+    # TODO: make this configurable
+    BAGEL_DEFAULT_SYSTEM_PROMPT = "You are BAGEL, a helpful assistant created by ByteDance."
+
+    # Chat-template envelope for image understanding (image-to-text).
+    VLM_UNDERSTANDING_PREFIX = (
+        "<|im_start|>system\n{system_prompt}<|im_end|>\n<|im_start|>user\n"
+    )
+    VLM_UNDERSTANDING_SUFFIX = "\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+    VLM_UNDERSTANDING_TEMPLATE = "<|im_start|>system\n{system_prompt}<|im_end|>" + \
+        "\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+
+    # Image generation (T2I/I2I): bare wrapping, no system prompt or roles. Input
+    # image (I2I) is positioned before this by the prefill_vae/vit walks.
+    GEN_TEMPLATE = "<|im_start|>{prompt}<|im_end|><|im_start|>"
+    BOS_EOS_TEMPL = "<|im_start|>{prompt}<|im_end|>"
+
+    def _encode_text(self, text: str) -> torch.Tensor:
+        """Tokenize a text segment, falling back to raw bytes when no tokenizer
+        is available (dummy-model test path)."""
+        if self.tokenizer is not None:
+            return torch.tensor(self.tokenizer.encode(text), dtype=torch.long)
+        return torch.tensor(list(text.encode("utf-8")), dtype=torch.uint8)
+
     def process_prompt(
         self,
         prompt: str | None,
@@ -427,30 +451,32 @@ class BagelModel(Model):
         result: NameToTensorList = {}
 
         if prompt is not None:
-            if self.tokenizer is not None:
-                tokens = self.tokenizer.encode(prompt)
-                result["text_inputs"] = [
-                    torch.tensor(tokens, dtype=torch.long)
-                ]
-            else:
-                # Fallback for testing without a tokenizer
-                byte_data = prompt.encode("utf-8")
-                result["text_inputs"] = [
-                    torch.tensor(list(byte_data), dtype=torch.uint8)
-                ]
-
-        think_mode = kwargs.get("think_mode", self.config.think_mode)
-        if think_mode and self.tokenizer is not None:
             target_output = output_modalities[0] if output_modalities else "text"
-            is_understanding = (target_output == "text")
-            sys_prompt = (
-                VLM_THINK_SYSTEM_PROMPT if is_understanding
-                else GEN_THINK_SYSTEM_PROMPT
-            )
-            sys_tokens = self.tokenizer.encode(sys_prompt)
-            result["system_prompt"] = [
-                torch.tensor(sys_tokens, dtype=torch.long)
-            ]
+            is_understanding = target_output == "text"
+            has_image = "image" in input_modalities
+            think_mode = kwargs.get("think_mode", self.config.think_mode)
+            system_prompt = self.BAGEL_DEFAULT_SYSTEM_PROMPT
+
+            if is_understanding and has_image:
+                if think_mode:
+                    system_prompt = f"{system_prompt} {VLM_THINK_SYSTEM_PROMPT}"
+                segments = [
+                    self.VLM_UNDERSTANDING_PREFIX.format(system_prompt=system_prompt),
+                    self.VLM_UNDERSTANDING_SUFFIX.format(prompt=prompt),
+                ]
+            elif is_understanding:
+                if think_mode:
+                    system_prompt = f"{system_prompt} {VLM_THINK_SYSTEM_PROMPT}"
+                segments = [self.VLM_UNDERSTANDING_TEMPLATE.format(
+                    system_prompt=system_prompt, prompt=prompt
+                )]
+            else:
+                # Image generation (T2I/I2I): the input image (I2I) is placed
+                # before this text by the prefill_vae/vit walks.
+                segments = [self.GEN_TEMPLATE.format(prompt=prompt)]
+                if think_mode:
+                    segments.insert(0, self.BOS_EOS_TEMPL.format(prompt=GEN_THINK_SYSTEM_PROMPT))
+            result["text_inputs"] = [self._encode_text(seg) for seg in segments]
 
         # Image edit path: both input and output include "image". 
         # request specifies a target width and/or height, resize the input
@@ -568,7 +594,14 @@ class BagelModel(Model):
         prefill_text = GraphNode(
             name="LLM",
             input_names=["text_inputs"],
-            outputs=[],
+            outputs=[
+                GraphEdge(
+                    next_node=EMIT_TO_CLIENT,
+                    name="new_token",
+                    output_modality="text",
+                    persist=True
+                ),
+            ],
         )
 
         # -- prefill_vit: ViT encoder -> LLM --
@@ -583,7 +616,14 @@ class BagelModel(Model):
             GraphNode(
                 name="LLM",
                 input_names=["img_emb"],
-                outputs=[],
+                outputs=[
+                    GraphEdge(
+                        next_node=EMIT_TO_CLIENT,
+                        name="new_token",
+                        output_modality="text",
+                        persist=True
+                    ),
+                ],
             ),
         ])
 
@@ -743,19 +783,20 @@ class BagelModel(Model):
         self, input_modalities: list[str],
         input_signals: dict[str, list[TensorPointerInfo]],
         is_understanding: bool,
-        think_mode: bool
     ):
         # Build prefill schedule: sequential list of (graph_walk_name, input tensor info)
         schedule: list[tuple[str, TensorPointerInfo]] = []
+        texts = input_signals.get("text_inputs", [])
+        images = input_signals.get("image_inputs", [])
 
-        # 1. System prompt (if think mode enabled)
-        if think_mode and "system_prompt" in input_signals:
-            schedule.append(("prefill_text", input_signals["system_prompt"][0]))
+        # 1. System prompt
+        
+        if len(texts) == 2:
+            # the first text block is the system prompt and should come at the very beginning
+            # (in both thinking and non-thinking mode)
+            input_modalities.insert(0, "text")
 
         # 2. Walk through interleaved inputs, building sequential steps
-        images = input_signals.get("image_inputs", [])
-        texts = input_signals.get("text_inputs", [])
-
         text_idx, image_idx = 0, 0
         for mod in input_modalities:
             if mod == "text":
@@ -837,8 +878,10 @@ class BagelModel(Model):
             return [graph_edge]
 
         elif graph_walk == DECODE:
-            # The submodule automatically adds a BOS to start
-            graph_edge = GraphEdge(next_node="LLM", name="text_inputs")
+            graph_edge = GraphEdge(
+                next_node="LLM", name="text_inputs",
+                tensor_info=persist_signals.get("new_token", [])
+            )
             return [graph_edge]
 
         elif graph_walk == "image_gen":
@@ -920,7 +963,6 @@ class BagelModel(Model):
             input_modalities=input_modalities,
             input_signals=input_signals,
             is_understanding=(target_output == "text"),
-            think_mode=think_mode
         )
 
         first_graph_walk = schedule[0][0] if schedule else DECODE
@@ -941,6 +983,10 @@ class BagelModel(Model):
             kwargs=kwargs,
         )
         step_metadata =  self._get_step_metadata(full_metadata)
+
+        sample_prefill_token = (think_mode or target_output != "image") and len(schedule) == 1
+        step_metadata["sample_prefill_token"] = sample_prefill_token
+
         inputs = self._get_fwd_pass_inputs(
             full_metadata, input_signals
         )
@@ -977,9 +1023,19 @@ class BagelModel(Model):
         """
         metadata = partition_metadata
         request_done = False
+
+        has_text_output = (
+            metadata.kwargs.get("think_mode", False) or metadata.kwargs["target_output"] != "image"
+        )
+        sample_prefill_token = False
+    
         if metadata.is_prefill:
             step = metadata.kwargs["prefill_step"] + 1
             schedule = metadata.kwargs["prefill_schedule"]
+
+            sample_prefill_token = has_text_output and (
+                step == len(schedule) - 1
+            )
 
             if step < len(schedule):
                 # More prefill steps remaining
@@ -1012,6 +1068,7 @@ class BagelModel(Model):
             request_done = True
 
         step_metadata =  self._get_step_metadata(metadata)
+        step_metadata["sample_prefill_token"] = sample_prefill_token
         inputs = self._get_fwd_pass_inputs(
             metadata, persist_signals
         )
