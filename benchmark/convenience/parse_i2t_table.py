@@ -45,6 +45,17 @@ def find_throughput_tok(text):
     return float(m.group(1)) if m else None
 
 
+def find_mean_output_tokens(text):
+    """Text tokens: 2456 total (122.8 avg/req) -> 122.8
+
+    The mean output length per request. With --ignore-eos this should match
+    across systems (proving equal decode work); without it, it documents the
+    output-length disparity that otherwise confounds the tok/s comparison.
+    """
+    m = re.search(r"Text tokens:\s*[0-9]+\s*total\s*\(([0-9]*\.?[0-9]+)\s*avg/req\)", text)
+    return float(m.group(1)) if m else None
+
+
 def fmt(v):
     """Format a value for output; blank if missing."""
     return "" if v is None else f"{v:g}"
@@ -75,12 +86,14 @@ def parse(text):
     itl_p99 = find_stat(text, "ITL (text)", "p99")
 
     throughput_tok = find_throughput_tok(text)
+    mean_out_tokens = find_mean_output_tokens(text)
 
     return [
         fmt(ttft_mean), fmt(ttft_p50), fmt(ttft_p95), fmt(ttft_p99),
         fmt(e2e_mean), fmt(e2e_p50), fmt(e2e_p95), fmt(e2e_p99),
         to_ms(itl_mean), to_ms(itl_p50), to_ms(itl_p95), to_ms(itl_p99),
         fmt(throughput_tok),
+        fmt(mean_out_tokens),
     ]
 
 
@@ -89,6 +102,7 @@ HEADER = [
     "E2E (mean)", "E2E (p50)", "E2E (p95)", "E2E (p99)",
     "ITL (mean, ms)", "ITL (p50, ms)", "ITL (p95, ms)", "ITL (p99, ms)",
     "Throughput (text tok/s)",
+    "Out tok/req (avg)",
 ]
 
 

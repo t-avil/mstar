@@ -1063,6 +1063,10 @@ class VLLMOmni(InferenceSystem):
                 "messages": messages,
                 "temperature": 0.0,  # match vllm-omni's bench (`patch.py:336`)
                 **model.get_model_kwargs(req_type),
+                # Per-request overrides (e.g. max_tokens / ignore_eos stamped by
+                # the runner's output-length control). vllm-omni's OpenAI server
+                # accepts ignore_eos and tolerates extra keys.
+                **req_input.model_kwargs,
                 **additional_model_kwargs,
             }
             if is_image_output:

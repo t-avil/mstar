@@ -1329,8 +1329,9 @@ class LLMSubmodule(ARNodeSubmodule):
         if "new_token" not in outputs:
             return set()
         token = outputs["new_token"][0].item()
-        if (self.eos_token_id is not None and self.eos_token_id == token) or \
-                (request_info.dynamic_loop_iter_counts.get("decode_loop", 0) + 1 >= request_info.max_tokens):
+        ignore_eos = request_info.sampling_config["LLM"].ignore_eos
+        if (not ignore_eos and self.eos_token_id == token) or \
+                (request_info.dynamic_loop_iter_counts.get("decode_loop", 0) + 2 >= request_info.max_tokens):
             return {"decode_loop"}
         return set()
 

@@ -113,6 +113,15 @@ class BenchmarkConfig:
     droid_rollout_horizon: int = 4
     droid_hf_cache: Optional[str] = None
 
+    # Output-length control (text/audio AR paths). ignore_eos forces every
+    # request to emit exactly its assigned max_tokens; a per-request length is
+    # sampled uniformly from [output_len_min, output_len_max] seeded by index
+    # so request i gets the same length under every inference system.
+    ignore_eos: bool = False
+    output_len_min: Optional[int] = None
+    output_len_max: Optional[int] = None
+    output_len_seed: int = 0
+
 
 class Benchmark:
     def __init__(self, config: BenchmarkConfig):
@@ -406,6 +415,30 @@ class Benchmark:
         if self.config.verbose:
             print("Warmup complete.")
 
+    def _assign_output_lengths(self, requests: list[RequestInput]) -> None:
+        """Stamp per-request max_tokens / ignore_eos onto each request.
+
+        Deterministic by index (seeded RNG) so request i gets the same length
+        under every inference system. Only touches text/audio (AR) outputs.
+        No-op unless ignore_eos or an output-len range is configured.
+        """
+        cfg = self.config
+        lo, hi = cfg.output_len_min, cfg.output_len_max
+        if not cfg.ignore_eos and lo is None and hi is None:
+            return
+        if (lo is None) != (hi is None):
+            raise ValueError("output_len_min and output_len_max must be set together")
+        rng = random.Random(cfg.output_len_seed)
+        for req in requests:
+            if req.req_type.get_output_modalities() not in ("text", "audio"):
+                continue
+            if lo is not None:
+                length = rng.randint(lo, hi)
+                req.model_kwargs["max_tokens"] = length
+                req.model_kwargs["max_output_tokens"] = length
+            if cfg.ignore_eos:
+                req.model_kwargs["ignore_eos"] = True
+
     async def run(self) -> tuple[list[RequestMetrics], AggregateMetrics]:
         dataset = self._get_dataset()
         if self.config.profiling_type == ProfilingType.OFFLINE:
@@ -413,6 +446,7 @@ class Benchmark:
             # make even multiple of batch size
             self.config.num_requests = ((self.config.num_requests + bs - 1) // bs) * bs
         requests = dataset.get_requests()[: self.config.num_requests]
+        self._assign_output_lengths(requests)
 
         # Bump the connection-pool cap so closed-loop runs at high
         # max_concurrency don't bottleneck on aiohttp's default 100/host limit.
@@ -549,6 +583,32 @@ def parse_args() -> BenchmarkConfig:
         help="HuggingFace cache directory for lerobot/droid_100 (default: HF default).",
     )
 
+    # Output-length control (text/audio AR paths)
+    outlen = parser.add_argument_group("output_length")
+    outlen.add_argument(
+        "--ignore-eos",
+        action="store_true",
+        help="Force each request to decode exactly max_tokens (server must honor ignore_eos).",
+    )
+    outlen.add_argument(
+        "--output-len-min",
+        type=int,
+        default=None,
+        help="Lower bound for per-request random max_tokens. Set with --output-len-max.",
+    )
+    outlen.add_argument(
+        "--output-len-max",
+        type=int,
+        default=None,
+        help="Upper bound for per-request random max_tokens. Set with --output-len-min.",
+    )
+    outlen.add_argument(
+        "--output-len-seed",
+        type=int,
+        default=0,
+        help="Seed for per-request length sampling (same across systems for parity).",
+    )
+
     args = parser.parse_args()
 
     dataset = args.dataset
@@ -615,6 +675,10 @@ def parse_args() -> BenchmarkConfig:
         local_cache_dir=args.local_cache,
         droid_rollout_horizon=args.droid_rollout_horizon,
         droid_hf_cache=args.droid_hf_cache,
+        ignore_eos=args.ignore_eos,
+        output_len_min=args.output_len_min,
+        output_len_max=args.output_len_max,
+        output_len_seed=args.output_len_seed,
     )
 
 

@@ -1175,8 +1175,9 @@ class ThinkerSubmodule(ARNodeSubmodule):
         if "new_token" not in outputs:
             return set()
         token = outputs["new_token"][0].item()
+        ignore_eos = request_info.sampling_config["Thinker"].ignore_eos
         eos_token_id = self.config.im_end_token_id
-        if (eos_token_id is not None and eos_token_id == token) or \
+        if (not ignore_eos and eos_token_id == token) or \
                 (request_info.dynamic_loop_iter_counts.get("thinker_decode_loop", 0) + 1 >= request_info.max_tokens):
             return {"thinker_decode_loop"}
         return set()

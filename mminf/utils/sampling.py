@@ -200,6 +200,7 @@ class SamplingConfig:
     temperature: float = 0.6
     top_k: int = 0
     top_p: float = 1
+    ignore_eos: bool = False # used for benchmark parity
     repetition_penalty: float = 1
     _seed: int = 0 # set by the conductor
 

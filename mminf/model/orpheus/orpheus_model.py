@@ -375,7 +375,8 @@ class OrpheusModel(Model):
         # ``repetition_penalty``) passed through ``model_kwargs`` are honored.
         model_kwargs = model_kwargs or {}
         keys = [
-            "temperature", "top_p", "repetition_penalty"
+            "temperature", "top_p", "repetition_penalty",
+            "ignore_eos"
         ]
         params = {
             k: model_kwargs.get(k, getattr(self.config, k))

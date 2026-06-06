@@ -486,9 +486,12 @@ class Qwen3OmniModel(Model):
         if node_name == "Thinker":
             temperature = model_kwargs.get("thinker_temperature", 0.7)
             top_p = model_kwargs.get("thinker_top_p", 0.9)
+            # only apply ignore_eos to the thinker
+            ignore_eos = model_kwargs.get("ignore_eos", False)
             return SamplingConfig(
                 vocab_size=self.config.thinker_text.vocab_size,
-                temperature=temperature, top_p=top_p
+                temperature=temperature, top_p=top_p,
+                ignore_eos=ignore_eos
             )
         if node_name == "Talker":
             temperature = model_kwargs.get("talker_temperature", 0.9)

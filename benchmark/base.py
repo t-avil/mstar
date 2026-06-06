@@ -117,6 +117,8 @@ class Bagel(Model):
         kwargs = {
             "temperature": 0.0,
             "image_preprocess": self.image_preprocess,
+            "max_tokens": 128,
+            "max_output_tokens": 128,
         }
         if self.disable_cfg:
             kwargs.update({
@@ -136,6 +138,17 @@ class Bagel(Model):
 
     def get_supported_modalities(self):
         return {RequestType.T2T, RequestType.T2I, RequestType.I2I, RequestType.I2T}
+    
+    def get_openai_system_message(self) -> Optional[dict]:
+        return {
+            "role": "system",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "You are BAGEL, a helpful assistant created by ByteDance.",
+                }
+            ],
+        }
 
 
 class Orpheus(Model):
