@@ -339,6 +339,7 @@ class PreprocessWorkerThread:
 
     def run(self):
         while not self.stop_event.is_set():
+            did_work = False
             try:
                 did_work = self._process_messages()
                 if not self.in_queue.empty():
