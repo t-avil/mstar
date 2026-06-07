@@ -36,7 +36,7 @@ from mminf.model.qwen3_omni.components.rope import (
 from mminf.model.qwen3_omni.components.talker import Qwen3OmniCodePredictor, Qwen3OmniTalkerModel
 from mminf.model.qwen3_omni.config import Qwen3OmniModelConfig
 from mminf.model.submodule_base import ARNodeInputs, ARNodeSubmodule, ModelInputsFromEngine, NodeInputs, NodeSubmodule
-from mminf.utils.sampling import CudaGraphableSampler
+from mminf.utils.sampling import CudaGraphableSampler, SeenTokenMask
 
 
 logger = logging.getLogger(__name__)
@@ -348,7 +348,9 @@ class ThinkerSubmodule(ARNodeSubmodule):
         graph_walk: str,
         fwd_info: CurrentForwardPassInfo,
         inputs: NameToTensorList,
-        pos_info: dict[str, PositionInfo] = {}
+        seen_token_mask: SeenTokenMask,
+        pos_info: dict[str, PositionInfo] = {},
+        **kwargs
     ) -> ARNodeInputs:
         device = self.get_device()
         start_pos = pos_info.get("main", PositionInfo()).position_id_start
@@ -381,6 +383,9 @@ class ThinkerSubmodule(ARNodeSubmodule):
             text_ids = inputs["text_inputs"][0].to(device)  # (seq_len,)
             embeds = self.model.model.embed_tokens(text_ids)
             seq_len = text_ids.shape[0]
+
+            # NOTE: newly-sampled tokens automatically added sto the seen token mask in decode
+            seen_token_mask.add_tokens(text_ids)
 
             # Compute 3D MRoPE position IDs for a pure-text span.  Each
             # prefill graph walk is single-modality so we use the simple
@@ -1170,8 +1175,9 @@ class ThinkerSubmodule(ARNodeSubmodule):
         if "new_token" not in outputs:
             return set()
         token = outputs["new_token"][0].item()
+        ignore_eos = request_info.sampling_config["Thinker"].ignore_eos
         eos_token_id = self.config.im_end_token_id
-        if (eos_token_id is not None and eos_token_id == token) or \
+        if (not ignore_eos and eos_token_id == token) or \
                 (request_info.dynamic_loop_iter_counts.get("thinker_decode_loop", 0) + 1 >= request_info.max_tokens):
             return {"thinker_decode_loop"}
         return set()
@@ -1371,6 +1377,7 @@ class TalkerSubmodule(ARNodeSubmodule):
         fwd_info: CurrentForwardPassInfo,
         inputs: NameToTensorList,
         pos_info: dict[str, PositionInfo] = {},
+        **kwargs
     ) -> ARNodeInputs:
         device = self.get_device()
 

@@ -315,7 +315,9 @@ class Model(ABC):
         self, node_name: str,
         model_kwargs: dict | None = None,
     )  -> SamplingConfig | None:
-        return SamplingConfig()
+        return SamplingConfig(
+            ignore_eos=(model_kwargs or {}).get("ignore_eos", False)
+        )
 
 
     @abstractmethod

@@ -24,6 +24,8 @@ from mminf.model.bagel.components.modeling_utils import (
     TimestepEmbedder,
     get_flattened_position_ids_extrapolate,
     patchify,
+    vllm_vae_resize,
+    vllm_vit_resize,
 )
 from mminf.model.bagel.config import BagelModelConfig
 from mminf.model.submodule_base import (
@@ -34,6 +36,7 @@ from mminf.model.submodule_base import (
     NodeSubmodule,
     StackingMethod,
 )
+from mminf.utils.sampling import SeenTokenMask
 
 logger = logging.getLogger(__name__)
 
@@ -74,16 +77,26 @@ class ViTEncoderSubmodule(NodeSubmodule):
     ) -> NodeInputs:
         image_inputs = inputs["image_inputs"]
 
-        image_tensor = self.vae_transform.resize_transform(image_inputs[0])
-        image_tensor = self.transform(image_tensor)
+        image_preprocess = fwd_info.step_metadata.get("image_preprocess", "default")
+        if image_preprocess == "vllm":
+            # vllm-omni parity: SiglipImageProcessor resizes to a fixed square
+            # (size = max_num_patch_per_side * patch_size, e.g. 70*14=980),
+            # discarding aspect ratio, then [0.5]/[0.5] normalize.
+            square = self.vit_max_num_patch_per_side * self.vit_patch_size
+            image_tensor = vllm_vit_resize(image_inputs[0], square)
+            image_tensor = self.transform.normalize_transform(image_tensor)
+        else:
+            image_tensor = self.vae_transform.resize_transform(image_inputs[0])
+            image_tensor = self.transform(image_tensor)
 
         device = image_tensor.device
 
         position_ids = get_flattened_position_ids_extrapolate(
             image_tensor.size(1), image_tensor.size(2),
             self.vit_patch_size,
-            max_num_patches_per_side=self.vit_max_num_patch_per_side
-        ).to(device)
+            max_num_patches_per_side=self.vit_max_num_patch_per_side,
+            device=device,
+        )
         pixel_values = patchify(image_tensor, self.vit_patch_size)
         # patchify yields (num_patches, p²·C); pre-patchify image_tensor is
         # (C, H, W), so its .shape[0] is the channel count, not the patch
@@ -251,7 +264,20 @@ class VAEEncoderSubmodule(NodeSubmodule):
         image_inputs = inputs["image_inputs"]
 
         # [C, H, W]
-        image_tensor: torch.Tensor = self.transform(self.transform.resize_transform(image_inputs[0].contiguous()))
+        image_preprocess = fwd_info.step_metadata.get("image_preprocess", "default")
+        img = image_inputs[0].contiguous()
+        if image_preprocess == "vllm":
+            # vllm-omni parity: _resize_to_stride (aspect-preserving, divisible
+            # by latent_downsample, long <= max_latent_size*latent_downsample,
+            # short >= 256), then [0.5]/[0.5] normalize.
+            image_tensor = vllm_vae_resize(
+                img,
+                stride=self.latent_downsample,
+                max_img_size=self.max_latent_size * self.latent_downsample,
+            )
+            image_tensor = self.transform.normalize_transform(image_tensor)
+        else:
+            image_tensor = self.transform(self.transform.resize_transform(img))
         device = image_tensor.device
 
         # Compute patchified dimensions as ints (CUDA graph compatible)
@@ -322,8 +348,8 @@ def _init_latents_and_time_index(
     config: BagelModelConfig,
     device,
     seed: int,
-    H: int=1024,
-    W: int=1024,
+    H: int,
+    W: int,
 ):
 
     h, w = (H // config.latent_downsample,
@@ -414,15 +440,6 @@ class LLMSubmodule(ARNodeSubmodule):
         self.eoi_token_id = eoi_token_id
         self.bos_token_id = bos_token_id
         self.eos_token_id = eos_token_id
-
-    def _preprocess_prefill_text(
-        self, text_inputs: torch.Tensor
-    ):
-        out = text_inputs.new_zeros(text_inputs.shape[0] + 2)
-        out[0] = self.bos_token_id
-        out[-1] = self.eos_token_id
-        out[1:-1] = text_inputs
-        return out
 
     def _get_image_pos_ids(
         self, labels: list[str],
@@ -546,19 +563,22 @@ class LLMSubmodule(ARNodeSubmodule):
         graph_walk: str,
         fwd_info: CurrentForwardPassInfo,
         inputs: NameToTensorList,
+        seen_token_mask: SeenTokenMask,
         pos_info: dict[str, PositionInfo] = {},
+        **kwargs
     ) -> ARNodeInputs:
 
         device = self.get_device()
         node_inputs = ARNodeInputs(input_seq_len=0)
 
         if graph_walk == "prefill_text":
-            node_inputs.input_ids = self._preprocess_prefill_text(inputs["text_inputs"][0])
+            node_inputs.input_ids = inputs["text_inputs"][0]
+            seen_token_mask.add_tokens(node_inputs.input_ids)
             node_inputs.input_seq_len = node_inputs.input_ids.shape[0]
 
         elif graph_walk == "decode":
-            bos = torch.tensor([self.bos_token_id], device=device)
-            node_inputs.input_ids = inputs["text_inputs"][0] if len(inputs["text_inputs"]) > 0 else bos.clone()
+            # NOTE: newly-sampled tokens automatically added to the seen token mask
+            node_inputs.input_ids = inputs["text_inputs"][0]
             node_inputs.input_seq_len = 1
 
         if graph_walk in ["prefill_vit", "prefill_vae"]:
@@ -577,7 +597,8 @@ class LLMSubmodule(ARNodeSubmodule):
 
         if graph_walk in ("image_gen", "image_gen_cfg"):
             tensor_inputs = {}
-            H, W = 1024, 1024 # TODO: make this configurable?
+            H = fwd_info.step_metadata.get("height", 1024)
+            W = fwd_info.step_metadata.get("width", 1024)
 
             tensor_inputs["vae_position_ids"] = get_flattened_position_ids_extrapolate(
                 H, W,
@@ -680,6 +701,10 @@ class LLMSubmodule(ARNodeSubmodule):
         result = ARNodeInputs.collate(inputs, stacking_method=StackingMethod.CAT)
         result["seq_lens"] = seq_lens
         result["requires_cfg"] =  requires_cfg
+        result["sample_token"] = any([
+            info.step_metadata.get("sample_prefill_token", True) \
+                for info in engine_inputs.per_request_info.values()
+        ])
         return result
 
     def _plan_for_graph_walk(
@@ -755,21 +780,33 @@ class LLMSubmodule(ARNodeSubmodule):
         kwargs.pop("cache_labels", None)
         kwargs.pop("snapshot_after", None)
         kwargs.pop("is_prefill", None)
+        sample_token = kwargs.pop("sample_prefill_token", True)
 
         if requires_cfg and cache_handle is not None:
             for label in ["main", "cfg_img"]:
                 cache_handle.set_active_label(label)
-                self.language_model(
+                out = self.language_model(
                     emb, mode="und",
                     cache_handle=cache_handle, **kwargs
                 )
+                if label == "main":
+                    hidden = out
         else:
             if cache_handle is not None:
                 cache_handle.set_active_label("main")
-            self.language_model(
+            hidden = self.language_model(
                 emb, mode="und",
                 cache_handle=cache_handle, **kwargs
             )
+        if sample_token:
+            qo_indptr_buf = cache_handle.get_qo_indptr_buf("main")
+            assert qo_indptr_buf is not None
+            last_token_indices = (qo_indptr_buf[1:] - 1).long()  # (padded_bs,)
+            last_hidden = hidden.index_select(0, last_token_indices)
+            logits = self.lm_head(last_hidden)
+            return {
+                "logits": [logits]
+            }
         return {}
 
     def _forward_prefill_vit(
@@ -788,9 +825,10 @@ class LLMSubmodule(ARNodeSubmodule):
         kwargs.pop("cache_labels", None)
         kwargs.pop("snapshot_after", None)
         kwargs.pop("is_prefill", None)
+        sample_token = kwargs.pop("sample_prefill_token", True)
 
         cache_handle.set_active_label("main")
-        self.language_model(
+        hidden = self.language_model(
             input_embeds, mode="und",
             custom_advance_pos_id=1,
             cache_handle=cache_handle, **kwargs
@@ -798,6 +836,15 @@ class LLMSubmodule(ARNodeSubmodule):
 
         if requires_cfg:
             cache_handle.snapshot_all("main", "cfg_text")
+        if sample_token:
+            qo_indptr_buf = cache_handle.get_qo_indptr_buf("main")
+            assert qo_indptr_buf is not None
+            last_token_indices = (qo_indptr_buf[1:] - 1).long()  # (padded_bs,)
+            last_hidden = hidden.index_select(0, last_token_indices)
+            logits = self.lm_head(last_hidden)
+            return {
+                "logits": [logits]
+            }
         return {}
 
     def _forward_prefill_vae(
@@ -831,6 +878,9 @@ class LLMSubmodule(ARNodeSubmodule):
             custom_advance_pos_id=1,
             **kwargs
         )
+
+        # NOTE: we will never sample a token from prefill_vae because it is alwaus
+        # followed by prefill_vit
 
         if requires_cfg and cache_handle is not None:
             cache_handle.snapshot_all("main", "cfg_text")
@@ -919,6 +969,16 @@ class LLMSubmodule(ARNodeSubmodule):
         kwargs.pop("is_prefill", None)
 
         latents = input_embeds
+
+        # latents, vae_position_ids, time_index and empty_combined_emb are all
+        # built with a sequence length derived from the same (H, W), but they
+        # arrive as separate inputs. Under torch.compile's dynamic shapes each
+        # gets an independent symbolic dim, so Dynamo can't prove the adds below
+        # line up. Assert the relationship explicitly.
+        n_latent = latents.shape[0]
+        torch._check(vae_position_ids.shape[0] == n_latent)
+        torch._check(time_index.shape[0] == n_latent)
+        torch._check(empty_combined_emb.shape[0] == n_latent + 2)
 
         N = self.config.num_timesteps
         shift = self.config.timestep_shift
@@ -1069,6 +1129,13 @@ class LLMSubmodule(ARNodeSubmodule):
 
         latents = input_embeds
 
+        # See _forward_image_gen: tie the separately-passed sequence dims so
+        # torch.compile's dynamic shapes can prove the adds below line up.
+        n_latent = latents.shape[0]
+        torch._check(vae_position_ids.shape[0] == n_latent)
+        torch._check(time_index.shape[0] == n_latent)
+        torch._check(empty_combined_emb.shape[0] == n_latent + 2)
+
         pos_embed = self.latent_pos_embed(vae_position_ids)
 
         N = self.config.num_timesteps
@@ -1118,7 +1185,9 @@ class LLMSubmodule(ARNodeSubmodule):
         self,
         graph_walk: str,
         engine_inputs: ModelInputsFromEngine,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None=None,
+        input_embeds: torch.Tensor | None=None,
+        sample_token: bool=False,
         requires_cfg: bool=False,
         **kwargs
     ) -> dict[str, NameToTensorList]:
@@ -1138,20 +1207,32 @@ class LLMSubmodule(ARNodeSubmodule):
                 requires_cfg=requires_cfg,
             )
         elif graph_walk == "prefill_text":
-            self._forward_prefill_text(
+            out = self._forward_prefill_text(
                 cache_handle=cache_manager,
                 input_ids=input_ids,
                 requires_cfg=requires_cfg,
+                # sample for cuda graph compatibility
+                sample_prefill_token=True,
                 **kwargs
-            ) # prefill is the same batched and unbatched
-            # Empty top-level dict (NOT ``{rid: []}``): prefill_text only
-            # populates the KV cache, no per-rid outputs. The runner's
-            # ``_sample_and_remap`` slow path falls through to
-            # ``outputs[rid] = {}`` for each rid when no ``__batched_logits__``
-            # sentinel is present and no dummy_rid keys exist in static_output;
-            # ``{rid: []}`` would AttributeError on ``[].items()`` in the
-            # per-rid collection loop.
-            return {}
+            )
+            if "logits" in out:
+                out["__batched_logits__"] = out.pop("logits")[0]
+                for i, rid in enumerate(request_ids):
+                    out[rid] = {"logits": [out["__batched_logits__"][i]]}
+            return out
+        elif graph_walk == "prefill_vit":
+            out = self._forward_prefill_vit(
+                cache_handle=cache_manager,
+                input_embeds=input_embeds,
+                requires_cfg=requires_cfg,
+                sample_prefill_token=sample_token,
+                **kwargs
+            )
+            if "logits" in out:
+                out["__batched_logits__"] = out.pop("logits")[0]
+                for i, rid in enumerate(request_ids):
+                    out[rid] = {"logits": [out["__batched_logits__"][i]]}
+            return out
         else:
             raise ValueError(f"Batched forward not supported for graph walk: {graph_walk!r}")
 
@@ -1203,25 +1284,6 @@ class LLMSubmodule(ARNodeSubmodule):
         out["__batched_logits__"] = logits
         return out
 
-    @torch.compiler.disable
-    def _batch_get_sampling_param(
-        self,
-        per_request_info: dict[str, CurrentForwardPassInfo],
-        request_ids: list[str],
-        key: str,
-        default: float | int,
-        device,
-        dtype: torch.dtype = torch.float32,
-    ) -> float | int | torch.Tensor:
-        """Extract a sampling param. Returns scalar if uniform, tensor if per-request."""
-        values = [
-            per_request_info[rid].step_metadata.get(key, default)
-            for rid in request_ids
-        ]
-        if len(set(values)) == 1:
-            return values[0]
-        return torch.tensor(values, device=device, dtype=dtype)
-
 
     def _wrap_with_boi_eoi(self, emb: torch.Tensor) -> torch.Tensor:
         """Wrap embeddings with <|vision_start|> and <|vision_end|> tokens."""
@@ -1235,10 +1297,15 @@ class LLMSubmodule(ARNodeSubmodule):
             eoi_emb = self.embed_tokens(eoi_ids).to(emb.dtype)
         return torch.cat([boi_emb, emb, eoi_emb], dim=0)
 
+    def max_batch_size(self, graph_walk: str):
+        if graph_walk == "prefill_vit":
+            return 2
+        return None
+
     def can_batch(
         self, batch: NodeBatch, model_inputs: list[NodeInputs]
     ):
-        return batch.graph_walk in ["decode", "prefill_text"]
+        return batch.graph_walk in ["decode", "prefill_text", "prefill_vit"]
 
     def postprocess(
         self, request_id: str,
@@ -1247,6 +1314,11 @@ class LLMSubmodule(ARNodeSubmodule):
         **kwargs
     ):
         if "new_token" not in outputs:
+            return
+        if request_info.graph_walk != "decode" and (
+            not request_info.step_metadata.get("sample_prefill_token", False)
+        ):
+            outputs.pop("new_token")
             return
         outputs["text_inputs"] = outputs["new_token"]
 
@@ -1258,8 +1330,9 @@ class LLMSubmodule(ARNodeSubmodule):
         if "new_token" not in outputs:
             return set()
         token = outputs["new_token"][0].item()
-        if (self.eos_token_id is not None and self.eos_token_id == token) or \
-                (request_info.dynamic_loop_iter_counts.get("decode_loop", 0) + 1 >= request_info.max_tokens):
+        ignore_eos = request_info.sampling_config["LLM"].ignore_eos
+        if (not ignore_eos and self.eos_token_id == token) or \
+                (request_info.dynamic_loop_iter_counts.get("decode_loop", 0) + 2 >= request_info.max_tokens):
             return {"decode_loop"}
         return set()
 
@@ -1296,8 +1369,11 @@ class VAEDecoderSubmodule(NodeSubmodule):
         return NodeInputs(
             tensor_inputs={
                 "latents": inputs["latents"][0]
+            },
+            kwargs={
+                "image_h": fwd_info.step_metadata.get("height", 1024),
+                "image_w": fwd_info.step_metadata.get("width", 1024)
             }
-            ## NOTE: we could also add image_h, image_w as kwargs here
         )
 
 
@@ -1306,18 +1382,16 @@ class VAEDecoderSubmodule(NodeSubmodule):
         graph_walk: str,
         engine_inputs: ModelInputsFromEngine,
         latents: torch.Tensor,
-        image_h: int | torch.Tensor = 1024, # BAGEL's default image dim
-        image_w: int | torch.Tensor = 1024,
+        image_h: int,
+        image_w: int,
         **kwargs,
     ) -> NameToTensorList:
         logger.debug(
             "Running BAGEL VAE dec with latents shape %s, h %d, w %d",
             str(latents.shape), image_h, image_w
         )
-        # Convert to int if tensor (CUDA graph compatible when passed as int
-        # from metadata; tensor fallback for backwards compatibility)
-        H = image_h.item() if isinstance(image_h, torch.Tensor) else int(image_h)
-        W = image_w.item() if isinstance(image_w, torch.Tensor) else int(image_w)
+        H = image_h
+        W = image_w
 
         p = self.latent_patch_size
         h = H // self.latent_downsample
@@ -1373,9 +1447,9 @@ class CombineCFGSubmodule(NodeSubmodule):
             "v_cfg_text": inputs["v_cfg_text"][0],
             "v_cfg_img": inputs["v_cfg_img"][0],
         }
-        kwargs = fwd_info.step_metadata
         if "latents" not in inputs or len(inputs["latents"]) == 0:
-            H, W = 1024, 1024
+            H = fwd_info.step_metadata.get("height", 1024)
+            W = fwd_info.step_metadata.get("width", 1024)
             result["latents"], result["time_index"] = _init_latents_and_time_index(
                 self.config, device=device, seed=fwd_info.random_seed, H=H, W=W
             )
@@ -1387,7 +1461,7 @@ class CombineCFGSubmodule(NodeSubmodule):
             }
         return NodeInputs(
             tensor_inputs=result,
-            kwargs=kwargs
+            kwargs=fwd_info.step_metadata
         )
 
     def forward(
@@ -1419,6 +1493,16 @@ class CombineCFGSubmodule(NodeSubmodule):
 
         N = self.config.num_timesteps
         shift = self.config.timestep_shift
+
+        # latents, the three velocity tensors and time_index all share the same
+        # (H, W)-derived sequence length but arrive as separate inputs. Tie their
+        # symbolic dims so torch.compile can prove the CFG combine / Euler step
+        # below line up under dynamic shapes.
+        n_latent = latents.shape[0]
+        torch._check(v_main.shape[0] == n_latent)
+        torch._check(v_cfg_text.shape[0] == n_latent)
+        torch._check(v_cfg_img.shape[0] == n_latent)
+        torch._check(time_index.shape[0] == n_latent)
 
         # Compute timestep and step size
         t_uniform = 1.0 - time_index / (N - 1)

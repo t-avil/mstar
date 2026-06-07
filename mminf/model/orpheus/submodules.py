@@ -13,6 +13,7 @@ from mminf.engine.cuda_graph_runner import BasicBatchedCudaGraphConfig
 from mminf.engine.kv_store import PositionInfo
 from mminf.model.orpheus.config import OrpheusModelConfig
 from mminf.model.submodule_base import ARNodeInputs, ARNodeSubmodule, ModelInputsFromEngine, NodeInputs, NodeSubmodule
+from mminf.utils.sampling import SeenTokenMask
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +89,7 @@ class OrpheusLLMSubmodule(ARNodeSubmodule):
         fwd_info: CurrentForwardPassInfo,
         inputs: NameToTensorList,
         pos_info: dict[str, PositionInfo] = {},
+        **kwargs,
     ) -> ARNodeInputs:
         return ARNodeInputs(
             input_ids=inputs["text_inputs"][0],
@@ -281,7 +283,8 @@ class OrpheusLLMSubmodule(ARNodeSubmodule):
             return set()
         token = outputs["new_token"][0].item()
         eos_token_id = self.config.stop_token_id
-        if (eos_token_id is not None and eos_token_id == token) or \
+        ignore_eos = request_info.sampling_config["LLM"].ignore_eos
+        if (not ignore_eos and eos_token_id == token) or \
                 (request_info.dynamic_loop_iter_counts.get("decode_loop", 0) + 1 >= request_info.max_tokens):
             return {"decode_loop"}
         return set()

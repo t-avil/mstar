@@ -169,7 +169,9 @@ class KVCacheEngine(BaseEngine):
                 submodule=submodule,
                 kv_management=node_to_kv_mgmt[node_name],
                 tp_group=tp_group,
-                sampler=Sampler(tp_group=tp_group),
+                sampler=Sampler(
+                    device=self.device, tp_group=tp_group
+                ),
             )
 
 
@@ -784,10 +786,11 @@ class KVCacheEngine(BaseEngine):
                     fwd_info=batch.per_request_info[rid],
                     inputs=batch.per_request_input_tensors[rid],
                     pos_info=pos_info,
+                    seen_token_mask=submod_mgmt.sampler.get_token_mask(rid)
                 )
             )
         if self.enable_nvtx:
-            range_pop(synchronize=True)
+            range_pop(synchronize=False)
 
         return PreparedBatch(
             batch=batch,

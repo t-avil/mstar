@@ -101,8 +101,10 @@ class Model(ABC):
 
 
 class Bagel(Model):
-    def __init__(self, disable_cfg: bool = False, **kwargs):
+    def __init__(self, disable_cfg: bool = False, image_preprocess: str = "vllm", **kwargs):
         super().__init__(**kwargs)
+        self.disable_cfg = disable_cfg
+        self.image_preprocess = image_preprocess
         self.disable_cfg = disable_cfg
 
     def get_model_kwargs(self, request_type: RequestType):
@@ -112,7 +114,12 @@ class Bagel(Model):
         # two systems would generate different token sequences, mostly
         # affecting I2T latency (variable EOS timing) but also leaking into
         # T2I/I2I via the tokens emitted before the image-gen handoff.
-        kwargs = {"temperature": 0.0}
+        kwargs = {
+            "temperature": 0.0,
+            "image_preprocess": self.image_preprocess,
+            "max_tokens": 128,
+            "max_output_tokens": 128,
+        }
         if self.disable_cfg:
             kwargs.update({
                 "cfg_img_scale": 1.0,
@@ -131,6 +138,17 @@ class Bagel(Model):
 
     def get_supported_modalities(self):
         return {RequestType.T2T, RequestType.T2I, RequestType.I2I, RequestType.I2T}
+    
+    def get_openai_system_message(self) -> Optional[dict]:
+        return {
+            "role": "system",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "You are BAGEL, a helpful assistant created by ByteDance.",
+                }
+            ],
+        }
 
 
 class Orpheus(Model):

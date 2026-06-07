@@ -384,13 +384,12 @@ class Food101Dataset(BaseDataset):
     image is passed via image_path.
     """
 
-    DEFAULT_PROMPT = FOOD101_IMAGE_PROMPTS[0]
 
     def __init__(
         self,
         num_requests: int = 100,
         req_type: RequestType = RequestType.I2T,
-        prompt: str = DEFAULT_PROMPT,
+        prompts: list[str] = FOOD101_IMAGE_PROMPTS,
         split: str = "validation",
         cache_dir: str | None = None,
     ):
@@ -401,7 +400,7 @@ class Food101Dataset(BaseDataset):
         from datasets import load_dataset
 
         self._num_requests = num_requests
-        self.prompt = prompt
+        self.prompts = prompts
 
         raw = load_dataset(
             "ethz/food101",
@@ -439,7 +438,7 @@ class Food101Dataset(BaseDataset):
                 self.items.append(
                     RequestInput(
                         req_type=req_type,
-                        prompt=self.prompt,
+                        prompt=self.prompts[len(self.items) % len(self.prompts)],
                         image_path=img_path,
                     )
                 )

@@ -13,7 +13,7 @@ from mminf.conductor.request_info import CurrentForwardPassInfo
 from mminf.engine.base import NodeBatch
 from mminf.engine.cache_manager import BatchedCacheManager
 from mminf.engine.kv_store import PositionInfo
-from mminf.utils.sampling import BaseSampler, CudaGraphableSampler
+from mminf.utils.sampling import BaseSampler, CudaGraphableSampler, SeenTokenMask
 
 if TYPE_CHECKING:
     from mminf.engine.cuda_graph_config import CudaGraphConfig
@@ -138,6 +138,7 @@ class ModelInputsFromEngine:
     sampler: BaseSampler | None = None
 
     @property
+    @torch.compiler.disable
     def single_request_info(self):
         """
         IMPORTANT: asserts that there is only one request
@@ -146,6 +147,7 @@ class ModelInputsFromEngine:
         return self.per_request_info[self.request_ids[0]]
     
     @property
+    @torch.compiler.disable
     def first_request_info(self):
         """
         unlike single_request_info, does not assert that there is only one request
@@ -344,6 +346,7 @@ class ARNodeSubmodule(NodeSubmodule):
         graph_walk: str,
         fwd_info: CurrentForwardPassInfo,
         inputs: NameToTensorList,
+        seen_token_mask: SeenTokenMask,
         pos_info: dict[str, PositionInfo] = {},
     ) -> ARNodeInputs:
         pass

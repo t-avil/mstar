@@ -67,6 +67,7 @@ from mminf.model.bagel.submodules import (
     ViTEncoderSubmodule,
 )
 from mminf.model.base import DECODE, ForwardPassArgs, Model
+from mminf.model.loader.base import LLAMA_STACKED_PARAMS, StackedParamRule
 from mminf.model.submodule_base import NodeSubmodule
 from mminf.model.loader import iter_safetensors_file, load_hf_weights
 from mminf.utils.sampling import SamplingConfig
@@ -143,19 +144,47 @@ class _BagelViTEMA(nn.Module):
         self.vit_pos_embed = vit_pos_embed
 
 
+def _stacked_source_keys(
+    expected: set[str], stacked_params: list[StackedParamRule] | None,
+) -> set[str]:
+    """Expand fused parameter names into the per-shard checkpoint keys they
+    are loaded from.
+    ``_load_into`` filters the safetensors read to ``expected`` (the
+    module's own parameter names). When ``stacked_params`` fuse several
+    checkpoint tensors into one parameter (``q_proj`` / ``k_proj`` /
+    ``v_proj`` → ``qkv_proj``), the source keys differ from the fused name,
+    so they must be added to the read filter or the iterator would skip
+    them.
+    """
+    if not stacked_params:
+        return expected
+    keys = set(expected)
+    for name in expected:
+        for rule in stacked_params:
+            if rule.target_suffix in name:
+                keys.add(name.replace(rule.target_suffix, rule.source_suffix))
+    return keys
+
+
 def _load_into(
     module: nn.Module, source_path: Path, device: str,
+    stacked_params: list[StackedParamRule] | None = None,
 ) -> None:
     """Materialise ``module`` on ``device`` and load every parameter from
     ``source_path``. Raises ``KeyError`` if any parameter is missing from
     the checkpoint — the equivalent of the old ``enforce_missing_keys=True``
     safety net.
+    ``stacked_params`` routes per-shard checkpoint tensors into fused
+    parameters (e.g. ``q/k/v_proj`` → ``qkv_proj``); pass it for modules
+    that use ``FusedColumnLinear`` projections.
     """
     module.to_empty(device=device)
     expected = set(dict(module.named_parameters()).keys())
+    read_keys = _stacked_source_keys(expected, stacked_params)
     loaded = load_hf_weights(
         module,
-        iter_safetensors_file(source_path, device=device, keys=expected),
+        iter_safetensors_file(source_path, device=device, keys=read_keys),
+        stacked_params=stacked_params
     )
     missing = expected - loaded
     if missing:
@@ -259,6 +288,8 @@ class BagelModel(Model):
         self.repo = Path(local_dir)
 
     def _init_language_model_components(self, device):
+        if self.llm_initialized:
+            return
         self._download_hf()
         self.llm_initialized = True
         with torch.device("meta"):
@@ -270,6 +301,7 @@ class BagelModel(Model):
         _load_into(
             _BagelLLMEMA(self.language_model, self.llm2vae),
             ema_path, device,
+            stacked_params=LLAMA_STACKED_PARAMS,
         )
 
         if not self.vae_initialized:
@@ -405,6 +437,30 @@ class BagelModel(Model):
     # Model ABC implementation
     # -----------------------------------------------------------------------
 
+    # System prompt for image understanding.
+    # TODO: make this configurable
+    BAGEL_DEFAULT_SYSTEM_PROMPT = "You are BAGEL, a helpful assistant created by ByteDance."
+
+    # Chat-template envelope for image understanding (image-to-text).
+    VLM_UNDERSTANDING_PREFIX = (
+        "<|im_start|>system\n{system_prompt}<|im_end|>\n<|im_start|>user\n"
+    )
+    VLM_UNDERSTANDING_SUFFIX = "\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+    VLM_UNDERSTANDING_TEMPLATE = "<|im_start|>system\n{system_prompt}<|im_end|>" + \
+        "\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+
+    # Image generation (T2I/I2I): bare wrapping, no system prompt or roles. Input
+    # image (I2I) is positioned before this by the prefill_vae/vit walks.
+    GEN_TEMPLATE = "<|im_start|>{prompt}<|im_end|><|im_start|>"
+    BOS_EOS_TEMPL = "<|im_start|>{prompt}<|im_end|>"
+
+    def _encode_text(self, text: str) -> torch.Tensor:
+        """Tokenize a text segment, falling back to raw bytes when no tokenizer
+        is available (dummy-model test path)."""
+        if self.tokenizer is not None:
+            return torch.tensor(self.tokenizer.encode(text), dtype=torch.long)
+        return torch.tensor(list(text.encode("utf-8")), dtype=torch.uint8)
+
     def process_prompt(
         self,
         prompt: str | None,
@@ -425,32 +481,86 @@ class BagelModel(Model):
         result: NameToTensorList = {}
 
         if prompt is not None:
-            if self.tokenizer is not None:
-                tokens = self.tokenizer.encode(prompt)
-                result["text_inputs"] = [
-                    torch.tensor(tokens, dtype=torch.long)
-                ]
-            else:
-                # Fallback for testing without a tokenizer
-                byte_data = prompt.encode("utf-8")
-                result["text_inputs"] = [
-                    torch.tensor(list(byte_data), dtype=torch.uint8)
-                ]
-
-        think_mode = kwargs.get("think_mode", self.config.think_mode)
-        if think_mode and self.tokenizer is not None:
             target_output = output_modalities[0] if output_modalities else "text"
-            is_understanding = (target_output == "text")
-            sys_prompt = (
-                VLM_THINK_SYSTEM_PROMPT if is_understanding
-                else GEN_THINK_SYSTEM_PROMPT
-            )
-            sys_tokens = self.tokenizer.encode(sys_prompt)
-            result["system_prompt"] = [
-                torch.tensor(sys_tokens, dtype=torch.long)
+            is_understanding = target_output == "text"
+            has_image = "image" in input_modalities
+            think_mode = kwargs.get("think_mode", self.config.think_mode)
+            system_prompt = self.BAGEL_DEFAULT_SYSTEM_PROMPT
+
+            if is_understanding and has_image:
+                if think_mode:
+                    system_prompt = f"{system_prompt} {VLM_THINK_SYSTEM_PROMPT}"
+                segments = [
+                    self.VLM_UNDERSTANDING_PREFIX.format(system_prompt=system_prompt),
+                    self.VLM_UNDERSTANDING_SUFFIX.format(prompt=prompt),
+                ]
+            elif is_understanding:
+                if think_mode:
+                    system_prompt = f"{system_prompt} {VLM_THINK_SYSTEM_PROMPT}"
+                segments = [self.VLM_UNDERSTANDING_TEMPLATE.format(
+                    system_prompt=system_prompt, prompt=prompt
+                )]
+            else:
+                # Image generation (T2I/I2I): the input image (I2I) is placed
+                # before this text by the prefill_vae/vit walks.
+                segments = [self.GEN_TEMPLATE.format(prompt=prompt)]
+                if think_mode:
+                    segments.insert(0, self.BOS_EOS_TEMPL.format(prompt=GEN_THINK_SYSTEM_PROMPT))
+            result["text_inputs"] = [self._encode_text(seg) for seg in segments]
+
+        # Image edit path: both input and output include "image". 
+        # request specifies a target width and/or height, resize the input
+        # images to be the largest that fits within that box (preserving
+        # aspect ratio) so the edited output matches the requested size.
+        is_image_edit = "image" in input_modalities and "image" in output_modalities
+        max_width = kwargs.get("width")
+        max_height = kwargs.get("height")
+        if (
+            is_image_edit
+            and tensors is not None
+            and tensors.get("image_inputs")
+        ):
+            result["image_inputs"] = [
+                self._resize_to_fit(img, max_width, max_height) 
+                for img in tensors["image_inputs"]
             ]
 
         return result
+    
+    @staticmethod
+    def _resize_to_fit(
+        image: torch.Tensor,
+        max_width: int | None,
+        max_height: int | None,
+    ) -> torch.Tensor:
+        """Resize a c x h x w image to the largest size fitting within
+        max_width x max_height while preserving aspect ratio.
+
+        If only one of max_width / max_height is given, only that dimension
+        constrains the result. Both dimensions are capped at 1024.
+        """
+        _, h, w = image.shape
+        scales = [1024 / w, 1024 / h]
+        if max_width is not None:
+            scales.append(max_width / w)
+        if max_height is not None:
+            scales.append(max_height / h)
+        scale = min(scales)
+        new_h = max(1, round(h * scale))
+        new_w = max(1, round(w * scale))
+        if new_h == h and new_w == w:
+            return image
+        logger.info(
+            "Resizing input image from %dx%d to %dx%d (h x w)",
+            h, w, new_h, new_w,
+        )
+        resized = torch.nn.functional.interpolate(
+            image.unsqueeze(0),
+            size=(new_h, new_w),
+            mode="bilinear",
+            align_corners=False,
+        )
+        return resized.squeeze(0)
 
     def postprocess(
         self, output: torch.Tensor,
@@ -514,7 +624,14 @@ class BagelModel(Model):
         prefill_text = GraphNode(
             name="LLM",
             input_names=["text_inputs"],
-            outputs=[],
+            outputs=[
+                GraphEdge(
+                    next_node=EMIT_TO_CLIENT,
+                    name="new_token",
+                    output_modality="text",
+                    persist=True
+                ),
+            ],
         )
 
         # -- prefill_vit: ViT encoder -> LLM --
@@ -529,7 +646,14 @@ class BagelModel(Model):
             GraphNode(
                 name="LLM",
                 input_names=["img_emb"],
-                outputs=[],
+                outputs=[
+                    GraphEdge(
+                        next_node=EMIT_TO_CLIENT,
+                        name="new_token",
+                        output_modality="text",
+                        persist=True
+                    ),
+                ],
             ),
         ])
 
@@ -689,19 +813,20 @@ class BagelModel(Model):
         self, input_modalities: list[str],
         input_signals: dict[str, list[TensorPointerInfo]],
         is_understanding: bool,
-        think_mode: bool
     ):
         # Build prefill schedule: sequential list of (graph_walk_name, input tensor info)
         schedule: list[tuple[str, TensorPointerInfo]] = []
+        texts = input_signals.get("text_inputs", [])
+        images = input_signals.get("image_inputs", [])
 
-        # 1. System prompt (if think mode enabled)
-        if think_mode and "system_prompt" in input_signals:
-            schedule.append(("prefill_text", input_signals["system_prompt"][0]))
+        # 1. System prompt
+        
+        if len(texts) == 2:
+            # the first text block is the system prompt and should come at the very beginning
+            # (in both thinking and non-thinking mode)
+            input_modalities.insert(0, "text")
 
         # 2. Walk through interleaved inputs, building sequential steps
-        images = input_signals.get("image_inputs", [])
-        texts = input_signals.get("text_inputs", [])
-
         text_idx, image_idx = 0, 0
         for mod in input_modalities:
             if mod == "text":
@@ -740,6 +865,9 @@ class BagelModel(Model):
             "cfg_interval": full_metadata.kwargs["cfg_interval"],
             "cfg_renorm_type": full_metadata.kwargs["cfg_renorm_type"],
             "cfg_renorm_min": full_metadata.kwargs["cfg_renorm_min"],
+            "width": full_metadata.kwargs["width"],
+            "height": full_metadata.kwargs["height"],
+            "image_preprocess": full_metadata.kwargs["image_preprocess"],
         }
 
     def _get_fwd_pass_inputs(
@@ -780,8 +908,10 @@ class BagelModel(Model):
             return [graph_edge]
 
         elif graph_walk == DECODE:
-            # The submodule automatically adds a BOS to start
-            graph_edge = GraphEdge(next_node="LLM", name="text_inputs")
+            graph_edge = GraphEdge(
+                next_node="LLM", name="text_inputs",
+                tensor_info=persist_signals.get("new_token", [])
+            )
             return [graph_edge]
 
         elif graph_walk == "image_gen":
@@ -842,17 +972,27 @@ class BagelModel(Model):
             "cfg_renorm_type", "cfg_renorm_min", "think_mode",
         ]
         params = {k: getattr(self.config, k) for k in overridable_keys}
+        params["width"] = 1024
+        params["height"] = 1024
+        params["image_preprocess"] = "default"
+        overridable_keys += ["width", "height", "image_preprocess"]
+
         if model_kwargs:
             for key in overridable_keys:
                 if key in model_kwargs:
                     params[key] = model_kwargs[key]
+        
+        if "image" in output_modalities and input_signals.get("image_inputs"):
+            image = input_signals["image_inputs"][0]
+            params["height"] = image.dims[1]
+            params["width"] = image.dims[2]
+            logger.info(f"Will generate an image of shape {params['height']} x {params['width']}")
 
         think_mode = params.pop("think_mode") # used for schedule logic, not stored in params
         schedule = self._build_prefill_schedule(
             input_modalities=input_modalities,
             input_signals=input_signals,
             is_understanding=(target_output == "text"),
-            think_mode=think_mode
         )
 
         first_graph_walk = schedule[0][0] if schedule else DECODE
@@ -862,7 +1002,7 @@ class BagelModel(Model):
             "target_output": target_output,
             "num_timesteps": self.config.num_timesteps,
             "think_mode": think_mode,
-            **params,  # CFG params
+            **params,  # CFG params  + gen width / height
         }
         full_metadata = CurrentForwardConductorMetadata(
             input_modalities=input_modalities,
@@ -873,6 +1013,10 @@ class BagelModel(Model):
             kwargs=kwargs,
         )
         step_metadata =  self._get_step_metadata(full_metadata)
+
+        sample_prefill_token = (think_mode or target_output != "image") and len(schedule) == 1
+        step_metadata["sample_prefill_token"] = sample_prefill_token
+
         inputs = self._get_fwd_pass_inputs(
             full_metadata, input_signals
         )
@@ -909,9 +1053,19 @@ class BagelModel(Model):
         """
         metadata = partition_metadata
         request_done = False
+
+        has_text_output = (
+            metadata.kwargs.get("think_mode", False) or metadata.kwargs["target_output"] != "image"
+        )
+        sample_prefill_token = False
+    
         if metadata.is_prefill:
             step = metadata.kwargs["prefill_step"] + 1
             schedule = metadata.kwargs["prefill_schedule"]
+
+            sample_prefill_token = has_text_output and (
+                step == len(schedule) - 1
+            )
 
             if step < len(schedule):
                 # More prefill steps remaining
@@ -944,6 +1098,7 @@ class BagelModel(Model):
             request_done = True
 
         step_metadata =  self._get_step_metadata(metadata)
+        step_metadata["sample_prefill_token"] = sample_prefill_token
         inputs = self._get_fwd_pass_inputs(
             metadata, persist_signals
         )
@@ -963,9 +1118,15 @@ class BagelModel(Model):
         model_kwargs: dict | None = None,
     )  -> SamplingConfig | None:
         keys = [
-            "temperature", "top_k", "top_p",
+            "temperature", "top_k", "top_p", "repetition_penalty",
+            "ignore_eos"
         ]
         params = {k: getattr(self.config, k) for k in keys}
+        if model_kwargs:
+            for key in keys:
+                if key in model_kwargs:
+                    params[key] = model_kwargs[key]
         return SamplingConfig(
+            vocab_size=self.config.vocab_size,
             **params
         )

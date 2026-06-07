@@ -44,6 +44,7 @@ class OrpheusModelConfig:
     temperature: float = 0.6
     top_p: float = 0.8
     repetition_penalty: float = 1.3
+    ignore_eos: bool = False  # benchmark parity: decode to max_tokens regardless of EOS
     max_new_tokens: int = 4096
 
     # Available voices
