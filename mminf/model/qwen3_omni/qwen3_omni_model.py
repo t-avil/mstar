@@ -933,36 +933,19 @@ class Qwen3OmniModel(Model):
         there are more codec tokens to process.
         """
         chunk_size = self.config.code2wav.codec_chunk_frames
-        token_count = conn.token_count if conn else 0
-        consumed = conn.consumed_count if conn else 0
-        producer_done = conn.producer_done if conn else False
-
         metadata.graph_walk = "code2wav_chunk"
-
-        available = token_count - consumed
-
-        # Nothing left to decode
-        if available <= 0 and producer_done:
-            return ForwardPassArgs(
-                full_metadata=metadata,
-                inputs=[],
-                unpersist_tensors=[],
-                request_done=True,
-            )
-
         step_metadata = {"consumed_tokens": chunk_size}
 
-        # Check if this is the last chunk
-        new_consumed = consumed + chunk_size
-        remaining_after = token_count - new_consumed
-        is_last = producer_done and remaining_after < chunk_size
-
+        # Don't predict the last chunk from token counts: LeftContextChunkPolicy
+        # emits an extra flush pass for the retained overlap, so a count-based
+        # guess completes the request before that final chunk is emitted. The
+        # `available <= 0` check above fires once consumption actually catches up.
         return ForwardPassArgs(
             full_metadata=metadata,
             inputs=[],
             unpersist_tensors=[],
             step_metadata=step_metadata,
-            request_done=is_last,
+            request_done=False,
         )
 
     # -----------------------------------------------------------------------
