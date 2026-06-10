@@ -1,10 +1,10 @@
 """The ``mminf`` command — a one-command quickstart wrapper.
 
-    mminf serve bagel                 # single-GPU defaults, port 8000
+    mminf serve bagel                 # defaults, port 8000
     mminf serve qwen3_omni --gpus 0,1,2
     mminf serve orpheus --port 9000
 
-``serve <model>`` resolves a sensible default single-GPU config, fills in the
+``serve <model>`` resolves a sensible default config, fills in the
 plumbing that the low-level ``mminf-serve`` requires (socket/upload dirs, a
 single-node-safe tensor protocol, HF cache), and then delegates to the same
 server entry point. Power users can still call ``mminf-serve --config ...``
@@ -21,11 +21,12 @@ from pathlib import Path
 
 import mminf
 
-# Model name -> default single-GPU config (relative to the repo's configs/).
+# Model name -> default config (relative to the repo's configs/).
 DEFAULT_CONFIGS: dict[str, str] = {
     "bagel": "bagel_single_gpu.yaml",
+    "bagel_cfg_parallel": "bagel_cfg_parallel.yaml",
     "orpheus": "orpheus_colocated.yaml",
-    "qwen3_omni": "qwen3omni_colocated.yaml",
+    "qwen3_omni": "qwen3omni_2gpu.yaml",
     "pi05": "pi05.yaml",
     "vjepa2": "vjepa2.yaml",
     "vjepa2_ac": "vjepa2_ac.yaml",
@@ -72,9 +73,9 @@ def _next_steps(model: str, host: str, port: int) -> str:
         "    from mminf import MMInfClient",
         f"    client = MMInfClient(\"{base}\")",
     ]
-    if model in ("bagel", "qwen3_omni"):
+    if model in ("bagel", "bagel_cfg_parallel", "qwen3_omni"):
         lines.append("    print(client.chat(\"Hello!\").text)")
-    if model == "bagel":
+    if model in ("bagel", "bagel_cfg_parallel"):
         lines.append("    open(\"out.png\",\"wb\").write(client.generate_image(\"a cat in a hat\"))")
     if model == "qwen3_omni":
         lines.append("    client.chat(\"Say hi\", output_modalities=(\"text\",\"audio\")).save_audio(\"out.wav\")")

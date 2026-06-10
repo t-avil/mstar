@@ -7,7 +7,7 @@ yet, see :doc:`installation`.
 1. Start a server
 -----------------
 
-The ``mminf`` CLI launches a server for a model with sensible single-GPU defaults:
+The ``mminf`` CLI launches a server for a model with a sensible default config:
 
 .. code-block:: bash
 
@@ -17,18 +17,31 @@ It listens on ``http://localhost:8000`` by default. Other models:
 
 .. code-block:: bash
 
-   mminf serve qwen3_omni      # omni: text/image/audio/video in, text/speech out
-   mminf serve orpheus         # text-to-speech
-   mminf serve pi05            # vision-language-action (robotics)
-   mminf serve vjepa2          # video world model
+   mminf serve bagel_cfg_parallel   # BAGEL with CFG branches split across GPUs (faster image gen)
+   mminf serve qwen3_omni           # omni: text/image/audio/video in, text/speech out
+   mminf serve orpheus              # text-to-speech
+   mminf serve pi05                 # vision-language-action (robotics)
+   mminf serve vjepa2               # video world model
 
-Choose GPUs and a port with ``--gpus`` / ``--port``:
+Defaults vary by model: most fit on a single GPU, but some ship with multi-GPU layouts —
+``qwen3_omni`` uses 2 GPUs and ``bagel_cfg_parallel`` uses 3 (the main branch plus the two
+classifier-free-guidance branches on their own GPUs). Choose GPUs and a port with
+``--gpus`` / ``--port``:
 
 .. code-block:: bash
 
-   mminf serve qwen3_omni --gpus 0,1,2 --port 9000
+   mminf serve qwen3_omni --gpus 0,1 --port 9000
 
 For custom layouts, disaggregation, and tensor parallelism, see :doc:`serving`.
+
+.. note::
+
+   The **first request(s) on a fresh environment can be slow** — often tens of seconds to a
+   few minutes. mminf ``torch.compile``\ s the model on first use, and that compilation
+   happens lazily on the first request that exercises each path. Subsequent requests run at
+   full speed, and the compiled artifacts are cached on disk, so later runs and restarts
+   warm up much faster. To avoid paying it on a real request, send a throwaway warmup
+   request right after the server reports ready.
 
 2. Send a request
 -----------------
