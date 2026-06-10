@@ -8,7 +8,12 @@ sys.path.insert(0, PROJECT_ROOT)
 try:
     from mminf import __version__ as package_version
 except Exception:  # noqa: BLE001
-    package_version = "0.0.0"
+    try:
+        from importlib.metadata import version as _pkg_version
+
+        package_version = _pkg_version("mminf")
+    except Exception:  # noqa: BLE001
+        package_version = "0.0.0"
 
 project = "mminf"
 author = "mminf Team"

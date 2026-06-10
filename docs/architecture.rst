@@ -22,7 +22,7 @@ High-level components
 - **Models** (``mminf/model/``): each model declares its computation graph, tokenization,
   engine types, and submodules. Registered via ``mminf/model/registry.py``.
 - **Graph** (``mminf/graph/``): computation-graph primitives — ``GraphNode``,
-  ``Sequential``, ``Parallel``, ``Loop``, ``DynamicLoop``, ``GraphEdge``.
+  ``Sequential``, ``Parallel``, ``Loop``, ``GraphEdge``.
 - **Communication** (``mminf/communication/``): ZMQ-based IPC/TCP messaging; tensor
   transport over RDMA or TCP.
 - **Streaming** (``mminf/streaming/``): streaming output with configurable chunking

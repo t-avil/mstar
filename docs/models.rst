@@ -1,9 +1,9 @@
 Supported Models
 ================
 
-``mminf`` ships several model families plus dummy models for testing without a GPU.
-The table below summarizes the registered families, their registry key (the value of
-``model:`` in a config YAML), and a representative Hugging Face identifier.
+``mminf`` ships the following model families. The table below summarizes the registered
+families, their registry key (the value of ``model:`` in a config YAML), and a
+representative Hugging Face identifier.
 
 Registry keys live in ``mminf/model/registry.py`` (``MODEL_REGISTRY`` / ``HF_MODELS``).
 
@@ -32,9 +32,6 @@ Registry keys live in ``mminf/model/registry.py`` (``MODEL_REGISTRY`` / ``HF_MOD
    * - ``vjepa2_ac``
      - ``vjepa2-ac-vitg``
      - V-JEPA 2-AC encoder + action-conditioned predictor.
-   * - ``dummy``
-     - —
-     - CPU-only stand-in for testing the graph/worker plumbing without weights.
 
 Notes
 -----

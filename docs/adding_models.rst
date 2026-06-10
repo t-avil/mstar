@@ -129,7 +129,7 @@ The abstract methods you **must** implement:
    Build the first :class:`mminf.model.base.ForwardPassArgs` for a partition — which
    graph walk to start on and which input edges feed it.
 
-``get_partition_forward_pass_args(self, partition_name, partition_metadata, persist_signals, new_tokens, incoming_connections=None) -> ForwardPassArgs``
+``get_partition_forward_pass_args(self, partition_name, partition_metadata, persist_signals, incoming_connections=None) -> ForwardPassArgs``
    Called by the conductor after each graph walk completes to decide the *next* walk, its
    inputs, and whether the request is done (``request_done=True``). For a simple
    prefill→decode model this flips ``is_prefill`` once and then loops decode until EOS.
@@ -138,9 +138,11 @@ The abstract methods you **must** implement:
    Encode a finished output tensor to bytes for the client (``utf-8`` for text, PNG for
    images, raw PCM for audio, …).
 
-``get_submodule(self, node_name, device="cpu") -> NodeSubmodule | None``
+``get_submodule(self, node_name, device="cpu", tp_group=None) -> NodeSubmodule | None``
    Lazily build and return the ``NodeSubmodule`` for ``node_name`` (load weights here,
-   on ``device``). Cache the result. Return ``None`` for dummy mode. See
+   on ``device``; ``tp_group`` is the node's tensor-parallel communicator when sharded —
+   forward it to parallel-linear constructors, see :ref:`Step 7 <tensor-parallelism>`).
+   Cache the result. Return ``None`` for dummy mode. See
    `Step 4 — Implement the submodules`_.
 
 Useful overridable defaults (not abstract): ``get_sampling_config`` (temperature/top-p
@@ -161,9 +163,9 @@ Step 3 — Declare the computation graph
   (this is how a generated token is carried from ``prefill`` into the ``decode`` loop),
   and ``output_modality="audio"`` (with ``next_node=EMIT_TO_CLIENT``) streams it to the
   client. Special destinations live in ``mminf/graph/special_destinations.py``
-  (``EMIT_TO_CLIENT``, ``EMPTY_DESTINATION``). The conductor learns about generated tokens
-  through the ``new_tokens`` argument to ``get_partition_forward_pass_args`` (and decode
-  termination through a submodule's ``check_stop``), not through any edge flag.
+  (``EMIT_TO_CLIENT``, ``EMPTY_DESTINATION``). A ``decode`` loop stops when a submodule's
+  ``check_stop`` registers a stop signal against the ``Loop`` (e.g. on EOS) — see Step 4 —
+  not through any edge flag.
 - ``Sequential([...])`` / ``Parallel([...])`` — compose subgraphs in order or
   concurrently.
 - ``Loop(name, section, max_iters, outputs)`` — an iterating subgraph whose body feeds
@@ -220,11 +222,13 @@ contract:
 
 ``forward(self, graph_walk, engine_inputs, **kwargs) -> NameToTensorList``
    The pure tensor → tensor computation. Keys in the returned dict are the edge
-   ``name`` s the graph routes downstream. **Both** ``forward`` **and** ``forward_batched``
-   **are wrapped with** ``torch.compile`` **automatically** (and CUDA-graph captured when
-   you declare configs — see :ref:`Step 5 <step-5>`). Keep them
-   compile-friendly; any helper that must *not* be traced (data-dependent Python control
-   flow, host syncs) has to be excluded explicitly, e.g. with ``@torch.compiler.disable``.
+   ``name`` s the graph routes downstream. ``forward`` **is wrapped with** ``torch.compile``
+   **automatically** (and CUDA-graph captured when you declare configs — see
+   :ref:`Step 5 <step-5>`); for autoregressive (``KV_CACHE``) nodes ``forward_batched`` is
+   compiled too, while the stateless engine leaves ``forward_batched`` eager. Keep the
+   compiled paths compile-friendly; any helper that must *not* be traced (data-dependent
+   Python control flow, host syncs) has to be excluded explicitly, e.g. with
+   ``@torch.compiler.disable``.
 
 ``postprocess(...)`` (optional)
    Metadata-only fixups that run on the GPU thread — must **not** read tensor values (no
@@ -686,7 +690,8 @@ Checklist
 Testing
 -------
 
-Start with the dummy plumbing to validate the graph before touching real weights, then:
+Validate the graph and worker plumbing before touching real weights — the CPU modular
+tests exercise models with submodules in dummy mode (``get_submodule`` returning ``None``):
 
 .. code-block:: bash
 
