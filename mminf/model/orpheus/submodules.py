@@ -189,13 +189,8 @@ class OrpheusLLMSubmodule(ARNodeSubmodule):
     ) -> dict[str, NameToTensorList]:
         """Batched forward pass for prefill and decode.
 
-        Prefill path emits per-request first-token logits via
-        ``qo_indptr_buf[1:] - 1`` last-token slicing — same pattern Thinker
-        prefill_text uses. Capture happens under
-        ``FlashInferPackedCudaGraphConfig`` so ``cache_handle.get_qo_indptr_buf("main")``
-        is non-None at capture and replay; per-rid output construction
-        mirrors decode (sentinel ``__batched_logits__`` for sample-once
-        fast path + per-rid ``{logits: [...]}`` slices).
+        Both paths sample within the forward pass (with the cuda graphable
+        sampler plugin) for improved performance, and return sampled tokens.
         """
         cache_handle = engine_inputs.cache_manager
         if graph_walk == "decode":
