@@ -70,6 +70,39 @@ qwen3_omni = [
     "sgl-kernel",
 ]
 
+orpheus = [
+    "einops",
+    "flashinfer-python",
+    "huggingface-hub",
+    "mooncake-transfer-engine",
+    "safetensors",
+    "transformers",
+]
+
+pi05 = [
+    "flashinfer-python",
+    "huggingface-hub",
+    "mooncake-transfer-engine",
+    "safetensors",
+    "transformers",
+    "triton",
+]
+
+vjepa2 = [
+    "huggingface-hub",
+    "mooncake-transfer-engine",
+    "safetensors",
+    "torchcodec",
+]
+
+vjepa2_ac = [
+    "flashinfer-python",
+    "huggingface-hub",
+    "mooncake-transfer-engine",
+    "safetensors",
+    "torchcodec",
+]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["mminf*"]

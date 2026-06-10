@@ -44,6 +44,15 @@ Model families and some output formats need extra packages, exposed as pip *extr
    * - ``.[qwen3_omni]``
      - Qwen3-Omni runtime: the BAGEL set plus ``flash-attn``, ``qwen-omni-utils``,
        ``sgl-kernel``, and ``datasets``.
+   * - ``.[orpheus]``
+     - Orpheus TTS runtime: ``transformers``, ``flashinfer-python``, ``safetensors``,
+       ``einops``, ``huggingface-hub``, ``mooncake-transfer-engine``.
+   * - ``.[pi05]``
+     - Pi0.5 runtime: ``transformers``, ``flashinfer-python``, ``safetensors``,
+       ``triton``, ``huggingface-hub``, ``mooncake-transfer-engine``.
+   * - ``.[vjepa2]`` / ``.[vjepa2_ac]``
+     - V-JEPA 2 runtime: ``safetensors``, ``torchcodec``, ``huggingface-hub``,
+       ``mooncake-transfer-engine`` (``vjepa2_ac`` also adds ``flashinfer-python``).
    * - ``.[audio]``
      - ``soundfile`` — only needed to return **non-WAV** audio containers (mp3/flac/…)
        from the OpenAI/SDK audio surfaces. WAV/PCM output works without it.
@@ -58,10 +67,10 @@ Combine extras as needed:
 
 .. note::
 
-   The model extras install the shared GPU runtime (FlashInfer, Transformers,
-   safetensors, …). Orpheus, Pi0.5, and V-JEPA 2 do not have dedicated extras yet — they
-   reuse those same dependencies, so installing one model extra (``.[bagel]`` is a good
-   default) is the simplest way to pull in the common GPU stack for them.
+   ``torch``, ``torchvision``, and ``torchaudio`` are already in the base install; each
+   model extra adds that family's remaining runtime — FlashInfer for the autoregressive
+   backbones, Transformers, safetensors, any codec/media libraries, and the Mooncake RDMA
+   transport for disaggregated deployments.
 
 GPU libraries
 -------------

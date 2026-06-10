@@ -108,8 +108,8 @@ A model declares a **computation graph** of components and a set of named **Walk
 `prefill`, `decode`, `image_gen`). The **Conductor** turns each request into a walk over that graph
 and schedules it; **Workers** each own a subgraph on their GPU and stream tensors directly to one
 another. Logical graph structure is decoupled from physical placement, so the same model runs
-single-GPU or fully disaggregated by changing only the YAML `node_groups`. Five composable
-primitives — `Sequential`, `Parallel`, `Loop`, `DynamicLoop`, and a cross-partition
+single-GPU or fully disaggregated by changing only the YAML `node_groups`. Four composable
+primitives — `Sequential`, `Parallel`, `Loop`, and a cross-partition
 `StreamingGraphEdge` — express every model family above. See the [paper](#citation) for the full design.
 
 ## Performance
