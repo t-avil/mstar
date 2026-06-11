@@ -1,7 +1,7 @@
-"""Chat via the official OpenAI SDK, pointed at an mminf server.
+"""Chat via the official OpenAI SDK, pointed at an mstar server.
 
     pip install openai
-    mminf serve qwen3_omni     # or: mminf serve bagel
+    mstar serve qwen3_omni     # or: mstar serve bagel
 """
 
 from openai import OpenAI

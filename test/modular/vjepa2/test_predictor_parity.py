@@ -15,11 +15,11 @@ from __future__ import annotations
 
 import torch
 
-from mminf.model.vjepa2.components.predictor import (
+from mstar.model.vjepa2.components.predictor import (
     VJEPA2Predictor,
     VJEPA2PredictorEmbeddings,
 )
-from mminf.model.vjepa2.config import VJepa2Config
+from mstar.model.vjepa2.config import VJepa2Config
 
 
 def _tiny_config() -> VJepa2Config:

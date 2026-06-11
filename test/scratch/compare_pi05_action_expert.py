@@ -1,22 +1,22 @@
-"""End-to-end comparison: mminf Pi0.5 action expert vs lerobot reference.
+"""End-to-end comparison: mstar Pi0.5 action expert vs lerobot reference.
 
 Approach
 --------
 1. Load lerobot PI05Policy (real production weights from lerobot/pi05_base).
 2. Extract its gemma_expert (action expert) layers and pre-populated prefix
    KV cache by running PaliGemma's prefill on a deterministic input.
-3. Build mminf Pi05ActionExpert with matching dims and copy lerobot's action
+3. Build mstar Pi05ActionExpert with matching dims and copy lerobot's action
    expert weights into it (per-layer self_attn / mlp / adaRMS norms).
 4. Compute the suffix embedding the same way lerobot does (action_in_proj on
    noise + sincos timestep + time_mlp -> adarms_cond).
 5. Run lerobot's gemma_expert layers with past_key_values to produce the
    reference suffix output for each iteration of the flow-matching loop.
-6. Run mminf's Pi05ActionExpert in the same loop using a MockCacheHandle
+6. Run mstar's Pi05ActionExpert in the same loop using a MockCacheHandle
    pre-populated with the prefix KV cache and using the matched HF Gemma
    RoPE formula on the suffix Q,K.
 7. Compare velocity outputs (action_out_proj) and final denoised actions.
 
-The mminf side bypasses FlashInfer's paged KV cache for this test (we're
+The mstar side bypasses FlashInfer's paged KV cache for this test (we're
 not validating page allocation, just the action-expert layer math). The
 underlying compute — adaRMS, gated residuals, attention with past KV —
 matches what FlashInfer's wrapper does up to bf16 precision (already
@@ -33,12 +33,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from lerobot.policies.pi05 import PI05Policy
 
-from mminf.model.pi05.components.action_expert import (
+from mstar.model.pi05.components.action_expert import (
     Pi05ActionExpert,
     Pi05TimeMLP,
 )
-from mminf.model.pi05.components.flow_matching import sincos_timestep_embedding
-from mminf.model.pi05.config import Pi05Config
+from mstar.model.pi05.components.flow_matching import sincos_timestep_embedding
+from mstar.model.pi05.config import Pi05Config
 
 DEVICE = torch.device("cuda")
 DTYPE = torch.float32  # match lerobot's loaded dtype
@@ -139,7 +139,7 @@ def _copy_linear(dst: nn.Linear, src: nn.Linear):
 
 
 def copy_action_expert_weights(ours: Pi05ActionExpert, ref_layers, ref_norm):
-    """Copy lerobot gemma_expert weights into mminf Pi05ActionExpert.
+    """Copy lerobot gemma_expert weights into mstar Pi05ActionExpert.
 
     ``ref_layers`` is the list of lerobot ``PiGemmaDecoderLayer`` instances.
     ``ref_norm`` is the lerobot final norm.
@@ -231,7 +231,7 @@ def main():
     print(f"prefix length: {prefix_len}")
     print(f"past_key_values type: {type(past_key_values).__name__}")
 
-    # ----- Build mminf Pi05ActionExpert with matching dims -----
+    # ----- Build mstar Pi05ActionExpert with matching dims -----
     cfg = Pi05Config(
         hidden_size=2048,  # paligemma side (unused here)
         action_hidden_size=action_hidden,
@@ -244,7 +244,7 @@ def main():
     )
     ours_action = Pi05ActionExpert(cfg).to(DEVICE, dtype=DTYPE)
     copy_action_expert_weights(ours_action, gemma_expert.model.layers, gemma_expert.model.norm)
-    print("Copied action expert weights into mminf Pi05ActionExpert")
+    print("Copied action expert weights into mstar Pi05ActionExpert")
 
     # Time MLP weights too
     ours_time_mlp = Pi05TimeMLP(action_hidden).to(DEVICE, dtype=DTYPE)
@@ -256,7 +256,7 @@ def main():
 
     # ----- Pre-populate MockCacheHandle with the lerobot prefix KV -----
     # past_key_values is HF DynamicCache; per-layer K,V have shape
-    # [B, num_kv_heads, prefix_len, head_dim]. mminf format is
+    # [B, num_kv_heads, prefix_len, head_dim]. mstar format is
     # [seq_len, num_kv_heads, head_dim] with B=1.
     suffix_positions = (
         torch.arange(horizon, device=DEVICE, dtype=torch.long) + prefix_len
@@ -280,12 +280,12 @@ def main():
         )
     print("Populated MockCacheHandle with prefix KV")
 
-    # ----- Run mminf denoising loop and compare against lerobot -----
+    # ----- Run mstar denoising loop and compare against lerobot -----
     num_steps = config.num_inference_steps
     dt = -1.0 / num_steps
     x_t = noise.clone()
     time = torch.tensor(1.0, device=DEVICE, dtype=DTYPE)
-    print(f"\nRunning {num_steps}-step denoise (mminf) ...")
+    print(f"\nRunning {num_steps}-step denoise (mstar) ...")
     for _step in range(num_steps):
         # Time -> adarms_cond
         time_emb = sincos_timestep_embedding(
@@ -296,7 +296,7 @@ def main():
         # Suffix embedding from action_in_proj (lerobot's, since we share weights)
         suffix = model.action_in_proj(x_t[0])  # [horizon, action_hidden]
 
-        # mminf forward
+        # mstar forward
         suffix_out = ours_action(
             query_sequence=suffix,
             cache_handle=handle,
@@ -306,7 +306,7 @@ def main():
         x_t = x_t + dt * v_t.unsqueeze(0)
         time = time + dt
     ours_actions = x_t
-    print(f"\nmminf actions abs max: {ours_actions.abs().max().item():.4f}")
+    print(f"\nmstar actions abs max: {ours_actions.abs().max().item():.4f}")
     print(f"reference abs max: {ref_actions.abs().max().item():.4f}")
 
     delta_max = (ours_actions - ref_actions).abs().max().item()

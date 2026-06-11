@@ -23,11 +23,11 @@ from __future__ import annotations
 import pytest
 import torch
 
-from mminf.conductor.request_info import CurrentForwardPassInfo
-from mminf.model.vjepa2.config import VJepa2Config
+from mstar.conductor.request_info import CurrentForwardPassInfo
+from mstar.model.vjepa2.config import VJepa2Config
 
 try:
-    from mminf.model.vjepa2.submodules import VJepa2MPCScorerSubmodule
+    from mstar.model.vjepa2.submodules import VJepa2MPCScorerSubmodule
 except (ImportError, AttributeError) as e:  # pragma: no cover - env-specific
     pytest.skip(
         f"Cannot import VJepa2MPCScorerSubmodule in this env: {e}",
@@ -226,7 +226,7 @@ class TestMPCPredictor:
 
     def _tiny_ac_config(self) -> VJepa2Config:
         """Small AC config so CPU forward is fast."""
-        from mminf.model.vjepa2.config import VJepa2ACPredictorConfig
+        from mstar.model.vjepa2.config import VJepa2ACPredictorConfig
 
         cfg = VJepa2Config(
             predictor_kind="ac",
@@ -254,10 +254,10 @@ class TestMPCPredictor:
 
     def test_k_way_broadcast_produces_k_outputs(self):
         try:
-            from mminf.model.vjepa2.components.ac_predictor import (
+            from mstar.model.vjepa2.components.ac_predictor import (
                 VisionTransformerPredictorAC,
             )
-            from mminf.model.vjepa2.submodules import VJepa2MPCPredictorSubmodule
+            from mstar.model.vjepa2.submodules import VJepa2MPCPredictorSubmodule
         except (ImportError, AttributeError) as e:
             pytest.skip(f"AC predictor unavailable in this env: {e}")
 

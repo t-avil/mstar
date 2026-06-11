@@ -1,4 +1,4 @@
-"""Numerical parity between mminf's V-JEPA 2-AC port and the upstream
+"""Numerical parity between mstar's V-JEPA 2-AC port and the upstream
 ``vjepa2/src/hub/backbones.py::_make_vjepa2_ac_model`` on real
 ``facebook/vjepa2-ac-vitg`` weights.
 
@@ -16,14 +16,14 @@ Local run::
     # Pre-download (one time, ~11.7 GB, direct from S3 — no HF auth):
     python -c "import torch.hub; torch.hub.download_url_to_file( \
         'https://dl.fbaipublicfiles.com/vjepa2/vjepa2-ac-vitg.pt', \
-        '/m-coriander/coriander/$USER/mminf_cache/vjepa2/vjepa2-ac-vitg.pt', \
+        '/m-coriander/coriander/$USER/mstar_cache/vjepa2/vjepa2-ac-vitg.pt', \
         progress=True)"
     pytest test/integration/test_vjepa2_ac.py -v -s
 
 What it does
 ------------
 1. Loads the upstream checkpoint via our
-   :func:`load_vjepa2_ac_upstream_weights` into mminf ``VJEPA2Encoder`` +
+   :func:`load_vjepa2_ac_upstream_weights` into mstar ``VJEPA2Encoder`` +
    ``VisionTransformerPredictorAC`` instances (with HF-keyed encoder and
    upstream-keyed AC predictor layouts).
 2. Instantiates the upstream reference model via
@@ -48,10 +48,10 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from mminf.model.vjepa2.components.ac_predictor import VisionTransformerPredictorAC  # noqa: E402
-from mminf.model.vjepa2.components.vit_encoder import VJEPA2Encoder  # noqa: E402
-from mminf.model.vjepa2.config import VJepa2ACPredictorConfig, VJepa2Config  # noqa: E402
-from mminf.model.vjepa2.weight_loader import (  # noqa: E402
+from mstar.model.vjepa2.components.ac_predictor import VisionTransformerPredictorAC  # noqa: E402
+from mstar.model.vjepa2.components.vit_encoder import VJEPA2Encoder  # noqa: E402
+from mstar.model.vjepa2.config import VJepa2ACPredictorConfig, VJepa2Config  # noqa: E402
+from mstar.model.vjepa2.weight_loader import (  # noqa: E402
     VJEPA2_AC_VITG_S3_URL,
     download_vjepa2_ac_upstream_pt,
     load_vjepa2_ac_upstream_weights,
@@ -60,8 +60,8 @@ from mminf.model.vjepa2.weight_loader import (  # noqa: E402
 
 def _default_cache_dir() -> Path:
     if "USER" in os.environ:
-        return Path(f"/m-coriander/coriander/{os.environ['USER']}/mminf_cache/vjepa2")
-    return Path.home() / ".cache" / "mminf_vjepa2"
+        return Path(f"/m-coriander/coriander/{os.environ['USER']}/mstar_cache/vjepa2")
+    return Path.home() / ".cache" / "mstar_vjepa2"
 
 
 def _upstream_pt_path() -> Path | None:
@@ -71,7 +71,7 @@ def _upstream_pt_path() -> Path | None:
     gracefully rather than blocking on a ~12 GB download).
     """
     candidates: list[Path] = []
-    env_cache = os.environ.get("MMINF_VJEPA2_CACHE")
+    env_cache = os.environ.get("MSTAR_VJEPA2_CACHE")
     if env_cache:
         candidates.append(Path(env_cache))
     candidates.append(_default_cache_dir())
@@ -175,7 +175,7 @@ def pt_path() -> Path:
     # Prefer what's already cached; if not present the module marker above
     # would already have skipped these tests, so this fallback is effectively
     # unreachable in normal runs — but we keep it so the test still works
-    # when re-enabled via ``MMINF_VJEPA2_CACHE`` + pre-downloaded weights.
+    # when re-enabled via ``MSTAR_VJEPA2_CACHE`` + pre-downloaded weights.
     found = _upstream_pt_path()
     if found is not None:
         return found

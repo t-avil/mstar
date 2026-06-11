@@ -980,11 +980,11 @@ class SeedTTSDataset(BaseDataset):
     `VideoMMEDataset` and the existing `RequestType.T2S` path (which only
     carries text input), this loader emits plain T2S requests using the
     target sentence as the prompt and DROPS the reference WAV / ref_text.
-    That exercises mminf's TTS serving path but does NOT evaluate voice
+    That exercises mstar's TTS serving path but does NOT evaluate voice
     cloning fidelity (WER vs ground-truth, SIM vs reference speaker).
 
     For voice-clone eval you would need to either (a) extend `RequestInput`
-    + `OurSystem` to carry `ref_audio` / `ref_text` and have mminf's server
+    + `OurSystem` to carry `ref_audio` / `ref_text` and have mstar's server
     accept them, or (b) point the `VLLMOmni` adapter at vllm-omni's
     `/v1/audio/speech` and pass them in `extra_body` (mirrors what
     `vllm_omni/benchmarks/data_modules/seed_tts_dataset.py` does).
@@ -1062,7 +1062,7 @@ class SeedTTSDataset(BaseDataset):
         """
         import tarfile
 
-        root = os.path.expanduser(cache_dir or "~/.cache/mminf-benchmark")
+        root = os.path.expanduser(cache_dir or "~/.cache/mstar-benchmark")
         os.makedirs(root, exist_ok=True)
         extract_root = os.path.join(root, cls.EXTRACTED_ROOT_NAME)
 

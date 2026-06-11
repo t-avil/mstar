@@ -6,16 +6,16 @@ import tempfile
 import pytest
 import torch
 
-from mminf.communication.communicator import BaseCommunicator, CommProtocol
-from mminf.communication.tensors import (
+from mstar.communication.communicator import BaseCommunicator, CommProtocol
+from mstar.communication.tensors import (
     MooncakeCommunicationManager,
     SharedMemoryCommunicationManager,
     _deserialize_tensor,
     _serialize_tensor,
     create_tensor_communication_manager,
 )
-from mminf.distributed.base import ShardingConfig
-from mminf.graph.base import GraphEdge, TensorPointerInfo
+from mstar.distributed.base import ShardingConfig
+from mstar.graph.base import GraphEdge, TensorPointerInfo
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -124,7 +124,7 @@ def test_store_and_register_creates_file():
         uuid = info["out"][0].uuid
         mgr.register_for_send("req1", [uuid])
 
-        expected_path = os.path.join(tmpdir, f"mminf_worker_0_{uuid}")
+        expected_path = os.path.join(tmpdir, f"mstar_worker_0_{uuid}")
         assert os.path.isfile(expected_path)
 
 
@@ -182,7 +182,7 @@ def test_cleanup_unlinks_file():
         uuid = info["out"][0].uuid
         mgr.register_for_send("req1", [uuid])
 
-        path = os.path.join(tmpdir, f"mminf_worker_0_{uuid}")
+        path = os.path.join(tmpdir, f"mstar_worker_0_{uuid}")
         assert os.path.isfile(path)
 
         # Dereference to 0 triggers cleanup

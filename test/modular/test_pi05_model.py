@@ -14,17 +14,17 @@ from pathlib import Path
 
 import torch
 
-from mminf.conductor.request_info import CurrentForwardConductorMetadata
-from mminf.engine.base import EngineType
-from mminf.graph.base import GraphNode, Loop, Sequential
-from mminf.graph.special_destinations import EMIT_TO_CLIENT
-from mminf.model.pi05.components.flow_matching import (
+from mstar.conductor.request_info import CurrentForwardConductorMetadata
+from mstar.engine.base import EngineType
+from mstar.graph.base import GraphNode, Loop, Sequential
+from mstar.graph.special_destinations import EMIT_TO_CLIENT
+from mstar.model.pi05.components.flow_matching import (
     discretize_state,
     euler_step,
     sincos_timestep_embedding,
 )
-from mminf.model.pi05.config import Pi05Config
-from mminf.model.pi05.pi05_model import Pi05Model
+from mstar.model.pi05.config import Pi05Config
+from mstar.model.pi05.pi05_model import Pi05Model
 
 CONFIG_PATH = str(
     Path(__file__).resolve().parents[2] / "configs" / "pi05.yaml"
@@ -308,7 +308,7 @@ def test_pi05_process_prompt_without_state_uses_plain_text():
 
 
 # ----------------------------------------------------------------------
-# Lerobot -> mminf weight remap (pure-function unit tests)
+# Lerobot -> mstar weight remap (pure-function unit tests)
 # ----------------------------------------------------------------------
 
 
@@ -316,7 +316,7 @@ def test_lerobot_remap_routes_keys_to_llm_wrapper_paths():
     """Verify that ``Pi05Model._lerobot_remap`` translates each LLM-side
     lerobot key to the matching parameter path on the LLM weight container.
     """
-    from mminf.model.pi05.pi05_model import Pi05Model
+    from mstar.model.pi05.pi05_model import Pi05Model
 
     model = Pi05Model.__new__(Pi05Model)  # bypass __init__ — pure-method test
     remap = model._lerobot_remap
@@ -369,7 +369,7 @@ def test_extract_siglip_state_dict_filters_and_renames_vision_keys():
     ``Pi05SiglipEncoder.state_dict()``-compatible mapping from a flat
     lerobot dict (only siglip + connector keys; others ignored).
     """
-    from mminf.model.pi05.pi05_model import Pi05Model
+    from mstar.model.pi05.pi05_model import Pi05Model
 
     def t(*shape):
         return torch.zeros(*shape)

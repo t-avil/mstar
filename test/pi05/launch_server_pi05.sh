@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Launch a single-GPU mminf server hosting Pi0.5 (lerobot/pi05_base).
+# Launch a single-GPU mstar server hosting Pi0.5 (lerobot/pi05_base).
 #
 # Usage:
 #   bash test/pi05/launch_server_pi05.sh                     # uses $USER and GPU 0
@@ -17,11 +17,11 @@
 #   * Pi0.5 weights live at lerobot/pi05_base on HuggingFace as a single
 #     ~14 GB safetensors blob. The first launch will download them via
 #     huggingface_hub into $CACHE_DIR; subsequent launches reuse the cache.
-#   * mminf's Pi05Model loader (mminf/model/pi05/weight_loader.py) handles
-#     the lerobot -> mminf state-dict remap automatically inside
+#   * mstar's Pi05Model loader (mstar/model/pi05/weight_loader.py) handles
+#     the lerobot -> mstar state-dict remap automatically inside
 #     get_submodule(), so no manual conversion step is needed.
 #   * The server listens on TCP $PORT and uses ZMQ over IPC under
-#     /tmp/mminf_$WHO/ for the conductor / worker / API hand-off.
+#     /tmp/mstar_$WHO/ for the conductor / worker / API hand-off.
 
 set -euo pipefail
 
@@ -54,12 +54,12 @@ echo "  port:    ${PORT}"
 echo "  cache:   ${PI05_CACHE_DIR}"
 echo "  config:  ${PI05_CONFIG_PATH}"
 
-CUDA_VISIBLE_DEVICES="${DEVICES}" python mminf/api_server/entrypoint.py \
+CUDA_VISIBLE_DEVICES="${DEVICES}" python mstar/api_server/entrypoint.py \
     --config "${PI05_CONFIG_PATH}" \
     --port "${PORT}" \
     --cache-dir "${PI05_CACHE_DIR}" \
-    --socket-path-prefix "/tmp/mminf_${WHO}/" \
-    --upload-dir "/tmp/mminf_uploads_${WHO}/" \
+    --socket-path-prefix "/tmp/mstar_${WHO}/" \
+    --upload-dir "/tmp/mstar_uploads_${WHO}/" \
     --port $PORT \
     --tensor-comm-protocol $TENSOR_PROTOCOL \
     --tcp-transfer-device ${TCP_DEVICE:-0.0.0.0.0}

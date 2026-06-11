@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Launch a single-GPU mminf server hosting V-JEPA 2-AC
+# Launch a single-GPU mstar server hosting V-JEPA 2-AC
 # (facebook/vjepa2-ac-vitg — action-conditioned ViT-g).
 #
 # Usage:
@@ -19,7 +19,7 @@
 #
 #       python -c "import torch.hub; torch.hub.download_url_to_file( \
 #           'https://dl.fbaipublicfiles.com/vjepa2/vjepa2-ac-vitg.pt', \
-#           '/m-coriander/coriander/$USER/mminf_cache/vjepa2/vjepa2-ac-vitg.pt', \
+#           '/m-coriander/coriander/$USER/mstar_cache/vjepa2/vjepa2-ac-vitg.pt', \
 #           progress=True)"
 #
 #   * Clients MUST send per-timestep 7-DOF actions + states via ``model_kwargs``
@@ -54,11 +54,11 @@ echo "  devices: ${DEVICES}"
 echo "  port:    ${PORT}"
 echo "  cache:   ${VJEPA_CACHE_DIR}"
 
-CUDA_VISIBLE_DEVICES="${DEVICES}" python mminf/api_server/entrypoint.py \
+CUDA_VISIBLE_DEVICES="${DEVICES}" python mstar/api_server/entrypoint.py \
     --config configs/vjepa2_ac.yaml \
     --port "${PORT}" \
     --cache-dir "${VJEPA_CACHE_DIR}" \
-    --socket-path-prefix "/tmp/mminf_${WHO}/" \
-    --upload-dir "/tmp/mminf_uploads_${WHO}/" \
+    --socket-path-prefix "/tmp/mstar_${WHO}/" \
+    --upload-dir "/tmp/mstar_uploads_${WHO}/" \
     --tensor-comm-protocol $TENSOR_PROTOCOL \
     --tcp-transfer-device ${TCP_DEVICE:-0.0.0.0.0}

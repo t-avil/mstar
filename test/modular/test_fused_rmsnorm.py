@@ -6,7 +6,7 @@ Run: python test_fused_qk_norm_rope.py
 import torch
 import flashinfer
 
-from mminf.utils.attention import fused_qk_norm_rope
+from mstar.utils.attention import fused_qk_norm_rope
 
 
 

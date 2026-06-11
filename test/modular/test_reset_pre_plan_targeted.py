@@ -23,7 +23,7 @@ import types
 
 sys.path.insert(0, ".")
 
-from mminf.engine.cuda_graph_runner import (
+from mstar.engine.cuda_graph_runner import (
     CudaGraphData,
     CudaGraphKey,
     CudaGraphRunner,

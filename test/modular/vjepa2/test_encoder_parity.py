@@ -18,9 +18,9 @@ import pytest
 import torch
 from torch import nn
 
-from mminf.model.vjepa2.components.rope_utils import rotate_queries_or_keys
-from mminf.model.vjepa2.components.vit_encoder import VJEPA2Encoder
-from mminf.model.vjepa2.config import VJepa2Config
+from mstar.model.vjepa2.components.rope_utils import rotate_queries_or_keys
+from mstar.model.vjepa2.components.vit_encoder import VJEPA2Encoder
+from mstar.model.vjepa2.config import VJepa2Config
 
 # ---------------------------------------------------------------------------
 # Tiny inline reference (pure torch) — independent from our port.

@@ -36,11 +36,11 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from mminf.conductor.request_info import CurrentForwardPassInfo  # noqa: E402
-from mminf.engine.kv_cache_engine import KVCacheEngine  # noqa: E402
-from mminf.engine.cuda_graph_runner import CudaGraphKey, CudaGraphRunner  # noqa: E402
-from mminf.engine.kv_store import TransferEngineInfo  # noqa: E402
-from mminf.model.submodule_base import ARNodeInputs, ModelInputsFromEngine  # noqa: E402
+from mstar.conductor.request_info import CurrentForwardPassInfo  # noqa: E402
+from mstar.engine.kv_cache_engine import KVCacheEngine  # noqa: E402
+from mstar.engine.cuda_graph_runner import CudaGraphKey, CudaGraphRunner  # noqa: E402
+from mstar.engine.kv_store import TransferEngineInfo  # noqa: E402
+from mstar.model.submodule_base import ARNodeInputs, ModelInputsFromEngine  # noqa: E402
 
 QWEN3_OMNI_REPO = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
 
@@ -73,7 +73,7 @@ def _bring_up_thinker(cache_dir: str | None = None):
     parity test's setup — eager numbers here reflect what the engine would
     run without torch.compile).
     """
-    from mminf.model.qwen3_omni.qwen3_omni_model import Qwen3OmniModel
+    from mstar.model.qwen3_omni.qwen3_omni_model import Qwen3OmniModel
 
     # cuda_graph_runner calls torch.cuda.set_device(self.device) inside the
     # capture path; it rejects a bare torch.device("cuda"). Use the explicit

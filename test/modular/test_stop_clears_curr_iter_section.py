@@ -50,7 +50,7 @@ import sys  # noqa: E402
 
 sys.path.insert(0, ".")
 
-from mminf.graph.base import (  # noqa: E402
+from mstar.graph.base import (  # noqa: E402
     DynamicLoop,
     GraphEdge,
     GraphNode,

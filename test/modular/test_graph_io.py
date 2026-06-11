@@ -5,8 +5,8 @@ wrong; if any of these regress, the underlying bugs have re-surfaced.
 """
 import pytest
 
-from mminf.graph.base import GraphEdge, GraphNode, Loop, Sequential
-from mminf.graph.graph_io import WorkerGraphIO
+from mstar.graph.base import GraphEdge, GraphNode, Loop, Sequential
+from mstar.graph.graph_io import WorkerGraphIO
 
 
 def _ar_loop_graph(max_iters: int = 5):

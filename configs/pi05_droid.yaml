@@ -5,7 +5,7 @@ max_seq_len: 2048
 #
 # Overrides action_horizon to match openpi's pi05_droid TrainConfig
 # (openpi/src/openpi/training/config.py: Pi0Config(action_horizon=15, pi05=True)),
-# which is what we benchmark against. With this override mminf and openpi
+# which is what we benchmark against. With this override mstar and openpi
 # both run 15-step flow-matching rollouts internally so JCT is comparable.
 #
 # Why action_dim is NOT overridden (stays 32):
@@ -19,7 +19,7 @@ max_seq_len: 2048
 #
 # CUDA-graph note: action_horizon and action_dim are both baked into the
 # graph captures (see Pi05LLMSubmodule.get_cuda_graph_configs in
-# mminf/model/pi05/submodules.py:325-329). They MUST be set at server-init
+# mstar/model/pi05/submodules.py:325-329). They MUST be set at server-init
 # time, never per-request — that's what this yaml override is for.
 model_kwargs:
   action_horizon: 15

@@ -3,9 +3,9 @@ import sys
 sys.path.insert(0, ".")
 
 
-from mminf.conductor.request_info import CurrentForwardConductorMetadata
-from mminf.model.orpheus.config import OrpheusModelConfig
-from mminf.model.orpheus.orpheus_model import OrpheusModel
+from mstar.conductor.request_info import CurrentForwardConductorMetadata
+from mstar.model.orpheus.config import OrpheusModelConfig
+from mstar.model.orpheus.orpheus_model import OrpheusModel
 
 
 def _make_model() -> OrpheusModel:

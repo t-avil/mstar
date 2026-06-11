@@ -29,7 +29,7 @@ sys.path.insert(0, ".")
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from mminf.engine.kv_store import (
+from mstar.engine.kv_store import (
     AllocationStatus,
     KVCacheConfig,
     PageAllocator,

@@ -109,7 +109,7 @@ class Bagel(Model):
 
     def get_model_kwargs(self, request_type: RequestType):
         # Force greedy on the thinker for cross-system parity. Without this,
-        # mminf falls back to mminf/model/bagel/config.py's temperature=0.6
+        # mstar falls back to mstar/model/bagel/config.py's temperature=0.6
         # default while vllm-omni gets temperature=0 from request.py:952 — the
         # two systems would generate different token sequences, mostly
         # affecting I2T latency (variable EOS timing) but also leaking into
@@ -194,8 +194,8 @@ class Qwen3Omni(Model):
         # Force greedy on the Thinker (text decoding) so cross-system runs
         # see deterministic text for the same prompt. Send both `max_tokens`
         # (OpenAI convention — vllm-omni / sglang-omni) and `max_output_tokens`
-        # (mminf's own kwarg, read in mminf/model/base.py:372-373; default
-        # MAX_OUTPUT_TOKENS=2048). Without the second key, mminf silently
+        # (mstar's own kwarg, read in mstar/model/base.py:372-373; default
+        # MAX_OUTPUT_TOKENS=2048). Without the second key, mstar silently
         # ignores the cap and runs to natural EOS, which on T2T was observed
         # at ~361 tokens/req vs vllm-omni's 256.
         #
@@ -208,10 +208,10 @@ class Qwen3Omni(Model):
         # sends ``temperature: 0.0`` over the wire just like we do, but the
         # vllm-omni server quietly drops it for the Talker stage. vllm-omni even
         # warns explicitly that ``temperature=0`` on Talker may cause repetitive
-        # output. Forcing greedy on mminf's Talker here was a false equivalence —
-        # mminf has no stage isolation, so it actually applied talker_temperature=0,
+        # output. Forcing greedy on mstar's Talker here was a false equivalence —
+        # mstar has no stage isolation, so it actually applied talker_temperature=0,
         # collapsing the Talker to a degenerate "mee mee mee" repetition attractor.
-        # Letting mminf use its own model default (talker_temperature=0.9) restores
+        # Letting mstar use its own model default (talker_temperature=0.9) restores
         # apples-to-apples behavior with vllm-omni's effective Talker sampling.
         return {
             "max_tokens": 256,

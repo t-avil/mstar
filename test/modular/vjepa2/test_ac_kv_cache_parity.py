@@ -19,8 +19,8 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-from mminf.model.vjepa2.components.ac_predictor import VisionTransformerPredictorAC
-from mminf.model.vjepa2.config import VJepa2ACPredictorConfig
+from mstar.model.vjepa2.components.ac_predictor import VisionTransformerPredictorAC
+from mstar.model.vjepa2.config import VJepa2ACPredictorConfig
 
 
 # ---------------------------------------------------------------------------

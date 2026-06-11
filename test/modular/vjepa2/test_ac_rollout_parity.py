@@ -19,16 +19,16 @@ from __future__ import annotations
 import pytest
 import torch
 
-from mminf.conductor.request_info import CurrentForwardPassInfo
-from mminf.model.vjepa2.components.ac_predictor import VisionTransformerPredictorAC
-from mminf.model.vjepa2.config import VJepa2ACPredictorConfig, VJepa2Config
+from mstar.conductor.request_info import CurrentForwardPassInfo
+from mstar.model.vjepa2.components.ac_predictor import VisionTransformerPredictorAC
+from mstar.model.vjepa2.config import VJepa2ACPredictorConfig, VJepa2Config
 
-# submodules module pulls in mminf.engine at import, which on some local
+# submodules module pulls in mstar.engine at import, which on some local
 # torch builds fails to set dynamo-config attributes that only exist in
 # newer torch.  Skip rather than crash collection so the pure-component
 # parity tests in this directory still run in either environment.
 try:
-    from mminf.model.vjepa2.submodules import VJepa2ACRolloutPredictorSubmodule
+    from mstar.model.vjepa2.submodules import VJepa2ACRolloutPredictorSubmodule
 except (ImportError, AttributeError) as e:  # pragma: no cover - env-specific
     pytest.skip(
         f"Cannot import VJepa2ACRolloutPredictorSubmodule in this env: {e}",
@@ -138,7 +138,7 @@ def _submodule_loop(
     num_steps: int,
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
     """Drive the submodule H times, threading ``encoder_hidden`` via
-    loop-back just like the mminf DynamicLoop does.
+    loop-back just like the mstar DynamicLoop does.
     """
     eh = encoder_hidden
     new_tgs: list[torch.Tensor] = []

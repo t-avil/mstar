@@ -1,4 +1,4 @@
-"""End-to-end numerical parity between mminf's V-JEPA 2 port and the
+"""End-to-end numerical parity between mstar's V-JEPA 2 port and the
 HuggingFace Transformers reference on real ``facebook/vjepa2-vitl-fpc64-256``
 weights.
 
@@ -40,21 +40,21 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from mminf.model.vjepa2.components.ac_predictor import VisionTransformerPredictorAC  # noqa: E402
-from mminf.model.vjepa2.components.predictor import VJEPA2Predictor  # noqa: E402
-from mminf.model.vjepa2.components.vit_encoder import VJEPA2Encoder  # noqa: E402
-from mminf.model.vjepa2.config import VJepa2ACPredictorConfig, VJepa2Config  # noqa: E402
+from mstar.model.vjepa2.components.ac_predictor import VisionTransformerPredictorAC  # noqa: E402
+from mstar.model.vjepa2.components.predictor import VJEPA2Predictor  # noqa: E402
+from mstar.model.vjepa2.components.vit_encoder import VJEPA2Encoder  # noqa: E402
+from mstar.model.vjepa2.config import VJepa2ACPredictorConfig, VJepa2Config  # noqa: E402
 
 HF_REPO = "facebook/vjepa2-vitl-fpc64-256"
 
 # Default to the coriander shared cache convention
-# (/m-coriander/coriander/$USER/mminf_cache/vjepa2), matching the launch
+# (/m-coriander/coriander/$USER/mstar_cache/vjepa2), matching the launch
 # scripts under test/<model>/.  ``setdefault`` means a shell-level
 # ``HF_HUB_CACHE`` still wins if set, keeping the test portable.
 if "USER" in os.environ:
     os.environ.setdefault(
         "HF_HUB_CACHE",
-        f"/m-coriander/coriander/{os.environ['USER']}/mminf_cache/vjepa2",
+        f"/m-coriander/coriander/{os.environ['USER']}/mstar_cache/vjepa2",
     )
 
 
@@ -275,8 +275,8 @@ def test_ac_predictor_instantiation_and_forward(device):
 
 def test_registry_has_both_variants():
     """Pre-flight: both "vjepa2" and "vjepa2_ac" appear in MODEL_REGISTRY so
-    ``mminf-serve --config configs/vjepa2_ac.yaml`` can find the class."""
-    from mminf.model.registry import HF_MODELS, MODEL_REGISTRY
+    ``mstar-serve --config configs/vjepa2_ac.yaml`` can find the class."""
+    from mstar.model.registry import HF_MODELS, MODEL_REGISTRY
 
     assert "vjepa2" in MODEL_REGISTRY
     assert "vjepa2_ac" in MODEL_REGISTRY

@@ -13,14 +13,14 @@ from copy import deepcopy
 import pytest
 import torch
 
-from mminf.communication.communicator import BaseCommunicator, CommProtocol
-from mminf.communication.tensors import (
+from mstar.communication.communicator import BaseCommunicator, CommProtocol
+from mstar.communication.tensors import (
     MOONCAKE_IMPORT_ERROR,
     SharedMemoryCommunicationManager,
     create_tensor_communication_manager,
 )
-from mminf.distributed.base import ShardingConfig, ShardingGroup
-from mminf.graph.base import GraphEdge, NodeAndGraphWalk
+from mstar.distributed.base import ShardingConfig, ShardingGroup
+from mstar.graph.base import GraphEdge, NodeAndGraphWalk
 
 
 # ---------------------------------------------------------------------------

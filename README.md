@@ -49,16 +49,16 @@ LLM serving stacks assume inference is a single autoregressive loop. Composite m
 
 ```bash
 pip install -e .            # install M*
-mminf serve bagel          # one command — launch a server (default: http://localhost:8000)
+mstar serve bagel          # one command — launch a server (default: http://localhost:8000)
 ```
 
-Other models: `mminf serve qwen3_omni` · `mminf serve orpheus` · `mminf serve pi05` · `mminf serve vjepa2`
+Other models: `mstar serve qwen3_omni` · `mstar serve orpheus` · `mstar serve pi05` · `mstar serve vjepa2`
 
 **Python SDK** — works for every model (text, image, audio, video):
 
 ```python
-from mminf import MMInfClient
-client = MMInfClient("http://localhost:8000")
+from mstar import MStarClient
+client = MStarClient("http://localhost:8000")
 
 client.chat("What is the capital of France?").text          # text
 client.generate_image("a cat in a hat")                     # → PNG bytes   (BAGEL)
@@ -80,7 +80,7 @@ client.images.generate(model="bagel", prompt="a cat")                   # image 
 ```
 
 Runnable scripts and `curl` examples live in [`examples/`](examples/). Power users can launch any
-deployment with an explicit config: `mminf-serve --config configs/<model>.yaml`.
+deployment with an explicit config: `mstar-serve --config configs/<model>.yaml`.
 
 ## Supported models
 
@@ -108,8 +108,8 @@ A model declares a **computation graph** of components and a set of named **Walk
 `prefill`, `decode`, `image_gen`). The **Conductor** turns each request into a walk over that graph
 and schedules it; **Workers** each own a subgraph on their GPU and stream tensors directly to one
 another. Logical graph structure is decoupled from physical placement, so the same model runs
-single-GPU or fully disaggregated by changing only the YAML `node_groups`. Five composable
-primitives — `Sequential`, `Parallel`, `Loop`, `DynamicLoop`, and a cross-partition
+single-GPU or fully disaggregated by changing only the YAML `node_groups`. Four composable
+primitives — `Sequential`, `Parallel`, `Loop`, and a cross-partition
 `StreamingGraphEdge` — express every model family above. See the [paper](#citation) for the full design.
 
 ## Performance

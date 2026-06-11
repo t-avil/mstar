@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Launch a single-GPU mminf server hosting V-JEPA 2 (facebook/vjepa2-vitl-fpc64-256).
+# Launch a single-GPU mstar server hosting V-JEPA 2 (facebook/vjepa2-vitl-fpc64-256).
 #
 # Usage:
 #   bash test/vjepa2/launch_server_vjepa2.sh                 # uses $USER and GPU 0
@@ -12,10 +12,10 @@
 #
 #       python -c "from huggingface_hub import snapshot_download; \
 #           snapshot_download('facebook/vjepa2-vitl-fpc64-256', \
-#               cache_dir='/m-coriander/coriander/$USER/mminf_cache/vjepa2/')"
+#               cache_dir='/m-coriander/coriander/$USER/mstar_cache/vjepa2/')"
 #
 #   * To swap to a bigger checkpoint (vith / vitg / vitg-384), edit
-#     HF_MODELS["vjepa2"] in mminf/model/registry.py — no code change needed.
+#     HF_MODELS["vjepa2"] in mstar/model/registry.py — no code change needed.
 #   * For the action-conditioned variant, use configs/vjepa2_ac.yaml
 #     (AC checkpoint weight loading is still a TODO — current server
 #     instantiates with uninitialized predictor weights).
@@ -46,11 +46,11 @@ echo "  devices: ${DEVICES}"
 echo "  port:    ${PORT}"
 echo "  cache:   ${VJEPA_CACHE_DIR}"
 
-CUDA_VISIBLE_DEVICES="${DEVICES}" python mminf/api_server/entrypoint.py \
+CUDA_VISIBLE_DEVICES="${DEVICES}" python mstar/api_server/entrypoint.py \
     --config configs/vjepa2.yaml \
     --port "${PORT}" \
     --cache-dir "${VJEPA_CACHE_DIR}" \
-    --socket-path-prefix "/tmp/mminf_${WHO}/" \
-    --upload-dir "/tmp/mminf_uploads_${WHO}/" \
+    --socket-path-prefix "/tmp/mstar_${WHO}/" \
+    --upload-dir "/tmp/mstar_uploads_${WHO}/" \
     --tensor-comm-protocol $TENSOR_PROTOCOL \
     --tcp-transfer-device ${TCP_DEVICE:-0.0.0.0.0}

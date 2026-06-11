@@ -20,10 +20,10 @@ else
     exit 1
 fi
 
-CUDA_VISIBLE_DEVICES=$DEVICES python mminf/api_server/entrypoint.py \
+CUDA_VISIBLE_DEVICES=$DEVICES python mstar/api_server/entrypoint.py \
     --config configs/orpheus_tp2.yaml --port $PORT \
     --cache-dir $ORPHEUS_CACHE_DIR \
-    --socket-path-prefix /tmp/mminf_${WHO}/ \
-    --upload-dir /tmp/mminf_uploads_${WHO}/ \
+    --socket-path-prefix /tmp/mstar_${WHO}/ \
+    --upload-dir /tmp/mstar_uploads_${WHO}/ \
     --tensor-comm-protocol $TENSOR_PROTOCOL \
     --tcp-transfer-device ${TCP_DEVICE:-0.0.0.0.0}

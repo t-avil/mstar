@@ -59,15 +59,15 @@ class _StubAPI:
 
 @pytest.fixture
 def client_and_stub(monkeypatch):
-    import mminf.api_server
+    import mstar.api_server
 
-    fake_ep = types.ModuleType("mminf.api_server.entrypoint")
+    fake_ep = types.ModuleType("mstar.api_server.entrypoint")
     stub = _StubAPI()
     fake_ep.api_server = stub
-    monkeypatch.setitem(sys.modules, "mminf.api_server.entrypoint", fake_ep)
-    monkeypatch.setattr(mminf.api_server, "entrypoint", fake_ep, raising=False)
+    monkeypatch.setitem(sys.modules, "mstar.api_server.entrypoint", fake_ep)
+    monkeypatch.setattr(mstar.api_server, "entrypoint", fake_ep, raising=False)
 
-    from mminf.api_server.openai.router import router
+    from mstar.api_server.openai.router import router
 
     app = FastAPI()
     app.include_router(router)
@@ -181,13 +181,13 @@ def test_unsupported_model_404(client_and_stub):
 
 
 def test_api_resolves_from_main_module(monkeypatch):
-    # Simulate `python mminf/api_server/entrypoint.py` (runs as __main__):
+    # Simulate `python mstar/api_server/entrypoint.py` (runs as __main__):
     # main() sets api_server on __main__, not on the package module. _api()
     # must still find it — this is the launch_server_*.sh launch path.
-    from mminf.api_server.openai import router as router_mod
+    from mstar.api_server.openai import router as router_mod
 
-    ep = types.ModuleType("mminf.api_server.entrypoint")  # present but no api_server
-    monkeypatch.setitem(sys.modules, "mminf.api_server.entrypoint", ep)
+    ep = types.ModuleType("mstar.api_server.entrypoint")  # present but no api_server
+    monkeypatch.setitem(sys.modules, "mstar.api_server.entrypoint", ep)
     stub = _StubAPI("bagel")
     monkeypatch.setattr(sys.modules["__main__"], "api_server", stub, raising=False)
     assert router_mod._api() is stub

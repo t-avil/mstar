@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "mminf"
+name = "mstar"
 version = "0.1.0"
 description = "Multimodal inference engine"
 readme = "README.md"
@@ -16,16 +16,20 @@ dependencies = [
     "pyzmq",
     "python-multipart",
     "requests",
-    "torch",
+    # PyTorch 2.9 is pinned: sgl-kernel (Qwen3-Omni) is built against torch 2.9,
+    # and newer torch defaults to CUDA 13 wheels. See docs/installation.rst for
+    # installing the build that matches your CUDA toolkit (e.g. cu128).
+    "torch==2.9.1",
+    "torchvision==0.24.1",
+    "torchaudio==2.9.1",
     "uvicorn",
     "gdown",
-    "torchaudio>=2.11.0",
-    "torchvision>=0.26.0",
+    "datasets",
 ]
 
 [project.scripts]
-mminf = "mminf.cli.main:main"
-mminf-serve = "mminf.api_server.entrypoint:main"
+mstar = "mstar.cli.main:main"
+mstar-serve = "mstar.api_server.entrypoint:main"
 
 [project.optional-dependencies]
 dev = [
@@ -54,8 +58,10 @@ bagel = [
 ]
 
 qwen3_omni = [
+    # NOTE: flash-attn is required by Qwen3-Omni but is NOT listed here — its
+    # prebuilt wheels aren't on PyPI, so a plain install compiles from source
+    # (and fails on CUDA 13). Install it separately; see docs/installation.rst.
     "einops",
-    "flash-attn",
     "flashinfer-python",
     "huggingface-hub",
     "mooncake-transfer-engine",
@@ -70,9 +76,65 @@ qwen3_omni = [
     "sgl-kernel",
 ]
 
+orpheus = [
+    "einops",
+    "flashinfer-python",
+    "huggingface-hub",
+    "mooncake-transfer-engine",
+    "safetensors",
+    "transformers",
+]
+
+pi05 = [
+    "flashinfer-python",
+    "huggingface-hub",
+    "mooncake-transfer-engine",
+    "safetensors",
+    "transformers",
+    "triton",
+]
+
+vjepa2 = [
+    "huggingface-hub",
+    "mooncake-transfer-engine",
+    "safetensors",
+    "torchcodec",
+]
+
+vjepa2_ac = [
+    "flashinfer-python",
+    "huggingface-hub",
+    "mooncake-transfer-engine",
+    "safetensors",
+    "torchcodec",
+]
+
+all = [
+    "ruff",
+    "pytest",
+    "soundfile",
+    "einops",
+    "flashinfer-python",
+    "huggingface-hub",
+    "mooncake-transfer-engine",
+    "Pillow",
+    "regex",
+    "safetensors",
+    "torchvision",
+    "torchaudio",
+    "torchcodec",
+    "transformers",
+    "safetensors",
+    "triton",
+    "qwen-omni-utils",
+    "sgl-kernel",
+    # flash-attn is intentionally omitted (Qwen3-Omni needs it) — install it
+    # separately, see docs/installation.rst.
+]
+
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["mminf*"]
+include = ["mstar*"]
 exclude = ["tests*", "benchmark*", "examples*"]
 
 [tool.ruff]

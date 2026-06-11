@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-`mminf/` is the main Python package. Core runtime pieces live in `mminf/api_server/` (FastAPI entrypoint), `mminf/conductor/`, `mminf/worker/`, `mminf/engine/`, `mminf/graph/`, `mminf/communication/`, and `mminf/streaming/`. Model implementations and loaders live under `mminf/model/` by family (`bagel/`, `qwen3_omni/`, `pi05/`, `vjepa2/`, etc.). Deployment configs are in `configs/`. Benchmarks live in `benchmark/`. Tests are under `test/`, split into `test/modular/` for unit-style coverage and `test/integration/` plus model-specific folders for end-to-end flows. Treat `ref/` as reference material, not primary code to extend.
+`mstar/` is the main Python package. Core runtime pieces live in `mstar/api_server/` (FastAPI entrypoint), `mstar/conductor/`, `mstar/worker/`, `mstar/engine/`, `mstar/graph/`, `mstar/communication/`, and `mstar/streaming/`. Model implementations and loaders live under `mstar/model/` by family (`bagel/`, `qwen3_omni/`, `pi05/`, `vjepa2/`, etc.). Deployment configs are in `configs/`. Benchmarks live in `benchmark/`. Tests are under `test/`, split into `test/modular/` for unit-style coverage and `test/integration/` plus model-specific folders for end-to-end flows. Treat `ref/` as reference material, not primary code to extend.
 
 ## Build, Test, and Development Commands
 Use Python 3.12.
@@ -11,7 +11,7 @@ Use Python 3.12.
 - `ruff format .`: apply the repo formatter.
 - `pytest test/modular/`: run fast modular tests.
 - `pytest test/integration/`: run GPU- and weights-dependent integration tests.
-- `mminf-serve --config configs/<model>.yaml --host 0.0.0.0 --port 8000`: start the server.
+- `mstar-serve --config configs/<model>.yaml --host 0.0.0.0 --port 8000`: start the server.
 - `bash benchmark/run_benchmark.sh`: run the benchmark wrapper against a running server.
 
 ## Coding Style & Naming Conventions

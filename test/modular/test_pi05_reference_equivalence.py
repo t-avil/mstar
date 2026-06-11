@@ -1,4 +1,4 @@
-"""Numerical equivalence tests between mminf's Pi0.5 implementation and
+"""Numerical equivalence tests between mstar's Pi0.5 implementation and
 the openpi PyTorch reference.
 
 Running openpi's PI0Pytorch end-to-end requires installing a patched
@@ -10,7 +10,7 @@ file therefore re-implements the openpi reference math inline as small
 vanilla-torch modules that mirror
 ``src/openpi/models_pytorch/{gemma_pytorch.py,pi0_pytorch.py}`` and
 ``transformers_replace/models/gemma/modeling_gemma.py``, then checks that
-the mminf Pi0.5 components produce numerically matching outputs when the
+the mstar Pi0.5 components produce numerically matching outputs when the
 two are initialized with identical weights.
 
 Coverage:
@@ -46,25 +46,25 @@ from torch import nn
 
 sys.path.insert(0, ".")
 
-from mminf.model.components import AdaRMSNorm as Pi05AdaRMSNorm
-from mminf.model.components.decoder_layer import _gated_residual
-from mminf.model.pi05.components.action_expert import (
+from mstar.model.components import AdaRMSNorm as Pi05AdaRMSNorm
+from mstar.model.components.decoder_layer import _gated_residual
+from mstar.model.pi05.components.action_expert import (
     Pi05ActionExpert,
     Pi05ActionExpertLayer,
     Pi05TimeMLP,
 )
-from mminf.model.pi05.components.flow_matching import sincos_timestep_embedding
-from mminf.model.pi05.config import Pi05Config
+from mstar.model.pi05.components.flow_matching import sincos_timestep_embedding
+from mstar.model.pi05.config import Pi05Config
 
-# FlashInfer's rmsnorm requires CUDA, so the mminf-side forwards have to run
-# on a GPU. Tests that need the mminf action expert are skipped when CUDA
+# FlashInfer's rmsnorm requires CUDA, so the mstar-side forwards have to run
+# on a GPU. Tests that need the mstar action expert are skipped when CUDA
 # isn't available.
 CUDA_AVAILABLE = torch.cuda.is_available()
 DEVICE = torch.device("cuda" if CUDA_AVAILABLE else "cpu")
-# FlashInfer's rmsnorm only dispatches fp16/bf16, so the mminf-side forwards
+# FlashInfer's rmsnorm only dispatches fp16/bf16, so the mstar-side forwards
 # run in bfloat16. Comparisons against the reference are therefore done at
 # bfloat16 precision (tolerances chosen accordingly).
-MMINF_DTYPE = torch.bfloat16
+MSTAR_DTYPE = torch.bfloat16
 requires_cuda = pytest.mark.skipif(
     not CUDA_AVAILABLE, reason="FlashInfer rmsnorm requires CUDA"
 )
@@ -249,7 +249,7 @@ class RefActionExpertLayer(nn.Module):
 
 
 # ----------------------------------------------------------------------
-# MockCacheHandle for the mminf side
+# MockCacheHandle for the mstar side
 # ----------------------------------------------------------------------
 
 
@@ -344,7 +344,7 @@ def _copy_layer(dst: Pi05ActionExpertLayer, src: RefActionExpertLayer) -> None:
 
 def _randomize_adarms(mod: RefAdaRMSNorm) -> None:
     """Make the modulation nontrivially affect the norm. Both reference and
-    mminf zero-init the Dense projection so the cond path is a no-op until we
+    mstar zero-init the Dense projection so the cond path is a no-op until we
     fill it. The plain ``weight`` parameter on ``RefAdaRMSNorm`` is unused in
     the cond path (matches lerobot's PiGemmaRMSNorm + openpi GemmaRMSNorm),
     so we don't randomize it.
@@ -388,17 +388,17 @@ def test_time_mlp_matches_reference_with_shared_weights():
 @requires_cuda
 def test_adarms_norm_matches_reference_with_shared_weights():
     torch.manual_seed(0)
-    # Reference runs in float32 for maximum precision; mminf runs in bfloat16
+    # Reference runs in float32 for maximum precision; mstar runs in bfloat16
     # (FlashInfer's dispatch requirement). Comparison is at bf16 tolerance.
     ref_norm = RefAdaRMSNorm(hidden_size=32, cond_dim=32).to(DEVICE, dtype=torch.float32)
     _randomize_adarms(ref_norm)
-    ours = Pi05AdaRMSNorm(hidden_size=32, cond_dim=32).to(DEVICE, dtype=MMINF_DTYPE)
+    ours = Pi05AdaRMSNorm(hidden_size=32, cond_dim=32).to(DEVICE, dtype=MSTAR_DTYPE)
     _copy_adarms(ours, ref_norm)
 
     x = torch.randn(4, 32, device=DEVICE, dtype=torch.float32)
     cond = torch.randn(32, device=DEVICE, dtype=torch.float32)
 
-    ours_out, ours_gate = ours(x.to(MMINF_DTYPE), cond.to(MMINF_DTYPE))
+    ours_out, ours_gate = ours(x.to(MSTAR_DTYPE), cond.to(MSTAR_DTYPE))
     ref_out, ref_gate = ref_norm(x, cond)
 
     ours_out_f32 = ours_out.to(torch.float32)
@@ -423,11 +423,11 @@ def test_gated_residual_matches_reference():
 
 @requires_cuda
 def test_action_expert_layer_matches_reference_single_request():
-    """One-layer action expert forward through mminf vs reference.
+    """One-layer action expert forward through mstar vs reference.
 
     Uses a ``MockCacheHandle`` that runs plain SDPA to bypass FlashInfer and
     compares against ``RefActionExpertLayer`` with identical weights. Both
-    sides skip RoPE to isolate the adaRMS + residual + MLP math. The mminf
+    sides skip RoPE to isolate the adaRMS + residual + MLP math. The mstar
     side runs in bfloat16 (FlashInfer rmsnorm constraint); the reference
     runs in float32. Comparison is done at bf16 tolerance.
     """
@@ -438,7 +438,7 @@ def test_action_expert_layer_matches_reference_single_request():
     _randomize_adarms(ref_layer.input_layernorm)
     _randomize_adarms(ref_layer.post_attention_layernorm)
 
-    ours = Pi05ActionExpertLayer(config).to(DEVICE, dtype=MMINF_DTYPE)
+    ours = Pi05ActionExpertLayer(config).to(DEVICE, dtype=MSTAR_DTYPE)
     _copy_layer(ours, ref_layer)
 
     x = torch.randn(config.action_horizon, config.hidden_size, device=DEVICE, dtype=torch.float32)
@@ -446,9 +446,9 @@ def test_action_expert_layer_matches_reference_single_request():
 
     handle = MockCacheHandle(scale=config.head_dim ** -0.5)
     ours_out = ours(
-        hidden_states=x.to(MMINF_DTYPE),
+        hidden_states=x.to(MSTAR_DTYPE),
         cache_handle=handle,
-        adarms_cond=cond.to(MMINF_DTYPE),
+        adarms_cond=cond.to(MSTAR_DTYPE),
     ).to(torch.float32)
 
     ref_out, _, _ = ref_layer(x, cond=cond)
@@ -485,7 +485,7 @@ def test_action_expert_full_stack_matches_reference_against_prefix_kv_cache():
         _randomize_adarms(rl.input_layernorm)
         _randomize_adarms(rl.post_attention_layernorm)
 
-    ours = Pi05ActionExpert(config).to(DEVICE, dtype=MMINF_DTYPE)
+    ours = Pi05ActionExpert(config).to(DEVICE, dtype=MSTAR_DTYPE)
     for i, our_layer in enumerate(ours.layers):
         _copy_layer(our_layer, ref_layers[i])
     ref_final_norm = RefAdaRMSNorm(config.hidden_size, cond_dim=config.hidden_size).to(
@@ -503,15 +503,15 @@ def test_action_expert_full_stack_matches_reference_against_prefix_kv_cache():
 
     handle = MockCacheHandle(scale=config.head_dim ** -0.5)
     for layer_idx, (k, v) in enumerate(past_kvs):
-        handle._store[layer_idx] = (k.clone().to(MMINF_DTYPE), v.clone().to(MMINF_DTYPE))
+        handle._store[layer_idx] = (k.clone().to(MSTAR_DTYPE), v.clone().to(MSTAR_DTYPE))
     handle.write_cache = False
 
     suffix = torch.randn(config.action_horizon, config.hidden_size, device=DEVICE, dtype=torch.float32)
     cond = torch.randn(config.hidden_size, device=DEVICE, dtype=torch.float32)
     ours_out = ours(
-        query_sequence=suffix.to(MMINF_DTYPE),
+        query_sequence=suffix.to(MSTAR_DTYPE),
         cache_handle=handle,
-        adarms_cond=cond.to(MMINF_DTYPE),
+        adarms_cond=cond.to(MSTAR_DTYPE),
     ).to(torch.float32)
 
     # Reference stack on the same suffix using the same prefix KV cache.
@@ -546,7 +546,7 @@ def test_euler_flow_matching_step_matches_reference():
     dt = -1.0 / num_steps
     # Reference sample_actions: x_t = x_t + dt * v_t
     ref_next = x_t + dt * v_t
-    # mminf submodule does next_actions = noisy_actions + dt * velocity
+    # mstar submodule does next_actions = noisy_actions + dt * velocity
     ours_next = x_t + dt * v_t
     assert torch.allclose(ours_next, ref_next, atol=1e-7)
 
@@ -600,8 +600,8 @@ def test_flashinfer_rope_matches_hf_gemma_formula():
     head_dim = 256  # Pi0.5 dimension; flashinfer requires head_dim >= 64
     rope_theta = 10000.0
 
-    q = torch.randn(seq_len, num_qo_heads, head_dim, device=DEVICE, dtype=MMINF_DTYPE)
-    k = torch.randn(seq_len, num_kv_heads, head_dim, device=DEVICE, dtype=MMINF_DTYPE)
+    q = torch.randn(seq_len, num_qo_heads, head_dim, device=DEVICE, dtype=MSTAR_DTYPE)
+    k = torch.randn(seq_len, num_kv_heads, head_dim, device=DEVICE, dtype=MSTAR_DTYPE)
     pos_ids = torch.arange(seq_len, device=DEVICE, dtype=torch.int32)
 
     q_hf, k_hf = _hf_gemma_apply_rotary(q.clone(), k.clone(), pos_ids, head_dim, rope_theta)
@@ -655,7 +655,7 @@ def test_flashinfer_paged_prefill_attention_matches_sdpa():
 
     Both scenarios are compared against torch SDPA on the same Q,K,V values.
     """
-    from mminf.utils.flashinfer_utils import FlashInferPrefillWrapper
+    from mstar.utils.flashinfer_utils import FlashInferPrefillWrapper
 
     torch.manual_seed(0)
     num_qo_heads = 8
@@ -667,16 +667,16 @@ def test_flashinfer_paged_prefill_attention_matches_sdpa():
     suffix_len = 4
 
     kv_cache_layer = torch.zeros(
-        max_pages, 2, page_size, num_kv_heads, head_dim, device=DEVICE, dtype=MMINF_DTYPE
+        max_pages, 2, page_size, num_kv_heads, head_dim, device=DEVICE, dtype=MSTAR_DTYPE
     )
     workspace = torch.empty(256 * 1024 * 1024, dtype=torch.uint8, device=DEVICE)
     wrapper = FlashInferPrefillWrapper(
         workspace, num_qo_heads, num_kv_heads, head_dim, page_size, device=DEVICE
     )
 
-    qp = torch.randn(prefix_len, num_qo_heads, head_dim, device=DEVICE, dtype=MMINF_DTYPE)
-    kp = torch.randn(prefix_len, num_kv_heads, head_dim, device=DEVICE, dtype=MMINF_DTYPE)
-    vp = torch.randn(prefix_len, num_kv_heads, head_dim, device=DEVICE, dtype=MMINF_DTYPE)
+    qp = torch.randn(prefix_len, num_qo_heads, head_dim, device=DEVICE, dtype=MSTAR_DTYPE)
+    kp = torch.randn(prefix_len, num_kv_heads, head_dim, device=DEVICE, dtype=MSTAR_DTYPE)
+    vp = torch.randn(prefix_len, num_kv_heads, head_dim, device=DEVICE, dtype=MSTAR_DTYPE)
 
     # --- Bidirectional prefill ---
     n_prefix_pages = (prefix_len + page_size - 1) // page_size
@@ -685,7 +685,7 @@ def test_flashinfer_paged_prefill_attention_matches_sdpa():
     ki = torch.tensor([0, n_prefix_pages], dtype=torch.int32, device=DEVICE)
     ind = torch.tensor(list(range(n_prefix_pages)), dtype=torch.int32, device=DEVICE)
     last = torch.tensor([last_page_len], dtype=torch.int32, device=DEVICE)
-    wrapper.plan(qo, ki, ind, last, causal=False, dtype=MMINF_DTYPE)
+    wrapper.plan(qo, ki, ind, last, causal=False, dtype=MSTAR_DTYPE)
     wrapper.set_kv_cache(kv_cache_layer, kp, vp)
     prefill_out = wrapper.run(qp, kv_cache_layer)
 
@@ -696,9 +696,9 @@ def test_flashinfer_paged_prefill_attention_matches_sdpa():
     assert delta < 5e-2, f"prefill max delta = {delta:.4e}"
 
     # --- Suffix attends to prefix + suffix ---
-    qs = torch.randn(suffix_len, num_qo_heads, head_dim, device=DEVICE, dtype=MMINF_DTYPE)
-    ks = torch.randn(suffix_len, num_kv_heads, head_dim, device=DEVICE, dtype=MMINF_DTYPE)
-    vs = torch.randn(suffix_len, num_kv_heads, head_dim, device=DEVICE, dtype=MMINF_DTYPE)
+    qs = torch.randn(suffix_len, num_qo_heads, head_dim, device=DEVICE, dtype=MSTAR_DTYPE)
+    ks = torch.randn(suffix_len, num_kv_heads, head_dim, device=DEVICE, dtype=MSTAR_DTYPE)
+    vs = torch.randn(suffix_len, num_kv_heads, head_dim, device=DEVICE, dtype=MSTAR_DTYPE)
 
     total_after = prefix_len + suffix_len
     n_pages_after = (total_after + page_size - 1) // page_size
@@ -707,7 +707,7 @@ def test_flashinfer_paged_prefill_attention_matches_sdpa():
     ki2 = torch.tensor([0, n_pages_after], dtype=torch.int32, device=DEVICE)
     ind2 = torch.tensor(list(range(n_pages_after)), dtype=torch.int32, device=DEVICE)
     last2 = torch.tensor([last_page_len_after], dtype=torch.int32, device=DEVICE)
-    wrapper.plan(qo2, ki2, ind2, last2, causal=False, dtype=MMINF_DTYPE)
+    wrapper.plan(qo2, ki2, ind2, last2, causal=False, dtype=MSTAR_DTYPE)
     wrapper.set_kv_cache(kv_cache_layer, ks, vs)
     suffix_out = wrapper.run(qs, kv_cache_layer)
 
@@ -727,7 +727,7 @@ def test_flashinfer_paged_prefill_attention_matches_sdpa():
 def test_pi05_siglip_encoder_matches_hf_reference():
     """``Pi05SiglipEncoder`` produces bit-identical features to HF SiglipVisionModel.
 
-    Both wrap the same HF class; the only difference is mminf adds a
+    Both wrap the same HF class; the only difference is mstar adds a
     ``nn.Linear`` connector to project to the LLM hidden size. The reference
     PaliGemma uses an analogous ``multi_modal_projector``. We verify the
     pre-connector features match exactly and the connector preserves the
@@ -735,7 +735,7 @@ def test_pi05_siglip_encoder_matches_hf_reference():
     """
     from transformers import SiglipVisionConfig, SiglipVisionModel
 
-    from mminf.model.pi05.components.siglip import Pi05SiglipEncoder
+    from mstar.model.pi05.components.siglip import Pi05SiglipEncoder
 
     torch.manual_seed(0)
     config = Pi05Config(
@@ -815,8 +815,8 @@ def test_pi05_image_preprocessing_matches_resize_with_pad_letterbox():
       * portrait (taller than wide) — pads left/right
       * non-divisible odd dims — exercises the asymmetric pad calculation
     """
-    from mminf.model.pi05.components.siglip import Pi05SiglipEncoder
-    from mminf.model.pi05.submodules import Pi05ViTEncoderSubmodule
+    from mstar.model.pi05.components.siglip import Pi05SiglipEncoder
+    from mstar.model.pi05.submodules import Pi05ViTEncoderSubmodule
 
     cfg = Pi05Config(
         vit_hidden_size=64,
@@ -852,8 +852,8 @@ def test_pi05_image_preprocessing_matches_resize_with_pad_letterbox():
 
 def test_pi05_image_preprocessing_uint8_to_float():
     """uint8 inputs in [0, 255] are auto-converted to float32 [-1, 1]."""
-    from mminf.model.pi05.components.siglip import Pi05SiglipEncoder
-    from mminf.model.pi05.submodules import Pi05ViTEncoderSubmodule
+    from mstar.model.pi05.components.siglip import Pi05SiglipEncoder
+    from mstar.model.pi05.submodules import Pi05ViTEncoderSubmodule
 
     cfg = Pi05Config(vit_image_size=224, num_cameras=1, vit_hidden_size=64,
                      vit_intermediate_size=128, vit_num_layers=2, vit_num_heads=4,

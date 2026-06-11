@@ -1,4 +1,4 @@
-from mminf.graph.base import GraphEdge, GraphNode
+from mstar.graph.base import GraphEdge, GraphNode
 
 
 def test_clone_for_next_iter_preserves_async_scheduling_flag():
