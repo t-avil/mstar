@@ -73,14 +73,14 @@ arrive. ``GET /health`` returns ``{"status": "healthy"}``.
 Python SDK
 ----------
 
-The SDK (:class:`mminf.client.MMInfClient`) is a thin HTTP client over ``/generate``. It
+The SDK (:class:`mstar.client.MStarClient`) is a thin HTTP client over ``/generate``. It
 depends only on ``requests`` (plus ``numpy`` for the audio helpers) — no torch — so it can
 run anywhere:
 
 .. code-block:: python
 
-   from mminf import MMInfClient
-   client = MMInfClient("http://localhost:8000")   # optional: timeout=600.0
+   from mstar import MStarClient
+   client = MStarClient("http://localhost:8000")   # optional: timeout=600.0
 
 The core method is ``generate``:
 
@@ -110,7 +110,7 @@ Convenience wrappers:
    * - ``health()``
      - ``True`` if the server is healthy.
 
-Result and event types live in ``mminf.client``:
+Result and event types live in ``mstar.client``:
 
 - ``GenerateResult`` — ``.text``, ``.images`` (list of PNG bytes), ``.audio``
   (an ``AudioBuffer`` or ``None``), ``.raw``; plus ``.save_image(path)`` /
@@ -135,7 +135,7 @@ Result and event types live in ``mminf.client``:
 OpenAI-compatible API
 ---------------------
 
-``mminf`` mounts OpenAI-style routes under ``/v1`` for the models with standard OpenAI
+``mstar`` mounts OpenAI-style routes under ``/v1`` for the models with standard OpenAI
 semantics. Point any OpenAI client at ``http://<host>:<port>/v1``:
 
 .. code-block:: python
