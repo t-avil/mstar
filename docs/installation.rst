@@ -136,26 +136,37 @@ ABI change). Skip the build by installing the prebuilt wheel that matches your s
 
 The wheels live on flash-attn's `GitHub releases
 <https://github.com/Dao-AILab/flash-attention/releases>`_, named by CUDA major, torch
-version, Python tag, and C++ ABI. With the pinned **torch 2.9** and **Python 3.12**, pick the
-``torch2.9 / cp312 / cxx11abiTRUE`` wheel for your CUDA major (``cu12`` on a CUDA 12.x box,
-``cu13`` on CUDA 13.x). For example, on CUDA 13:
+version, Python tag, and C++ ABI. With the pinned **torch 2.9** and **Python 3.12** you want a
+``torch2.9 / cp312 / cxx11abiTRUE`` wheel — the only choice left is the CUDA major, which must
+match **your installed torch's** CUDA, not your system toolkit. Check it first:
 
 .. code-block:: bash
 
+   python -c "import torch; print(torch.version.cuda)"   # 12.8 -> cu12,  13.0 -> cu13
+
+Then install the matching wheel by **direct URL** (don't use ``--find-links`` — uv sorts the
+``+cu13…`` local version above ``+cu12…`` and will grab cu13 even on a CUDA 12 box):
+
+.. code-block:: bash
+
+   # torch built for CUDA 12.x (cu12 — the default / most common)
+   uv pip install \
+     "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.9cxx11abiTRUE-cp312-cp312-linux_x86_64.whl"
+
+   # torch built for CUDA 13.x (cu13)
    uv pip install \
      "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu13torch2.9cxx11abiTRUE-cp312-cp312-linux_x86_64.whl"
 
-Swap ``cu13`` → ``cu12`` for a CUDA 12.x machine. Because it's a binary wheel nothing
-compiles, so your *system* CUDA version is irrelevant — only the torch build matters. Verify
-with:
+Because it's a binary wheel nothing compiles, so your *system* CUDA version is irrelevant —
+only the torch build matters. Verify with:
 
 .. code-block:: bash
 
    python -c "import flash_attn; print(flash_attn.__version__)"
 
-(An ``undefined symbol`` error on import means the wheel's ABI/torch tag doesn't match your
-installed torch — pick the wheel whose ``torch2.9`` / ``cu1x`` tags match
-``python -c "import torch; print(torch.__version__, torch.version.cuda)"``.)
+(An ``undefined symbol`` error on import means the wheel's ``cu1x`` / ``torch2.9`` tag doesn't
+match your installed torch — recheck ``python -c "import torch; print(torch.__version__,
+torch.version.cuda)"`` and pick the matching wheel.)
 
 Matching your CUDA toolkit
 --------------------------
