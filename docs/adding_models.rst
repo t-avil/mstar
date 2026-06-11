@@ -2,24 +2,24 @@ Adding a New Model
 ==================
 
 This page walks through everything you need to implement to add support for a new model
-in ``mminf``. By the end you will have a model that the conductor can schedule, that
-workers can execute on GPU, and that you can launch with ``mminf-serve``.
+in ``mstar``. By the end you will have a model that the conductor can schedule, that
+workers can execute on GPU, and that you can launch with ``mstar-serve``.
 
 Mental model
 ------------
 
-A model in ``mminf`` is split into a handful of well-defined responsibilities:
+A model in ``mstar`` is split into a handful of well-defined responsibilities:
 
-- **The** ``Model`` **class** (``mminf/model/base.py``) is the contract the rest of the
+- **The** ``Model`` **class** (``mstar/model/base.py``) is the contract the rest of the
   system talks to. It tokenizes prompts, declares the computation graph, says which
   engine runs each node, builds forward-pass arguments, and post-processes outputs. It
   contains *no* GPU compute.
-- **Submodules** (``NodeSubmodule`` in ``mminf/model/submodule_base.py``) are the
+- **Submodules** (``NodeSubmodule`` in ``mstar/model/submodule_base.py``) are the
   ``torch.nn.Module`` s that *do* the compute. Each graph node maps to one submodule.
-- **Engines** (``mminf/engine/``) wrap submodules with execution machinery (KV cache,
+- **Engines** (``mstar/engine/``) wrap submodules with execution machinery (KV cache,
   FlashInfer, CUDA graphs, batching). You pick an engine *type* per node; you rarely
   write a new engine.
-- **The graph** (``mminf/graph/base.py``) is how a model declares *what runs in what
+- **The graph** (``mstar/graph/base.py``) is how a model declares *what runs in what
   order*: nodes, edges between them, and loops. Conceptually all of a model's work is
   one large computation graph, and each named "graph walk" (e.g. ``prefill``,
   ``decode``) is a *path* through it. For implementation purposes, though, you declare
@@ -32,7 +32,7 @@ A model in ``mminf`` is split into a handful of well-defined responsibilities:
 
 A note on vocabulary used throughout this page: a **tensor bundle** routed between nodes
 is a ``NameToTensorList`` — i.e. ``dict[str, list[torch.Tensor]]``
-(``mminf/communication/tensors.py``), mapping an edge name to a (usually length-1) list
+(``mstar/communication/tensors.py``), mapping an edge name to a (usually length-1) list
 of tensors.
 
 The flow at request time. This is the **conductor/model-level** flow, at the granularity
@@ -55,11 +55,11 @@ described in later steps) is abstracted away here::
 What you will create
 --------------------
 
-A typical model lives in its own package under ``mminf/model/<your_model>/``:
+A typical model lives in its own package under ``mstar/model/<your_model>/``:
 
 .. code-block:: text
 
-   mminf/model/<your_model>/
+   mstar/model/<your_model>/
    ├── __init__.py
    ├── config.py            # a @dataclass with architecture + generation params
    ├── <your_model>_model.py # the Model subclass (the contract)
@@ -68,19 +68,19 @@ A typical model lives in its own package under ``mminf/model/<your_model>/``:
 
 Plus two things outside that package:
 
-- an entry in ``mminf/model/registry.py`` so the model is discoverable, and
+- an entry in ``mstar/model/registry.py`` so the model is discoverable, and
 - a config YAML in ``configs/`` mapping nodes to ranks.
 
 Step 1 — Register the model
 ---------------------------
 
-Open ``mminf/model/registry.py`` and add your class to ``MODEL_REGISTRY`` (and, if it
+Open ``mstar/model/registry.py`` and add your class to ``MODEL_REGISTRY`` (and, if it
 loads weights from Hugging Face, to ``HF_MODELS``). The dict key is the string you put
 under ``model:`` in a config YAML.
 
 .. code-block:: python
 
-   from mminf.model.your_model.your_model_model import YourModel
+   from mstar.model.your_model.your_model_model import YourModel
 
    MODEL_REGISTRY: dict[str, type[Model]] = {
        # ...
@@ -98,7 +98,7 @@ single source of truth.
 Step 2 — Implement the ``Model`` class
 --------------------------------------
 
-Subclass :class:`mminf.model.base.Model` and implement its abstract methods. The
+Subclass :class:`mstar.model.base.Model` and implement its abstract methods. The
 constructor receives ``model_path_hf`` (from ``HF_MODELS``) plus any ``**kwargs``; it
 typically loads the tokenizer and stores a config dataclass. Defer heavy weight loading
 to ``get_submodule`` so the conductor process never allocates GPU memory.
@@ -111,7 +111,7 @@ The abstract methods you **must** implement:
    config if all AR nodes share one. Models with no AR node may return an empty list.
 
 ``get_node_engine_types(self) -> dict[str, EngineType]``
-   Maps each graph-node name to an :class:`mminf.engine.base.EngineType`
+   Maps each graph-node name to an :class:`mstar.engine.base.EngineType`
    (``KV_CACHE`` or ``STATELESS``). See `Step 6 — Choose engine types`_ below.
 
 ``get_graph_walk_graphs(self) -> dict[str, GraphSection]``
@@ -126,7 +126,7 @@ The abstract methods you **must** implement:
    such as ``pixel_values``. The returned dict is merged into the request's tensors.
 
 ``get_initial_forward_pass_args(self, partition_name, input_modalities, output_modalities, input_signals, model_kwargs=None) -> ForwardPassArgs``
-   Build the first :class:`mminf.model.base.ForwardPassArgs` for a partition — which
+   Build the first :class:`mstar.model.base.ForwardPassArgs` for a partition — which
    graph walk to start on and which input edges feed it.
 
 ``get_partition_forward_pass_args(self, partition_name, partition_metadata, persist_signals, incoming_connections=None) -> ForwardPassArgs``
@@ -153,7 +153,7 @@ Step 3 — Declare the computation graph
 --------------------------------------
 
 ``get_graph_walk_graphs`` returns one graph per *walk*. The primitives
-(``mminf/graph/base.py``):
+(``mstar/graph/base.py``):
 
 - ``GraphNode(name, input_names, outputs)`` — one unit of compute. ``name`` must match a
   key in ``get_node_engine_types``. ``input_names`` are the tensor names that must be
@@ -163,7 +163,7 @@ Step 3 — Declare the computation graph
   (this is how a generated token is carried from ``prefill`` into the ``decode`` loop),
   and ``output_modality`` — one of ``"text"``, ``"image"``, ``"audio"``, ``"video"``,
   ``"action"`` — with ``next_node=EMIT_TO_CLIENT`` streams the tensor to the client.
-  Special destinations live in ``mminf/graph/special_destinations.py``
+  Special destinations live in ``mstar/graph/special_destinations.py``
   (``EMIT_TO_CLIENT``, ``EMPTY_DESTINATION``). A ``decode`` loop stops when a submodule's
   ``check_stop`` registers a stop signal against the ``Loop`` (e.g. on EOS) — see Step 4 —
   not through any edge flag.
@@ -202,7 +202,7 @@ A minimal text generator has two walks — a one-shot ``prefill`` node and a ``d
 Step 4 — Implement the submodules
 ---------------------------------
 
-Each node name maps to a :class:`mminf.model.submodule_base.NodeSubmodule` (a
+Each node name maps to a :class:`mstar.model.submodule_base.NodeSubmodule` (a
 ``torch.nn.Module``). Autoregressive nodes use the ``ARNodeSubmodule`` subclass. The
 contract:
 
@@ -253,13 +253,13 @@ Loading weights
 ~~~~~~~~~~~~~~~
 
 ``get_submodule`` is where a node's parameters are actually loaded. Weight loading is
-standardized through ``mminf/model/loader/`` — using it (rather than an ad-hoc
+standardized through ``mstar/model/loader/`` — using it (rather than an ad-hoc
 ``load_state_dict``) is what lets the *same* code load both a single-GPU checkpoint and a
 tensor-parallel shard (see :ref:`Step 7 <tensor-parallelism>`). There are three layers:
 
 1. In ``get_submodule`` you build the ``nn.Module`` on the ``meta`` device, materialize it
    with ``to_empty(device=...)``, then call the top-level driver
-   ``load_weights(module, source, device=...)`` from ``mminf.model.loader``. The driver
+   ``load_weights(module, source, device=...)`` from ``mstar.model.loader``. The driver
    picks the right safetensors iterator (single file *or* a sharded HF directory) and
    calls ``module.load_weights(weights)``.
 2. Your module implements ``load_weights(self, weights)`` and delegates to
@@ -275,7 +275,7 @@ tensor-parallel shard (see :ref:`Step 7 <tensor-parallelism>`). There are three 
 
    # in the Model: build on meta, materialize, hand off to the driver
    def _create_llm_submodule(self, device, tp_group=None):
-       from mminf.model.loader import load_weights
+       from mstar.model.loader import load_weights
        with torch.device("meta"):
            language_model = OrpheusForCausalLM(self.config, comm_group=tp_group)
        language_model.to_empty(device=device)
@@ -284,7 +284,7 @@ tensor-parallel shard (see :ref:`Step 7 <tensor-parallelism>`). There are three 
 
    # in the nn.Module: declare the fused-shard routing and delegate
    def load_weights(self, weights):
-       from mminf.model.loader import LLAMA_STACKED_PARAMS, load_hf_weights
+       from mstar.model.loader import LLAMA_STACKED_PARAMS, load_hf_weights
        return load_hf_weights(self, weights, stacked_params=LLAMA_STACKED_PARAMS)
 
 Each parameter's ``weight_loader`` is also where tensor-parallel sharding happens: when the
@@ -321,7 +321,7 @@ to collate a batch; you can still disable batching for a specific node or walk b
 ``get_cuda_graph_configs(self, device, tp_world_size=1) -> list[CudaGraphConfig]`` (empty
 by default → eager). The capture runs ``torch.compile`` first (the per-config ``compile``
 flag, default ``True``), then records a CUDA graph it can replay. Two config types live
-in ``mminf/engine/cuda_graph_config.py``, and they differ in *which* stage of the
+in ``mstar/engine/cuda_graph_config.py``, and they differ in *which* stage of the
 submodule pipeline they freeze:
 
 .. list-table::
@@ -379,7 +379,7 @@ Step 6 — Choose engine types
 ----------------------------
 
 You almost never write an engine; you assign one of the two
-:class:`~mminf.engine.base.EngineType` values per node in ``get_node_engine_types``.
+:class:`~mstar.engine.base.EngineType` values per node in ``get_node_engine_types``.
 The engine type — not the submodule — decides whether the node gets a managed KV cache:
 
 .. list-table::
@@ -391,13 +391,13 @@ The engine type — not the submodule — decides whether the node gets a manage
    * - ``KV_CACHE``
      - Any node that needs a persistent, paged KV cache across forward passes —
        autoregressive LLMs (text decode) and LLM-as-denoiser flow loops alike. Runs on
-       :class:`~mminf.engine.kv_cache_engine.KVCacheEngine`; pairs with an
+       :class:`~mstar.engine.kv_cache_engine.KVCacheEngine`; pairs with an
        ``ARNodeSubmodule`` and an entry in ``get_kv_cache_config``.
    * - ``STATELESS``
      - Every node *without* cross-step KV state — ViT / VAE / audio encoders and
        decoders, embedding and projection stages, flow-matching combine steps, codec
        (waveform) decoders. Runs on
-       :class:`~mminf.engine.stateless_engine.StatelessEngine`.
+       :class:`~mstar.engine.stateless_engine.StatelessEngine`.
 
 A model's job is just to label each node; the worker instantiates the right engine and
 gives ``KV_CACHE`` nodes their cache from ``get_kv_cache_config``.
@@ -421,7 +421,7 @@ Run it with:
 
 .. code-block:: bash
 
-   mminf-serve --config configs/your_model.yaml --host 0.0.0.0 --port 8000
+   mstar-serve --config configs/your_model.yaml --host 0.0.0.0 --port 8000
 
 .. _tensor-parallelism:
 
@@ -432,7 +432,7 @@ A node can be sharded across several GPUs by adding ``tp_size`` to its ``node_gr
 entry and listing ``tp_size`` ranks. The runtime splits the group's ranks into
 TP groups of that size and builds one ``comm_group`` per shard. For a node to actually
 shard (rather than be replicated), its components must be built from the tensor-parallel
-modules in ``mminf/model/components/distributed`` — ``ParallelAttention``,
+modules in ``mstar/model/components/distributed`` — ``ParallelAttention``,
 ``ParallelGatedMLP``, ``ColumnParallelLinear`` / ``RowParallelLinear``,
 ``VocabParallelEmbedding``, and friends — whose ``weight_loader`` s (see `Loading
 weights`_) slice each sharded parameter automatically. A node whose components do *not*
@@ -461,7 +461,7 @@ shardable nodes (and any non-default shard dimensions):
 .. code-block:: python
 
    def get_default_sharding_config(self):
-       from mminf.distributed.base import ShardingConfig
+       from mstar.distributed.base import ShardingConfig
        return ShardingConfig(groups=[], tp_enabled_nodes={"LLM"}, shard_dim={})
 
 Two pieces split work across the TP group, and it helps to keep them separate:
@@ -482,7 +482,7 @@ at load time. See ``configs/qwen3omni_thinker_tp2.yaml`` for a multi-node-type e
 Worked example: Orpheus
 -----------------------
 
-Orpheus (``mminf/model/orpheus/``) is a compact, complete reference. It is a TTS model:
+Orpheus (``mstar/model/orpheus/``) is a compact, complete reference. It is a TTS model:
 a Llama 3.2 3B LLM emits audio tokens, and a SNAC decoder turns them into 24 kHz PCM.
 
 Two nodes, two engines — the LLM needs a KV cache, the SNAC decoder doesn't:
@@ -520,7 +520,7 @@ window *while* the LLM is still generating.
 Worked example: BAGEL
 ---------------------
 
-Orpheus is a single pipeline. BAGEL (``mminf/model/bagel/``) is the opposite end of the
+Orpheus is a single pipeline. BAGEL (``mstar/model/bagel/``) is the opposite end of the
 spectrum and a better illustration of *why* the graph abstraction exists: it is a
 **unified** model that does both image *understanding* (image → text) and image
 *generation* (text → image) with the **same** Qwen2 LLM, which also serves as the
@@ -681,10 +681,10 @@ Checklist
 
 .. code-block:: text
 
-   [ ] mminf/model/<your_model>/config.py        — config dataclass
-   [ ] mminf/model/<your_model>/components/       — the nn.Modules + weight loading
-   [ ] mminf/model/<your_model>/submodules.py     — NodeSubmodule per node
-   [ ] mminf/model/<your_model>/<your_model>_model.py — Model subclass:
+   [ ] mstar/model/<your_model>/config.py        — config dataclass
+   [ ] mstar/model/<your_model>/components/       — the nn.Modules + weight loading
+   [ ] mstar/model/<your_model>/submodules.py     — NodeSubmodule per node
+   [ ] mstar/model/<your_model>/<your_model>_model.py — Model subclass:
          [ ] get_kv_cache_config
          [ ] get_node_engine_types
          [ ] get_graph_walk_graphs
@@ -693,7 +693,7 @@ Checklist
          [ ] get_partition_forward_pass_args
          [ ] postprocess
          [ ] get_submodule
-   [ ] mminf/model/registry.py                    — add to MODEL_REGISTRY (+ HF_MODELS)
+   [ ] mstar/model/registry.py                    — add to MODEL_REGISTRY (+ HF_MODELS)
    [ ] configs/<your_model>.yaml                  — node_groups → ranks
    [ ] (optional) async partitions if pipelined
 
@@ -708,7 +708,7 @@ tests exercise models with submodules in dummy mode (``get_submodule`` returning
    ruff check .
    pytest test/modular/                  # CPU graph/worker tests
    pytest test/integration/              # requires GPU + weights
-   mminf-serve --config configs/your_model.yaml --port 8000
+   mstar-serve --config configs/your_model.yaml --port 8000
 
 Then send a ``POST /generate`` request and confirm the streamed output. Modeling a new
 family on the closest existing one (Orpheus for a streaming LLM + codec, BAGEL for
