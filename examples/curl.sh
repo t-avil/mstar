@@ -1,5 +1,5 @@
 #!/bin/bash
-# Quick curl smoke tests against a running mminf server (default port 8000).
+# Quick curl smoke tests against a running mstar server (default port 8000).
 set -euo pipefail
 HOST=${HOST:-localhost}
 PORT=${PORT:-8000}
