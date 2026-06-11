@@ -12,7 +12,7 @@
   <a href="#quickstart"><b>Quickstart</b></a> &nbsp;·&nbsp;
   <a href="#supported-models"><b>Models</b></a> &nbsp;·&nbsp;
   <a href="#how-it-works"><b>How it works</b></a> &nbsp;·&nbsp;
-  <a href="https://mstar-project.github.io/docs/"><b>Docs</b></a> &nbsp;·&nbsp;
+  <a href="https://mstar-project.github.io/mstar/"><b>Docs</b></a> &nbsp;·&nbsp;
   <a href="https://mstar-project.github.io/"><b>Blog</b></a> &nbsp;·&nbsp;
   <a href="https://mstar-project.github.io/mstar.pdf"><b>Paper</b></a>
 </p>
@@ -21,7 +21,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-7b61ff.svg" alt="License: Apache 2.0"></a>
   <img src="https://img.shields.io/badge/python-3.12-22d3ee.svg" alt="Python 3.12">
   <img src="https://img.shields.io/badge/modalities-text_image_audio_video_action-6a8cff.svg" alt="Modalities">
-  <a href="https://mstar-project.github.io/docs/"><img src="https://img.shields.io/badge/docs-online-3b82f6.svg" alt="Docs"></a>
+  <a href="https://mstar-project.github.io/mstar/"><img src="https://img.shields.io/badge/docs-online-3b82f6.svg" alt="Docs"></a>
   <a href="https://mstar-project.github.io/mstar.pdf"><img src="https://img.shields.io/badge/paper-PDF-b31b1b.svg" alt="Paper (PDF)"></a>
 </p>
 

@@ -10,12 +10,12 @@ on:
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 
-# Builds the Sphinx site and publishes the HTML into the org Pages repo
-# (mstar-project/mstar-project.github.io) under /docs/, leaving the blog and
-# landing page at the Pages repo root untouched (keep_files: true).
-#
-# Requires a secret PAGES_DEPLOY_KEY: an SSH private key whose matching public
-# key is registered as a write-enabled Deploy Key on the Pages repo.
+# Builds the Sphinx site and publishes it to this repo's own gh-pages branch,
+# served as a GitHub Pages project page at https://mstar-project.github.io/mstar/.
+# Uses the built-in GITHUB_TOKEN — no deploy key or PAT to own, rotate, or expire.
+permissions:
+  contents: write
+
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
@@ -43,15 +43,11 @@ jobs:
       - name: Build HTML
         run: sphinx-build -b html docs docs/_build/html
 
-      - name: Publish to Pages repo
+      - name: Publish to gh-pages
         if: github.ref == 'refs/heads/main'
         uses: peaceiris/actions-gh-pages@v4
         with:
-          deploy_key: ${{ secrets.PAGES_DEPLOY_KEY }}
-          external_repository: mstar-project/mstar-project.github.io
-          publish_branch: main
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./docs/_build/html
-          destination_dir: docs
-          keep_files: true
-          enable_jekyll: false
+          publish_branch: gh-pages
           commit_message: "docs: publish ${{ github.sha }}"
