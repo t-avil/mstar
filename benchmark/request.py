@@ -762,7 +762,7 @@ class OurSystem(InferenceSystem):
                         modality=mod,
                         data_b64=data_b64,
                         arrival_time=arrival_time,
-                        n_tokens=1,  # mminf server emits one token per chunk
+                        n_tokens=1,  # mstar server emits one token per chunk
                     )
 
         except Exception as e:
