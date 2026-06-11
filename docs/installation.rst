@@ -15,7 +15,7 @@ Requirements
 Install from source
 -------------------
 
-``mminf`` is installed from source in editable mode. We recommend `uv
+``mstar`` is installed from source in editable mode. We recommend `uv
 <https://docs.astral.sh/uv/>`_ to create the Python 3.12 environment:
 
 .. code-block:: bash
@@ -30,11 +30,11 @@ Install from source
    uv pip install --torch-backend=auto -e .
 
 This pulls in the core runtime (PyTorch, FastAPI/Uvicorn, ZMQ, …) and installs the two
-console scripts, ``mminf`` and ``mminf-serve``.
+console scripts, ``mstar`` and ``mstar-serve``.
 
 .. important::
 
-   **Always pass** ``--torch-backend=auto``. ``mminf`` pins **PyTorch 2.9**
+   **Always pass** ``--torch-backend=auto``. ``mstar`` pins **PyTorch 2.9**
    (``torch==2.9.1`` / ``torchvision==0.24.1`` / ``torchaudio==2.9.1``); ``sgl-kernel``
    (Qwen3-Omni) is built against torch 2.9, so newer torch won't work. The flag tells
    ``uv`` to detect your driver's CUDA version and fetch the **matching** torch build —
@@ -187,7 +187,7 @@ works unchanged across machines. (Needs a recent ``uv`` — run ``uv pip install
 look for ``--torch-backend`` if unsure; ``export UV_TORCH_BACKEND=auto`` is equivalent.)
 
 **Manual fallback.** If you can't use the flag, install the pinned torch trio from the
-matching CUDA index **first**, then install ``mminf`` (the resolver then treats the
+matching CUDA index **first**, then install ``mstar`` (the resolver then treats the
 requirement as already satisfied):
 
 .. code-block:: bash
@@ -206,8 +206,8 @@ Verify the install
 
 .. code-block:: bash
 
-   python -c "import mminf; print('mminf import OK')"
-   mminf --help
-   mminf-serve --help
+   python -c "import mstar; print('mstar import OK')"
+   mstar --help
+   mstar-serve --help
 
 Next: :doc:`quickstart`.
