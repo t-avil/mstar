@@ -4,8 +4,8 @@ Originally hand-authored by the refactor lead at
 ~/Downloads/disaggregation_research/multimodal_inference/smoke_test_graph.py;
 moved here so pytest picks them up.
 """
-from mminf.graph.base import GraphEdge, GraphNode, Loop, Sequential
-from mminf.graph.graph_io import WorkerGraphIO
+from mstar.graph.base import GraphEdge, GraphNode, Loop, Sequential
+from mstar.graph.graph_io import WorkerGraphIO
 
 
 def run_graph(

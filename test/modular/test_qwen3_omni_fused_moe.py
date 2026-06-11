@@ -24,9 +24,9 @@ sys.path.insert(0, ".")
 import pytest
 import torch
 
-from mminf.model.components import GatedMLP, SparseMoeBlock, SparseMoeBlockWithSharedExpert
-from mminf.model.components.moe import dispatch_experts_fused as _dispatch_experts_fused
-from mminf.utils.fused_moe.align import has_sgl_kernel
+from mstar.model.components import GatedMLP, SparseMoeBlock, SparseMoeBlockWithSharedExpert
+from mstar.model.components.moe import dispatch_experts_fused as _dispatch_experts_fused
+from mstar.utils.fused_moe.align import has_sgl_kernel
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="fused MoE requires CUDA")
 
@@ -77,7 +77,7 @@ def _seed():
 )
 def test_fused_experts_numerical_parity(num_tokens, hidden, inter, num_experts, top_k):
     _skip_if_no_sgl_kernel()
-    from mminf.utils.fused_moe import fused_experts
+    from mstar.utils.fused_moe import fused_experts
 
     device = torch.device("cuda")
     dtype = torch.bfloat16
@@ -142,7 +142,7 @@ def test_thinker_block_parity(num_tokens):
     x = torch.randn(num_tokens, hidden, device=device, dtype=dtype)
 
     # Force naive path by disabling the fused flag on the module.
-    import mminf.model.components.moe as moe_mod
+    import mstar.model.components.moe as moe_mod
 
     saved = moe_mod._HAS_FUSED
     try:
@@ -191,7 +191,7 @@ def test_talker_block_parity(num_tokens):
 
     x = torch.randn(num_tokens, hidden, device=device, dtype=dtype)
 
-    import mminf.model.components.moe as moe_mod
+    import mstar.model.components.moe as moe_mod
 
     saved = moe_mod._HAS_FUSED
     try:

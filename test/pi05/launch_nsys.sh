@@ -23,10 +23,10 @@ echo "  port:    ${PORT}"
 echo "  cache:   ${PI05_CACHE_DIR}"
 
 CUDA_VISIBLE_DEVICES=$DEVICES nsys profile --trace=cuda,nvtx --output=pi05_profile --force-overwrite=true \
-    python -m mminf.api_server.entrypoint --config configs/pi05_droid.yaml --enable-nvtx \
+    python -m mstar.api_server.entrypoint --config configs/pi05_droid.yaml --enable-nvtx \
     --cache-dir $PI05_CACHE_DIR \
-    --socket-path-prefix /tmp/mminf_$WHO/ \
-    --upload-dir /tmp/mminf_uploads_$WHO/ \
+    --socket-path-prefix /tmp/mstar_$WHO/ \
+    --upload-dir /tmp/mstar_uploads_$WHO/ \
     --port $PORT \
     --tensor-comm-protocol $TENSOR_PROTOCOL \
     --tcp-transfer-device ${TCP_DEVICE:-0.0.0.0.0}

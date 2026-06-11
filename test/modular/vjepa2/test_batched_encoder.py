@@ -22,22 +22,22 @@ from __future__ import annotations
 import pytest
 import torch
 
-from mminf.conductor.request_info import CurrentForwardPassInfo
-from mminf.model.vjepa2.components.predictor import VJEPA2Predictor
-from mminf.model.vjepa2.components.vit_encoder import VJEPA2Encoder
-from mminf.model.vjepa2.config import VJepa2Config
+from mstar.conductor.request_info import CurrentForwardPassInfo
+from mstar.model.vjepa2.components.predictor import VJEPA2Predictor
+from mstar.model.vjepa2.components.vit_encoder import VJEPA2Encoder
+from mstar.model.vjepa2.config import VJepa2Config
 
-# ``mminf.engine`` / ``mminf.model.vjepa2.submodules`` hit
+# ``mstar.engine`` / ``mstar.model.vjepa2.submodules`` hit
 # ``torch._dynamo.config.recompile_limit`` at import, which doesn't exist on
 # older torch builds.  Match the pattern in ``test_rollout_parity.py`` and
 # skip the module if any of these imports fail in this env.
 try:
-    from mminf.engine.base import NodeBatch
-    from mminf.engine.stateless_engine import (
+    from mstar.engine.base import NodeBatch
+    from mstar.engine.stateless_engine import (
         StatelessEngine,
         make_enc_dec_config,
     )
-    from mminf.model.vjepa2.submodules import (
+    from mstar.model.vjepa2.submodules import (
         VJepa2EncoderSubmodule,
         VJepa2PredictorSubmodule,
     )

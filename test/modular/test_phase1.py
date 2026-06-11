@@ -6,7 +6,7 @@ the interleaved LLM<->flow loop fires nodes in the correct order.
 import pytest
 
 pytest.skip(
-    "Depends on deleted mminf.graph.request_queues.PerRequestNodeQueues "
+    "Depends on deleted mstar.graph.request_queues.PerRequestNodeQueues "
     "and the deleted dummy_model. Re-target against WorkerGraphIO + a "
     "real model in a follow-up.",
     allow_module_level=True,
@@ -16,20 +16,20 @@ import sys  # noqa: E402
 
 sys.path.insert(0, ".")
 
-from mminf.engine.kv_cache_engine import KVCacheEngine  # noqa: E402
-from mminf.engine.base import EngineType, NodeBatch, NodeOutput
-from mminf.engine.kv_store import PageAllocator
-from mminf.engine.stateless_engine import (
+from mstar.engine.kv_cache_engine import KVCacheEngine  # noqa: E402
+from mstar.engine.base import EngineType, NodeBatch, NodeOutput
+from mstar.engine.kv_store import PageAllocator
+from mstar.engine.stateless_engine import (
     StatelessEngine,
     make_enc_dec_config,
 )
-from mminf.graph.base import GraphEdge
-from mminf.graph.request_queues import PerRequestNodeQueues
-from mminf.model.base import WorkerGraph
-from mminf.model.dummy_model import DummyModel
-from mminf.worker.engine_manager import EngineManager
-from mminf.worker.micro_scheduler import MicroScheduler
-from mminf.worker.node_manager_utils import (
+from mstar.graph.base import GraphEdge
+from mstar.graph.request_queues import PerRequestNodeQueues
+from mstar.model.base import WorkerGraph
+from mstar.model.dummy_model import DummyModel
+from mstar.worker.engine_manager import EngineManager
+from mstar.worker.micro_scheduler import MicroScheduler
+from mstar.worker.node_manager_utils import (
     WorkerGraphQueues,
     WorkerGraphsManager,
 )

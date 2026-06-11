@@ -10,8 +10,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from lerobot.policies.pi05 import PI05Policy
 from lerobot.policies.pi05.modeling_pi05 import make_att_2d_masks
 
-from mminf.model.pi05.components.paligemma import Pi05PaliGemmaExpert
-from mminf.model.pi05.config import Pi05Config
+from mstar.model.pi05.components.paligemma import Pi05PaliGemmaExpert
+from mstar.model.pi05.config import Pi05Config
 
 DEVICE = torch.device("cuda")
 DTYPE = torch.float32
@@ -70,7 +70,7 @@ print(f"\nCaptured {len(ref_per_layer)} per-layer outputs from lerobot")
 print(f"layer 0 shape: {ref_per_layer[0].shape}")
 print(f"final ref hidden shape: {ref_outputs[0].shape}")
 
-# Now run mminf and capture per layer too via a hook
+# Now run mstar and capture per layer too via a hook
 cfg = Pi05Config(
     hidden_size=2048, num_layers=18, num_qo_heads=8, num_kv_heads=1,
     head_dim=256, pali_intermediate_size=16384, rms_norm_eps=lm.layers[0].input_layernorm.eps,

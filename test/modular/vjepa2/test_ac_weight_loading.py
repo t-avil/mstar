@@ -1,5 +1,5 @@
-"""Unit tests for the upstream → mminf key-rename helpers in
-``mminf.model.vjepa2.weight_loader``.
+"""Unit tests for the upstream → mstar key-rename helpers in
+``mstar.model.vjepa2.weight_loader``.
 
 These tests are pure CPU / pure Python: they build synthetic state_dicts
 that exercise the upstream V-JEPA 2-AC key schema (as seen in
@@ -16,10 +16,10 @@ from __future__ import annotations
 
 import torch
 
-from mminf.model.vjepa2.components.ac_predictor import VisionTransformerPredictorAC
-from mminf.model.vjepa2.components.vit_encoder import VJEPA2Encoder
-from mminf.model.vjepa2.config import VJepa2ACPredictorConfig, VJepa2Config
-from mminf.model.vjepa2.weight_loader import (
+from mstar.model.vjepa2.components.ac_predictor import VisionTransformerPredictorAC
+from mstar.model.vjepa2.components.vit_encoder import VJEPA2Encoder
+from mstar.model.vjepa2.config import VJepa2ACPredictorConfig, VJepa2Config
+from mstar.model.vjepa2.weight_loader import (
     _rename_upstream_ac_predictor_keys,
     _rename_upstream_encoder_keys,
 )

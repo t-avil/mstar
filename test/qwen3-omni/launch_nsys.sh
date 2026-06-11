@@ -19,11 +19,11 @@ else
 fi
 
 CUDA_VISIBLE_DEVICES=$DEVICES nsys profile --trace=cuda,nvtx --output=qwen3omni_profile --force-overwrite=true \
-    python mminf/api_server/entrypoint.py --enable-nvtx \
+    python mstar/api_server/entrypoint.py --enable-nvtx \
     --config configs/qwen3omni_2gpu.yaml \
     --cache-dir $QWEN3OMNI_CACHE_DIR \
-    --socket-path-prefix /tmp/mminf_${WHO}/ \
-    --upload-dir /tmp/mminf_uploads_${WHO}/ \
+    --socket-path-prefix /tmp/mstar_${WHO}/ \
+    --upload-dir /tmp/mstar_uploads_${WHO}/ \
     --port $PORT \
     --tensor-comm-protocol ${TENSOR_PROTOCOL:SHM} \
     --tcp-transfer-device ${TCP_DEVICE:-0.0.0.0.0}

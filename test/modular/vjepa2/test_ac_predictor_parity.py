@@ -17,12 +17,12 @@ from __future__ import annotations
 import pytest
 import torch
 
-from mminf.model.vjepa2.components.ac_predictor import (
+from mstar.model.vjepa2.components.ac_predictor import (
     ACBlock,
     VisionTransformerPredictorAC,
     build_action_block_causal_attention_mask,
 )
-from mminf.model.vjepa2.config import VJepa2ACPredictorConfig
+from mstar.model.vjepa2.config import VJepa2ACPredictorConfig
 
 
 def _tiny_ac_config(use_extrinsics: bool = False) -> VJepa2ACPredictorConfig:

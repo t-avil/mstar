@@ -1,4 +1,4 @@
-"""Run a single PaliGemma layer through both lerobot and mminf with copied
+"""Run a single PaliGemma layer through both lerobot and mstar with copied
 weights and compare each substep (norm, attention, MLP) to localize the bug.
 """
 
@@ -11,9 +11,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from lerobot.policies.pi05 import PI05Policy  # noqa: E402
 
-from mminf.model.pi05.components import Pi05GemmaRMSNorm  # noqa: E402
-from mminf.model.pi05.components.paligemma import Pi05PaliGemmaLayer  # noqa: E402
-from mminf.model.pi05.config import Pi05Config  # noqa: E402
+from mstar.model.pi05.components import Pi05GemmaRMSNorm  # noqa: E402
+from mstar.model.pi05.components.paligemma import Pi05PaliGemmaLayer  # noqa: E402
+from mstar.model.pi05.config import Pi05Config  # noqa: E402
 
 DEVICE = torch.device("cuda")
 torch.manual_seed(0)

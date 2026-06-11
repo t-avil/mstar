@@ -26,13 +26,13 @@ from __future__ import annotations
 
 import pytest
 
-# mminf.engine import fails on certain local torch builds that are missing
+# mstar.engine import fails on certain local torch builds that are missing
 # newer dynamo-config attributes.  Guard at module level so collection of
 # the pure-graph tests doesn't crash in those envs.
 try:
-    from mminf.graph.base import DynamicLoop, GraphNode, Sequential
-    from mminf.graph.special_destinations import EMIT_TO_CLIENT
-    from mminf.model.vjepa2.vjepa2_model import VJepa2Model
+    from mstar.graph.base import DynamicLoop, GraphNode, Sequential
+    from mstar.graph.special_destinations import EMIT_TO_CLIENT
+    from mstar.model.vjepa2.vjepa2_model import VJepa2Model
 except (ImportError, AttributeError) as e:  # pragma: no cover - env-specific
     pytest.skip(
         f"Cannot import VJepa2Model in this env: {e}", allow_module_level=True

@@ -1,6 +1,6 @@
 """Run lerobot's PI05Pytorch reference inference on a fixed deterministic
 input and dump the inputs / intermediates / outputs to disk for later
-numerical comparison against mminf.
+numerical comparison against mstar.
 """
 
 import sys
@@ -69,7 +69,7 @@ def main():
     print(f"  abs max: {actions.abs().max().item():.4f}")
     print(f"  first row: {actions[0, 0].cpu().tolist()[:8]}")
 
-    # Dump everything we'll need for the mminf comparison ---------------
+    # Dump everything we'll need for the mstar comparison ---------------
     payload = {
         "images": [img.detach().cpu() for img in images],
         "img_masks": [m.detach().cpu() for m in img_masks],

@@ -1,4 +1,4 @@
-"""Compare individual mminf Pi0.5 components against the matching lerobot
+"""Compare individual mstar Pi0.5 components against the matching lerobot
 PI05Pytorch submodules with real production weights from lerobot/pi05_base.
 
 Tests:
@@ -16,12 +16,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from lerobot.policies.pi05 import PI05Policy
 
-from mminf.model.pi05.components.action_expert import (
+from mstar.model.pi05.components.action_expert import (
     Pi05AdaRMSNorm,
     Pi05TimeMLP,
 )
-from mminf.model.pi05.components.flow_matching import sincos_timestep_embedding
-from mminf.model.pi05.config import Pi05Config
+from mstar.model.pi05.components.flow_matching import sincos_timestep_embedding
+from mstar.model.pi05.config import Pi05Config
 
 DEVICE = torch.device("cuda")
 
@@ -49,7 +49,7 @@ def main():
     ref_h = model.time_mlp_out(ref_h)
     ref_adarms_cond = F.silu(ref_h)
 
-    # mminf path
+    # mstar path
     ours = Pi05TimeMLP(action_hidden).to(DEVICE, dtype=model.time_mlp_in.weight.dtype)
     with torch.no_grad():
         ours.linear_in.weight.copy_(model.time_mlp_in.weight)

@@ -20,8 +20,8 @@ that ``Worker._try_speculate_next`` relies on:
 from copy import deepcopy
 
 
-from mminf.graph.base import GraphEdge, GraphNode, Loop, Sequential
-from mminf.graph.graph_io import WorkerGraphIO
+from mstar.graph.base import GraphEdge, GraphNode, Loop, Sequential
+from mstar.graph.graph_io import WorkerGraphIO
 
 
 def _ar_loop_graph(max_iters: int = 5):
@@ -169,7 +169,7 @@ def test_speculative_signals_sees_tensor_info_via_shared_reference():
     edge during ingest_for_speculation (or update), the spec gather would
     read a stale empty tensor_info and silently drop continuing rids.
     """
-    from mminf.graph.base import TensorPointerInfo
+    from mstar.graph.base import TensorPointerInfo
 
     wgio = _per_rid_wgios(1)[0]
     rid_node = wgio.nodes["ar_decode"]

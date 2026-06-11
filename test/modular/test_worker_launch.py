@@ -18,7 +18,7 @@ import os  # noqa: E402
 import tempfile  # noqa: E402
 import time  # noqa: E402
 
-from mminf.model.dummy_model import DummyModel  # noqa: E402
+from mstar.model.dummy_model import DummyModel  # noqa: E402
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "configs", "examples", "dummy.yaml")
 
@@ -49,7 +49,7 @@ class TestGetNodeEngineTypes:
 class TestDeriveWorkerInfo:
     def test_worker_ids(self):
         """Verify worker IDs are derived from unique ranks in the config."""
-        from mminf.conductor.conductor import Conductor
+        from mstar.conductor.conductor import Conductor
 
         model = DummyModel()
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -66,7 +66,7 @@ class TestDeriveWorkerInfo:
 
     def test_per_worker_worker_graphs(self):
         """Verify each worker gets the correct worker graphs assigned to it."""
-        from mminf.conductor.conductor import Conductor
+        from mstar.conductor.conductor import Conductor
 
         model = DummyModel()
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -84,7 +84,7 @@ class TestDeriveWorkerInfo:
 
     def test_per_worker_engine_configs(self):
         """Verify engine configs are built correctly per worker."""
-        from mminf.conductor.conductor import Conductor
+        from mstar.conductor.conductor import Conductor
 
         model = DummyModel()
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -104,7 +104,7 @@ class TestDeriveWorkerInfo:
 
     def test_global_worker_graph_maps(self):
         """Verify all_worker_graph_ids_to_graph_walks and all_worker_graph_ids_to_nodes are populated."""
-        from mminf.conductor.conductor import Conductor
+        from mstar.conductor.conductor import Conductor
 
         model = DummyModel()
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -127,7 +127,7 @@ class TestDeriveWorkerInfo:
 class TestWorkerSpawning:
     def test_workers_spawn_and_are_alive(self):
         """Integration test: spawn Worker processes, verify alive, shutdown, verify dead."""
-        from mminf.conductor.conductor import Conductor
+        from mstar.conductor.conductor import Conductor
 
         model = DummyModel()
         with tempfile.TemporaryDirectory() as tmpdir:

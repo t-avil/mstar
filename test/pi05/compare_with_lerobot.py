@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Compare a running mminf Pi0.5 server's actions against the lerobot
+"""Compare a running mstar Pi0.5 server's actions against the lerobot
 reference implementation under deterministic inputs.
 
 What it does
 ------------
 1. Generates 3 deterministic 224x224 random PNGs (so the server's data_worker
    path runs end-to-end), a fixed prompt, and a fixed robot state.
-2. POSTs them to the running mminf server with a pinned ``request_id`` so the
+2. POSTs them to the running mstar server with a pinned ``request_id`` so the
    conductor's per-request RNG seed is reproducible (md5 hash, see
-   ``mminf/conductor/conductor.py::_req_id_to_seed``).
+   ``mstar/conductor/conductor.py::_req_id_to_seed``).
 3. Recomputes the exact noise tensor the server's Pi05 submodule will sample
    (same seed, same shape, same device).
 4. Loads ``lerobot.policies.pi05.PI05Policy.from_pretrained("lerobot/pi05_base")``
@@ -60,7 +60,7 @@ DEFAULT_REQUEST_ID = "pi05_compare_fixed_seed_v1"
 # ----------------------------------------------------------------------------
 
 def server_seed_for(request_id: str) -> int:
-    """Reproduce ``mminf.conductor.conductor._req_id_to_seed`` exactly."""
+    """Reproduce ``mstar.conductor.conductor._req_id_to_seed`` exactly."""
     import hashlib
 
     digest = hashlib.md5(request_id.encode("utf-8")).digest()
@@ -71,7 +71,7 @@ def reproduce_server_noise(request_id: str, device: torch.device) -> torch.Tenso
     """Reproduce the noise tensor that ``Pi05LLMSubmodule._preprocess_action_gen``
     will sample on iteration 0 for this request.
 
-    Server code (mminf/model/pi05/submodules.py)::
+    Server code (mstar/model/pi05/submodules.py)::
 
         generator = torch.Generator(device=device).manual_seed(info.random_seed)
         noisy_actions = torch.randn(action_horizon, action_dim, device=device, generator=generator)
@@ -185,7 +185,7 @@ def build_tokens(
     template, tokenize via the same PaliGemma fast tokenizer."""
     from transformers import AutoTokenizer
 
-    from mminf.model.pi05.components.flow_matching import discretize_state
+    from mstar.model.pi05.components.flow_matching import discretize_state
 
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_REPO, use_fast=True)
     state_t = torch.tensor(robot_state, dtype=torch.float32)

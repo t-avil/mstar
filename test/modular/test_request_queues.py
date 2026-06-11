@@ -9,12 +9,12 @@ pytest.skip(
 import sys  # noqa: E402
 import time  # noqa: E402
 
-from mminf.graph.request_queues import PerRequestNodeQueues  # noqa: E402
+from mstar.graph.request_queues import PerRequestNodeQueues  # noqa: E402
 
 sys.path.insert(0, ".")
 import numpy as np  # noqa: E402
 
-from mminf.graph.base import GraphEdge, GraphNode, Loop, Parallel, Sequential  # noqa: E402
+from mstar.graph.base import GraphEdge, GraphNode, Loop, Parallel, Sequential  # noqa: E402
 
 if __name__ == "__main__":
     # show-o2-style graph with weird stuff added to stress-test

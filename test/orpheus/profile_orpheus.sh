@@ -18,17 +18,17 @@ DEVICES="${2:-0}"
 PORT="${PORT:-20001}"
 export PORT
 USERNAME="${USER:-keisuke}"
-CACHE_DIR="/m-coriander/coriander/${USERNAME}/mminf_cache/orpheus/"
-SOCKET_PREFIX="/tmp/mminf_${USERNAME}/"
-UPLOAD_DIR="/tmp/mminf_uploads_${USERNAME}/"
+CACHE_DIR="/m-coriander/coriander/${USERNAME}/mstar_cache/orpheus/"
+SOCKET_PREFIX="/tmp/mstar_${USERNAME}/"
+UPLOAD_DIR="/tmp/mstar_uploads_${USERNAME}/"
 OUTPUT_DIR="nsys_profiles"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 PROFILE_NAME="${OUTPUT_DIR}/orpheus_bs${NUM_REQUESTS}_${TIMESTAMP}"
 SERVER_LOG="${OUTPUT_DIR}/server_${TIMESTAMP}.log"
 
-PYTHON="/m-coriander/coriander/keisuke/miniconda3/envs/mminf/bin/python"
+PYTHON="/m-coriander/coriander/keisuke/miniconda3/envs/mstar/bin/python"
 REPO_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
-export LD_LIBRARY_PATH="/m-coriander/coriander/keisuke/miniconda3/envs/mminf/lib:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="/m-coriander/coriander/keisuke/miniconda3/envs/mstar/lib:${LD_LIBRARY_PATH:-}"
 export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
 cd "$REPO_DIR"
 
@@ -46,7 +46,7 @@ CUDA_VISIBLE_DEVICES=$DEVICES nsys profile \
     --trace=cuda,nvtx,osrt \
     --output="$PROFILE_NAME" \
     --force-overwrite=true \
-    $PYTHON mminf/api_server/entrypoint.py \
+    $PYTHON mstar/api_server/entrypoint.py \
         --config configs/orpheus_colocated.yaml \
         --port "$PORT" \
         --cache-dir "$CACHE_DIR" \

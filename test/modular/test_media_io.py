@@ -1,4 +1,4 @@
-"""Unit tests for mminf.api_server.media_io (numpy only — no server deps)."""
+"""Unit tests for mstar.api_server.media_io (numpy only — no server deps)."""
 
 import base64
 import struct
@@ -7,7 +7,7 @@ import pytest
 
 np = pytest.importorskip("numpy")
 
-from mminf.api_server import media_io  # noqa: E402
+from mstar.api_server import media_io  # noqa: E402
 
 
 def test_pcm16_to_wav_header_rate_and_data():

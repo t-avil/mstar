@@ -10,12 +10,12 @@ Covers:
 
 import pytest
 
-from mminf.conductor.request_info import (
+from mstar.conductor.request_info import (
     CurrentForwardPassInfo,
 )
-from mminf.graph.base import GraphEdge, GraphNode, Loop, Sequential
-from mminf.model.base import WorkerGraph
-from mminf.worker.node_manager_utils import (
+from mstar.graph.base import GraphEdge, GraphNode, Loop, Sequential
+from mstar.model.base import WorkerGraph
+from mstar.worker.node_manager_utils import (
     WorkerGraphQueues,
     WorkerGraphsManager,
 )
@@ -308,7 +308,7 @@ def test_process_node_outputs_marks_wg_done_with_all_external_outputs():
     SNAC) never reported done and the conductor hung.
     """
     # Build a 1-node wg whose single output goes to EMPTY_DESTINATION.
-    from mminf.graph.special_destinations import EMPTY_DESTINATION
+    from mstar.graph.special_destinations import EMPTY_DESTINATION
     single_node_graph = GraphNode(
         name="prefill",
         input_names={"prompt"},

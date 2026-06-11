@@ -1,4 +1,4 @@
-"""Tests for mminf.distributed.config.ShardingConfig.
+"""Tests for mstar.distributed.config.ShardingConfig.
 
 Covers:
 - ShardingGroup.register_workers
@@ -8,8 +8,8 @@ Covers:
 """
 import pytest
 
-from mminf.distributed.base import ShardDestination, ShardingConfig, ShardingGroup
-from mminf.graph.base import NodeAndGraphWalk
+from mstar.distributed.base import ShardDestination, ShardingConfig, ShardingGroup
+from mstar.graph.base import NodeAndGraphWalk
 
 
 # ---------------------------------------------------------------------------

@@ -8,8 +8,8 @@ import pytest
 pytest.importorskip("pydantic")
 pytest.importorskip("numpy")
 
-from mminf.api_server.openai import adapters  # noqa: E402
-from mminf.api_server.openai.protocol import (  # noqa: E402
+from mstar.api_server.openai import adapters  # noqa: E402
+from mstar.api_server.openai.protocol import (  # noqa: E402
     ChatCompletionRequest,
     ImageGenerationRequest,
     SpeechRequest,
