@@ -2,7 +2,7 @@ model: "vjepa2_ac"
 max_seq_len: 16384
 
 # Uses facebook/vjepa2-ac-vitg (from HF_MODELS["vjepa2_ac"] in
-# mminf/model/registry.py).  AC weights loaded from the public S3 mirror
+# mstar/model/registry.py).  AC weights loaded from the public S3 mirror
 # at https://dl.fbaipublicfiles.com/vjepa2/vjepa2-ac-vitg.pt via
 # download_vjepa2_ac_upstream_pt on first get_submodule() call.
 
