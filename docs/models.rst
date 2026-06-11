@@ -1,11 +1,11 @@
 Supported Models
 ================
 
-``mminf`` ships the following model families. The table below summarizes the registered
+``mstar`` ships the following model families. The table below summarizes the registered
 families, their registry key (the value of ``model:`` in a config YAML), and a
 representative Hugging Face identifier.
 
-Registry keys live in ``mminf/model/registry.py`` (``MODEL_REGISTRY`` / ``HF_MODELS``).
+Registry keys live in ``mstar/model/registry.py`` (``MODEL_REGISTRY`` / ``HF_MODELS``).
 
 .. list-table:: Registered model families
    :header-rows: 1
