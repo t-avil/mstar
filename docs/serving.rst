@@ -1,23 +1,23 @@
 Serving
 =======
 
-``mminf`` has two ways to start a server:
+``mstar`` has two ways to start a server:
 
-- ``mminf serve <model>`` — a one-command wrapper with sensible per-model defaults (most
+- ``mstar serve <model>`` — a one-command wrapper with sensible per-model defaults (most
   single-GPU; a few multi-GPU). Best for getting started and single-node runs.
-- ``mminf-serve --config <yaml>`` — the low-level entry point that takes an explicit
+- ``mstar-serve --config <yaml>`` — the low-level entry point that takes an explicit
   config. Use it for custom layouts, disaggregation, and tensor parallelism.
 
-``mminf serve`` resolves a default config for the model, fills in the plumbing that
-``mminf-serve`` needs (socket/upload dirs, a single-node-safe tensor protocol, the HF
+``mstar serve`` resolves a default config for the model, fills in the plumbing that
+``mstar-serve`` needs (socket/upload dirs, a single-node-safe tensor protocol, the HF
 cache), and then delegates to it.
 
-mminf serve
+mstar serve
 -----------
 
 .. code-block:: bash
 
-   mminf serve <model> [options]
+   mstar serve <model> [options]
 
 ``<model>`` is one of ``bagel``, ``bagel_cfg_parallel``, ``qwen3_omni``, ``orpheus``,
 ``pi05``, ``vjepa2``, ``vjepa2_ac`` (or pass ``--config`` for any other deployment).
@@ -48,10 +48,10 @@ mminf serve
      - ``SHM``
      - Tensor transport: ``SHM`` (safe single-node default), ``TCP``, or ``RDMA``.
    * - ``--socket-path-prefix``
-     - ``/tmp/mminf_<user>/``
+     - ``/tmp/mstar_<user>/``
      - ZMQ IPC socket prefix.
    * - ``--upload-dir``
-     - ``/tmp/mminf_uploads_<user>/``
+     - ``/tmp/mstar_uploads_<user>/``
      - Temp directory for uploaded media.
    * - ``--log-level``
      - ``INFO``
@@ -88,12 +88,12 @@ Each model maps to a default config (override with ``--config``):
      - ``configs/vjepa2_ac.yaml``
      - 1
 
-mminf-serve
+mstar-serve
 -----------
 
 .. code-block:: bash
 
-   mminf-serve --config configs/<model>.yaml [options]
+   mstar-serve --config configs/<model>.yaml [options]
 
 .. list-table::
    :header-rows: 1
@@ -115,10 +115,10 @@ mminf-serve
      - HF default
      - HuggingFace weight cache directory.
    * - ``--socket-path-prefix``
-     - ``/tmp/mminf``
+     - ``/tmp/mstar``
      - ZMQ IPC socket prefix (shared with conductor/workers).
    * - ``--upload-dir``
-     - ``/tmp/mminf_uploads``
+     - ``/tmp/mstar_uploads``
      - Temp directory for uploaded media.
    * - ``--timeout``
      - ``600``
@@ -138,9 +138,9 @@ mminf-serve
 
 .. note::
 
-   ``mminf serve`` defaults the tensor protocol to ``SHM`` (safe on a single node),
-   whereas ``mminf-serve`` defaults to ``RDMA``. On a single node without RDMA, pass
-   ``--tensor-comm-protocol SHM`` to ``mminf-serve``.
+   ``mstar serve`` defaults the tensor protocol to ``SHM`` (safe on a single node),
+   whereas ``mstar-serve`` defaults to ``RDMA``. On a single node without RDMA, pass
+   ``--tensor-comm-protocol SHM`` to ``mstar-serve``.
 
 Config files
 ------------
