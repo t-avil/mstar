@@ -110,6 +110,8 @@ vjepa2_ac = [
 ]
 
 all = [
+    "ruff",
+    "pytest",
     "soundfile",
     "einops",
     "flashinfer-python",
