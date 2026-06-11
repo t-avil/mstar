@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "mminf"
+name = "mstar"
 version = "0.1.0"
 description = "Multimodal inference engine"
 readme = "README.md"
@@ -28,8 +28,8 @@ dependencies = [
 ]
 
 [project.scripts]
-mminf = "mminf.cli.main:main"
-mminf-serve = "mminf.api_server.entrypoint:main"
+mstar = "mstar.cli.main:main"
+mstar-serve = "mstar.api_server.entrypoint:main"
 
 [project.optional-dependencies]
 dev = [
@@ -132,7 +132,7 @@ all = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["mminf*"]
+include = ["mstar*"]
 exclude = ["tests*", "benchmark*", "examples*"]
 
 [tool.ruff]
