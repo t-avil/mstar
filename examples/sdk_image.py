@@ -1,11 +1,11 @@
 """Text-to-image via the Python SDK.
 
-Start a server first, e.g.:  mminf serve bagel
+Start a server first, e.g.:  mstar serve bagel
 """
 
-from mminf import MMInfClient
+from mstar import MStarClient
 
-client = MMInfClient("http://localhost:8000")
+client = MStarClient("http://localhost:8000")
 
 png = client.generate_image("a cat in a hat, oil painting", think_mode=True)
 with open("out.png", "wb") as f:
