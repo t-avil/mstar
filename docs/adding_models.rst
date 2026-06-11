@@ -589,7 +589,9 @@ back to itself, and the loop's ``outputs`` hand the final latents to ``vae_decod
    prefill_vit = Sequential([
        GraphNode(name="vit_encoder", input_names=["image_inputs"],
                  outputs=[GraphEdge(next_node="LLM", name="img_emb")]),
-       GraphNode(name="LLM", input_names=["img_emb"], outputs=[]),
+       GraphNode(name="LLM", input_names=["img_emb"],
+                 outputs=[GraphEdge(next_node=EMIT_TO_CLIENT, name="new_token",
+                                    output_modality="text", persist=True)]),
    ])
 
    image_gen = Sequential([
@@ -607,9 +609,18 @@ back to itself, and the loop's ``outputs`` hand the final latents to ``vae_decod
            name="vae_decoder",
            input_names=["latents"],
            outputs=[GraphEdge(next_node=EMIT_TO_CLIENT, name="image_output",
-                              output_modality="image", persist=True)],
+                              output_modality="image")],
        ),
    ])
+
+**Declared outputs are conditional.** A node's ``outputs`` list is the set of edges it
+*can* emit; what it actually emits on a given step is limited to whatever its submodule produces.
+``new_token`` above is the clearest case — the LLM samples a token only when the request
+needs text out (the understanding path, and every ``decode`` step). On the
+image-generation / editing path the same node still runs and writes the KV cache but
+samples no token, so ``new_token`` is not produced. It is in the graph because understanding
+requests use it; treat declared edges as the *possible* outputs and let the submodule decide
+which actually fire on each step.
 
 **Choosing the walk per request.** Unlike Orpheus, BAGEL's transitions are
 *schedule-driven*: the output modality is known up front from the request's
