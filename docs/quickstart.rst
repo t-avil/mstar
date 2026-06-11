@@ -1,27 +1,27 @@
 Quickstart
 ==========
 
-This page serves a model and sends a first request. If you haven't installed ``mminf``
+This page serves a model and sends a first request. If you haven't installed ``mstar``
 yet, see :doc:`installation`.
 
 1. Start a server
 -----------------
 
-The ``mminf`` CLI launches a server for a model with a sensible default config:
+The ``mstar`` CLI launches a server for a model with a sensible default config:
 
 .. code-block:: bash
 
-   mminf serve bagel
+   mstar serve bagel
 
 It listens on ``http://localhost:8000`` by default. Other models:
 
 .. code-block:: bash
 
-   mminf serve bagel_cfg_parallel   # BAGEL with CFG branches split across GPUs (faster image gen)
-   mminf serve qwen3_omni           # omni: text/image/audio/video in, text/speech out
-   mminf serve orpheus              # text-to-speech
-   mminf serve pi05                 # vision-language-action (robotics)
-   mminf serve vjepa2               # video world model
+   mstar serve bagel_cfg_parallel   # BAGEL with CFG branches split across GPUs (faster image gen)
+   mstar serve qwen3_omni           # omni: text/image/audio/video in, text/speech out
+   mstar serve orpheus              # text-to-speech
+   mstar serve pi05                 # vision-language-action (robotics)
+   mstar serve vjepa2               # video world model
 
 Defaults vary by model: most fit on a single GPU, but some ship with multi-GPU layouts —
 ``qwen3_omni`` uses 2 GPUs and ``bagel_cfg_parallel`` uses 3 (the main branch plus the two
@@ -30,14 +30,14 @@ classifier-free-guidance branches on their own GPUs). Choose GPUs and a port wit
 
 .. code-block:: bash
 
-   mminf serve qwen3_omni --gpus 0,1 --port 9000
+   mstar serve qwen3_omni --gpus 0,1 --port 9000
 
 For custom layouts, disaggregation, and tensor parallelism, see :doc:`serving`.
 
 .. note::
 
    The **first request(s) on a fresh environment can be slow** — often tens of seconds to a
-   few minutes. mminf ``torch.compile``\ s the model on first use, and that compilation
+   few minutes. mstar ``torch.compile``\ s the model on first use, and that compilation
    happens lazily on the first request that exercises each path. Subsequent requests run at
    full speed, and the compiled artifacts are cached on disk, so later runs and restarts
    warm up much faster. To avoid paying it on a real request, send a throwaway warmup
@@ -51,9 +51,9 @@ that supports it, so run the matching server first:
 
 .. code-block:: python
 
-   from mminf import MMInfClient
+   from mstar import MStarClient
 
-   client = MMInfClient("http://localhost:8000")
+   client = MStarClient("http://localhost:8000")
 
    print(client.chat("What is the capital of France?").text)              # text  (BAGEL / Qwen3-Omni)
    open("cat.png", "wb").write(client.generate_image("a cat in a hat"))   # image (BAGEL)
@@ -63,7 +63,7 @@ Streaming yields typed chunks (``TextChunk`` / ``ImageChunk`` / ``AudioChunk``):
 
 .. code-block:: python
 
-   from mminf.client import TextChunk
+   from mstar.client import TextChunk
 
    for event in client.chat("Tell me a short story.", stream=True):
        if isinstance(event, TextChunk):
