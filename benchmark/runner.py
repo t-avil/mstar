@@ -512,7 +512,7 @@ def parse_args() -> BenchmarkConfig:
         "--output-dir", default=None, help="Directory to save outputs (text files / images). Omit to skip."
     )
     parser.add_argument("--verbose", action="store_true")
-    parser.add_argument("--local-cache", default="./mminf-benchmark-cache/", type=str)
+    parser.add_argument("--local-cache", default="./mstar-benchmark-cache/", type=str)
 
     # specific to image gen
     parser.add_argument("--disable-cfg", action="store_true")
