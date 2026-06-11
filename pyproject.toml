@@ -16,11 +16,15 @@ dependencies = [
     "pyzmq",
     "python-multipart",
     "requests",
-    "torch",
+    # PyTorch 2.9 is pinned: sgl-kernel (Qwen3-Omni) is built against torch 2.9,
+    # and newer torch defaults to CUDA 13 wheels. See docs/installation.rst for
+    # installing the build that matches your CUDA toolkit (e.g. cu128).
+    "torch==2.9.1",
+    "torchvision==0.24.1",
+    "torchaudio==2.9.1",
     "uvicorn",
     "gdown",
-    "torchaudio>=2.11.0",
-    "torchvision>=0.26.0",
+    "datasets",
 ]
 
 [project.scripts]
@@ -54,8 +58,10 @@ bagel = [
 ]
 
 qwen3_omni = [
+    # NOTE: flash-attn is required by Qwen3-Omni but is NOT listed here — its
+    # prebuilt wheels aren't on PyPI, so a plain install compiles from source
+    # (and fails on CUDA 13). Install it separately; see docs/installation.rst.
     "einops",
-    "flash-attn",
     "flashinfer-python",
     "huggingface-hub",
     "mooncake-transfer-engine",
@@ -101,6 +107,27 @@ vjepa2_ac = [
     "mooncake-transfer-engine",
     "safetensors",
     "torchcodec",
+]
+
+all = [
+    "soundfile",
+    "einops",
+    "flashinfer-python",
+    "huggingface-hub",
+    "mooncake-transfer-engine",
+    "Pillow",
+    "regex",
+    "safetensors",
+    "torchvision",
+    "torchaudio",
+    "torchcodec",
+    "transformers",
+    "safetensors",
+    "triton",
+    "qwen-omni-utils",
+    "sgl-kernel",
+    # flash-attn is intentionally omitted (Qwen3-Omni needs it) — install it
+    # separately, see docs/installation.rst.
 ]
 
 [tool.setuptools.packages.find]

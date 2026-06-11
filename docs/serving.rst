@@ -3,8 +3,8 @@ Serving
 
 ``mminf`` has two ways to start a server:
 
-- ``mminf serve <model>`` — a one-command wrapper with single-GPU defaults. Best for
-  getting started and single-node runs.
+- ``mminf serve <model>`` — a one-command wrapper with sensible per-model defaults (most
+  single-GPU; a few multi-GPU). Best for getting started and single-node runs.
 - ``mminf-serve --config <yaml>`` — the low-level entry point that takes an explicit
   config. Use it for custom layouts, disaggregation, and tensor parallelism.
 
@@ -19,8 +19,8 @@ mminf serve
 
    mminf serve <model> [options]
 
-``<model>`` is one of ``bagel``, ``qwen3_omni``, ``orpheus``, ``pi05``, ``vjepa2``,
-``vjepa2_ac`` (or pass ``--config`` for any other deployment).
+``<model>`` is one of ``bagel``, ``bagel_cfg_parallel``, ``qwen3_omni``, ``orpheus``,
+``pi05``, ``vjepa2``, ``vjepa2_ac`` (or pass ``--config`` for any other deployment).
 
 .. list-table::
    :header-rows: 1
@@ -57,26 +57,36 @@ mminf serve
      - ``INFO``
      - ``DEBUG`` / ``INFO`` / ``WARNING`` / ``ERROR``.
 
-Each model maps to a default single-GPU config:
+Each model maps to a default config (override with ``--config``):
 
 .. list-table::
    :header-rows: 1
-   :widths: 22 44
+   :widths: 22 44 12
 
    * - Model
      - Default config
+     - GPUs
    * - ``bagel``
      - ``configs/bagel_single_gpu.yaml``
+     - 1
+   * - ``bagel_cfg_parallel``
+     - ``configs/bagel_cfg_parallel.yaml``
+     - 3
    * - ``orpheus``
      - ``configs/orpheus_colocated.yaml``
+     - 1
    * - ``qwen3_omni``
-     - ``configs/qwen3omni_colocated.yaml``
+     - ``configs/qwen3omni_2gpu.yaml``
+     - 2
    * - ``pi05``
      - ``configs/pi05.yaml``
+     - 1
    * - ``vjepa2``
      - ``configs/vjepa2.yaml``
+     - 1
    * - ``vjepa2_ac``
      - ``configs/vjepa2_ac.yaml``
+     - 1
 
 mminf-serve
 -----------
