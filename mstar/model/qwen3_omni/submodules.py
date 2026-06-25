@@ -109,6 +109,75 @@ class AudioEncoderSubmodule(NodeSubmodule):
         return {"audio_embeds": [audio_embeds]}
 
 
+class NativeAudioEncoderSubmodule(NodeSubmodule):
+    """Native AuT submodule with cross-request batching.
+
+    The audio encoder is varlen-packed (per-request windows via ``cu_seqlens``),
+    so batching N requests needs no padding: concatenate their mel features along
+    time, pass a multi-entry ``feature_lens``, run one forward, and slice the
+    packed output back per request. Mirrors the Code2Wav preprocess/forward_batched
+    contract. Batched-no-graph already beats the HF baseline, so no torch.compile /
+    CUDA graphs are declared (the issue warns they don't uniformly help encoders).
+    """
+
+    def __init__(self, audio_encoder: nn.Module, config: Qwen3OmniModelConfig):
+        super().__init__()
+        self.audio_encoder = audio_encoder
+        self.config = config
+
+    def prepare_inputs(self, graph_walk, fwd_info, inputs, **kwargs) -> NodeInputs:
+        return NodeInputs(tensor_inputs={
+            "audio_features": inputs["audio_features"][0],
+            "audio_seqlens": inputs.get("audio_seqlens", [None])[0],
+        })
+
+    @staticmethod
+    def _req_token_count(seqlens: torch.Tensor) -> int:
+        from mstar.model.qwen3_omni.components.audio_encoder import _feat_extract_output_lengths
+        return int(_feat_extract_output_lengths(seqlens.reshape(-1)).sum())
+
+    def preprocess(self, graph_walk, engine_inputs, inputs: list[NodeInputs]):
+        feats = [i.tensor_inputs["audio_features"] for i in inputs]
+        lens = [i.tensor_inputs["audio_seqlens"].reshape(-1) for i in inputs]
+        counts = [self._req_token_count(l) for l in lens]
+        return {
+            "audio_features": torch.cat(feats, dim=1),   # (mel, sum_T)
+            "audio_seqlens": torch.cat(lens),            # (sum_segments,)
+            "req_token_counts": counts,
+        }
+
+    def forward_batched(self, graph_walk, engine_inputs, audio_features,
+                        audio_seqlens, req_token_counts=None, **kwargs):
+        embeds = self.audio_encoder(audio_features, audio_seqlens).last_hidden_state
+        if embeds.dim() == 3:
+            embeds = embeds.squeeze(0)
+        request_ids = engine_inputs.request_ids
+        if req_token_counts is None:  # single-segment-per-request fallback
+            req_token_counts = [self._req_token_count(audio_seqlens[i:i + 1])
+                                for i in range(len(request_ids))]
+        results: dict[str, NameToTensorList] = {}
+        off = 0
+        for rid, c in zip(request_ids, req_token_counts):
+            results[rid] = {"audio_embeds": [embeds[off:off + c]]}
+            off += c
+        return results
+
+    def forward(self, graph_walk, engine_inputs, audio_features, audio_seqlens, **kwargs):
+        embeds = self.audio_encoder(audio_features, audio_seqlens).last_hidden_state
+        if embeds.dim() == 3:
+            embeds = embeds.squeeze(0)
+        return {"audio_embeds": [embeds]}
+
+    def can_batch(self, batch: NodeBatch, model_inputs: list[NodeInputs]) -> bool:
+        # Safe pad-free batching needs one feature_lens entry per request so the
+        # output split is unambiguous; otherwise defer to sequential forward.
+        for mi in model_inputs:
+            sl = mi.tensor_inputs.get("audio_seqlens")
+            if sl is None or sl.reshape(-1).numel() != 1:
+                return False
+        return True
+
+
 # ===================================================================
 # 2. VisionEncoderSubmodule (enc_dec engine)
 # ===================================================================
@@ -206,6 +275,81 @@ class VisionEncoderSubmodule(NodeSubmodule):
             "vision_embeds": [vision_embeds],
             "deepstack": deepstack if deepstack is not None else [torch.tensor([])],
         }
+
+
+class NativeVisionEncoderSubmodule(NodeSubmodule):
+    """Native ViT submodule with cross-request batching + DeepStack.
+
+    Multiple images batch with no padding: concatenate their patch rows and
+    ``grid_thw`` rows, run one forward (per-image attention isolated by the
+    encoder's ``cu_seqlens``), then slice the merged tokens AND each DeepStack
+    level back per request. Same output contract as ``VisionEncoderSubmodule``
+    (``vision_embeds`` + positionally-spliced ``deepstack``) so nothing upstream
+    of ``vision_encoder.forward`` changes.
+    """
+
+    def __init__(self, vision_encoder: nn.Module, config: Qwen3OmniModelConfig):
+        super().__init__()
+        self.vision_encoder = vision_encoder
+        self.config = config
+        self.merge_sq = self.config.vision.spatial_merge_size ** 2
+
+    def _merged_tokens(self, grid_thw: torch.Tensor) -> int:
+        g = grid_thw if grid_thw.dim() == 2 else grid_thw.unsqueeze(0)
+        return int((g[:, 0] * g[:, 1] * g[:, 2]).sum() // self.merge_sq)
+
+    def prepare_inputs(self, graph_walk, fwd_info, inputs, **kwargs) -> NodeInputs:
+        pixel_values = inputs["pixel_values"][0]
+        grid_thw = inputs.get("image_grid_thw", inputs.get("grid_thw", [None]))[0]
+        if grid_thw is None:
+            raise ValueError("NativeVisionEncoder: 'image_grid_thw' input is None.")
+        if grid_thw.dim() == 1:
+            grid_thw = grid_thw.unsqueeze(0)
+        return NodeInputs(tensor_inputs={"pixel_values": pixel_values, "grid_thw": grid_thw})
+
+    def preprocess(self, graph_walk, engine_inputs, inputs: list[NodeInputs]):
+        pvs = [i.tensor_inputs["pixel_values"] for i in inputs]
+        grids = [i.tensor_inputs["grid_thw"] for i in inputs]
+        counts = [self._merged_tokens(g) for g in grids]
+        return {
+            "pixel_values": torch.cat(pvs, dim=0),
+            "grid_thw": torch.cat(grids, dim=0),
+            "req_token_counts": counts,
+        }
+
+    def _run(self, pixel_values, grid_thw):
+        out = self.vision_encoder(pixel_values, grid_thw=grid_thw)
+        if isinstance(out, tuple):
+            embeds, deepstack = out
+        else:
+            embeds, deepstack = out.pooler_output, out.deepstack_features
+        if isinstance(deepstack, torch.Tensor):
+            deepstack = [deepstack]
+        return embeds, deepstack
+
+    def forward_batched(self, graph_walk, engine_inputs, pixel_values, grid_thw,
+                        req_token_counts=None, **kwargs):
+        embeds, deepstack = self._run(pixel_values, grid_thw)
+        request_ids = engine_inputs.request_ids
+        results: dict[str, NameToTensorList] = {}
+        off = 0
+        for rid, c in zip(request_ids, req_token_counts):
+            results[rid] = {
+                "vision_embeds": [embeds[off:off + c]],
+                "deepstack": [d[off:off + c] for d in deepstack],
+            }
+            off += c
+        return results
+
+    def forward(self, graph_walk, engine_inputs, pixel_values, grid_thw, **kwargs):
+        embeds, deepstack = self._run(pixel_values, grid_thw)
+        return {
+            "vision_embeds": [embeds],
+            "deepstack": deepstack if deepstack else [torch.tensor([])],
+        }
+
+    def can_batch(self, batch: NodeBatch, model_inputs: list[NodeInputs]) -> bool:
+        return True
 
 
 # ===================================================================

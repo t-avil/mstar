@@ -371,6 +371,14 @@ class Qwen3OmniModelConfig:
     code_predictor: CodePredictorConfig = field(default_factory=CodePredictorConfig)
     code2wav: Code2WavConfig = field(default_factory=Code2WavConfig)
 
+    # --- Native encoder toggles ------------------------------------------
+    # When True, use the native mstar audio/vision encoders (batched, decoupled
+    # from transformers) instead of the thin HF-wrapper submodules. The HF path
+    # is kept as a fallback/reference for one release so regressions can be
+    # bisected. See mstar/model/qwen3_omni/components/{audio_encoder,vision_encoder}.py.
+    native_audio_encoder: bool = False
+    native_vision_encoder: bool = False
+
     def __post_init__(self) -> None:
         # Sanity check: all codec special token IDs must be < the Talker's
         # codec_embedding vocab size (talker_text.vocab_size, typically 3072).

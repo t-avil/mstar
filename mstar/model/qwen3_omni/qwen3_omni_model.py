@@ -1461,23 +1461,37 @@ class Qwen3OmniModel(Model):
         )
 
     def _create_audio_encoder_submodule(self, device: str) -> NodeSubmodule:
-        """Load the audio encoder (AuT) from HF weights."""
-        # Reuse HF audio encoder directly (Whisper-style, not perf-critical)
+        """Load the audio encoder (AuT) from HF weights.
+
+        Two paths, selected by ``config.native_audio_encoder``:
+          * native (default off): batched, transformers-decoupled mstar module
+            (``NativeAudioEncoderSubmodule``) — exact parity, 5-11x throughput.
+          * HF wrapper (fallback/reference, kept for one release).
+        """
         from transformers import AutoConfig
+        from mstar.model.utils import ModuleAndPrefix, load_weights_from_hf_shards
+
+        config = AutoConfig.from_pretrained(self.local_dir, trust_remote_code=True)
+        audio_config = config.thinker_config.audio_config
+
+        if getattr(self.config, "native_audio_encoder", False):
+            from mstar.model.qwen3_omni.components.audio_encoder import (
+                NativeQwen3OmniAudioEncoder,
+            )
+            from mstar.model.qwen3_omni.submodules import NativeAudioEncoderSubmodule
+            audio_encoder = NativeQwen3OmniAudioEncoder(audio_config).to(device)
+            load_weights_from_hf_shards(
+                repo_dir=self.local_dir,
+                modules=[ModuleAndPrefix(audio_encoder, prefix="thinker.audio_tower")],
+                device=device,
+            )
+            audio_encoder.eval()
+            return NativeAudioEncoderSubmodule(audio_encoder=audio_encoder, config=self.config)
+
+        # ---- HF-wrapper fallback path ----
         from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
             Qwen3OmniMoeAudioEncoder,
         )
-
-        from mstar.model.utils import ModuleAndPrefix, load_weights_from_hf_shards
-
-        # Load config only (no weights)
-        config = AutoConfig.from_pretrained(
-            self.local_dir,
-            trust_remote_code=True,
-        )
-
-        # This should be a Qwen3OmniMoeConfig
-        audio_config = config.thinker_config.audio_config
 
         # Build the audio encoder from config.
         # IMPORTANT: pass attn_implementation="flash_attention_2" so the
@@ -1500,23 +1514,38 @@ class Qwen3OmniModel(Model):
         return AudioEncoderSubmodule(audio_encoder=audio_encoder, config=self.config)
 
     def _create_vision_encoder_submodule(self, device: str) -> NodeSubmodule:
-        """Load the vision encoder (SigLIP2 ViT) from HF weights."""
-        # Reuse HF vision encoder directly
+        """Load the vision encoder (SigLIP2 ViT) from HF weights.
+
+        Two paths, selected by ``config.native_vision_encoder``:
+          * native (default off): batched, flash-varlen mstar module
+            (``NativeVisionEncoderSubmodule``) — exact parity (incl. every
+            DeepStack level), and removes the ~3.3 s/image HF-wrapper TTFT cost.
+          * HF wrapper (fallback/reference, kept for one release).
+        """
         from transformers import AutoConfig
+        from mstar.model.utils import ModuleAndPrefix, load_weights_from_hf_shards
+
+        config = AutoConfig.from_pretrained(self.local_dir, trust_remote_code=True)
+        vision_config = config.thinker_config.vision_config
+
+        if getattr(self.config, "native_vision_encoder", False):
+            from mstar.model.qwen3_omni.components.vision_encoder import (
+                NativeQwen3OmniVisionEncoder,
+            )
+            from mstar.model.qwen3_omni.submodules import NativeVisionEncoderSubmodule
+            vision_encoder = NativeQwen3OmniVisionEncoder(vision_config).to(device)
+            load_weights_from_hf_shards(
+                repo_dir=self.local_dir,
+                modules=[ModuleAndPrefix(vision_encoder, prefix="thinker.visual")],
+                device=device,
+            )
+            vision_encoder.eval()
+            return NativeVisionEncoderSubmodule(vision_encoder=vision_encoder, config=self.config)
+
+        # ---- HF-wrapper fallback path ----
         from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
             Qwen3OmniMoeVisionEncoder,
         )
-
-        from mstar.model.utils import ModuleAndPrefix, load_weights_from_hf_shards
-
-        # Load full config (no weights)
-        config = AutoConfig.from_pretrained(
-            self.local_dir,
-            trust_remote_code=True,
-        )
-
-        # Extract the vision sub-config
-        vision_config = config.thinker_config.vision_config
 
         # Build the vision encoder.
         # CRITICAL: pass attn_implementation="flash_attention_2". Without
