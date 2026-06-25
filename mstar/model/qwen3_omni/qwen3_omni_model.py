@@ -118,6 +118,12 @@ class Qwen3OmniModel(Model):
         self.config = Qwen3OmniModelConfig.from_pretrained(local_dir)
         self.local_dir = local_dir
 
+        # Allow yaml model_kwargs / constructor kwargs to toggle native encoders
+        # (e.g. model_kwargs: {native_audio_encoder: true, native_vision_encoder: true}).
+        for _flag in ("native_audio_encoder", "native_vision_encoder"):
+            if _flag in kwargs:
+                setattr(self.config, _flag, bool(kwargs[_flag]))
+
         # Tokenizer (Thinker uses a Qwen-family tokenizer)
         self.tokenizer = AutoTokenizer.from_pretrained(
             local_dir, cache_dir=cache_dir, trust_remote_code=True,

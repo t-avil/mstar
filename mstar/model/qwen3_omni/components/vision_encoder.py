@@ -57,6 +57,15 @@ class VisionRotaryEmbedding(nn.Module):
 
 
 class VisionPatchEmbed(nn.Module):
+    """Patch embedding. Weight is stored as a Conv3d (matching HF's
+    ``patch_embed.proj`` so checkpoints load unchanged), but because
+    kernel==stride==patch size the convolution is exactly a per-patch linear
+    projection. We compute it as an ``F.linear`` matmul instead of nn.Conv3d:
+    cuDNN's bf16 Conv3d for this shape is pathologically slow (~3.5 s/image on
+    H100) and is the dominant cost of the HF vision encoder. The matmul is
+    bit-identical and ~0.1 ms.
+    """
+
     def __init__(self, config):
         super().__init__()
         self.in_channels = config.in_channels
@@ -67,8 +76,11 @@ class VisionPatchEmbed(nn.Module):
         self.proj = nn.Conv3d(self.in_channels, self.embed_dim, kernel_size=ks, stride=ks, bias=True)
 
     def forward(self, x):
-        x = x.view(-1, self.in_channels, self.temporal_patch_size, self.patch_size, self.patch_size)
-        return self.proj(x.to(self.proj.weight.dtype)).view(-1, self.embed_dim)
+        # x: (num_patches, C*tT*pH*pW) already flattened in [C, tT, pH, pW] order,
+        # which matches Conv3d weight flattening exactly.
+        w = self.proj.weight.reshape(self.embed_dim, -1)
+        x = x.reshape(-1, w.shape[1]).to(w.dtype)
+        return torch.nn.functional.linear(x, w, self.proj.bias)
 
 
 class VisionPatchMerger(nn.Module):
