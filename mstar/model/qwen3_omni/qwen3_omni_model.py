@@ -1470,11 +1470,12 @@ class Qwen3OmniModel(Model):
         """Load the audio encoder (AuT) from HF weights.
 
         Two paths, selected by ``config.native_audio_encoder``:
-          * native (default off): batched, transformers-decoupled mstar module
+          * native (default on): batched, transformers-decoupled mstar module
             (``NativeAudioEncoderSubmodule``) — exact parity, 5-11x throughput.
           * HF wrapper (fallback/reference, kept for one release).
         """
         from transformers import AutoConfig
+
         from mstar.model.utils import ModuleAndPrefix, load_weights_from_hf_shards
 
         config = AutoConfig.from_pretrained(self.local_dir, trust_remote_code=True)
@@ -1523,12 +1524,13 @@ class Qwen3OmniModel(Model):
         """Load the vision encoder (SigLIP2 ViT) from HF weights.
 
         Two paths, selected by ``config.native_vision_encoder``:
-          * native (default off): batched, flash-varlen mstar module
+          * native (default on): batched, flash-varlen mstar module
             (``NativeVisionEncoderSubmodule``) — exact parity (incl. every
             DeepStack level), and removes the ~3.3 s/image HF-wrapper TTFT cost.
           * HF wrapper (fallback/reference, kept for one release).
         """
         from transformers import AutoConfig
+
         from mstar.model.utils import ModuleAndPrefix, load_weights_from_hf_shards
 
         config = AutoConfig.from_pretrained(self.local_dir, trust_remote_code=True)

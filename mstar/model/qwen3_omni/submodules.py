@@ -157,7 +157,7 @@ class NativeAudioEncoderSubmodule(NodeSubmodule):
                                 for i in range(len(request_ids))]
         results: dict[str, NameToTensorList] = {}
         off = 0
-        for rid, c in zip(request_ids, req_token_counts):
+        for rid, c in zip(request_ids, req_token_counts, strict=False):
             results[rid] = {"audio_embeds": [embeds[off:off + c]]}
             off += c
         return results
@@ -292,7 +292,10 @@ class NativeVisionEncoderSubmodule(NodeSubmodule):
         super().__init__()
         self.vision_encoder = vision_encoder
         self.config = config
-        self.merge_sq = self.config.vision.spatial_merge_size ** 2
+        # Source the merge factor from the encoder it was built with (not the
+        # mstar config) so the per-request token split can never diverge from
+        # what the encoder actually produces.
+        self.merge_sq = vision_encoder.spatial_merge_size ** 2
 
     def _merged_tokens(self, grid_thw: torch.Tensor) -> int:
         g = grid_thw if grid_thw.dim() == 2 else grid_thw.unsqueeze(0)
@@ -331,9 +334,12 @@ class NativeVisionEncoderSubmodule(NodeSubmodule):
                         req_token_counts=None, **kwargs):
         embeds, deepstack = self._run(pixel_values, grid_thw)
         request_ids = engine_inputs.request_ids
+        if req_token_counts is None:  # one-image-per-request fallback
+            g = grid_thw if grid_thw.dim() == 2 else grid_thw.unsqueeze(0)
+            req_token_counts = [self._merged_tokens(g[i:i + 1]) for i in range(len(request_ids))]
         results: dict[str, NameToTensorList] = {}
         off = 0
-        for rid, c in zip(request_ids, req_token_counts):
+        for rid, c in zip(request_ids, req_token_counts, strict=False):
             results[rid] = {
                 "vision_embeds": [embeds[off:off + c]],
                 "deepstack": [d[off:off + c] for d in deepstack],

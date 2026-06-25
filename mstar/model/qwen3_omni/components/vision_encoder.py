@@ -61,9 +61,13 @@ class VisionPatchEmbed(nn.Module):
     ``patch_embed.proj`` so checkpoints load unchanged), but because
     kernel==stride==patch size the convolution is exactly a per-patch linear
     projection. We compute it as an ``F.linear`` matmul instead of nn.Conv3d:
-    cuDNN's bf16 Conv3d for this shape is pathologically slow (~3.5 s/image on
-    H100) and is the dominant cost of the HF vision encoder. The matmul is
-    bit-identical and ~0.1 ms.
+    cuDNN's *low-precision* Conv3d for this (kernel==stride) shape is
+    pathologically slow — measured ~3.2 s/image bf16 on H100, vs ~0.2 ms for the
+    same conv in fp32 and ~40 us for this matmul — and is the dominant cost of
+    the HF vision encoder. The matmul is exact in fp32; in bf16 it differs from
+    the Conv3d only by accumulation-order rounding (<=~1.6e-2 per element), which
+    the parity test bounds end-to-end (see qwen3_omni_encoder_parity.py for the
+    per-layer profile).
     """
 
     def __init__(self, config):
