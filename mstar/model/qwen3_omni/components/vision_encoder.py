@@ -200,6 +200,7 @@ class NativeQwen3OmniVisionEncoder(nn.Module):
         self._cg_cache: dict = {}
         self._cg_pool = None
         self._cg_max_keys = int(os.environ.get("MSTAR_ENCODER_CG_MAX_KEYS", "16"))
+        self._cg_warmed = False
 
     def _cuda_graph_enabled(self) -> bool:
         if os.environ.get("MSTAR_ENCODER_CUDA_GRAPH", "0") not in ("1", "true", "True"):
@@ -267,8 +268,39 @@ class NativeQwen3OmniVisionEncoder(nn.Module):
             graph=graph, static_x=static_x, out_merged=merged, out_deepstack=deepstack,
             cu_seqlens=cu_seqlens, position_embeddings=position_embeddings, fi_state=fi_state)
 
+    def _maybe_cg_warmup(self, pixel_values, grid_thw):
+        """Pre-capture graphs for all configured batch sizes BEFORE serving, so
+        lazy capture never lands inside a measured request. Triggered once, on
+        the first forward, when MSTAR_ENCODER_CG_WARMUP is a comma list of batch
+        sizes (e.g. "1,4,8,16,32"). Uses the first image of the current request
+        as the per-image template and replicates it to each batch size -- valid
+        because the graph key is the grid layout, identical across images. The
+        cost (a handful of encoder forwards) is paid once at startup instead of
+        repeatedly in the hot path."""
+        if self._cg_warmed:
+            return
+        self._cg_warmed = True
+        spec = os.environ.get("MSTAR_ENCODER_CG_WARMUP", "")
+        if not spec or not self._cuda_graph_enabled():
+            return
+        try:
+            batch_sizes = sorted({int(b) for b in spec.split(",") if b.strip()})
+        except ValueError:
+            return
+        g = grid_thw if grid_thw.dim() == 2 else grid_thw.unsqueeze(0)
+        g0 = g[:1]
+        n0 = int(g0[0, 0] * g0[0, 1] * g0[0, 2])    # patch rows for image 0
+        pv0 = pixel_values[:n0]
+        logger.info("vision encoder CUDA-graph warmup: pre-capturing batch sizes %s", batch_sizes)
+        for k in batch_sizes:
+            try:
+                self.forward(pv0.repeat(k, 1), g0.repeat(k, 1))   # triggers capture for key_k
+            except Exception:
+                logger.warning("vision CG warmup failed for bs=%d", k, exc_info=True)
+
     @torch.no_grad()
     def forward(self, pixel_values, grid_thw):
+        self._maybe_cg_warmup(pixel_values, grid_thw)
         dtype = self.patch_embed.proj.weight.dtype
         pixel_values = pixel_values.to(dtype)
 
