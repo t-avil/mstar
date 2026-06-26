@@ -28,8 +28,10 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
 
 VENV="${VENV:-${REPO_ROOT}/.venv-bench}"
-ITERS="${ITERS:-20}"
-WARMUP="${WARMUP:-5}"
+# Number of independent samples per datapoint (the bench's --repeats knob; per-call
+# n_iter/n_warmup are tuned inside the bench and intentionally not exposed, since
+# HF vision is ~3 s/call). ITERS kept as a back-compat alias.
+REPEATS="${REPEATS:-${ITERS:-10}}"
 OUT="${OUT:-benchmark/artifacts}"
 # A GPU is "free" if it uses <= this many MiB and <= this %% utilization.
 MAX_MEM_MIB="${MAX_MEM_MIB:-2000}"
@@ -97,7 +99,7 @@ python -c "import torch, transformers; print('torch', torch.__version__, '| tran
 echo "Running benchmark on GPU ${GPU_IDX} (SDPA backend, no flash-attn) ..."
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 CUDA_VISIBLE_DEVICES="${GPU_IDX}" python -m benchmark.qwen3_omni_encoders \
-  --device cuda:0 --iters "${ITERS}" --warmup "${WARMUP}" --out "${OUT}"
+  --device cuda:0 --repeats "${REPEATS}" --out "${OUT}"
 
 echo
 echo "Artifacts written to ${OUT}/ :"

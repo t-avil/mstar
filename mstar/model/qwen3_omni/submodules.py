@@ -118,6 +118,12 @@ class NativeAudioEncoderSubmodule(NodeSubmodule):
     packed output back per request. Mirrors the Code2Wav preprocess/forward_batched
     contract. Batched-no-graph already beats the HF baseline, so no torch.compile /
     CUDA graphs are declared (the issue warns they don't uniformly help encoders).
+
+    Batching scope (see ``can_batch``): cross-request batching only engages when
+    every request carries exactly ONE ``feature_lens`` segment, so the per-request
+    output split is unambiguous. A request with multiple audio clips
+    (multi-segment ``feature_lens``) falls back to the sequential ``forward`` —
+    it is still correct, just not batched with its peers.
     """
 
     def __init__(self, audio_encoder: nn.Module, config: Qwen3OmniModelConfig):

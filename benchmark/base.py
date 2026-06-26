@@ -1,3 +1,4 @@
+import os
 from abc import ABC, abstractmethod
 from enum import Enum
 from typing import Optional
@@ -213,10 +214,26 @@ class Qwen3Omni(Model):
         # collapsing the Talker to a degenerate "mee mee mee" repetition attractor.
         # Letting mstar use its own model default (talker_temperature=0.9) restores
         # apples-to-apples behavior with vllm-omni's effective Talker sampling.
+        # Thinker temperature is PATH-AWARE (fixes the "speech didn't run" case):
+        #   * text paths (T2T/I2T/A2T): greedy (0.0) for cross-system token parity.
+        #   * speech paths (T2S/I2S/A2S): greedy makes the Thinker emit an
+        #     empty / EOS-only text stream, so vLLM-Omni & SGLang-Omni feed an
+        #     empty tensor into ``_thinker_to_talker_prefill`` ->
+        #     ``torch.cat(): expected a non-empty list`` and the speech request
+        #     CRASHES. A non-zero Thinker temperature makes it produce text the
+        #     Talker can vocode, so all systems actually run. Token-exact parity
+        #     is irrelevant on speech paths (we score RTF / audio throughput, not
+        #     token sequences), and the Talker already samples at 0.9 by default.
+        #     Override with BENCH_SPEECH_THINKER_TEMPERATURE.
+        speech_paths = {RequestType.T2S, RequestType.I2S, RequestType.A2S}
+        thinker_temperature = 0.0
+        if request_type in speech_paths:
+            thinker_temperature = float(
+                os.environ.get("BENCH_SPEECH_THINKER_TEMPERATURE", "0.7"))
         return {
             "max_tokens": 256,
             "max_output_tokens": 256,
-            "thinker_temperature": 0.0,
+            "thinker_temperature": thinker_temperature,
         }
 
     def get_supported_modalities(self):

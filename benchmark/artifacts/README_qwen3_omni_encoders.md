@@ -14,7 +14,7 @@ All data below is persisted as JSON (with **every raw sample**) and PNG in this 
 ## Methodology (so the numbers are auditable, not taken on faith)
 
 - **Hardware:** 1× NVIDIA H100 80GB, exclusive (one idle GPU pinned via `CUDA_VISIBLE_DEVICES`; no GPU sharing).
-- **Stack:** torch 2.9.1+cu130, transformers 5.12.1.
+- **Stack:** torch 2.9.1+**cu128**, transformers 5.12.1. (The box is CUDA 12.8 — `nvcc` 12.8 / `torch.version.cuda == 12.8` — so cu128 is the correct wheel per `docs/installation.rst`; the cu130 wheel is for CUDA 13.x boxes and would fail to compile flash-attn here. `setup_and_run_qwen3_omni_encoders.sh` auto-selects it via `UV_TORCH_BACKEND=auto`.)
 - **dtype = bfloat16 = the production setup.** The encoders run on the `enc_dec` stateless engine whose `autocast_dtype` defaults to `torch.bfloat16` (`mstar/engine/stateless_engine.py:65`). We verified this rather than assume it, because the headline result *only* exists in bf16 (see patch-embed).
 - **Attention = SDPA; flash-attn excluded.** Both HF and native use SDPA, so the comparison isolates the structural changes (patch-embed, batching), not the attention kernel. **Caveat:** the native encoder's SDPA fallback builds an O(total_tokens²) mask, so native *large-batch* numbers here are pessimistic vs a production flash-varlen deployment. HF vision is unaffected (it is Conv3d-bound, not attention-bound).
 - **Batch sizes `(1,2,4,8,16)` and `repeats=10`** reuse the existing `perf_testing/offline_homogenous.sh` convention; CUDA-event timing follows `test/modular/test_fused_rmsnorm.py`. Each datapoint = 10 independent samples → mean ± std.

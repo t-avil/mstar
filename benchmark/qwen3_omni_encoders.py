@@ -230,7 +230,7 @@ def make_charts(artifact, out_dir, tag):
     fig.suptitle(f"Qwen3-Omni encoders: per-item latency vs batch — {artifact['env']['gpu']}")
     fig.tight_layout()
     p = os.path.join(out_dir, f"qwen3_omni_latency_vs_batch_{tag}.png")
-    fig.savefig(p, dpi=130)
+    fig.savefig(p, dpi=200)
     plt.close(fig)
     paths.append(p)
 
@@ -254,7 +254,7 @@ def make_charts(artifact, out_dir, tag):
     ax.legend()
     fig.tight_layout()
     p = os.path.join(out_dir, f"qwen3_omni_patch_embed_{tag}.png")
-    fig.savefig(p, dpi=130)
+    fig.savefig(p, dpi=200)
     plt.close(fig)
     paths.append(p)
     return paths

@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import logging
 import math
+import os
+from collections import namedtuple
 
 import numpy as np
 import torch
@@ -25,6 +27,11 @@ from torch import nn
 from transformers.activations import ACT2FN
 
 logger = logging.getLogger(__name__)
+
+# Output container mirroring the field of HF's BaseModelOutput that downstream
+# code reads (``.last_hidden_state``). Defined once at module scope rather than
+# as an ad-hoc class re-created per forward call.
+AudioEncoderOutput = namedtuple("AudioEncoderOutput", ["last_hidden_state"])
 
 try:
     from flash_attn import flash_attn_varlen_func
@@ -38,7 +45,11 @@ except ImportError:  # pragma: no cover
 # --------------------------------------------------------------------------- #
 # varlen attention primitive (mirrors bagel vit_encoder.run_attention)
 # --------------------------------------------------------------------------- #
-def _sdpa_varlen(q, k, v, cu_seqlens, scale):
+def _sdpa_varlen_dense(q, k, v, cu_seqlens, scale):
+    # ORIGINAL fallback: builds a dense (total_len, total_len) block-diagonal
+    # mask, i.e. O(total_tokens^2) memory/compute. At serving batch sizes the
+    # cross-segment terms make encoder TTFT regress (README_qwen3_omni_encoders.md:
+    # native large-batch numbers are SDPA-pessimistic). Kept for A/B + parity.
     total_len = q.shape[0]
     seg_ids = torch.zeros(total_len, dtype=torch.int32, device=q.device)
     seg_ids[cu_seqlens[1:-1].long()] = 1
@@ -49,6 +60,88 @@ def _sdpa_varlen(q, k, v, cu_seqlens, scale):
     v_b = v.transpose(0, 1).unsqueeze(0)
     out = F.scaled_dot_product_attention(q_b, k_b, v_b, attn_mask=attn_mask, scale=scale)
     return out.squeeze(0).transpose(0, 1).contiguous()
+
+
+def _sdpa_varlen_per_segment(q, k, v, cu_seqlens, scale):
+    # No-flash-attn varlen path that is LINEAR in batch: run a dense SDPA per
+    # image/audio segment (O(sum L_i^2)) instead of one (sum L_i)^2 masked call.
+    # Mathematically identical to the block-diagonal mask (attention never
+    # crosses segments), but removes the quadratic cross-segment compute/memory
+    # that made native large-batch TTFT explode. This is the production varlen
+    # path on hardware without flash-attn (this H200).
+    cu = cu_seqlens.tolist()
+    out = torch.empty_like(q)
+    for a, b in zip(cu[:-1], cu[1:]):
+        qs = q[a:b].transpose(0, 1).unsqueeze(0)
+        ks = k[a:b].transpose(0, 1).unsqueeze(0)
+        vs = v[a:b].transpose(0, 1).unsqueeze(0)
+        o = F.scaled_dot_product_attention(qs, ks, vs, scale=scale)
+        out[a:b] = o.squeeze(0).transpose(0, 1)
+    return out
+
+
+def _sdpa_varlen_padded(q, k, v, cu_seqlens, scale):
+    # No-flash varlen via pad-to-max + batched SDPA with a key-padding mask: a
+    # SINGLE attention kernel over (n_seg, heads, max_len, head_dim). Best when
+    # segments are similar length (e.g. audio windows, which are mostly equal),
+    # where per-segment's many tiny kernels lose to one batched call. Wastes work
+    # on padding when lengths are very uneven (e.g. mixed-resolution images).
+    cu = cu_seqlens.tolist()
+    lens = [b - a for a, b in zip(cu[:-1], cu[1:])]
+    nseg, max_len = len(lens), max(lens)
+    h, d = q.shape[1], q.shape[2]
+    qb = q.new_zeros(nseg, max_len, h, d)
+    kb = q.new_zeros(nseg, max_len, h, d)
+    vb = q.new_zeros(nseg, max_len, h, d)
+    mask = torch.zeros(nseg, 1, 1, max_len, device=q.device, dtype=torch.bool)
+    for i, (a, b) in enumerate(zip(cu[:-1], cu[1:])):
+        n = b - a
+        qb[i, :n] = q[a:b]; kb[i, :n] = k[a:b]; vb[i, :n] = v[a:b]
+        mask[i, 0, 0, :n] = True
+    qb, kb, vb = (t.permute(0, 2, 1, 3) for t in (qb, kb, vb))
+    o = F.scaled_dot_product_attention(qb, kb, vb, attn_mask=mask, scale=scale).permute(0, 2, 1, 3)
+    out = torch.empty_like(q)
+    for i, (a, b) in enumerate(zip(cu[:-1], cu[1:])):
+        out[a:b] = o[i, : b - a]
+    return out
+
+
+def _sdpa_varlen_adaptive(q, k, v, cu_seqlens, scale):
+    # Pick dense vs per-segment from segment STRUCTURE (no GPU sync — uses tensor
+    # shapes only). Benchmarked on H200 (bench_encoder_fast.py):
+    #   * FEW BIG segments (vision: ~728-tok images) -> per-segment always wins
+    #     (cross-segment compute saved >> launch overhead of a few kernels).
+    #   * MANY TINY segments (audio: ~50-tok windows) -> the dense single kernel
+    #     beats hundreds of tiny per-segment kernels (launch-bound) UNTIL the
+    #     total grows enough that dense's O(total^2) mask explodes (~bs32).
+    # Decision metric M = total^2 / n_seg (= total * mean_seg), a proxy for the
+    # dense/per-segment compute ratio: dense ~ total^2, per-segment ~ Σ L_i^2
+    # (≈ total*mean_seg for similar lengths), so per-segment wins when M exceeds a
+    # launch-cost threshold. Calibrated on H200 (bench_encoder_fast.py): τ≈5e5
+    # cleanly separates vision (few big segments → M high → per_segment at every
+    # batch) from audio (many tiny windows → M low at small batch → dense, then
+    # crosses to per_segment ~bs32 as the dense O(n²) mask explodes). Shapes only,
+    # no GPU sync.
+    total = q.shape[0]
+    n_seg = max(cu_seqlens.shape[0] - 1, 1)
+    if (total * total) / n_seg > 500_000:
+        return _sdpa_varlen_per_segment(q, k, v, cu_seqlens, scale)
+    return _sdpa_varlen_dense(q, k, v, cu_seqlens, scale)
+
+
+# Backend selectable via env for A/B benchmarking. Default = adaptive: picks
+# dense vs per-segment per call from segment structure, so vision (few big
+# segments) and audio (many tiny windows) each get their best path.
+# MSTAR_VARLEN_BACKEND in {adaptive, per_segment, dense, padded}.
+_VARLEN_BACKEND = os.environ.get("MSTAR_VARLEN_BACKEND", "adaptive")
+_VARLEN_FALLBACKS = {"adaptive": _sdpa_varlen_adaptive,
+                     "per_segment": _sdpa_varlen_per_segment, "dense": _sdpa_varlen_dense,
+                     "padded": _sdpa_varlen_padded}
+
+
+def _sdpa_varlen(q, k, v, cu_seqlens, scale):
+    return _VARLEN_FALLBACKS.get(_VARLEN_BACKEND, _sdpa_varlen_per_segment)(
+        q, k, v, cu_seqlens, scale)
 
 
 @torch.compiler.disable
@@ -201,7 +294,11 @@ class NativeQwen3OmniAudioEncoder(nn.Module):
         self.proj2 = nn.Linear(d_model, config.output_dim)
 
     @torch.no_grad()
-    def forward(self, input_features, feature_lens):
+    def forward(self, input_features, feature_lens=None, return_dict=True, **kwargs):
+        # ``return_dict``/``**kwargs`` accepted for signature-compatibility with
+        # HF's Qwen3OmniMoeAudioEncoder (some callers pass them); the native path
+        # always returns the same AudioEncoderOutput regardless.
+        assert feature_lens is not None, "native AuT requires feature_lens"
         param_dtype = self.conv2d1.weight.dtype
         input_features = input_features.to(param_dtype)
         padded_feature, chunk_lengths = chunk_and_pad_features(input_features, feature_lens, self.n_window)
@@ -232,8 +329,4 @@ class NativeQwen3OmniAudioEncoder(nn.Module):
         hidden_states = self.act(hidden_states)
         hidden_states = self.proj2(hidden_states)
 
-        class _Out:
-            pass
-        out = _Out()
-        out.last_hidden_state = hidden_states
-        return out
+        return AudioEncoderOutput(last_hidden_state=hidden_states)

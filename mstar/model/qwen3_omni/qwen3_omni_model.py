@@ -55,6 +55,29 @@ from mstar.utils.sampling import SamplingConfig
 logger = logging.getLogger(__name__)
 
 
+def _hf_encoder_attn_impl() -> str:
+    """Pick the attention implementation for the HF-wrapper encoder fallback.
+
+    The HF ``Qwen3OmniMoe{Audio,Vision}Encoder`` classes hard-fail at init if
+    asked for ``flash_attention_2`` without the ``flash_attn`` package present
+    (transformers raises ImportError rather than degrading). The native encoder
+    path already degrades gracefully to torch SDPA when flash_attn is missing
+    (see bagel vit_encoder), so the HF path must do the same to keep both
+    variants benchmarkable on the *same* hardware footing. We only request FA2
+    when flash_attn actually imports.
+    """
+    import importlib.util
+
+    if importlib.util.find_spec("flash_attn") is not None:
+        return "flash_attention_2"
+    logger.warning(
+        "flash_attn is not available; HF-wrapper encoders will fall back to "
+        "torch SDPA (slower than FA2 varlen, but matches the native path's "
+        "fallback so the M*-old vs M*-new comparison stays on equal footing)."
+    )
+    return "sdpa"
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -1471,7 +1494,11 @@ class Qwen3OmniModel(Model):
 
         Two paths, selected by ``config.native_audio_encoder``:
           * native (default on): batched, transformers-decoupled mstar module
-            (``NativeAudioEncoderSubmodule``) — exact parity, 5-11x throughput.
+            (``NativeAudioEncoderSubmodule``). Numerically matches HF (fp32
+            exact; bf16 within the parity bar). Throughput gain over the HF
+            wrapper is modest — ~1.2-1.7x in the SDPA microbenchmark, peaking at
+            batch 4-8 (see benchmark/artifacts/README_qwen3_omni_encoders.md);
+            the win is cross-request batching, not a faster attention kernel.
           * HF wrapper (fallback/reference, kept for one release).
         """
         from transformers import AutoConfig
@@ -1507,7 +1534,7 @@ class Qwen3OmniModel(Model):
         # SDPA on the full packed sequence (no per-segment fusion),
         # which is significantly slower than FA2's varlen path.
         audio_encoder = Qwen3OmniMoeAudioEncoder._from_config(
-            audio_config, attn_implementation="flash_attention_2"
+            audio_config, attn_implementation=_hf_encoder_attn_impl()
         )
 
         load_weights_from_hf_shards(
@@ -1524,9 +1551,15 @@ class Qwen3OmniModel(Model):
         """Load the vision encoder (SigLIP2 ViT) from HF weights.
 
         Two paths, selected by ``config.native_vision_encoder``:
-          * native (default on): batched, flash-varlen mstar module
-            (``NativeVisionEncoderSubmodule``) — exact parity (incl. every
-            DeepStack level), and removes the ~3.3 s/image HF-wrapper TTFT cost.
+          * native (default on): batched, varlen mstar module
+            (``NativeVisionEncoderSubmodule``). Numerically matches HF (fp32
+            exact; bf16 within bar) for the pooler output and every DeepStack
+            level. The large per-image speedup comes almost entirely from
+            computing the patch embed as an ``F.linear`` instead of HF's bf16
+            ``Conv3d`` (kernel==stride), which hits a cuDNN low-precision cliff
+            (~3.3 s/image on H100) — the same swap could in principle be applied
+            to the HF path. Attention is the same ``flash_attn_varlen_func``
+            primitive HF uses, not a shape-specialized kernel.
           * HF wrapper (fallback/reference, kept for one release).
         """
         from transformers import AutoConfig
@@ -1566,7 +1599,7 @@ class Qwen3OmniModel(Model):
         # vllm-omni. With "flash_attention_2", a single varlen FA2 call
         # per layer handles all frames at once via cu_seqlens.
         vision_encoder = Qwen3OmniMoeVisionEncoder._from_config(
-            vision_config, attn_implementation="flash_attention_2"
+            vision_config, attn_implementation=_hf_encoder_attn_impl()
         )
 
         load_weights_from_hf_shards(

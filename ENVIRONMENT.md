@@ -13,8 +13,13 @@ or reverted. Created 2026-06-25.
   (`HF_HOME`). ~60 GB. Disk: `/mnt/storage` had 1.9 TB free.
 
 ## New virtualenvs (under /mnt/storage/timchick/venvs, not /home)
-- `venvs/mstar` — pre-existing project env (torch 2.9.1+cu130, transformers 5.12.1,
-  flash-attn 2.8.3). Used for M\* + the encoder micro-benchmarks.
+- `venvs/mstar` — pre-existing project env (transformers 5.12.1, flash-attn 2.8.3).
+  Used for M\* + the encoder micro-benchmarks. **PyTorch build: must be
+  `torch==2.9.1+cu128`** to match this CUDA 12.8 box (`torch.version.cuda==12.8`,
+  `nvcc` 12.8); cu130 is the CUDA-13.x wheel and mismatches the toolkit (breaks
+  flash-attn). If the inherited env shows `+cu130`, reinstall via
+  `UV_TORCH_BACKEND=auto` (or `--index-url …/whl/cu128`) before trusting any
+  timing numbers. Project pin: `torch==2.9.1` (`pyproject.toml`).
 - `venvs/vllm-omni` — NEW. `uv venv --python 3.12`; `vllm==0.19.0
   --torch-backend=auto`; `vllm-omni` cloned to `/mnt/storage/timchick/vllm-omni`
   and `pip install -e .`.

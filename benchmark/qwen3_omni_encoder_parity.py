@@ -134,7 +134,7 @@ def make_chart(artifact, out_dir, tag):
     fig.suptitle(f"Per-layer parity (random weights, 0 missing/unexpected) — {artifact['env']['gpu']}")
     fig.tight_layout()
     p = os.path.join(out_dir, f"qwen3_omni_parity_depth_{tag}.png")
-    fig.savefig(p, dpi=130)
+    fig.savefig(p, dpi=200)
     plt.close(fig)
     return [p]
 
