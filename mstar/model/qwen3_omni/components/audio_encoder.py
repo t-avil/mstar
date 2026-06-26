@@ -396,6 +396,38 @@ class NativeQwen3OmniAudioEncoder(nn.Module):
         # varlen backend (SDPA's data-dependent mask build is not capture-safe).
         self._cg_cache: dict = {}
         self._cg_max_keys = int(os.environ.get("MSTAR_ENCODER_CG_MAX_KEYS", "16"))
+        self._cg_warmed = False
+
+    def _maybe_cg_warmup(self, input_features, feature_lens):
+        """Pre-capture graphs for all configured batch sizes BEFORE serving, so
+        lazy capture never lands inside a measured request. Triggered once, on
+        the first forward, when MSTAR_ENCODER_CG_WARMUP is a comma list of batch
+        sizes. Replicates the first clip's per-segment length to each batch size
+        (the graph key is the audio-length layout, identical across clips of the
+        same length)."""
+        if self._cg_warmed:
+            return
+        self._cg_warmed = True
+        spec = os.environ.get("MSTAR_ENCODER_CG_WARMUP", "")
+        if not spec or not self._cuda_graph_enabled() or feature_lens is None:
+            return
+        try:
+            batch_sizes = sorted({int(b) for b in spec.split(",") if b.strip()})
+        except ValueError:
+            return
+        fl = feature_lens.reshape(-1)
+        L0 = int(fl[0])                                   # frames in clip 0
+        mel = input_features.shape[0]
+        dev, dt = input_features.device, input_features.dtype
+        logger.info("audio encoder CUDA-graph warmup: pre-capturing batch sizes %s", batch_sizes)
+        for k in batch_sizes:
+            try:
+                lens = torch.full((k,), L0, dtype=torch.long, device=dev)
+                feats = input_features[:, :L0].repeat(1, k) if input_features.shape[1] >= L0 \
+                    else torch.zeros(mel, L0 * k, device=dev, dtype=dt)
+                self.forward(feats, feature_lens=lens)       # triggers capture for key_k
+            except Exception:
+                logger.warning("audio CG warmup failed for bs=%d", k, exc_info=True)
 
     def _cuda_graph_enabled(self) -> bool:
         if os.environ.get("MSTAR_ENCODER_CUDA_GRAPH", "0") not in ("1", "true", "True"):
@@ -453,6 +485,7 @@ class NativeQwen3OmniAudioEncoder(nn.Module):
         # HF's Qwen3OmniMoeAudioEncoder (some callers pass them); the native path
         # always returns the same AudioEncoderOutput regardless.
         assert feature_lens is not None, "native AuT requires feature_lens"
+        self._maybe_cg_warmup(input_features, feature_lens)
         param_dtype = self.conv2d1.weight.dtype
         input_features = input_features.to(param_dtype)
         padded_feature, chunk_lengths = chunk_and_pad_features(input_features, feature_lens, self.n_window)
