@@ -143,3 +143,28 @@ working infra: use the `mstar` wrapper (SHM by default) on a node with a normal
 - `benchmark/runner.py`: `results.json` now persists the full TTFT / ITL / RTF /
   throughput from `AggregateMetrics` (was JCT-only) + the real `inference_system`
   tag — additive, existing consumers unaffected.
+
+## vLLM-Omni working recipe (corrected from the stale repo instructions)
+- Repo `benchmark/vllm_omni_instructions.md` says `vllm==0.19.0` — **wrong/stale**.
+  vllm-omni HEAD needs `IrOpPriorityConfig` → install **`vllm==0.23.0`** (per
+  vllm-omni's own `docs/getting_started/quickstart.md`).
+- Then `vllm==0.23.0` pulls `transformers==4.57.6`, whose `Qwen3OmniMoeProcessor`
+  crashes: `Qwen2TokenizerFast has no attribute image_token`. Fix: upgrade to
+  **`transformers==5.12.1`** (allowed by vllm's pin `>=4.56,!=5.0-5.5`; handles
+  Qwen3-Omni's `image_token`). Verified: `AutoProcessor` → `Qwen3OmniMoeProcessor` OK.
+- Stage config moved: use `vllm_omni/deploy/qwen3_omni_moe.yaml` (2 GPUs: stage0
+  cuda:0, stages1+2 cuda:1). Serve: `CUDA_VISIBLE_DEVICES=0,2 vllm serve
+  Qwen/Qwen3-Omni-30B-A3B-Instruct --omni --port 8091 --stage-configs-path
+  vllm_omni/deploy/qwen3_omni_moe.yaml`.
+- uv cache redirected to `/mnt/storage/timchick/uv_cache` (root fs is full).
+- NOTE: removed the mstar-generated `tokenizer.json` from the shared snapshot (it
+  broke vllm's tokenizer load). Regenerate it for the M* step, or give M* its own
+  snapshot copy.
+
+## sglang-omni working recipe (corrected from stale instructions)
+- Repo instructions say `python -m sglang_omni.cli.cli serve` — **wrong module**.
+  Use the example launcher: `examples/run_qwen3_omni_server.py` (text-only output,
+  for I2T/S2T) or `examples/run_qwen3_omni_speech_server.py` (speech, for I2S).
+- transformers 5.6.0 (sglang venv) loads `Qwen3OmniMoeProcessor` fine (no image_token bug).
+- Serve: `CUDA_VISIBLE_DEVICES=0,2 python examples/run_qwen3_omni_server.py
+  --model-path Qwen/Qwen3-Omni-30B-A3B-Instruct --port 8092`.
