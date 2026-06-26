@@ -49,11 +49,13 @@ import matplotlib.pyplot as plt  # noqa: E402
 # Color scheme: green (M*-new, the winner), red (M*-old/HF), blue (vLLM),
 # purple (SGLang). Baseline stays gray as a reference line.
 SERIES = {
-    "ours_native": ("M*-new (native enc, opt)", "#2ca02c", "o", "-"),
+    "ours_native": ("M*-new (native enc, adaptive SDPA)", "#2ca02c", "o", "-"),
+    "ours_native_cg": ("M*-new + FlashInfer + CUDA-graph", "#1f77b4", "D", "-"),
+    "ours_native_fi": ("M*-new + FlashInfer (no graph)", "#7b3fa0", "v", ":"),
     "ours_native_baseline": ("M*-new (native, dense-mask baseline)", "#9e9e9e", "x", ":"),
     "ours_hf": ("M*-old (HF enc)", "#d62728", "s", "--"),
-    "vllm_omni": ("vLLM-Omni", "#1f77b4", "^", "-"),
-    "sglang_omni": ("SGLang-Omni", "#7b3fa0", "D", "-"),
+    "vllm_omni": ("vLLM-Omni", "#8c564b", "^", "-"),
+    "sglang_omni": ("SGLang-Omni", "#ff7f0e", "P", "-"),
 }
 PATH_LABEL = {
     "image_to_text": "I2T",
@@ -133,7 +135,8 @@ def _series_xy(runs, path, extractor):
     return out
 
 
-def _line_panel(ax, runs, path, extractor, ylabel, title, logx=True, logy=False):
+def _line_panel(ax, runs, path, extractor, ylabel, title, logx=True, logy=False,
+                higher_better=False):
     series = _series_xy(runs, path, extractor)
     for label, color, marker, ls, xs, ys in series:
         # markersize/linewidth + alpha so coincident lines (e.g. M*-old vs M*-new
@@ -146,6 +149,28 @@ def _line_panel(ax, runs, path, extractor, ylabel, title, logx=True, logy=False)
         vtxt = f"{ys[-1]:.3g}"
         ax.annotate(vtxt, (xs[-1], ys[-1]), textcoords="offset points",
                     xytext=(6, 4), fontsize=7, color=color)
+
+    # Per-point win labels on the BLUE line (ours_native_cg): its speedup vs
+    # Green (ours_native, adaptive) and vs Red (ours_hf). >1.00x = blue winning.
+    # For latency metrics (lower=better) the ratio is other/blue; for throughput
+    # (higher=better) it's blue/other -- so >1 always means "blue is better".
+    def _byb(key):
+        return {bs: extractor(d) for bs, d in runs.get(key, {}).get(path, {}).items()}
+    blue, green, red = _byb("ours_native_cg"), _byb("ours_native"), _byb("ours_hf")
+    blue_color = SERIES["ours_native_cg"][1]
+    for bs, by in sorted(blue.items()):
+        if by in (None, 0):
+            continue
+        parts = []
+        for tag, other in (("G", green.get(bs)), ("R", red.get(bs))):
+            if other in (None, 0):
+                continue
+            r = (by / other) if higher_better else (other / by)
+            parts.append(f"{tag}{r:.2f}x")
+        if parts:
+            ax.annotate(" ".join(parts), (bs, by), textcoords="offset points",
+                        xytext=(0, -14), fontsize=7, color=blue_color, ha="center",
+                        fontweight="bold")
     ax.set_xlabel("batch size")
     ax.set_ylabel(ylabel)
     ax.set_title(title)
@@ -247,7 +272,7 @@ def plot_speech_paths(runs, out_dir, topology, dpi=200, provenance=""):
             axes[1][col], runs, path,
             lambda d: d.get("audio_seconds_throughput"),
             "audio throughput (audio-sec/wall-sec) - higher=better",
-            f"{plabel} throughput  ({topology})")
+            f"{plabel} throughput  ({topology})", higher_better=True)
         any_data = any_data or r or t
     fig.suptitle("Qwen3-Omni speech paths - RTF & throughput across runtimes "
                  "(I2S = figs 5/6 analog; T2S = paper TTS path)")

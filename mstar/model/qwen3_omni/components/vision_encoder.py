@@ -19,6 +19,10 @@ Output contract matches the HF wrapper's consumer (VisionEncoderSubmodule):
 """
 from __future__ import annotations
 
+import logging
+import os
+from dataclasses import dataclass
+
 import torch
 from torch import nn
 from transformers.activations import ACT2FN
@@ -29,6 +33,23 @@ from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
 )
 
 from mstar.model.qwen3_omni.components.audio_encoder import varlen_attention
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _VisionGraph:
+    """One captured block-loop graph for a fixed grid layout. ``cu_seqlens`` and
+    ``position_embeddings`` are retained so the storage the captured kernels read
+    outlives the graph; ``fi_state`` keeps the dedicated FlashInfer wrapper alive
+    (and never re-planned)."""
+    graph: "torch.cuda.CUDAGraph"
+    static_x: torch.Tensor
+    out_merged: torch.Tensor
+    out_deepstack: list
+    cu_seqlens: torch.Tensor
+    position_embeddings: tuple
+    fi_state: dict
 
 
 def _rotate_half(x):
@@ -172,6 +193,80 @@ class NativeQwen3OmniVisionEncoder(nn.Module):
             for _ in range(len(config.deepstack_visual_indexes))
         ])
 
+        # CUDA-graph capture state for the block-loop tail. One captured graph
+        # per distinct grid layout (keyed on seq_len + cu_seqlens). Opt-in via
+        # MSTAR_ENCODER_CUDA_GRAPH=1; only legal with the FlashInfer varlen
+        # backend (SDPA's data-dependent mask build is not capture-safe).
+        self._cg_cache: dict = {}
+        self._cg_pool = None
+        self._cg_max_keys = int(os.environ.get("MSTAR_ENCODER_CG_MAX_KEYS", "16"))
+
+    def _cuda_graph_enabled(self) -> bool:
+        if os.environ.get("MSTAR_ENCODER_CUDA_GRAPH", "0") not in ("1", "true", "True"):
+            return False
+        import mstar.model.qwen3_omni.components.audio_encoder as AE
+        return AE._FLASHINFER_AVAILABLE and AE._VARLEN_BACKEND == "flashinfer"
+
+    def _block_loop_tail(self, hidden_states, cu_seqlens, max_seqlen, position_embeddings):
+        """The expensive, capture-legal region: block loop + DeepStack mergers +
+        final merger. ``cu_seqlens``/``max_seqlen``/``position_embeddings`` depend
+        only on ``grid_thw`` (the spatial layout), so for a fixed layout they are
+        constants and this whole region is replayable as one CUDA graph."""
+        deepstack_features = []
+        for i, blk in enumerate(self.blocks):
+            hidden_states = blk(hidden_states, cu_seqlens, max_seqlen, position_embeddings)
+            if i in self.deepstack_visual_indexes:
+                k = self.deepstack_visual_indexes.index(i)
+                deepstack_features.append(self.merger_list[k](hidden_states))
+        merged = self.merger(hidden_states)
+        return merged, deepstack_features
+
+    def _capture_graph(self, key, hidden_states, cu_seqlens, max_seqlen, position_embeddings):
+        """Capture ``_block_loop_tail`` for one grid-layout ``key`` with a
+        dedicated FlashInfer wrapper (planned once, never re-planned). Returns a
+        ``_VisionGraph`` or None if capture failed (caller then runs eager)."""
+        import mstar.model.qwen3_omni.components.audio_encoder as AE
+        dev = hidden_states.device
+        fi_state = AE.make_fi_state(dev)
+        if fi_state is None:
+            return None
+        # Each captured key gets its OWN private graph pool. Sharing one pool
+        # across lazily-captured keys trips the caching allocator's
+        # ``use_count > 0`` assert because the earlier key's static buffers are
+        # still live in the pool when the next capture_begin runs.
+        static_x = hidden_states.clone()
+        AE.set_fi_override(fi_state)
+        graph = torch.cuda.CUDAGraph()
+        try:
+            stream = torch.cuda.Stream()
+            stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(stream):
+                for _ in range(3):
+                    self._block_loop_tail(static_x, cu_seqlens, max_seqlen, position_embeddings)
+            torch.cuda.current_stream().wait_stream(stream)
+            with torch.cuda.graph(graph):
+                merged, deepstack = self._block_loop_tail(
+                    static_x, cu_seqlens, max_seqlen, position_embeddings)
+        except Exception:
+            logger.warning("vision encoder CUDA-graph capture failed for key=%s; "
+                           "falling back to eager", key, exc_info=True)
+            # A capture that throws inside capture_begin/capture can leave the
+            # current stream stuck in capture mode (so later eager ops fail with
+            # "Offset increment outside graph capture"). Reset the device's
+            # capture state defensively.
+            try:
+                torch.cuda.synchronize(dev)
+            except Exception:
+                pass
+            return None
+        finally:
+            AE.set_fi_override(None)
+        # Keep cu_seqlens / position_embeddings alive: the captured kernels read
+        # them, so their storage must outlive the graph.
+        return _VisionGraph(
+            graph=graph, static_x=static_x, out_merged=merged, out_deepstack=deepstack,
+            cu_seqlens=cu_seqlens, position_embeddings=position_embeddings, fi_state=fi_state)
+
     @torch.no_grad()
     def forward(self, pixel_values, grid_thw):
         dtype = self.patch_embed.proj.weight.dtype
@@ -194,12 +289,21 @@ class NativeQwen3OmniVisionEncoder(nn.Module):
         position_embeddings = (emb.cos(), emb.sin())
         max_seqlen = int((cu_seqlens[1:] - cu_seqlens[:-1]).max())
 
-        deepstack_features = []
-        for i, blk in enumerate(self.blocks):
-            hidden_states = blk(hidden_states, cu_seqlens, max_seqlen, position_embeddings)
-            if i in self.deepstack_visual_indexes:
-                k = self.deepstack_visual_indexes.index(i)
-                deepstack_features.append(self.merger_list[k](hidden_states))
+        if self._cuda_graph_enabled():
+            # Key on the exact varlen layout: same key => identical cu_seqlens /
+            # position_embeddings, so the captured graph is valid. Pixel values
+            # only enter via ``hidden_states``, which we copy into the static buf.
+            key = (int(seq_len), tuple(cu_seqlens.tolist()))
+            vg = self._cg_cache.get(key)
+            if vg is None and len(self._cg_cache) < self._cg_max_keys:
+                vg = self._capture_graph(
+                    key, hidden_states, cu_seqlens, max_seqlen, position_embeddings)
+                if vg is not None:
+                    self._cg_cache[key] = vg
+            if vg is not None:
+                vg.static_x.copy_(hidden_states)
+                vg.graph.replay()
+                return (vg.out_merged.clone(),
+                        [d.clone() for d in vg.out_deepstack])
 
-        merged = self.merger(hidden_states)
-        return merged, deepstack_features
+        return self._block_loop_tail(hidden_states, cu_seqlens, max_seqlen, position_embeddings)

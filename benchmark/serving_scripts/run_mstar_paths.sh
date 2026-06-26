@@ -34,11 +34,22 @@ PATHS="${PATHS:-image_to_text audio_to_text image_to_speech text_to_speech}"
 for path in $PATHS; do
   for bs in $BATCHES; do
     od="$OUT/$path/bs$bs"; mkdir -p "$od"
-    echo ">>> M*-$VARIANT $path bs=$bs $(date +%H:%M:%S)"
-    timeout "${TIMEOUT:-1200}" "$PY" -m benchmark.runner \
+    # Per-path sample count + fixed decode length to reduce noise. Text paths
+    # (I2T/S2T) use TEXT_OUTLEN (min==max + ignore_eos -> every request decodes
+    # exactly that many tokens => stable ITL); speech paths can use a smaller
+    # SPEECH_NREQ since they are slow.
+    REQ="$NREQ"; EXTRA=""
+    case "$path" in
+      image_to_text|audio_to_text)
+        [ -n "${TEXT_OUTLEN:-}" ] && EXTRA="--ignore-eos --output-len-min ${TEXT_OUTLEN} --output-len-max ${TEXT_OUTLEN}" ;;
+      image_to_speech|text_to_speech)
+        REQ="${SPEECH_NREQ:-$NREQ}" ;;
+    esac
+    echo ">>> M*-$VARIANT $path bs=$bs req=$REQ $(date +%H:%M:%S)"
+    timeout "${TIMEOUT:-1800}" "$PY" -m benchmark.runner \
       --url "$URL" --model qwen3omni --inference-system ours \
       --request-type "$path" --dataset "${DS[$path]}" \
-      --num-requests "$NREQ" --batch-size "$bs" --num-warmup "$NWARM" \
+      --num-requests "$REQ" --batch-size "$bs" --num-warmup "$NWARM" $EXTRA \
       --profiling-type closed_loop --max-concurrency "$bs" \
       --local-cache "$BENCH_ROOT/bench_cache" \
       --output-dir "$od" > "$od/run.log" 2>&1 \

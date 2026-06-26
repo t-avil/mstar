@@ -19,6 +19,7 @@ import logging
 import math
 import os
 from collections import namedtuple
+from dataclasses import dataclass
 
 import numpy as np
 import torch
@@ -129,14 +130,98 @@ def _sdpa_varlen_adaptive(q, k, v, cu_seqlens, scale):
     return _sdpa_varlen_dense(q, k, v, cu_seqlens, scale)
 
 
-# Backend selectable via env for A/B benchmarking. Default = adaptive: picks
-# dense vs per-segment per call from segment structure, so vision (few big
-# segments) and audio (many tiny windows) each get their best path.
-# MSTAR_VARLEN_BACKEND in {adaptive, per_segment, dense, padded}.
+# --------------------------------------------------------------------------- #
+# FlashInfer ragged (no-KV-cache) varlen self-attention.
+# This is the intended fast path that is also CUDA-graph-friendly: FlashInfer
+# splits attention into a host-side ``plan`` (absorbs the variable-length layout
+# from cu_seqlens) and a single fused, branch-free ``run`` kernel — so unlike the
+# SDPA fallbacks there is no data-dependent mask build or per-segment loop, and
+# the cost is ragged-native (~linear), not the O(n^2) dense mask. Mirrors how the
+# rest of M* (Thinker/Talker) already use FlashInfer.
+# --------------------------------------------------------------------------- #
+try:
+    import flashinfer as _flashinfer
+    _FLASHINFER_AVAILABLE = True
+except Exception:  # pragma: no cover
+    _flashinfer = None
+    _FLASHINFER_AVAILABLE = False
+
+# Per-device {workspace, wrapper, last cu_seqlens object} so we plan ONCE per
+# forward (all encoder layers share the same cu_seqlens object) and re-plan only
+# when a new forward arrives.
+_FI_STATE: dict = {}
+
+
+def _fi_pad_hd(t, target):
+    # Zero-pad the head_dim. FlashInfer's Hopper prefill kernel hard-asserts
+    # head_dim in {64,128,256}; the Qwen3-Omni encoders use 72 (vision) which is
+    # unsupported. Zero-padding q/k/v to 128 is EXACT: the padded dims contribute
+    # 0 to Q.K^T (zero*zero) and 0 to the output (zero V), so slicing the output
+    # back to the real head_dim recovers identical attention. Cost: ~128/72 more
+    # attention FLOPs, paid to get the fused, graph-capturable FlashInfer path.
+    return t if t.shape[-1] == target else F.pad(t, (0, target - t.shape[-1]))
+
+
+def make_fi_state(device):
+    """Build a fresh, isolated FlashInfer ragged-prefill wrapper + state dict.
+
+    Each CUDA-graph capture key owns one of these so its wrapper is planned
+    exactly once and never re-planned — re-planning a shared wrapper mutates
+    the buffers a previously-captured graph recorded, silently corrupting that
+    graph's replay. The shared per-device ``_FI_STATE`` is fine for eager use
+    (it re-plans on every layout change) but unsafe to capture against twice.
+    """
+    if not _FLASHINFER_AVAILABLE:
+        return None
+    ws = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device=device)
+    wrapper = _flashinfer.BatchPrefillWithRaggedKVCacheWrapper(ws, kv_layout="NHD")
+    return {"ws": ws, "wrapper": wrapper, "cu_obj": None}
+
+
+# When set (by the vision encoder's CUDA-graph capture), _flashinfer_varlen
+# routes through THIS state instead of the shared per-device _FI_STATE so the
+# capture plans/records a dedicated wrapper. Cleared after capture. Replay never
+# re-enters Python, so this only matters during warmup+capture.
+_fi_override: dict | None = None
+
+
+def set_fi_override(state):
+    global _fi_override
+    _fi_override = state
+
+
+def _flashinfer_varlen(q, k, v, cu_seqlens, scale):
+    """q/k/v: (total_tokens, num_heads, head_dim), packed/segmented by cu_seqlens.
+    Bidirectional self-attention (qo_indptr == kv_indptr == cu_seqlens)."""
+    if not _FLASHINFER_AVAILABLE:
+        return _sdpa_varlen_adaptive(q, k, v, cu_seqlens, scale)
+    dev = q.device
+    if _fi_override is not None:
+        st = _fi_override
+    else:
+        st = _FI_STATE.get(dev)
+        if st is None:
+            st = make_fi_state(dev)
+            _FI_STATE[dev] = st
+    wrapper = st["wrapper"]
+    H, D = q.shape[1], q.shape[2]
+    Dp = 64 if D <= 64 else (128 if D <= 128 else 256)   # FlashInfer-supported head_dim
+    qp, kp, vp = (_fi_pad_hd(t, Dp).contiguous() for t in (q, k, v))
+    if st["cu_obj"] is not cu_seqlens:          # plan once per forward
+        cu = cu_seqlens.to(torch.int32)
+        wrapper.plan(cu, cu, H, H, Dp, causal=False, sm_scale=float(scale),
+                     q_data_type=q.dtype)
+        st["cu_obj"] = cu_seqlens
+    out = wrapper.run(qp, kp, vp)
+    return out[..., :D].contiguous()
+
+
+# Backend selectable via env for A/B benchmarking. Default = adaptive (no-flash
+# SDPA). MSTAR_VARLEN_BACKEND in {adaptive, per_segment, dense, padded, flashinfer}.
 _VARLEN_BACKEND = os.environ.get("MSTAR_VARLEN_BACKEND", "adaptive")
 _VARLEN_FALLBACKS = {"adaptive": _sdpa_varlen_adaptive,
                      "per_segment": _sdpa_varlen_per_segment, "dense": _sdpa_varlen_dense,
-                     "padded": _sdpa_varlen_padded}
+                     "padded": _sdpa_varlen_padded, "flashinfer": _flashinfer_varlen}
 
 
 def _sdpa_varlen(q, k, v, cu_seqlens, scale):
@@ -263,6 +348,18 @@ class NativeAudioEncoderLayer(nn.Module):
         return residual + hidden_states
 
 
+@dataclass
+class _AudioGraph:
+    """One captured layer-loop graph for a fixed audio-length layout. ``cu_seqlens``
+    is retained so the storage the captured kernels read outlives the graph;
+    ``fi_state`` keeps the dedicated FlashInfer wrapper alive (never re-planned)."""
+    graph: "torch.cuda.CUDAGraph"
+    static_x: torch.Tensor
+    out: torch.Tensor
+    cu_seqlens: torch.Tensor
+    fi_state: dict
+
+
 class NativeQwen3OmniAudioEncoder(nn.Module):
     """Native AuT. Same I/O contract as HF: forward(input_features, feature_lens)
     -> object with ``.last_hidden_state`` of shape (num_audio_tokens, output_dim)."""
@@ -293,6 +390,63 @@ class NativeQwen3OmniAudioEncoder(nn.Module):
         self.act = ACT2FN[config.activation_function]
         self.proj2 = nn.Linear(d_model, config.output_dim)
 
+        # CUDA-graph capture state for the encoder layer-loop tail. One captured
+        # graph per distinct audio-length layout (keyed on seq_len + cu_seqlens).
+        # Opt-in via MSTAR_ENCODER_CUDA_GRAPH=1; only legal with the FlashInfer
+        # varlen backend (SDPA's data-dependent mask build is not capture-safe).
+        self._cg_cache: dict = {}
+        self._cg_max_keys = int(os.environ.get("MSTAR_ENCODER_CG_MAX_KEYS", "16"))
+
+    def _cuda_graph_enabled(self) -> bool:
+        if os.environ.get("MSTAR_ENCODER_CUDA_GRAPH", "0") not in ("1", "true", "True"):
+            return False
+        return _FLASHINFER_AVAILABLE and _VARLEN_BACKEND == "flashinfer"
+
+    def _layer_loop_tail(self, hidden_states, cu_seqlens, max_seqlen):
+        """The expensive, capture-legal region: encoder layer loop + post-norm /
+        projection head. ``cu_seqlens``/``max_seqlen`` depend only on the audio
+        length layout, so for a fixed layout this whole region replays as one graph."""
+        for layer in self.layers:
+            hidden_states = layer(hidden_states, cu_seqlens, max_seqlen)
+        hidden_states = self.ln_post(hidden_states)
+        hidden_states = self.proj1(hidden_states)
+        hidden_states = self.act(hidden_states)
+        hidden_states = self.proj2(hidden_states)
+        return hidden_states
+
+    def _capture_graph(self, key, hidden_states, cu_seqlens, max_seqlen):
+        """Capture ``_layer_loop_tail`` for one audio-length ``key`` with a
+        dedicated FlashInfer wrapper (planned once, never re-planned). Returns an
+        ``_AudioGraph`` or None if capture failed (caller then runs eager)."""
+        dev = hidden_states.device
+        fi_state = make_fi_state(dev)
+        if fi_state is None:
+            return None
+        static_x = hidden_states.clone()
+        set_fi_override(fi_state)
+        graph = torch.cuda.CUDAGraph()
+        try:
+            stream = torch.cuda.Stream()
+            stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(stream):
+                for _ in range(3):
+                    self._layer_loop_tail(static_x, cu_seqlens, max_seqlen)
+            torch.cuda.current_stream().wait_stream(stream)
+            with torch.cuda.graph(graph):
+                out = self._layer_loop_tail(static_x, cu_seqlens, max_seqlen)
+        except Exception:
+            logger.warning("audio encoder CUDA-graph capture failed for key=%s; "
+                           "falling back to eager", key, exc_info=True)
+            try:
+                torch.cuda.synchronize(dev)
+            except Exception:
+                pass
+            return None
+        finally:
+            set_fi_override(None)
+        return _AudioGraph(graph=graph, static_x=static_x, out=out,
+                           cu_seqlens=cu_seqlens, fi_state=fi_state)
+
     @torch.no_grad()
     def forward(self, input_features, feature_lens=None, return_dict=True, **kwargs):
         # ``return_dict``/``**kwargs`` accepted for signature-compatibility with
@@ -321,12 +475,21 @@ class NativeQwen3OmniAudioEncoder(nn.Module):
         hidden_states = torch.index_select(padded_embed.reshape(-1, padded_embed.shape[-1]), 0, valid_indices)
 
         max_seqlen = int((cu_seqlens[1:] - cu_seqlens[:-1]).max())
-        for layer in self.layers:
-            hidden_states = layer(hidden_states, cu_seqlens, max_seqlen)
 
-        hidden_states = self.ln_post(hidden_states)
-        hidden_states = self.proj1(hidden_states)
-        hidden_states = self.act(hidden_states)
-        hidden_states = self.proj2(hidden_states)
+        if self._cuda_graph_enabled():
+            # Key on the exact varlen layout: same key => identical cu_seqlens, so
+            # the captured graph is valid. Audio content only enters via
+            # ``hidden_states``, which we copy into the static buffer.
+            key = (int(hidden_states.shape[0]), tuple(cu_seqlens.tolist()))
+            ag = self._cg_cache.get(key)
+            if ag is None and len(self._cg_cache) < self._cg_max_keys:
+                ag = self._capture_graph(key, hidden_states, cu_seqlens, max_seqlen)
+                if ag is not None:
+                    self._cg_cache[key] = ag
+            if ag is not None:
+                ag.static_x.copy_(hidden_states)
+                ag.graph.replay()
+                return AudioEncoderOutput(last_hidden_state=ag.out.clone())
 
+        hidden_states = self._layer_loop_tail(hidden_states, cu_seqlens, max_seqlen)
         return AudioEncoderOutput(last_hidden_state=hidden_states)
