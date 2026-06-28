@@ -110,6 +110,51 @@ def vllm_audio_sentinels_enabled() -> bool:
     return _envflag("MSTAR_VLLM_AUDIO_SENTINELS")
 
 
+def chunked_prefill_enabled() -> bool:
+    """When ON, the Thinker prefill of a long audio/vision/text span is split
+    into token-budgeted chunks across scheduler steps (resumable chunked
+    prefill) so a single long prefill does not monopolize a scheduler step and
+    stall other requests' first tokens (TTFT at batch).
+
+    Default OFF -> the existing single-shot prefill is used and is byte-identical.
+    When ON, a prefill whose span is <= the chunk threshold is processed in a
+    single chunk and is byte-identical to the single-shot path.
+
+    See ``DESIGN_chunked_prefill.md`` for the full design and the partial
+    (model-side implemented, scheduler re-enqueue stubbed) state.
+    """
+    return _envflag("MSTAR_CHUNKED_PREFILL")
+
+
+# Default chunk size (max new prefill tokens admitted per scheduler step for a
+# single request) when MSTAR_CHUNKED_PREFILL is ON. Chosen to match the
+# mid-range PREFILL_TOKEN_BUCKETS entry so a fixed chunk maps onto an existing
+# CUDA-graph capture shape (num_tokens=chunk) with no new captures.
+DEFAULT_LONG_PREFILL_TOKEN_THRESHOLD = 512
+
+
+def long_prefill_token_threshold() -> int:
+    """Chunk size for resumable chunked prefill (max new prefill tokens per
+    request per scheduler step). Read from ``MSTAR_LONG_PREFILL_TOKEN_THRESHOLD``;
+    defaults to ``DEFAULT_LONG_PREFILL_TOKEN_THRESHOLD`` (512).
+
+    Keep this aligned with one of ``ThinkerSubmodule.PREFILL_TOKEN_BUCKETS`` so
+    every full chunk replays an existing capture; the final (ragged) chunk falls
+    back to the smallest bucket >= its size exactly like a short single-shot
+    prefill does today.
+    """
+    import os as _os
+
+    raw = _os.environ.get("MSTAR_LONG_PREFILL_TOKEN_THRESHOLD")
+    if raw is None:
+        return DEFAULT_LONG_PREFILL_TOKEN_THRESHOLD
+    try:
+        val = int(raw.strip())
+    except (TypeError, ValueError):
+        return DEFAULT_LONG_PREFILL_TOKEN_THRESHOLD
+    return val if val > 0 else DEFAULT_LONG_PREFILL_TOKEN_THRESHOLD
+
+
 def _tensor_dump_dir() -> str | None:
     """Directory for env-gated intermediate-tensor / token dumps, or None."""
     import os as _os

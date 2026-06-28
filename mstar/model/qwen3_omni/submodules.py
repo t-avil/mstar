@@ -32,6 +32,7 @@ from mstar.model.qwen3_omni.components.rope import (
     get_rope_index_audio,
     get_rope_index_text,
     get_rope_index_vision,
+    slice_mrope_positions,
 )
 from mstar.model.qwen3_omni.components.talker import Qwen3OmniCodePredictor, Qwen3OmniTalkerModel
 from mstar.model.qwen3_omni.config import Qwen3OmniModelConfig
@@ -510,6 +511,72 @@ class ThinkerSubmodule(ARNodeSubmodule):
             self._vision_eos_embed
         ], dim=0)
 
+    def _maybe_chunk_prefill(
+        self,
+        graph_walk: str,
+        fwd_info: CurrentForwardPassInfo,
+        node_inputs: ARNodeInputs,
+    ) -> ARNodeInputs:
+        """Resumable chunked prefill: slice a precomputed full-span prefill to
+        this step's token window when ``MSTAR_CHUNKED_PREFILL`` is ON.
+
+        Default OFF -> returns ``node_inputs`` unchanged (byte-identical
+        single-shot prefill). When ON, the chunk window for this step is read
+        from ``fwd_info.step_metadata`` (``prefill_chunk_offset`` /
+        ``prefill_chunk_len``). Those keys are populated by the conductor /
+        scheduler chunked re-enqueue path, which is currently STUBBED (see
+        ``DESIGN_chunked_prefill.md`` and the guard in
+        ``MicroScheduler.get_next_batch``). With the path stubbed the keys are
+        absent, so even with the flag ON a prefill is processed as a single
+        chunk covering the whole span -> still byte-identical to single-shot.
+
+        The M-RoPE handling follows the vLLM recipe: ``node_inputs.custom_pos_ids``
+        is the FULL ``(3, seq_len)`` position grid precomputed once by the walk
+        branch above; we just index ``[:, computed:computed + chunk_len]``. No
+        per-chunk grid math, so mid-span chunk boundaries are exact.
+        """
+        from mstar.model.qwen3_omni.qwen3_omni_model import (
+            chunked_prefill_enabled,
+        )
+
+        if not chunked_prefill_enabled():
+            return node_inputs
+
+        sm = fwd_info.step_metadata if fwd_info is not None else {}
+        full_len = node_inputs.input_seq_len
+        computed = int(sm.get("prefill_chunk_offset", 0))
+        chunk_len = int(sm.get("prefill_chunk_len", full_len))
+        if computed == 0 and chunk_len >= full_len:
+            # Whole span fits in one chunk (input <= threshold, or scheduler
+            # re-enqueue not active): nothing to slice -> byte-identical.
+            return node_inputs
+
+        if graph_walk == "prefill_vision":
+            # Vision chunking additionally needs per-chunk slicing of the
+            # deepstack_<i> tensors AND persistence of the vision encoder
+            # output across chunk steps -- part of the stubbed scheduler work.
+            raise NotImplementedError(
+                "Chunked prefill_vision is not yet wired end-to-end: the vision "
+                "encoder output (vision_embeds + deepstack) must persist across "
+                "chunk steps and each deepstack_<i> tensor must be sliced to the "
+                "chunk window. See DESIGN_chunked_prefill.md (Vision section)."
+            )
+
+        embeds = node_inputs.input_embeds[computed:computed + chunk_len]
+        pos_ids = slice_mrope_positions(
+            node_inputs.custom_pos_ids, computed, chunk_len
+        )
+        tensor_inputs = dict(node_inputs.tensor_inputs)
+        masks = tensor_inputs.get("masks_for_talker")
+        if isinstance(masks, torch.Tensor) and masks.dim() == 2:
+            tensor_inputs["masks_for_talker"] = masks[:, computed:computed + chunk_len]
+        return ARNodeInputs(
+            input_seq_len=chunk_len,
+            input_embeds=embeds,
+            custom_pos_ids=pos_ids,
+            tensor_inputs=tensor_inputs,
+        )
+
     def prepare_inputs(
         self,
         graph_walk: str,
@@ -566,13 +633,16 @@ class ThinkerSubmodule(ARNodeSubmodule):
                 torch.zeros(text_ids.shape, dtype=torch.bool, device=device), # multimodal
                 self._get_talker_text_mask(text_ids) # text inclusion
             ])
-            return ARNodeInputs(
-                input_seq_len=seq_len,
-                input_embeds=embeds,
-                custom_pos_ids=pos_ids,
-                tensor_inputs={
-                    "masks_for_talker": masks_for_talker
-                }
+            return self._maybe_chunk_prefill(
+                graph_walk, fwd_info,
+                ARNodeInputs(
+                    input_seq_len=seq_len,
+                    input_embeds=embeds,
+                    custom_pos_ids=pos_ids,
+                    tensor_inputs={
+                        "masks_for_talker": masks_for_talker
+                    }
+                ),
             )
 
         if graph_walk == "prefill_audio":
@@ -626,13 +696,16 @@ class ThinkerSubmodule(ARNodeSubmodule):
             pos_ids = torch.cat(
                 [start_pos_ids, audio_pos_ids, end_pos_ids], dim=1
             )
-            return ARNodeInputs(
-                input_seq_len=seq_len,
-                input_embeds=wrapped_embeds,
-                custom_pos_ids=pos_ids,
-                tensor_inputs={
-                    "masks_for_talker": masks_for_talker
-                }
+            return self._maybe_chunk_prefill(
+                graph_walk, fwd_info,
+                ARNodeInputs(
+                    input_seq_len=seq_len,
+                    input_embeds=wrapped_embeds,
+                    custom_pos_ids=pos_ids,
+                    tensor_inputs={
+                        "masks_for_talker": masks_for_talker
+                    }
+                ),
             )
 
         if graph_walk == "prefill_vision":
@@ -687,15 +760,18 @@ class ThinkerSubmodule(ARNodeSubmodule):
                 full_deepstack[mm_mask, :] = deepstack_inp
                 deepstack.append(full_deepstack)
 
-            return ARNodeInputs(
-                input_seq_len=total_len,
-                input_embeds=wrapped_embeds,
-                custom_pos_ids=pos_ids,
-                tensor_inputs={
-                    "masks_for_talker": masks_for_talker,
-                    "mrope_pos_advance": mrope_pos_advance,
-                    "deepstack": deepstack,
-                }
+            return self._maybe_chunk_prefill(
+                graph_walk, fwd_info,
+                ARNodeInputs(
+                    input_seq_len=total_len,
+                    input_embeds=wrapped_embeds,
+                    custom_pos_ids=pos_ids,
+                    tensor_inputs={
+                        "masks_for_talker": masks_for_talker,
+                        "mrope_pos_advance": mrope_pos_advance,
+                        "deepstack": deepstack,
+                    }
+                ),
             )
 
     def preprocess(

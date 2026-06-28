@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -11,6 +12,20 @@ from mstar.worker.engine_manager import EngineManager
 from mstar.worker.node_manager_utils import WorkerGraphsManager
 
 logger = logging.getLogger(__name__)
+
+# Thinker prefill walks eligible for resumable chunked prefill. Kept local to
+# the scheduler so it does not import the (heavy) Qwen3-Omni model module just
+# to read the env flag.
+_THINKER_PREFILL_WALKS = frozenset(
+    {"prefill_text", "prefill_audio", "prefill_vision"}
+)
+
+
+def _chunked_prefill_enabled() -> bool:
+    """Mirror of ``qwen3_omni_model.chunked_prefill_enabled`` without importing
+    the model module (avoids a worker->model import cycle). Default OFF."""
+    raw = os.environ.get("MSTAR_CHUNKED_PREFILL")
+    return raw is not None and raw.strip().lower() in ("1", "true", "yes", "on")
 
 
 @dataclass
@@ -299,11 +314,97 @@ class MicroScheduler:
             best_node_name, graph_walk
         )] = self.batch_number
 
+        # Resumable chunked prefill (MSTAR_CHUNKED_PREFILL): cap new prefill
+        # tokens per step and re-enqueue the remainder. STUBBED -- see the
+        # method docstring for exactly what remains. Dormant by default and
+        # when the flag is OFF; only fires once the conductor marks a request
+        # as needing chunking, which it does not yet.
+        if _chunked_prefill_enabled() and graph_walk in _THINKER_PREFILL_WALKS:
+            self._maybe_reenqueue_prefill_remainder(
+                worker_graphs_manager, graph_walk, node_objects,
+            )
+
         return ScheduledBatch(
             node_name=best_node_name,
             graph_walk=graph_walk,
             node_objects=node_objects,
             request_to_worker_graph=request_to_worker_graph,
+        )
+
+    def _maybe_reenqueue_prefill_remainder(
+        self,
+        worker_graphs_manager: WorkerGraphsManager,
+        graph_walk: str,
+        node_objects: dict[str, GraphNode],
+    ) -> None:
+        """STUB: cap each request's prefill to the token threshold and put the
+        remainder back on its queue for the next scheduler cycle.
+
+        This is the one piece of resumable chunked prefill that is NOT yet
+        implemented (it cannot be validated without a GPU). The model side is
+        complete: ``ThinkerSubmodule._maybe_chunk_prefill`` slices a precomputed
+        full-span prefill (embeds + 3D M-RoPE + talker masks) to the window
+        ``[prefill_chunk_offset : prefill_chunk_offset + prefill_chunk_len]``
+        read from ``fwd_info.step_metadata``, and the FlashInfer KV append is
+        already resumable (``cache_manager._plan_attention_impl`` writes ``sl``
+        new tokens at offset ``state.seq_len`` and grows pages to
+        ``state.seq_len + sl``), so feeding chunks across steps appends KV
+        correctly and the next chunk's queries attend causally over the KV the
+        previous chunks wrote.
+
+        TODO -- to finish, in priority order:
+          1. Per-request computed-tokens counter. Track new prefill tokens
+             admitted so far for each (request_id, prefill walk). The total
+             span length is known to the conductor (text token count;
+             audio/vision token count after the encoder node runs), not to the
+             scheduler -- so the conductor must publish it (e.g. on
+             ``CurrentForwardPassInfo.step_metadata['prefill_total_len']``).
+          2. Cap + re-enqueue. When ``computed + threshold < total``, set
+             ``step_metadata['prefill_chunk_offset'] = computed`` and
+             ``['prefill_chunk_len'] = min(threshold, total - computed)`` for
+             THIS step, advance the counter, and re-push the SAME prefill node
+             onto the request's per-request queue (``queue.push_ready_node`` /
+             the WorkerGraphsManager re-enqueue API) so it is ready again next
+             cycle. Only the FINAL chunk sets ``is_last_prefill=True`` (so
+             logits are sampled once -- see ThinkerSubmodule.forward ~L868 and
+             the conductor ~L1098).
+          3. Conductor coordination (qwen3_omni_model.py). The Thinker state
+             machine (``_get_thinker_forward``) must NOT advance
+             ``prefill_step`` until the current walk's span is fully consumed,
+             and the Talker's ``num_thinker_prefill_steps`` must keep counting
+             one streamed thinker_states chunk per WALK, not per token-chunk
+             (or the Talker last-prefill detection drifts). Simplest: stream
+             thinker_states only on the final token-chunk of each walk.
+          4. Encoder-output persistence for audio/vision. The encoder node runs
+             once and its output (audio_embeds / vision_embeds + deepstack) must
+             persist across the walk's chunk steps; today it is consumed by the
+             single Thinker step. prefill_vision additionally needs per-chunk
+             deepstack_<i> slicing (ThinkerSubmodule._maybe_chunk_prefill raises
+             NotImplementedError for vision until then).
+          5. seen_token_mask: add_tokens must run once per token (currently per
+             walk step on the full span); move it to slice on the chunk window.
+          6. CUDA graphs: a fixed chunk size == one PREFILL_TOKEN_BUCKETS entry,
+             so full chunks replay an existing capture; the ragged final chunk
+             uses the smallest bucket >= its size, exactly like a short
+             single-shot prefill today. No new captures required.
+
+        Validation is GPU-only: assert 2-chunk prefill KV + first-token logits
+        match single-shot (test/modular/test_qwen3_omni_chunked_prefill_parity.py).
+        """
+        needs_chunking = any(
+            getattr(n, "requires_prefill_chunking", False)
+            for n in node_objects.values()
+        )
+        if not needs_chunking:
+            # No conductor-marked request needs chunking -> dormant. Short
+            # prefills (<= threshold) and the flag-ON single-chunk path reach
+            # here and proceed unchanged.
+            return
+        raise NotImplementedError(
+            "Resumable chunked-prefill re-enqueue is not implemented; see "
+            "MicroScheduler._maybe_reenqueue_prefill_remainder for the full "
+            "TODO and DESIGN_chunked_prefill.md. Unset MSTAR_CHUNKED_PREFILL "
+            "to use single-shot prefill."
         )
 
     def has_ready_excluding(
