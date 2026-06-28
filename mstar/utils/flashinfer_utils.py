@@ -19,6 +19,8 @@ import logging
 
 import torch
 
+from mstar.utils.fp8_utils import is_fp8_dtype
+
 logger = logging.getLogger(__name__)
 
 
@@ -110,7 +112,16 @@ class FlashInferPrefillWrapper:
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
         self.page_size = page_size
+        # ``dtype`` is the query/compute dtype (bf16). ``kv_dtype`` is the
+        # paged-cache storage dtype, which equals ``dtype`` for a normal
+        # cache and an fp8 format (e4m3/e5m2) when MSTAR_FP8_KV is on.
+        # ``k_scale`` / ``v_scale`` are the fp8 dequant factors (None for
+        # a bf16 cache). All three default to the bf16-equivalent values so
+        # the OFF path is unchanged.
         self.dtype = None
+        self.kv_dtype = None
+        self.k_scale: float | None = None
+        self.v_scale: float | None = None
 
         import flashinfer
 
@@ -168,11 +179,19 @@ class FlashInferPrefillWrapper:
         paged_kv_last_page_len: torch.Tensor,
         causal: bool = True,
         dtype: torch.dtype = torch.bfloat16,
+        kv_dtype: torch.dtype | None = None,
+        k_scale: float | None = None,
+        v_scale: float | None = None,
     ):
         """Plan attention and compute KV write indices.
 
         In CUDA graph mode, updates static buffers via .copy_() so that
         the same GPU addresses are used during graph replay.
+
+        ``dtype`` is the query/compute dtype; ``kv_dtype`` (defaults to
+        ``dtype``) is the paged-cache storage dtype. When ``kv_dtype`` is an
+        fp8 format, FlashInfer reads bf16 Q against fp8 K/V and dequantizes
+        with ``k_scale`` / ``v_scale`` supplied at ``run`` time.
 
         Inputs may be on CPU — that's preferred because FlashInfer's
         ``BatchPrefillWithPagedKVCacheWrapper.plan`` does ``indptr.to("cpu")``
@@ -183,6 +202,9 @@ class FlashInferPrefillWrapper:
         per-token bookkeeping below.
         """
         self.dtype = dtype
+        self.kv_dtype = kv_dtype if kv_dtype is not None else dtype
+        self.k_scale = k_scale
+        self.v_scale = v_scale
         self.attn_wrapper.plan(
             qo_indptr=qo_indptr,
             paged_kv_indptr=paged_kv_indptr,
@@ -194,6 +216,7 @@ class FlashInferPrefillWrapper:
             page_size=self.page_size,
             causal=causal,
             q_data_type=dtype,
+            kv_data_type=self.kv_dtype,
         )
 
         # Async H2D for the GPU-side per-token bookkeeping that follows.
@@ -266,6 +289,11 @@ class FlashInferPrefillWrapper:
         Returns:
             output: [total_tokens, num_qo_heads, head_dim]
         """
+        if is_fp8_dtype(self.kv_dtype):
+            return self.attn_wrapper.run(
+                q.to(self.dtype), kv_cache_layer,
+                k_scale=self.k_scale, v_scale=self.v_scale,
+            )
         return self.attn_wrapper.run(q.to(self.dtype), kv_cache_layer)
 
     def set_kv_cache(
@@ -276,6 +304,10 @@ class FlashInferPrefillWrapper:
     ):
         """Write K, V to the paged KV cache at pre-computed positions.
 
+        For an fp8 cache the new K/V are scaled by ``1/scale`` and clamped
+        to the fp8 range before the cast, matching the dequant convention
+        used at ``run`` time (real ≈ stored * scale).
+
         Args:
             kv_cache_layer: [max_pages, 2, page_size, num_kv_heads, head_dim]
             k: [total_tokens, num_kv_heads, head_dim]
@@ -284,8 +316,21 @@ class FlashInferPrefillWrapper:
         n = self._total_tokens
         page_idx = self.token_to_page[:n]
         cache_idx = self.token_to_cache[:n]
-        kv_cache_layer[page_idx, 0, cache_idx] = k[:n].to(self.dtype)
-        kv_cache_layer[page_idx, 1, cache_idx] = v[:n].to(self.dtype)
+        k_w, v_w = self._quantize_kv(k[:n], v[:n])
+        kv_cache_layer[page_idx, 0, cache_idx] = k_w
+        kv_cache_layer[page_idx, 1, cache_idx] = v_w
+
+    def _quantize_kv(self, k: torch.Tensor, v: torch.Tensor):
+        """Cast K/V into the cache storage dtype (scaling first for fp8)."""
+        if is_fp8_dtype(self.kv_dtype):
+            from mstar.utils.fp8_utils import quantize_to_fp8
+            ks = self.k_scale if self.k_scale is not None else 1.0
+            vs = self.v_scale if self.v_scale is not None else 1.0
+            return (
+                quantize_to_fp8(k, ks, self.kv_dtype),
+                quantize_to_fp8(v, vs, self.kv_dtype),
+            )
+        return k.to(self.kv_dtype), v.to(self.kv_dtype)
 
 
 class FlashInferDecodeWrapper:
@@ -327,7 +372,11 @@ class FlashInferDecodeWrapper:
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
         self.page_size = page_size
+        # See FlashInferPrefillWrapper for the meaning of these four.
         self.dtype = None
+        self.kv_dtype = None
+        self.k_scale: float | None = None
+        self.v_scale: float | None = None
 
         import flashinfer
 
@@ -373,6 +422,9 @@ class FlashInferDecodeWrapper:
         paged_kv_last_page_len: torch.Tensor,
         kv_cache_locations: torch.Tensor | None = None,
         dtype: torch.dtype = torch.bfloat16,
+        kv_dtype: torch.dtype | None = None,
+        k_scale: float | None = None,
+        v_scale: float | None = None,
     ):
         """Plan decode attention and compute KV write locations.
 
@@ -380,9 +432,17 @@ class FlashInferDecodeWrapper:
         location is the last page at position = last_page_len (before
         the append; after append it becomes last_page_len).
 
+        ``dtype`` is the query/compute dtype; ``kv_dtype`` (defaults to
+        ``dtype``) is the cache storage dtype (an fp8 format when
+        MSTAR_FP8_KV is on). ``k_scale`` / ``v_scale`` are the fp8 dequant
+        factors passed to ``run``.
+
         Inputs may be on CPU; see prefill wrapper's plan docstring.
         """
         n_req = paged_kv_indptr.shape[0] - 1
+        self.kv_dtype = kv_dtype if kv_dtype is not None else dtype
+        self.k_scale = k_scale
+        self.v_scale = v_scale
 
         if self.enable_nvtx:
             from mstar.utils.profiler import range_pop, range_push
@@ -398,6 +458,7 @@ class FlashInferDecodeWrapper:
                 head_dim=self.head_dim,
                 page_size=self.page_size,
                 q_data_type=dtype,
+                kv_data_type=self.kv_dtype,
             )
         finally:
             if self.enable_nvtx:
@@ -462,6 +523,11 @@ class FlashInferDecodeWrapper:
         Returns:
             output: [n_req, num_qo_heads, head_dim]
         """
+        if is_fp8_dtype(self.kv_dtype):
+            return self.attn_wrapper.run(
+                q.to(self.dtype), kv_cache_layer,
+                k_scale=self.k_scale, v_scale=self.v_scale,
+            )
         return self.attn_wrapper.run(q.to(self.dtype), kv_cache_layer)
 
     def set_kv_cache(
@@ -472,6 +538,9 @@ class FlashInferDecodeWrapper:
     ):
         """Write K, V for decode (1 token per request).
 
+        For an fp8 cache K/V are scaled and clamped before the cast (see
+        the prefill wrapper's ``set_kv_cache``).
+
         Args:
             kv_cache_layer: [max_pages, 2, page_size, num_kv_heads, head_dim]
             k: [n_req, num_kv_heads, head_dim]
@@ -480,5 +549,18 @@ class FlashInferDecodeWrapper:
         n = self._n_req
         pages = self.kv_cache_locations[:n, 0]
         positions = self.kv_cache_locations[:n, 1]
-        kv_cache_layer[pages, 0, positions] = k[:n].to(self.dtype)
-        kv_cache_layer[pages, 1, positions] = v[:n].to(self.dtype)
+        k_w, v_w = self._quantize_kv(k[:n], v[:n])
+        kv_cache_layer[pages, 0, positions] = k_w
+        kv_cache_layer[pages, 1, positions] = v_w
+
+    def _quantize_kv(self, k: torch.Tensor, v: torch.Tensor):
+        """Cast K/V into the cache storage dtype (scaling first for fp8)."""
+        if is_fp8_dtype(self.kv_dtype):
+            from mstar.utils.fp8_utils import quantize_to_fp8
+            ks = self.k_scale if self.k_scale is not None else 1.0
+            vs = self.v_scale if self.v_scale is not None else 1.0
+            return (
+                quantize_to_fp8(k, ks, self.kv_dtype),
+                quantize_to_fp8(v, vs, self.kv_dtype),
+            )
+        return k.to(self.kv_dtype), v.to(self.kv_dtype)

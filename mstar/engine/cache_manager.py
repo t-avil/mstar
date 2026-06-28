@@ -4,6 +4,7 @@ import torch
 
 from mstar.engine.kv_store import KVCacheConfig, KVRequestState, PagedAllocationManager
 from mstar.utils.flashinfer_utils import FlashInferDecodeWrapper, FlashInferPrefillWrapper
+from mstar.utils.fp8_utils import fp8_compute_dtype, is_fp8_dtype, kv_scales
 
 
 @dataclass
@@ -88,6 +89,17 @@ class BatchedCacheManager:
         self.device = device
         self.layer_idx = 0
         self.enable_nvtx = enable_nvtx
+
+        # FP8 KV cache (MSTAR_FP8_KV): when ``kv_cache`` was allocated in an
+        # fp8 format, attention math (the query) runs in bf16 while K/V are
+        # stored fp8 and dequantized by FlashInfer with these per-tensor
+        # calibration scales. For a normal bf16 cache ``_kv_is_fp8`` is
+        # False and the scales are unused — the OFF path is unchanged.
+        self._kv_is_fp8 = is_fp8_dtype(kv_cache.dtype) if kv_cache is not None else False
+        if self._kv_is_fp8:
+            self._k_scale, self._v_scale = kv_scales()
+        else:
+            self._k_scale, self._v_scale = None, None
 
         self.auto_write_store = auto_write_store
 
@@ -238,13 +250,17 @@ class BatchedCacheManager:
 
         assert self.kv_cache is not None
 
-        # Default the FlashInfer wrapper's dtype to whatever dtype the KV
-        # cache tensor was actually allocated in. Hardcoding bf16 here breaks
-        # any model that runs in fp32 (the wrapper would try to write
-        # bf16-cast K/V into an fp32 cache and torch raises a dtype mismatch
-        # in flashinfer_utils.set_kv_cache).
+        # Split the query/compute dtype from the KV *storage* dtype.
+        #
+        # For a normal cache they are equal — defaulting to whatever the KV
+        # tensor was allocated in (bf16, or fp32 for fp32 models; hardcoding
+        # bf16 would break fp32 models with a dtype mismatch in
+        # set_kv_cache). For an fp8 cache (MSTAR_FP8_KV) the query stays bf16
+        # while K/V are stored fp8; FlashInfer dequantizes K/V with the
+        # per-tensor scales recorded on this manager.
+        kv_dtype = self.kv_cache.dtype
         if dtype is None:
-            dtype = self.kv_cache.dtype
+            dtype = fp8_compute_dtype(kv_dtype)
 
         effective_label = label
         if effective_label is None:
@@ -403,6 +419,9 @@ class BatchedCacheManager:
                     paged_kv_last_page_len=paged_kv_last_page_len,
                     kv_cache_locations=kv_cache_locations,
                     dtype=dtype,
+                    kv_dtype=kv_dtype,
+                    k_scale=self._k_scale,
+                    v_scale=self._v_scale,
                 )
             else:
                 wrapper.plan(
@@ -412,6 +431,9 @@ class BatchedCacheManager:
                     paged_kv_last_page_len=paged_kv_last_page_len,
                     causal=is_causal,
                     dtype=dtype,
+                    kv_dtype=kv_dtype,
+                    k_scale=self._k_scale,
+                    v_scale=self._v_scale,
                 )
         finally:
             if self.enable_nvtx:
@@ -594,13 +616,20 @@ class BatchedCacheManager:
             enable_nvtx=self.enable_nvtx,
         )
 
+        # Keep the CFG batch consistent with the cache storage dtype: when
+        # the cache is fp8 the query stays bf16 but K/V are stored fp8.
+        kv_dtype = self.kv_cache.dtype
+        compute_dtype = fp8_compute_dtype(kv_dtype, fallback=dtype)
         wrapper.plan(
             qo_indptr=qo_indptr,
             paged_kv_indptr=paged_kv_indptr,
             paged_kv_indices=paged_kv_indices,
             paged_kv_last_page_len=paged_kv_last_page_len,
             causal=is_causal,
-            dtype=dtype,
+            dtype=compute_dtype,
+            kv_dtype=kv_dtype,
+            k_scale=self._k_scale,
+            v_scale=self._v_scale,
         )
 
         ps = _PlanState(

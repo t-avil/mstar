@@ -141,13 +141,23 @@ class EngineManager:
                     else:
                         submodules[name] = submodule.to(device=device)
 
+            # FP8 KV cache (MSTAR_FP8_KV, default OFF): store the paged KV
+            # cache for AR engines in e4m3 instead of the compute dtype.
+            # Only KVCacheEngine reads non-bf16 KV; other engine types keep
+            # the autocast dtype. ``kv_cache_storage_dtype`` returns
+            # ``autocast_dtype`` unchanged when the flag is off.
+            from mstar.utils.fp8_utils import kv_cache_storage_dtype
+            kv_cache_type = autocast_dtype
+            if isinstance(engine, KVCacheEngine) and autocast_dtype is not None:
+                kv_cache_type = kv_cache_storage_dtype(autocast_dtype)
+
             engine.load_model(
                 submodules,
                 tp_groups=tp_groups,
                 kv_cache_config=kv_config,
                 device=device,
                 transfer_engine_info=transfer_engine_info,
-                kv_cache_type=autocast_dtype,
+                kv_cache_type=kv_cache_type,
                 default_sampling_config={
                     node: model.get_sampling_config(node, {}) \
                         for node in submodules

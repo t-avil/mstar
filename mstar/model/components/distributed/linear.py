@@ -5,6 +5,45 @@ from mstar.distributed.communication import TPCommGroup
 from mstar.distributed.utils import divide, split_tensor_along_last_dim
 
 
+def _linear(module: nn.Module, input_: torch.Tensor, weight: torch.Tensor,
+            bias: torch.Tensor | None) -> torch.Tensor:
+    """Linear that optionally runs through an fp8 ``scaled_mm`` GEMM.
+
+    Default path is ``F.linear`` (bf16) — byte-identical to before. When
+    ``MSTAR_FP8_WEIGHTS`` is set *and* fp8 scaled_mm is available, the
+    weight is quantized to e4m3 once (lazily, cached on the module) and the
+    GEMM runs with a dynamic per-tensor activation scale.
+
+    Caveat (needs GPU validation): the lazy quantization must complete
+    before CUDA-graph capture, otherwise the captured graph bakes the bf16
+    path. The intended production wiring is a one-shot weight quantization
+    at load time; this lazy hook is the scaffold. See DESIGN_fp8.md.
+    """
+    from mstar.utils.fp8_utils import (
+        fp8_linear,
+        fp8_scaled_mm_supported,
+        fp8_weights_enabled,
+        quantize_weight_fp8,
+    )
+
+    if (
+        fp8_weights_enabled()
+        and fp8_scaled_mm_supported()
+        and weight.dtype not in (torch.float8_e4m3fn, torch.float8_e5m2)
+    ):
+        wq = getattr(module, "_fp8_weight", None)
+        if wq is None:
+            wq, ws = quantize_weight_fp8(weight)
+            module._fp8_weight = wq
+            module._fp8_weight_scale = ws
+        return fp8_linear(
+            input_, module._fp8_weight, module._fp8_weight_scale, bias,
+            out_dtype=input_.dtype if input_.dtype != torch.float32 else torch.bfloat16,
+        )
+
+    return torch.nn.functional.linear(input_, weight, bias)
+
+
 class ColumnParallelLinear(nn.Module):
     """Linear layer with column parallelism.
 
@@ -97,8 +136,8 @@ class ColumnParallelLinear(nn.Module):
     ) -> torch.Tensor | tuple[torch.Tensor, nn.Parameter | None]:
         bias = self.bias if not self.skip_bias_add else None
 
-        # Matrix multiply.
-        output_parallel = torch.nn.functional.linear(input_, self.weight, bias)
+        # Matrix multiply (optionally fp8 scaled_mm; default bf16 F.linear).
+        output_parallel = _linear(self, input_, self.weight, bias)
 
         if self.gather_output and self.tp_size > 1:
             # All-gather across the partitions.
@@ -409,7 +448,7 @@ class RowParallelLinear(nn.Module):
         # Only fuse bias add into GEMM for rank 0 (this ensures that
         # bias will not get added more than once in TP>1 case)
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
-        output_parallel = torch.nn.functional.linear(input_parallel, self.weight, bias_)
+        output_parallel = _linear(self, input_parallel, self.weight, bias_)
 
         if self.reduce_results and self.tp_size > 1:
             output = self.comm_group.all_reduce(output_parallel)
