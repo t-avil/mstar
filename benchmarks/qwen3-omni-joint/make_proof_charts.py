@@ -194,6 +194,6 @@ for path, (title, modality) in PATHS.items():
                bbox_to_anchor=(0.5, -0.01))
     fig.tight_layout(rect=[0, 0.03, 1, 0.96])
     outp = os.path.join(OUT, f"{path}_4metric.png")
-    fig.savefig(outp, dpi=130, bbox_inches="tight"); plt.close(fig)
+    fig.savefig(outp, dpi=200, bbox_inches="tight"); plt.close(fig)
     print("wrote", outp)
 print("DONE")
