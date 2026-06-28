@@ -1,0 +1,56 @@
+{
+  "benchmark": "code2wav-sp",
+  "title": "Code2Wav frame-dim SEQUENCE PARALLELISM for Qwen3-Omni (M*)",
+  "branch": "code2wav-sp",
+  "base_commit": "43ffffa",
+  "gpus": "2x H200 (physical 4,5), default qwen3omni_2gpu placement",
+  "env_flags": {
+    "MSTAR_CODE2WAV_SP": "master enable (default 0 = byte-identical baseline)",
+    "MSTAR_CODE2WAV_SP_NSHARD": "contiguous frame shards (default 2)",
+    "MSTAR_CODE2WAV_SP_HALO": "left-context halo in codec frames (default 32)",
+    "MSTAR_CODE2WAV_SP_DEVICES": "per-shard devices e.g. cuda:0,cuda:1 (absent=single-GPU shard mode)",
+    "MSTAR_CODE2WAV_SP_COMPILE": "torch.compile each per-device conv stack (default 1)"
+  },
+  "design": {
+    "where_shard": "AFTER the cheap pre_transformer (sliding-window-72 attention runs on the FULL chunk so its context is exact), the EXPENSIVE upsample+decoder causal conv stack is sharded over contiguous frame ranges.",
+    "halo": "Each non-first shard prepends `halo` real left-context frames; the conv stack is fully causal (left-pad-only convs, right-cropped transposed convs) so frames [a,b) depend only on input frames [a-R, b). Measured conv receptive field R ~= 4 frames; default halo=32 is 8x margin.",
+    "boundary_align": "Decoder transposed convs lose a CONSTANT C=555 samples of causal warmup (output length = total_upsample*T - C, affine). Interior-shard trim = up*ctx - C (not up*ctx); shard 0 keeps everything. This makes the recombined waveform LENGTH and CONTENT exactly match the single-pass output (no off-by-C seam).",
+    "multi_device": "Conv-stack weights are deep-copied onto each extra device; shard hidden slice -> .to(device) -> conv stack -> trim halo -> .to(base) -> concat. Talker+Code2Wav colocate on worker_0 (cuda:0); worker_0 can address cuda:1 (all GPUs visible, CUDA_VISIBLE_DEVICES set process-wide pre-spawn), Thinker (worker_1, cuda:1) is idle during B=1 vocoding.",
+    "cuda_graph": "SP path is cross-device+dynamic -> not graph-capturable; Code2WavSubmodule disables graph capture when SP on (runs eager)."
+  },
+  "parity_gate": {
+    "status": "PASS",
+    "method": "Real Qwen3OmniMoeCode2Wav (random fp32 weights), single-pass vs sharded, identical weights/inputs. Full-waveform max-abs + cosine, plus +/-2400-sample boundary window.",
+    "exact_cases": {
+      "exact_1gpu_2shard": "len match exactly; max_abs ~1.1e-4 (fp32 conv-reassociation floor); cosine 0.99999997; seam_max_abs ~8e-5",
+      "exact_2gpu_2shard": "len match exactly; max_abs ~1.0e-4; cosine 0.99999997; seam_max_abs ~8e-5",
+      "exact_2gpu_4shard": "len match exactly; max_abs ~1.1e-4; cosine 0.99999997; 3 seams all ~8e-5"
+    },
+    "halo_sweep_T400": {
+      "0": "LENGTH MISMATCH (degenerate)",
+      "1": "max_abs 4.7e-3 (audible seam)",
+      "2": "1.9e-3",
+      "4": "1.1e-4 (== floor; seam fully closed)",
+      "8": "1.1e-4", "16": "1.1e-4", "32": "1.1e-4"
+    },
+    "conclusion": "Sharded waveform == single-device waveform to fp32 precision, including AT the shard boundary. Receptive field R~=4 frames; halo>=4 is exact. Default 32 is safe. NO seam/click."
+  },
+  "microbench_verdict": {
+    "method": "Isolated vocoder forward timing (warmup 20, measure 100), T = input codec frames. T=50 is the production streaming chunk (codec_chunk 25 + left_context 25).",
+    "key_finding": "The vocoder is LAUNCH-BOUND, not compute-bound: T=50->800 is 16x more frames but only 4.2x more time (single_compiled 11.29->47.14 ms). Splitting a launch-bound workload only MULTIPLIES kernel-launch overhead.",
+    "speedup_vs_single_compiled_at_T50": {
+      "single_eager": "0.79x", "sp_1gpu_2shard": "0.79x", "sp_2gpu_2shard": "0.73x", "sp_2gpu_4shard": "0.50x"
+    },
+    "speedup_vs_single_compiled_at_T800": {
+      "single_eager": "0.57x", "sp_1gpu_2shard": "0.95x", "sp_2gpu_2shard": "0.95x", "sp_2gpu_4shard": "0.62x"
+    },
+    "observations": [
+      "SP NEVER beats the compiled baseline at any T (asymptotes to 0.95x at T=800, never reaches 1.0x).",
+      "2-GPU SP ~= 1-GPU SP at every T -> the second GPU adds nothing; the bottleneck is launch overhead/serialization, not GPU compute throughput.",
+      "torch.compile alone (already in the baseline) is the bigger lever: it fuses the launch-bound SnakeBeta+Conv+pad chains, exactly the cost SP cannot reduce.",
+      "Against the EAGER baseline, 2-GPU SP does help at large T (1.66x at T=800) -- but production uses the COMPILED path and streams tiny T=50 chunks."
+    ],
+    "verdict": "Code2Wav frame-dim SP does NOT halve the vocoder cost. At the production T=50 streaming chunk it is 27-50% SLOWER than the compiled baseline. The premise (long audio => the vocoder dominates and is shardable) holds in aggregate, but each STREAMING chunk is only 50 frames -- below the regime where frame-splitting can amortize its doubled launch overhead, and the conv stack is launch-bound so the extra GPU is idle compute."
+  },
+  "live_t2s_ab": "see raw_live_t2s.json (assemble_ab.py) -- B=1 x50 OFF vs ON-2gpu E2E confirmation"
+}

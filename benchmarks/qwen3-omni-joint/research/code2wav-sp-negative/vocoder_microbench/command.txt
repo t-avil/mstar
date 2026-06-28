@@ -1,0 +1,6 @@
+# Code2Wav vocoder microbenchmark (SP-OFF vs SP-ON single/cross-device)
+# GPUs: 0,1 (Agent A dedicated), confirmed idle (~4 MiB) before launch.
+PYTHONPATH=/home/tim/code2wav-sp-wt CUDA_VISIBLE_DEVICES=0,1 HF_HOME=/m-coriander/coriander/hf \
+  /home/tim/mstar-encoders/.venv/bin/python microbench.py
+# chart:
+/home/tim/mstar-encoders/.venv/bin/python make_charts.py

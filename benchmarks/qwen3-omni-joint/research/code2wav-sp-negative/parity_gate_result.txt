@@ -1,0 +1,25 @@
+Code2Wav SP parity gate (test/qwen3-omni/test_code2wav_sp_parity.py) — ALL PASS
+single T=50  n=2 h=32 : max_abs=1.14e-04 cos=1.00000095 boundary=8.9e-05  PASS
+single T=128 n=2 h=32 : max_abs=1.11e-04 cos=1.00000441 boundary=8.1e-05  PASS
+single T=200 n=4 h=32 : max_abs=1.30e-04 cos=1.00000596 boundary=1.1e-04  PASS
+single T=97  n=3 h=32 : max_abs=1.20e-04 cos=1.00000215 boundary=9.5e-05  PASS
+neg-control halo=1    : max_abs=5.65e-03 (SEAM correctly detected)         PASS
+xdev   T=50  n=2 h=32 : max_abs=1.14e-04 cos=1.00000095 boundary=8.9e-05  PASS
+xdev   T=128 n=2 h=32 : max_abs=1.11e-04 cos=1.00000441 boundary=8.1e-05  PASS
+xdev   T=200 n=2 h=32 : max_abs=5.38e-05 cos=1.00000632 boundary=5.4e-05  PASS
+Min-safe halo sweep (single, T=128): halo>=4 bit-exact; receptive field ~4 codec frames; default halo=32 has 8x margin.
+18-case backend parity (test/modular/test_qwen3_omni_varlen_backend_parity.py): 18 passed.
+
+--- Large-chunk extension (throughput-path compose), phys GPU1 ---
+single T=400 n=2 h=32 : max_abs=1.33e-04 cos=1.00001943 boundary=9.5e-05  PASS
+single T=800 n=4 h=32 : max_abs=1.23e-04 cos=1.00005305 boundary=1.2e-04  PASS
+=> chunk-size insensitive: conv-stack RF (~4 frames) fixed; halo=32 holds any T.
+xdev T=800 : regression-guard case; not independently executed (GPU0 held by
+             external user 'atindra'); identical trim math to passing
+             single-device T=800 + cross-device T<=200.
+
+--- e2e A/B (optional confirmation) ---
+NOT RUN: GPUs 0,1 occupied by external user (atindra; GPU0 ~137GB). The 2gpu
+serving config needs both ranks. Verdict already settled by the conservative
+microbench (SP slower than its own OFF baseline at every chunk size) + numerical
+parity. Driver ready: /home/tim/exp_code2wav/i2s_s2s_ab/run_ab.sh

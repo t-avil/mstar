@@ -1,0 +1,201 @@
+{
+  "benchmark": "code2wav-sp-parity",
+  "timestamp_utc": "20260628T082300Z",
+  "num_visible_gpus": 2,
+  "total_upsample": 1920,
+  "cases": [
+    {
+      "len_off": 95445,
+      "len_on": 95445,
+      "max_abs": 9.211152791976929e-05,
+      "mean_abs": 1.7095354701188856e-05,
+      "cosine": 0.9999999752061601,
+      "seam_frames": [
+        25
+      ],
+      "seam_max_abs": [
+        8.511543273925781e-05
+      ],
+      "case": "exact_1gpu_2shard",
+      "T": 50,
+      "env": {
+        "MSTAR_CODE2WAV_SP": "1",
+        "MSTAR_CODE2WAV_SP_NSHARD": "2",
+        "MSTAR_CODE2WAV_SP_HALO": "32",
+        "MSTAR_CODE2WAV_SP_COMPILE": "0"
+      }
+    },
+    {
+      "len_off": 383445,
+      "len_on": 383445,
+      "max_abs": 0.00011005252599716187,
+      "mean_abs": 1.7100256668190566e-05,
+      "cosine": 0.9999999752547429,
+      "seam_frames": [
+        100
+      ],
+      "seam_max_abs": [
+        8.111447095870972e-05
+      ],
+      "case": "exact_1gpu_2shard",
+      "T": 200,
+      "env": {
+        "MSTAR_CODE2WAV_SP": "1",
+        "MSTAR_CODE2WAV_SP_NSHARD": "2",
+        "MSTAR_CODE2WAV_SP_HALO": "32",
+        "MSTAR_CODE2WAV_SP_COMPILE": "0"
+      }
+    },
+    {
+      "len_off": 767445,
+      "len_on": 767445,
+      "max_abs": 0.00010700523853302002,
+      "mean_abs": 1.7189196203229967e-05,
+      "cosine": 0.9999999750074439,
+      "seam_frames": [
+        200
+      ],
+      "seam_max_abs": [
+        9.258463978767395e-05
+      ],
+      "case": "exact_1gpu_2shard",
+      "T": 400,
+      "env": {
+        "MSTAR_CODE2WAV_SP": "1",
+        "MSTAR_CODE2WAV_SP_NSHARD": "2",
+        "MSTAR_CODE2WAV_SP_HALO": "32",
+        "MSTAR_CODE2WAV_SP_COMPILE": "0"
+      }
+    },
+    {
+      "len_off": 383445,
+      "len_on": 383445,
+      "max_abs": 0.00010272860527038574,
+      "mean_abs": 1.716479174966185e-05,
+      "cosine": 0.9999999750771935,
+      "seam_frames": [
+        100
+      ],
+      "seam_max_abs": [
+        9.050965309143066e-05
+      ],
+      "case": "exact_2gpu_2shard",
+      "T": 200,
+      "env": {
+        "MSTAR_CODE2WAV_SP": "1",
+        "MSTAR_CODE2WAV_SP_NSHARD": "2",
+        "MSTAR_CODE2WAV_SP_HALO": "32",
+        "MSTAR_CODE2WAV_SP_DEVICES": "cuda:0,cuda:1",
+        "MSTAR_CODE2WAV_SP_COMPILE": "0"
+      }
+    },
+    {
+      "len_off": 767445,
+      "len_on": 767445,
+      "max_abs": 0.00010482221841812134,
+      "mean_abs": 1.723046525695866e-05,
+      "cosine": 0.9999999748902116,
+      "seam_frames": [
+        200
+      ],
+      "seam_max_abs": [
+        8.142739534378052e-05
+      ],
+      "case": "exact_2gpu_2shard",
+      "T": 400,
+      "env": {
+        "MSTAR_CODE2WAV_SP": "1",
+        "MSTAR_CODE2WAV_SP_NSHARD": "2",
+        "MSTAR_CODE2WAV_SP_HALO": "32",
+        "MSTAR_CODE2WAV_SP_DEVICES": "cuda:0,cuda:1",
+        "MSTAR_CODE2WAV_SP_COMPILE": "0"
+      }
+    },
+    {
+      "len_off": 767445,
+      "len_on": 767445,
+      "max_abs": 0.00011115148663520813,
+      "mean_abs": 1.7210913653725206e-05,
+      "cosine": 0.9999999749315759,
+      "seam_frames": [
+        100,
+        200,
+        300
+      ],
+      "seam_max_abs": [
+        8.109956979751587e-05,
+        9.310990571975708e-05,
+        7.969141006469727e-05
+      ],
+      "case": "exact_2gpu_4shard",
+      "T": 400,
+      "env": {
+        "MSTAR_CODE2WAV_SP": "1",
+        "MSTAR_CODE2WAV_SP_NSHARD": "4",
+        "MSTAR_CODE2WAV_SP_HALO": "32",
+        "MSTAR_CODE2WAV_SP_DEVICES": "cuda:0,cuda:1",
+        "MSTAR_CODE2WAV_SP_COMPILE": "0"
+      }
+    },
+    {
+      "case": "halo_sweep",
+      "T": 400,
+      "halos": {
+        "0": {
+          "max_abs": null,
+          "cosine": null,
+          "seam_max_abs": null,
+          "shape_mismatch": true
+        },
+        "1": {
+          "max_abs": 0.004716448485851288,
+          "cosine": 0.9999997454108334,
+          "seam_max_abs": [
+            0.004716448485851288
+          ],
+          "shape_mismatch": false
+        },
+        "2": {
+          "max_abs": 0.001918293535709381,
+          "cosine": 0.9999999561316634,
+          "seam_max_abs": [
+            0.001918293535709381
+          ],
+          "shape_mismatch": false
+        },
+        "4": {
+          "max_abs": 0.00011115148663520813,
+          "cosine": 0.9999999749407125,
+          "seam_max_abs": [
+            8.052587509155273e-05
+          ],
+          "shape_mismatch": false
+        },
+        "8": {
+          "max_abs": 0.00011115148663520813,
+          "cosine": 0.999999974942036,
+          "seam_max_abs": [
+            8.330494165420532e-05
+          ],
+          "shape_mismatch": false
+        },
+        "16": {
+          "max_abs": 0.00011115148663520813,
+          "cosine": 0.999999974942036,
+          "seam_max_abs": [
+            8.330494165420532e-05
+          ],
+          "shape_mismatch": false
+        },
+        "32": {
+          "max_abs": 0.00011115148663520813,
+          "cosine": 0.9999999749496374,
+          "seam_max_abs": [
+            8.330494165420532e-05
+          ],
+          "shape_mismatch": false
+        }
+      }
+    }
+  ]
+}
