@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -22,6 +23,30 @@ class ReadyNodeEntry:
 
 
 @dataclass
+class MixedBatchPlan:
+    """Describes a mixed prefill+decode ("piggyback") step.
+
+    Produced ONLY when ``MSTAR_MIXED_WALK`` is enabled. Attached to a
+    ``ScheduledBatch`` whose primary ``graph_walk`` is the latency-sensitive
+    decode walk; the named prefill request(s) ride the same scheduler step so
+    a freshly-arrived request's prefill no longer waits a full cycle behind
+    the running decode batch (continuous batching, vLLM-v1 style).
+
+    The decode and prefill requests share one ``node_name`` (in M*'s
+    Qwen3-Omni topology the Thinker decode and all Thinker prefill walks run on
+    the same "Thinker" node), so a single mixed varlen forward can serve both.
+    See DESIGN_mixed_walk.md for the forward/replay contract this descriptor
+    drives.
+    """
+    decode_rids: list[str]
+    prefill_rids: list[str]
+    decode_walk: str
+    prefill_walk: str | None
+    token_budget: int
+    prefill_chunk_cap: int
+
+
+@dataclass
 class ScheduledBatch:
     """A batch of nodes ready to be executed."""
     node_name: str
@@ -29,6 +54,10 @@ class ScheduledBatch:
     node_objects: dict[str,GraphNode]
     # request_id -> worker_graph_id (for push-back on OOM)
     request_to_worker_graph: dict[str, str] = None
+    # Set ONLY under MSTAR_MIXED_WALK when a waiting prefill piggybacks onto
+    # this decode batch. None on every default-path batch, so the flag-OFF
+    # behavior (and every consumer that doesn't inspect it) is unchanged.
+    mixed_plan: "MixedBatchPlan | None" = None
 
 
 # Priority: lower value = higher priority
@@ -41,6 +70,60 @@ PRIORITY = {
 class SchedulingType(Enum):
     PRIORITY = "priority"
     ROUND_ROBIN = "round_robin"
+
+
+def is_decode_walk(graph_walk: str) -> bool:
+    """Heuristic split of decode (1-token AR step) walks from prefill walks.
+
+    A walk is a decode if its name is exactly ``decode`` or ends in
+    ``_decode`` (M*'s ``thinker_decode`` / ``talker_decode``). M*'s prefill
+    walks carry a ``prefill`` segment (``prefill_text`` / ``prefill_audio`` /
+    ``prefill_vision`` / ``talker_prefill``), so this cleanly identifies the
+    latency-sensitive decode that should remain the PRIMARY of a mixed step,
+    with prefills piggybacking onto it. Used only on the env-gated mixed path;
+    rationale and override points are in DESIGN_mixed_walk.md.
+    """
+    return graph_walk == "decode" or graph_walk.endswith("_decode")
+
+
+def plan_mixed_budget(
+    decode_count: int,
+    prefill_candidates: list,
+    token_budget: int,
+    prefill_chunk_cap: int,
+    max_prefill_requests: int = 1,
+    token_count_fn=None,
+) -> list[int]:
+    """Pure token-budget admission for one mixed prefill+decode step.
+
+    Mirrors vLLM v1's single-token-budget loop (scheduler.py: running decodes
+    consume one token each, then waiting prefills consume the remaining
+    budget). Returns the indices INTO ``prefill_candidates`` admitted to
+    piggyback this step (highest-priority/scan-order first).
+
+    ``token_count_fn(candidate) -> int`` estimates a candidate's prefill token
+    cost; it defaults to the conservative ``prefill_chunk_cap`` because exact
+    per-request prefill lengths are not reliably available at schedule time
+    (they live in the request's pending input tensors, not in the ready-node
+    metadata the scheduler scans). Every candidate's cost is capped at
+    ``prefill_chunk_cap`` so the captured-graph shape set stays finite — see
+    the capture-shape risk section of DESIGN_mixed_walk.md.
+
+    Pure function (no scheduler/queue state) so it is unit-testable on CPU.
+    """
+    if token_count_fn is None:
+        token_count_fn = lambda _c: prefill_chunk_cap  # noqa: E731
+    admitted: list[int] = []
+    used = decode_count  # each running decode contributes exactly 1 query token
+    for idx, cand in enumerate(prefill_candidates):
+        if len(admitted) >= max_prefill_requests:
+            break
+        cost = min(token_count_fn(cand), prefill_chunk_cap)
+        if used + cost > token_budget:
+            continue
+        admitted.append(idx)
+        used += cost
+    return admitted
 
 
 class MicroScheduler:
@@ -71,6 +154,22 @@ class MicroScheduler:
         self.node_and_walk_to_last_batch_num = {}
         # request_id -> monotonic time until which the request is held
         self.held_until: dict[str, float] = {}
+
+        # --- MSTAR_MIXED_WALK: continuous-batching (prefill piggybacks decode) ---
+        # Default OFF -> strict one-(node, graph_walk)-per-step, byte-identical to
+        # the pre-existing scheduler. When ON, get_next_batch may admit one (or a
+        # few) waiting prefill requests onto the running decode batch under a
+        # shared token budget. See DESIGN_mixed_walk.md.
+        self.mixed_walk_enabled = os.environ.get("MSTAR_MIXED_WALK", "0") == "1"
+        self.mixed_token_budget = int(
+            os.environ.get("MSTAR_MIXED_TOKEN_BUDGET", "8192")
+        )
+        self.mixed_prefill_chunk_cap = int(
+            os.environ.get("MSTAR_MIXED_PREFILL_CHUNK", "512")
+        )
+        self.mixed_max_prefill_requests = int(
+            os.environ.get("MSTAR_MIXED_MAX_PREFILL_REQS", "1")
+        )
         # Rids with a deferred remove; stop initiating new work for them.
         # Shared by reference with Worker._pending_removes.
         self.pending_removes: set[str] = set()
@@ -299,11 +398,107 @@ class MicroScheduler:
             best_node_name, graph_walk
         )] = self.batch_number
 
+        mixed_plan = self._maybe_plan_mixed(
+            best_node_name=best_node_name,
+            graph_walk=graph_walk,
+            node_name_to_requests=node_name_to_requests,
+            node_objects=node_objects,
+            request_to_worker_graph=request_to_worker_graph,
+            worker_graphs_manager=worker_graphs_manager,
+        )
+
         return ScheduledBatch(
             node_name=best_node_name,
             graph_walk=graph_walk,
             node_objects=node_objects,
             request_to_worker_graph=request_to_worker_graph,
+            mixed_plan=mixed_plan,
+        )
+
+    def _engine_is_kv_cache(self, node_name: str) -> bool:
+        if node_name not in self.engine_manager.node_to_engine:
+            return False
+        return self.engine_manager.get_engine(node_name).engine_type() == EngineType.KV_CACHE
+
+    def _maybe_plan_mixed(
+        self,
+        best_node_name: str,
+        graph_walk: str,
+        node_name_to_requests: dict[str, list[ReadyNodeEntry]],
+        node_objects: dict,
+        request_to_worker_graph: dict,
+        worker_graphs_manager: WorkerGraphsManager,
+    ) -> "MixedBatchPlan | None":
+        """Piggyback waiting prefill(s) onto a decode batch (MSTAR_MIXED_WALK).
+
+        No-op (returns None) unless the flag is on AND the just-selected
+        primary is a latency-sensitive decode on a KV-cache node. When it
+        applies, it admits prefill request(s) of OTHER walks on the SAME node
+        under the shared token budget, pops their ready nodes into
+        ``node_objects`` (mutated in place, like the decode loop above), and
+        returns the plan describing the mixed step. On the flag-OFF path this
+        method is never called with effect — every batch keeps ``mixed_plan=None``.
+        """
+        if not self.mixed_walk_enabled:
+            return None
+        if not node_objects:
+            return None
+        if not is_decode_walk(graph_walk):
+            return None  # only piggyback ONTO a decode primary, never onto a prefill
+        if not self._engine_is_kv_cache(best_node_name):
+            return None
+
+        decode_rids = list(node_objects.keys())
+        prefill_candidates = [
+            e for e in node_name_to_requests[best_node_name]
+            if e.request_id not in node_objects and not is_decode_walk(e.graph_walk)
+        ]
+        if not prefill_candidates:
+            return None
+
+        admitted = plan_mixed_budget(
+            decode_count=len(decode_rids),
+            prefill_candidates=prefill_candidates,
+            token_budget=self.mixed_token_budget,
+            prefill_chunk_cap=self.mixed_prefill_chunk_cap,
+            max_prefill_requests=self.mixed_max_prefill_requests,
+        )
+        if not admitted:
+            return None
+
+        prefill_rids: list[str] = []
+        prefill_walk: str | None = None
+        for idx in admitted:
+            entry = prefill_candidates[idx]
+            queue = worker_graphs_manager.queues[entry.worker_graph_id]
+            popped = queue.pop_ready_nodes(entry.request_id, [best_node_name])
+            if not popped:
+                continue
+            assert len(popped) == 1
+            node_objects[entry.request_id] = popped[0]
+            request_to_worker_graph[entry.request_id] = entry.worker_graph_id
+            prefill_rids.append(entry.request_id)
+            prefill_walk = entry.graph_walk
+            self.node_and_walk_to_last_batch_num[
+                (best_node_name, entry.graph_walk)
+            ] = self.batch_number
+
+        if not prefill_rids:
+            return None
+
+        logger.debug(
+            "MicroScheduler MIXED step on node %s: decode walk %s (%d reqs) + "
+            "prefill walk %s (%d reqs)",
+            best_node_name, graph_walk, len(decode_rids),
+            prefill_walk, len(prefill_rids),
+        )
+        return MixedBatchPlan(
+            decode_rids=decode_rids,
+            prefill_rids=prefill_rids,
+            decode_walk=graph_walk,
+            prefill_walk=prefill_walk,
+            token_budget=self.mixed_token_budget,
+            prefill_chunk_cap=self.mixed_prefill_chunk_cap,
         )
 
     def has_ready_excluding(
