@@ -509,6 +509,85 @@ class ThinkerSubmodule(ARNodeSubmodule):
     ) -> ARNodeInputs:
         device = self.get_device()
         start_pos = pos_info.get("main", PositionInfo()).position_id_start
+
+        # -- Merged prefill walk: run each sub-walk's prepare_inputs in the
+        #    original schedule order, advancing the 3D-MRoPE start position
+        #    exactly as the per-walk cache state would across two separate
+        #    walks, then concatenate embeds / positions / talker masks. The
+        #    result is byte-identical to the two-walk path (same tokens, same
+        #    positions, same causal order) but flows through ONE Thinker
+        #    forward, eliminating the inter-walk conductor round-trip.
+        if graph_walk in ("prefill_audio_text", "prefill_vision_text"):
+            sub_walks = fwd_info.step_metadata.get("merged_sub_walks")
+            if not sub_walks:
+                # Defensive fallback: infer order (modality first, text last,
+                # matching the default ``input_modalities`` ordering).
+                modality = (
+                    "prefill_audio"
+                    if graph_walk == "prefill_audio_text"
+                    else "prefill_vision"
+                )
+                sub_walks = [modality, "prefill_text"]
+
+            embeds_parts: list[torch.Tensor] = []
+            pos_parts: list[torch.Tensor] = []
+            mask_parts: list[torch.Tensor] = []
+            deepstack_list: list[torch.Tensor] | None = None
+            vision_offset = 0
+            vision_seg_len = 0
+            cur = start_pos
+            total_len = 0
+            for sub in sub_walks:
+                sub_inp = self.prepare_inputs(
+                    sub, fwd_info, inputs, seen_token_mask,
+                    pos_info={"main": PositionInfo(position_id_start=cur)},
+                )
+                embeds_parts.append(sub_inp.input_embeds)
+                pos_parts.append(sub_inp.custom_pos_ids)
+                mask_parts.append(sub_inp.tensor_inputs["masks_for_talker"])
+                seg_len = sub_inp.input_seq_len
+                if sub == "prefill_vision":
+                    vision_offset = total_len
+                    vision_seg_len = seg_len
+                    deepstack_list = sub_inp.tensor_inputs.get("deepstack")
+                    # The vision 3D-grid position span can exceed seg_len.
+                    advance = sub_inp.tensor_inputs.get(
+                        "mrope_pos_advance", seg_len
+                    )
+                else:
+                    advance = seg_len
+                cur += advance
+                total_len += seg_len
+
+            input_embeds = torch.cat(embeds_parts, dim=0)
+            pos_ids = torch.cat(pos_parts, dim=1)
+            masks_for_talker = torch.cat(mask_parts, dim=1)
+            tensor_inputs: dict[str, Any] = {
+                "masks_for_talker": masks_for_talker,
+            }
+            if graph_walk == "prefill_vision_text":
+                # Re-pad each deepstack level to the FULL merged sequence
+                # length: zeros everywhere except the vision segment's slot
+                # (``_deepstack_process`` adds element-wise to all tokens).
+                hidden = input_embeds.shape[-1]
+                full_deepstack: list[torch.Tensor] = []
+                for d in (deepstack_list or []):
+                    fd = torch.zeros(
+                        (total_len, hidden), dtype=d.dtype, device=device,
+                    )
+                    fd[vision_offset:vision_offset + vision_seg_len] = d
+                    full_deepstack.append(fd)
+                tensor_inputs["deepstack"] = full_deepstack
+                # Combined per-request MRoPE advance across both sub-walks.
+                tensor_inputs["mrope_pos_advance"] = int(cur - start_pos)
+
+            return ARNodeInputs(
+                input_seq_len=total_len,
+                input_embeds=input_embeds,
+                custom_pos_ids=pos_ids,
+                tensor_inputs=tensor_inputs,
+            )
+
         if graph_walk == "thinker_decode":
             # Get previous token ID from text_inputs
             token_id = inputs["text_inputs"][0].to(device)  # (1,) or scalar
@@ -704,7 +783,7 @@ class ThinkerSubmodule(ARNodeSubmodule):
         cache_manager.plan_rope(seq_lens=seq_lens, pos_ids=None, label="main")
 
         extra_inputs = {}
-        if graph_walk == "prefill_vision":
+        if graph_walk in ("prefill_vision", "prefill_vision_text"):
             assert len(inputs) == 1, \
                 "Batching not implemented for Thinker vision prefill"
             inp = inputs[0]
@@ -1037,7 +1116,13 @@ class ThinkerSubmodule(ARNodeSubmodule):
             ),
             FlashInferPackedCudaGraphConfig(
                 capture_graph_walk="prefill_text",
-                replay_graph_walks=["prefill_text", "prefill_audio"],
+                # ``prefill_audio_text`` (merged audio+text) has the identical
+                # post-preprocess signature (input_embeds + cos_3d + sin_3d),
+                # so it replays this same bucketed capture — no extra graph,
+                # no eager fallback.
+                replay_graph_walks=[
+                    "prefill_text", "prefill_audio", "prefill_audio_text",
+                ],
                 packed_seq_len_to_inputs=prefill_text_packed,
                 requires_cfg=False,
                 labels=["main"],
@@ -1071,7 +1156,11 @@ class ThinkerSubmodule(ARNodeSubmodule):
             # — see ``cache_manager._PlanState.custom_pos_advance``.
             FlashInferPackedCudaGraphConfig(
                 capture_graph_walk="prefill_vision",
-                replay_graph_walks=["prefill_vision"],
+                # ``prefill_vision_text`` (merged vision+text) shares the same
+                # post-preprocess signature (deepstack_<i> padded to the full
+                # merged length + side-channel mrope_pos_advance), so it
+                # replays this capture too.
+                replay_graph_walks=["prefill_vision", "prefill_vision_text"],
                 packed_seq_len_to_inputs=prefill_vision_packed,
                 requires_cfg=False,
                 labels=["main"],
@@ -1153,6 +1242,7 @@ class ThinkerSubmodule(ARNodeSubmodule):
         # preprocess which does pass it explicitly.
         is_prefill = graph_walk in (
             "prefill_text", "prefill_audio", "prefill_vision",
+            "prefill_audio_text", "prefill_vision_text",
         )
         if mrope_section is None and is_prefill:
             mrope_section = self.MROPE_SECTION

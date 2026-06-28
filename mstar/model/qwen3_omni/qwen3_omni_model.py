@@ -29,6 +29,7 @@ Text-only mode:
 """
 
 import logging
+import os
 from pathlib import Path
 
 import torch
@@ -215,6 +216,68 @@ class Qwen3OmniModel(Model):
     # -----------------------------------------------------------------------
     # Model ABC: graph walk definitions
     # -----------------------------------------------------------------------
+
+    # Map the (frozen) set of sub-walk names that may be fused into the
+    # single merged walk name that replaces them.  Only the exact
+    # text+single-modality combinations are supported; anything else falls
+    # back to the default per-modality multi-walk schedule.
+    _MERGE_WALK_NAME = {
+        frozenset({"prefill_text", "prefill_audio"}): "prefill_audio_text",
+        frozenset({"prefill_text", "prefill_vision"}): "prefill_vision_text",
+    }
+    _MERGED_WALKS = frozenset({"prefill_audio_text", "prefill_vision_text"})
+
+    @staticmethod
+    def _merge_prefill_walks_enabled() -> bool:
+        """True when ``MSTAR_MERGE_PREFILL_WALKS=1`` (default OFF).
+
+        When off, every code path below is byte-identical to the baseline.
+        """
+        return os.environ.get("MSTAR_MERGE_PREFILL_WALKS", "0") == "1"
+
+    def _try_merge_schedule(
+        self,
+        schedule: list[tuple[str, dict]],
+    ) -> tuple[str, dict, list[str]] | None:
+        """Collapse a supported 2-walk prefill schedule into one merged walk.
+
+        Returns ``(merged_walk_name, merged_tensor_dict, sub_walk_order)`` or
+        ``None`` when the schedule is not a supported merge (then the default
+        multi-walk schedule is used).  ``sub_walk_order`` preserves the exact
+        KV-cache ordering of the original schedule so the merged forward
+        reproduces the same positions / embeddings.
+        """
+        if len(schedule) != 2:
+            return None
+        walk_names = {w for (w, _) in schedule}
+        merged_name = self._MERGE_WALK_NAME.get(frozenset(walk_names))
+        if merged_name is None:
+            return None
+        merged_dict: dict = {}
+        for _, tensor_dict in schedule:
+            merged_dict.update(tensor_dict)
+        sub_walk_order = [w for (w, _) in schedule]
+        return merged_name, merged_dict, sub_walk_order
+
+    def _num_thinker_prefill_steps(self, input_modalities: list[str]) -> int:
+        """Number of Thinker prefill walks (== thinker_states emissions /
+        talker triggers) the conductor will dispatch for this request.
+
+        Default = one walk per modality.  With the merge flag on, a supported
+        text+single-modality request collapses to a single walk, so the Talker
+        must expect one prefill chunk, not two.
+        """
+        default = len(input_modalities)
+        if not self._merge_prefill_walks_enabled():
+            return default
+        non_text = [m for m in input_modalities if m != "text"]
+        if (
+            "text" in input_modalities
+            and len(non_text) == 1
+            and non_text[0] in ("audio", "image", "video")
+        ):
+            return 1
+        return default
 
     def get_graph_walk_graphs(self) -> dict[str, GraphNode | Sequential]:
         """Define all graph walks for the 3-partition architecture.
@@ -433,10 +496,82 @@ class Qwen3OmniModel(Model):
             ],
         )
 
+        # -- Merged prefill walks (env-gated via MSTAR_MERGE_PREFILL_WALKS) --
+        #    Fuse the encoder + BOTH the modality prefill and the text prefill
+        #    into ONE walk so the encoder output flows straight into a single
+        #    Thinker prefill forward with NO conductor round-trip between the
+        #    modality-prefill walk and the text-prefill walk. The single
+        #    Thinker node consumes ``text_inputs`` + the encoder embeds
+        #    together; ``ThinkerSubmodule.prepare_inputs`` concatenates the
+        #    per-modality embeds / 3D-MRoPE positions / talker masks in the
+        #    original schedule order, so the merged forward is mathematically
+        #    identical (same causal attention, same positions) to the two-walk
+        #    path that appends to the same KV cache. These walks are always
+        #    registered (harmless) but only *scheduled* when the flag is on.
+        prefill_audio_text = Sequential([
+            GraphNode(
+                name="audio_encoder",
+                input_names=["audio_features", "audio_seqlens"],
+                outputs=[GraphEdge(next_node="Thinker", name="audio_embeds")],
+            ),
+            GraphNode(
+                name="Thinker",
+                input_names=["text_inputs", "audio_embeds"],
+                outputs=[
+                    GraphEdge(
+                        next_node=EMIT_TO_CLIENT, name="new_token",
+                        output_modality="text", persist=True,
+                    ),
+                    StreamingGraphEdge(
+                        next_node="Talker", name="thinker_states",
+                        target_partition="Talker",
+                    ),
+                    StreamingGraphEdge(
+                        next_node="Talker", name="thinker_mask",
+                        target_partition="Talker",
+                    ),
+                ],
+            ),
+        ])
+
+        prefill_vision_text = Sequential([
+            GraphNode(
+                name="vision_encoder",
+                input_names=["pixel_values", "image_grid_thw"],
+                outputs=[
+                    GraphEdge(next_node="Thinker", name="vision_embeds"),
+                    GraphEdge(next_node="Thinker", name="deepstack"),
+                ],
+            ),
+            GraphNode(
+                name="Thinker",
+                input_names=[
+                    "text_inputs", "vision_embeds", "deepstack",
+                    "video_second_per_grid", "image_grid_thw",
+                ],
+                outputs=[
+                    GraphEdge(
+                        next_node=EMIT_TO_CLIENT, name="new_token",
+                        output_modality="text", persist=True,
+                    ),
+                    StreamingGraphEdge(
+                        next_node="Talker", name="thinker_states",
+                        target_partition="Talker",
+                    ),
+                    StreamingGraphEdge(
+                        next_node="Talker", name="thinker_mask",
+                        target_partition="Talker",
+                    ),
+                ],
+            ),
+        ])
+
         return {
             "prefill_text": prefill_text,
             "prefill_audio": prefill_audio,
             "prefill_vision": prefill_vision,
+            "prefill_audio_text": prefill_audio_text,
+            "prefill_vision_text": prefill_vision_text,
             "thinker_decode": thinker_decode,
             "talker_prefill": talker_prefill,
             "talker_last_prefill": talker_last_prefill,
@@ -454,7 +589,8 @@ class Qwen3OmniModel(Model):
                 name="Thinker",
                 graph_walks={
                     "prefill_text", "prefill_audio",
-                    "prefill_vision", "thinker_decode",
+                    "prefill_vision", "prefill_audio_text",
+                    "prefill_vision_text", "thinker_decode",
                 },
                 initial_walk="prefill_text",
                 producer_partitions=[],
@@ -570,7 +706,9 @@ class Qwen3OmniModel(Model):
                 kwargs={
                     "audio_output": audio_output,
                     "talker_prefill_done": False,
-                    "num_thinker_prefill_steps": len(input_modalities),
+                    "num_thinker_prefill_steps": self._num_thinker_prefill_steps(
+                        input_modalities
+                    ),
                     "prefill_chunks_processed": 0,
                     "voice": model_kwargs.get("voice", "Ethan"),
                     "talker_max_tokens": self.get_max_talker_output_tokens(**model_kwargs),
@@ -622,6 +760,17 @@ class Qwen3OmniModel(Model):
             input_modalities, input_signals,
         )
 
+        # Optionally fuse the modality + text prefill walks into one merged
+        # walk (env-gated).  ``merged_sub_walks`` records the original
+        # per-modality KV ordering so the worker's prepare_inputs concatenates
+        # embeds / positions / masks in exactly the baseline order.
+        merged_sub_walks: list[str] | None = None
+        if self._merge_prefill_walks_enabled():
+            merged = self._try_merge_schedule(schedule)
+            if merged is not None:
+                merged_name, merged_dict, merged_sub_walks = merged
+                schedule = [(merged_name, merged_dict)]
+
         first_walk = schedule[0][0] if schedule else "thinker_decode"
         is_last_prefill = (schedule and len(schedule) == 1)
 
@@ -634,6 +783,7 @@ class Qwen3OmniModel(Model):
                 "prefill_schedule": schedule,
                 "prefill_step": 0,
                 "audio_output": audio_output,
+                "merged_sub_walks": merged_sub_walks,
             },
         )
 
@@ -652,7 +802,11 @@ class Qwen3OmniModel(Model):
                 # Tell the Thinker whether to emit thinker_states.  Text only
                 # requests skip it to save cross-partition bandwidth.
                 "audio_output": audio_output,
-                "is_last_prefill": is_last_prefill
+                "is_last_prefill": is_last_prefill,
+                # Ordered sub-walk list for the merged-prefill path; None for
+                # the default per-modality walks.  Consumed by
+                # ``ThinkerSubmodule.prepare_inputs`` on the worker.
+                "merged_sub_walks": merged_sub_walks,
             },
         )
 
@@ -738,6 +892,35 @@ class Qwen3OmniModel(Model):
         schedule = metadata.kwargs["prefill_schedule"]
         step = metadata.kwargs["prefill_step"]
         walk_name, tensor_dict = schedule[step]
+
+        # Merged prefill walk: route each tensor to its node(s) by name —
+        # text to the Thinker, modality features to the encoder, image grid
+        # to both encoder and Thinker.  The Thinker node also needs the same
+        # placeholder edges (image_grid_thw / video_second_per_grid) the
+        # default prefill_vision emits so its ReadySignals fire.
+        if walk_name in self._MERGED_WALKS:
+            routing = {
+                "text_inputs": ["Thinker"],
+                "audio_features": ["audio_encoder"],
+                "audio_seqlens": ["audio_encoder"],
+                "pixel_values": ["vision_encoder"],
+                "image_grid_thw": ["vision_encoder", "Thinker"],
+                "video_second_per_grid": ["Thinker"],
+            }
+            edges: list[GraphEdge] = []
+            for input_name, tensor_info in tensor_dict.items():
+                for target in routing.get(input_name, ["Thinker"]):
+                    edge = GraphEdge(next_node=target, name=input_name)
+                    edge.tensor_info = [tensor_info]
+                    edges.append(edge)
+            if walk_name == "prefill_vision_text":
+                # Emit the Thinker's vision placeholder inputs even when absent
+                # (image requests have no video_second_per_grid), matching the
+                # default prefill_vision behaviour.
+                for key in ["image_grid_thw", "video_second_per_grid"]:
+                    if key not in tensor_dict:
+                        edges.append(GraphEdge(next_node="Thinker", name=key))
+            return edges
 
         # Determine the target node — for audio/vision, the first node in
         # the Sequential walk is the encoder (not the Thinker).
