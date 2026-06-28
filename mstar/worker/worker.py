@@ -709,8 +709,24 @@ class Worker:
 
     def _poll_stream_buffers(self) -> None:
         """Check all active StreamBuffers; when a chunk is ready, feed it as a normal input."""
+        # Count how many requests are concurrently feeding each consumer node so
+        # batch-adaptive chunk policies can size chunks to the live batch. A
+        # request is "active" for an edge while its buffer still holds items or
+        # its producer has not finished. Cheap O(requests) pass; a no-op for
+        # non-adaptive policies (observe_batch_size defaults to doing nothing),
+        # so the default streaming path stays byte-identical.
+        active_by_node: dict[str, int] = {}
+        for req_info in self.worker_graphs_manager.per_request_info.values():
+            for edge_name, sbuf in req_info.stream_buffers.items():
+                sbuf._update_buffer()
+                if len(sbuf._buffer) > 0 or not sbuf.producer_done:
+                    node = self._consumer_node_cache.get(edge_name, "")
+                    active_by_node[node] = active_by_node.get(node, 0) + 1
+
         for request_id, req_info in list(self.worker_graphs_manager.per_request_info.items()):
             for edge_name, sbuf in req_info.stream_buffers.items():
+                node = self._consumer_node_cache.get(edge_name, "")
+                sbuf.policy.observe_batch_size(active_by_node.get(node, 0))
                 synthetic_edge = self._pop_streaming_edge(sbuf, edge_name, request_id)
 
                 if synthetic_edge is not None:

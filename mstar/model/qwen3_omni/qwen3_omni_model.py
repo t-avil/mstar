@@ -49,7 +49,11 @@ from mstar.model.base import MAX_OUTPUT_TOKENS, ForwardPassArgs, Model, TensorAn
 from mstar.model.qwen3_omni.components.talker import Qwen3OmniCodePredictor
 from mstar.model.submodule_base import NodeSubmodule
 from mstar.model.utils import Operation, WeightConverter
-from mstar.streaming.chunk_policy import FixedChunkPolicy, LeftContextChunkPolicy
+from mstar.streaming.chunk_policy import (
+    BatchAdaptiveLeftContextChunkPolicy,
+    FixedChunkPolicy,
+    LeftContextChunkPolicy,
+)
 from mstar.streaming.topology import Connection, PartitionTopology, StreamingGraphEdge
 from mstar.utils.sampling import SamplingConfig
 
@@ -696,6 +700,45 @@ class Qwen3OmniModel(Model):
         ]
 
     def get_partition_topology(self) -> PartitionTopology:
+        latency_chunk = self.config.code2wav.codec_chunk_frames
+        left_context = self.config.code2wav.codec_left_context_frames
+
+        # Batch-adaptive Code2Wav chunk (opt-in via MSTAR_VOCODER_ADAPTIVE_CHUNK).
+        # Default OFF -> the fixed LeftContextChunkPolicy below, byte-identical
+        # to the current behavior. When ON, the chunk grows from the latency
+        # value (codec_chunk_frames) to MSTAR_VOCODER_LARGE_CHUNK once at least
+        # MSTAR_VOCODER_ADAPTIVE_THRESHOLD requests are co-vocoding. left_context
+        # stays fixed and every chunk is clamped >= left_context (see
+        # BatchAdaptiveLeftContextChunkPolicy) so the first-pop stride can never
+        # go negative.
+        def _env_flag(name: str) -> bool:
+            raw = os.environ.get(name)
+            return raw is not None and raw.strip().lower() in ("1", "true", "yes", "on")
+
+        def _env_int(name: str, default: int) -> int:
+            raw = os.environ.get(name)
+            if raw is None:
+                return default
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                return default
+
+        if _env_flag("MSTAR_VOCODER_ADAPTIVE_CHUNK"):
+            large_chunk = _env_int("MSTAR_VOCODER_LARGE_CHUNK", 150)
+            threshold = _env_int("MSTAR_VOCODER_ADAPTIVE_THRESHOLD", 4)
+            codec_chunk_policy_factory = lambda: BatchAdaptiveLeftContextChunkPolicy(
+                latency_chunk=latency_chunk,
+                large_chunk=large_chunk,
+                left_context=left_context,
+                threshold=threshold,
+            )
+        else:
+            codec_chunk_policy_factory = lambda: LeftContextChunkPolicy(
+                chunk=latency_chunk,
+                left_context=left_context,
+            )
+
         return PartitionTopology(
             partitions=["Thinker", "Talker", "Code2Wav"],
             connections=[
@@ -715,10 +758,7 @@ class Qwen3OmniModel(Model):
                     from_partition="Talker",
                     to_partition="Code2Wav",
                     edge_name="codec_tokens",
-                    chunk_policy_factory=lambda: LeftContextChunkPolicy(
-                        chunk=self.config.code2wav.codec_chunk_frames,
-                        left_context=self.config.code2wav.codec_left_context_frames,
-                    ),
+                    chunk_policy_factory=codec_chunk_policy_factory,
                 ),
             ],
         )
