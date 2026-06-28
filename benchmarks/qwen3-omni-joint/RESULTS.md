@@ -30,8 +30,18 @@ back-to-back under identical load only, never across time windows on this shared
 - **GPU log-mel** (`MSTAR_GPU_MEL`): the HF CPU WhisperFeatureExtractor mel is an intrinsic ~240 ms cost that
   **serializes across the batch** (un-optimized S2T plateaus at B8, S2S vocoder+mel saturate to RTF 2.0–2.3 @B32
   and *lose* to vLLM). Moving it to `torch.stft` on GPU (~0.4 ms) flips **S2S** from a batch loss to a decisive
-  win and lifts **S2T tok/s** above vLLM; S2T req/s still plateaus (~7 vs vLLM ~12.7 @B32 — same-walk scheduler
-  barrier, Lever 2, not attempted). The single decisive audio lever.
+  win and lifts **S2T tok/s** above vLLM; S2T req/s still plateaus (~7 vs vLLM ~12.7 @B32). The single decisive
+  audio lever.
+
+**S2T high-batch ceiling — root-caused (structural, not a tunable):** the scheduler runs exactly ONE walk per
+GPU step (`get_next_batch`), so audio-prefill and thinker-decode cannot co-run; throughput = serialized(prefill +
+decode), which is *order-invariant* — reordering walks cannot raise it. (Note: qwen3_omni uses ROUND_ROBIN
+`_select_node_rr`, already fair least-recently-served, so there is no walk-starvation to fix — the LEVERS report's
+premise didn't apply.) vLLM scales because it overlaps prefill+decode in one step (continuous/chunked prefill).
+The ONLY fix is **piggyback / chunked-prefill** (a mixed prefill+decode walk + a new combined `CudaGraphKey` +
+same-walk-invariant change + full parity revalidation) — a large, high-risk effort **deliberately deferred to a
+supervised future task**, not attempted here. A scoped reorder experiment (Lever 2 option-i) was evaluated and
+rejected by code analysis (zero GPU) as structurally unable to help.
 - **prompt-layout** (matched audio length → fair RTF) + **native encoders** + codec-chunk@15 (default) compose
   on top. (Larger codec chunks regress — disproven below — so the default 15 is used, not a tuned larger value.)
 - Length fairness: integrated S2S median audio ≈4.3 s vs vLLM ≈5.0 s (ratio ~0.85 — comparable, RTF is fair).
