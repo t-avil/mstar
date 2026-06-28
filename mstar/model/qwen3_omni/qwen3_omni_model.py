@@ -158,6 +158,140 @@ def _resolve_local_hf_snapshot(repo_id: str, cache_dir: str | None = None) -> st
 
 
 # ---------------------------------------------------------------------------
+# GPU image preprocessing (env-gated, default OFF)
+# ---------------------------------------------------------------------------
+#
+# Qwen3-Omni's image path normally moves each GPU image to CPU
+# (``img.cpu().numpy()``) and hands it to HF's ``Qwen2VLImageProcessor``,
+# which runs smart_resize + rescale + normalize + patchify on CPU.  That CPU
+# round-trip + numpy processing is the single biggest I2T TTFT cost (~175 ms).
+#
+# When ``MSTAR_GPU_IMAGE_PREPROCESS=1`` we run the *identical* algorithm fully
+# on the GPU so the image never leaves the device.  The resize re-uses
+# torchvision's functional ``resize`` (bicubic + antialias) -- the very same
+# kernel HF's torchvision backend calls -- just on a CUDA tensor, so the
+# output matches HF's CPU ``pixel_values`` within fp tolerance (grid_thw is
+# bit-exact; pixel_values cos > 0.9999, max-abs <= ~3 uint8 levels from
+# CPU-vs-GPU bicubic rounding).  Default OFF keeps current behaviour byte for
+# byte.
+
+
+def _gpu_image_preprocess_enabled() -> bool:
+    import os
+
+    return os.environ.get("MSTAR_GPU_IMAGE_PREPROCESS", "0") == "1"
+
+
+def _smart_resize(
+    height: int,
+    width: int,
+    factor: int,
+    min_pixels: int,
+    max_pixels: int,
+) -> tuple[int, int]:
+    """Port of HF ``smart_resize`` (Qwen2VLImageProcessor).  Pure python ints."""
+    import math
+
+    if max(height, width) / min(height, width) > 200:
+        raise ValueError(
+            "absolute aspect ratio must be smaller than 200, got "
+            f"{max(height, width) / min(height, width)}"
+        )
+    h_bar = round(height / factor) * factor
+    w_bar = round(width / factor) * factor
+    if h_bar * w_bar > max_pixels:
+        beta = math.sqrt((height * width) / max_pixels)
+        h_bar = max(factor, math.floor(height / beta / factor) * factor)
+        w_bar = max(factor, math.floor(width / beta / factor) * factor)
+    elif h_bar * w_bar < min_pixels:
+        beta = math.sqrt(min_pixels / (height * width))
+        h_bar = math.ceil(height * beta / factor) * factor
+        w_bar = math.ceil(width * beta / factor) * factor
+    return h_bar, w_bar
+
+
+def _gpu_image_preprocess(
+    img: "torch.Tensor",
+    *,
+    patch_size: int,
+    temporal_patch_size: int,
+    merge_size: int,
+    min_pixels: int,
+    max_pixels: int,
+    image_mean,
+    image_std,
+) -> tuple["torch.Tensor", "torch.Tensor"]:
+    """Resize + rescale + normalize + patchify a single image on its device.
+
+    ``img`` is a (C, H, W) tensor on the GPU, float in [0, 1] (as produced by
+    data_worker) or uint8 in [0, 255].  Returns ``(pixel_values, grid_thw)``
+    matching HF's ``Qwen2VLImageProcessor`` output for one image:
+    ``pixel_values`` is 2-D ``(grid_h*grid_w, C*temporal*patch*patch)`` and
+    ``grid_thw`` is ``(1, 3)`` long ``[[1, grid_h, grid_w]]``.
+    """
+    from torchvision.transforms.v2.functional import InterpolationMode
+    from torchvision.transforms.v2.functional import resize as tv_resize
+
+    # Normalise layout to (C, H, W) and dtype to uint8 in [0, 255], exactly as
+    # the CPU path does before handing the array to HF (which then casts to
+    # uint8 -> tvF.resize).
+    if img.dim() == 3 and img.shape[-1] in (1, 3) and img.shape[0] not in (1, 3):
+        img = img.permute(2, 0, 1)  # HWC -> CHW
+    if img.dtype.is_floating_point:
+        img_u8 = (img * 255.0).clamp(0, 255).to(torch.uint8)
+    else:
+        img_u8 = img.to(torch.uint8)
+    img_u8 = img_u8.contiguous()
+
+    C, H, W = img_u8.shape
+    factor = patch_size * merge_size
+    h_bar, w_bar = _smart_resize(H, W, factor, min_pixels, max_pixels)
+
+    # Resize on-device with the same torchvision kernel HF's fast backend uses
+    # (bicubic + antialias on uint8).
+    resized = tv_resize(
+        img_u8,
+        [h_bar, w_bar],
+        interpolation=InterpolationMode.BICUBIC,
+        antialias=True,
+    )
+
+    # Fused rescale (1/255) + normalize, matching HF's
+    # ``_fuse_mean_std_and_rescale_factor``: mean *= 255, std *= 255, then
+    # (x - mean) / std on the float32 image.
+    dev = resized.device
+    mean_t = torch.as_tensor(image_mean, device=dev, dtype=torch.float32) * 255.0
+    std_t = torch.as_tensor(image_std, device=dev, dtype=torch.float32) * 255.0
+    patches = resized.to(torch.float32)
+    patches = (patches - mean_t[:, None, None]) / std_t[:, None, None]
+    patches = patches.unsqueeze(0)  # (1, C, h_bar, w_bar)
+
+    grid_h, grid_w = h_bar // patch_size, w_bar // patch_size
+    patches = patches.reshape(
+        1,
+        C,
+        grid_h // merge_size,
+        merge_size,
+        patch_size,
+        grid_w // merge_size,
+        merge_size,
+        patch_size,
+    )
+    # [batch, grid_h/merge, grid_w/merge, merge, merge, channel, patch, patch]
+    patches = patches.permute(0, 2, 5, 3, 6, 1, 4, 7)
+    flatten_patches = (
+        patches.unsqueeze(6)
+        .expand(-1, -1, -1, -1, -1, -1, temporal_patch_size, -1, -1)
+        .reshape(
+            grid_h * grid_w,
+            C * temporal_patch_size * patch_size * patch_size,
+        )
+    )
+    grid_thw = torch.tensor([[1, grid_h, grid_w]], dtype=torch.long)
+    return flatten_patches, grid_thw
+
+
+# ---------------------------------------------------------------------------
 # Qwen3OmniModel
 # ---------------------------------------------------------------------------
 
@@ -1151,20 +1285,25 @@ class Qwen3OmniModel(Model):
         raw_audio_inputs = tensors.get("audio_inputs", [])
         raw_video_inputs = tensors.get("video_inputs", [])
 
+        # When GPU image preprocessing is enabled we keep the raw GPU tensors
+        # and never round-trip through CPU/numpy (see _gpu_image_preprocess).
+        gpu_img_preprocess = _gpu_image_preprocess_enabled()
+
         pil_images: list = []
-        for img in raw_image_inputs:
-            # data_worker.py provides images as (C, H, W) float32 in [0, 1]
-            # on the GPU.  HF processors expect PIL/numpy uint8 (H, W, C)
-            # in [0, 255] -- otherwise the default do_rescale=True double-
-            # rescales and the model sees a near-zero (essentially black)
-            # tensor regardless of the actual image content.
-            if img.dtype.is_floating_point:
-                img_u8 = (img * 255.0).clamp(0, 255).to(torch.uint8)
-            else:
-                img_u8 = img
-            if img_u8.dim() == 3 and img_u8.shape[0] in (1, 3):
-                img_u8 = img_u8.permute(1, 2, 0)  # CHW -> HWC
-            pil_images.append(img_u8.cpu().contiguous().numpy())
+        if not gpu_img_preprocess:
+            for img in raw_image_inputs:
+                # data_worker.py provides images as (C, H, W) float32 in [0, 1]
+                # on the GPU.  HF processors expect PIL/numpy uint8 (H, W, C)
+                # in [0, 255] -- otherwise the default do_rescale=True double-
+                # rescales and the model sees a near-zero (essentially black)
+                # tensor regardless of the actual image content.
+                if img.dtype.is_floating_point:
+                    img_u8 = (img * 255.0).clamp(0, 255).to(torch.uint8)
+                else:
+                    img_u8 = img
+                if img_u8.dim() == 3 and img_u8.shape[0] in (1, 3):
+                    img_u8 = img_u8.permute(1, 2, 0)  # CHW -> HWC
+                pil_images.append(img_u8.cpu().contiguous().numpy())
 
         np_audios: list = []
         for waveform in raw_audio_inputs:
@@ -1315,11 +1454,28 @@ class Qwen3OmniModel(Model):
 
         # Run image_processor / feature_extractor SEPARATELY for the
         # modality outputs.  These don't touch text_inputs.
-        for img in pil_images:
+        if gpu_img_preprocess:
+            # GPU path: process each image fully on-device (no CPU round-trip).
             img_proc = self._processor.image_processor
-            img_out = img_proc(images=[img], return_tensors="pt")
-            result["pixel_values"].append(img_out["pixel_values"])
-            result["image_grid_thw"] += img_out["image_grid_thw"]
+            for img in raw_image_inputs:
+                pv, grid_thw = _gpu_image_preprocess(
+                    img,
+                    patch_size=img_proc.patch_size,
+                    temporal_patch_size=img_proc.temporal_patch_size,
+                    merge_size=img_proc.merge_size,
+                    min_pixels=img_proc.size["shortest_edge"],
+                    max_pixels=img_proc.size["longest_edge"],
+                    image_mean=img_proc.image_mean,
+                    image_std=img_proc.image_std,
+                )
+                result["pixel_values"].append(pv)
+                result["image_grid_thw"] += list(grid_thw)
+        else:
+            for img in pil_images:
+                img_proc = self._processor.image_processor
+                img_out = img_proc(images=[img], return_tensors="pt")
+                result["pixel_values"].append(img_out["pixel_values"])
+                result["image_grid_thw"] += img_out["image_grid_thw"]
 
         for audio in np_audios:
             feat_extractor = self._processor.feature_extractor
