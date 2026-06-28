@@ -1,0 +1,23 @@
+`trust_remote_code` is not supported anymore.
+Please check that the Hugging Face dataset 'openslr/librispeech_asr' isn't based on a loading script and remove `trust_remote_code`.
+If the dataset is based on a loading script, please ask the dataset author to remove it and convert it to a standard format like Parquet.
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'interleaved', 'mrope_section'}
+
+--- Benchmark Results (wall time: 36.50s) ---
+Closed-Loop Benchmark Results (160 requests, max_concurrency=32)
+──────────────────────────────────────────────────
+Request type breakdown: audio_to_speech=160
+Requests : 160/160 succeeded
+TTFT (audio)  : mean=2.314s  p50=2.291s  p95=2.727s  p99=2.811s
+E2E           : mean=4.508s  p50=3.907s  p95=7.362s  p99=16.737s
+ITL  (audio)  : mean=0.783s  p50=0.865s  p95=1.459s  p99=2.125s
+Audio SV      : mean=0.998s  p50=1.000s  p05=1.000s  p10=1.000s  (higher is better)
+RTF           : mean=0.770  p50=0.772  p95=0.900  p99=0.953  (lower is better; <1.0 = real-time)
+Audio dur    : mean=6.642s
+Prompt tokens: 14408 total
+Output bytes (audio): 51012862 total (608 chunks)
+Throughput: 4.38 req/s (successful only)
+Throughput: 29.12 audio sec/s (synthesized audio per wall second)
+Total wall time: 36.50s
+
+Saved 160 outputs to /home/tim/exp_vllm_i2s_s2s/out_vllm_omni/audio_to_speech/B32/
