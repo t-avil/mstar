@@ -1,0 +1,22 @@
+`trust_remote_code` is not supported anymore.
+Please check that the Hugging Face dataset 'openslr/librispeech_asr' isn't based on a loading script and remove `trust_remote_code`.
+If the dataset is based on a loading script, please ask the dataset author to remove it and convert it to a standard format like Parquet.
+Using the latest cached version of the dataset since openslr/librispeech_asr couldn't be found on the Hugging Face Hub (offline mode is enabled).
+Found the latest cached dataset configuration 'clean' at /m-coriander/coriander/hf/datasets/openslr___librispeech_asr/clean/0.0.0/71cacbfb7e2354c4226d01e70d77d5fca3d04ba1 (last modified on Sun May  3 01:45:55 2026).
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'interleaved', 'mrope_section'}
+
+--- Benchmark Results (wall time: 10.77s) ---
+Closed-Loop Benchmark Results (50 requests, max_concurrency=1)
+──────────────────────────────────────────────────
+Request type breakdown: audio_to_text=50
+Requests : 50/50 succeeded
+TTFT (text)  : mean=0.118s  p50=0.105s  p95=0.133s  p99=0.394s
+E2E          : mean=0.215s  p50=0.203s  p95=0.275s  p99=0.477s
+ITL  (text)  : mean=0.007s  p50=0.007s  p95=0.010s  p99=0.012s
+Text tokens: 714 total (14.3 avg/req)
+Output bytes (text): 3286 total (714 chunks)
+Throughput: 4.64 req/s (successful only)
+Throughput: 66.30 text tok/s
+Total wall time: 10.77s
+
+Saved 50 outputs to /home/tim/merge-prefill-wt/benchmark-personal/merge-prefill-walks/raw/off_a2t/

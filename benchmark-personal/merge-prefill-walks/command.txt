@@ -1,0 +1,9 @@
+# Server (per variant), GPUs 0,1, SHM transport, default 2gpu placement:
+#   OFF (baseline): mstar-serve --config configs/qwen3omni_2gpu.yaml --tensor-comm-protocol SHM ...
+#   ON (merge)    : MSTAR_MERGE_PREFILL_WALKS=1 mstar-serve --config configs/qwen3omni_2gpu.yaml --tensor-comm-protocol SHM ...
+# Client (closed-loop, B=1, x50, 5 warmup, output-len-seed 42):
+#   python -m benchmark.runner --url <URL> --model qwen3omni --inference-system ours \
+#     --request-type {audio_to_text|image_to_text|audio_to_speech} \
+#     --dataset {libri|food101|libri} --num-requests 50 --num-warmup 5 \
+#     --batch-size 1 --profiling-type closed_loop --max-concurrency 1 --output-len-seed 42
+# Reps: S2T captured 1+3 OFF and 3 ON to bound run-to-run noise. I2T/S2S 1 run each.

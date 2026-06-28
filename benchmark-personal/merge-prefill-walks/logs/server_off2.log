@@ -1,0 +1,100 @@
+2026-06-28 07:57:58,709 WARNING [worker_1] mstar.communication.tensors: Deferring cleanup of tensor uuid df177d16-c544-4241-994d-275fddcff515 (awaiting TENSOR_RECEIVED ACK)
+2026-06-28 07:57:58,710 INFO [api_server] mstar.api_server.entrypoint: Request d585ce1a-a42c-487c-b8b2-db0d3f0c6bd2 submitted  in=['audio', 'text']  out=['text']
+2026-06-28 07:57:58,894 INFO [conductor] mstar.conductor.conductor: Request d585ce1a-a42c-487c-b8b2-db0d3f0c6bd2 done
+2026-06-28 07:57:58,895 INFO [api_server] mstar.api_server.entrypoint: API server received d585ce1a-a42c-487c-b8b2-db0d3f0c6bd2 done
+2026-06-28 07:57:58,896 INFO [api_server] mstar.api_server.entrypoint: Async stream results received finish for d585ce1a-a42c-487c-b8b2-db0d3f0c6bd2
+2026-06-28 07:57:58,898 WARNING [worker_1] mstar.communication.tensors: Deferring cleanup of tensor uuid 0699166a-4481-46bd-a285-b47cf4877f0a (awaiting TENSOR_RECEIVED ACK)
+2026-06-28 07:57:58,899 INFO [api_server] mstar.api_server.entrypoint: Request f1b1ee96-2dc0-4b25-906b-4aeca93c973f submitted  in=['audio', 'text']  out=['text']
+2026-06-28 07:57:59,061 INFO [conductor] mstar.conductor.conductor: Request f1b1ee96-2dc0-4b25-906b-4aeca93c973f done
+2026-06-28 07:57:59,062 INFO [api_server] mstar.api_server.entrypoint: API server received f1b1ee96-2dc0-4b25-906b-4aeca93c973f done
+2026-06-28 07:57:59,064 INFO [api_server] mstar.api_server.entrypoint: Async stream results received finish for f1b1ee96-2dc0-4b25-906b-4aeca93c973f
+2026-06-28 07:57:59,065 WARNING [worker_1] mstar.communication.tensors: Deferring cleanup of tensor uuid d9fc7670-408e-4ffb-b1bf-16a32b13c53e (awaiting TENSOR_RECEIVED ACK)
+2026-06-28 07:57:59,067 INFO [api_server] mstar.api_server.entrypoint: Request 46bbdbd8-ed4c-4090-ad4e-e9508cbacfc9 submitted  in=['audio', 'text']  out=['text']
+2026-06-28 07:57:59,292 INFO [conductor] mstar.conductor.conductor: Request 46bbdbd8-ed4c-4090-ad4e-e9508cbacfc9 done
+2026-06-28 07:57:59,292 INFO [api_server] mstar.api_server.entrypoint: API server received 46bbdbd8-ed4c-4090-ad4e-e9508cbacfc9 done
+2026-06-28 07:57:59,294 INFO [api_server] mstar.api_server.entrypoint: Async stream results received finish for 46bbdbd8-ed4c-4090-ad4e-e9508cbacfc9
+2026-06-28 07:57:59,296 WARNING [worker_1] mstar.communication.tensors: Deferring cleanup of tensor uuid df5b0905-ed5b-4e4e-b6a6-772fa59e9536 (awaiting TENSOR_RECEIVED ACK)
+2026-06-28 07:57:59,296 WARNING [worker_1] mstar.communication.tensors: Deferring cleanup of tensor uuid cf4a8173-c922-4cf7-8a05-7a9e0bdd9ba7 (awaiting TENSOR_RECEIVED ACK)
+2026-06-28 07:57:59,297 INFO [api_server] mstar.api_server.entrypoint: Request 35597593-d6bf-44c0-946b-70f487e9eba7 submitted  in=['audio', 'text']  out=['text']
+2026-06-28 07:57:59,484 INFO [conductor] mstar.conductor.conductor: Request 35597593-d6bf-44c0-946b-70f487e9eba7 done
+2026-06-28 07:57:59,486 INFO [api_server] mstar.api_server.entrypoint: API server received 35597593-d6bf-44c0-946b-70f487e9eba7 done
+2026-06-28 07:57:59,487 INFO [api_server] mstar.api_server.entrypoint: Async stream results received finish for 35597593-d6bf-44c0-946b-70f487e9eba7
+2026-06-28 07:57:59,488 WARNING [worker_1] mstar.communication.tensors: Deferring cleanup of tensor uuid 11026e98-0ba0-4982-b369-d93c1cd67b51 (awaiting TENSOR_RECEIVED ACK)
+2026-06-28 07:57:59,491 INFO [api_server] mstar.api_server.entrypoint: Request 284c860a-9dca-45ce-bc06-673bc5664814 submitted  in=['audio', 'text']  out=['text']
+2026-06-28 07:57:59,675 INFO [conductor] mstar.conductor.conductor: Request 284c860a-9dca-45ce-bc06-673bc5664814 done
+2026-06-28 07:57:59,676 INFO [api_server] mstar.api_server.entrypoint: API server received 284c860a-9dca-45ce-bc06-673bc5664814 done
+2026-06-28 07:57:59,678 INFO [api_server] mstar.api_server.entrypoint: Async stream results received finish for 284c860a-9dca-45ce-bc06-673bc5664814
+2026-06-28 07:57:59,679 WARNING [worker_1] mstar.communication.tensors: Deferring cleanup of tensor uuid 2637a438-911c-4983-9194-5b0245d1efd4 (awaiting TENSOR_RECEIVED ACK)
+2026-06-28 07:57:59,681 INFO [api_server] mstar.api_server.entrypoint: Request 883f3ebe-87d7-4758-a9e6-74fc8a24d621 submitted  in=['audio', 'text']  out=['text']
+2026-06-28 07:57:59,912 INFO [conductor] mstar.conductor.conductor: Request 883f3ebe-87d7-4758-a9e6-74fc8a24d621 done
+2026-06-28 07:57:59,913 INFO [api_server] mstar.api_server.entrypoint: API server received 883f3ebe-87d7-4758-a9e6-74fc8a24d621 done
+2026-06-28 07:57:59,916 INFO [api_server] mstar.api_server.entrypoint: Async stream results received finish for 883f3ebe-87d7-4758-a9e6-74fc8a24d621
+2026-06-28 07:57:59,916 WARNING [worker_1] mstar.communication.tensors: Deferring cleanup of tensor uuid f11e6ab5-109a-427c-aa54-52e303d720c1 (awaiting TENSOR_RECEIVED ACK)
+2026-06-28 07:57:59,916 WARNING [worker_1] mstar.communication.tensors: Deferring cleanup of tensor uuid cdb4b836-f200-4ba4-a3b6-0f663fa216d8 (awaiting TENSOR_RECEIVED ACK)
+2026-06-28 07:57:59,919 INFO [api_server] mstar.api_server.entrypoint: Request f2c25fe2-0026-445b-b44b-cea0efb932be submitted  in=['audio', 'text']  out=['text']
+2026-06-28 07:58:00,154 INFO [conductor] mstar.conductor.conductor: Request f2c25fe2-0026-445b-b44b-cea0efb932be done
+2026-06-28 07:58:00,156 INFO [api_server] mstar.api_server.entrypoint: API server received f2c25fe2-0026-445b-b44b-cea0efb932be done
+2026-06-28 07:58:00,157 INFO [api_server] mstar.api_server.entrypoint: Async stream results received finish for f2c25fe2-0026-445b-b44b-cea0efb932be
+2026-06-28 07:58:00,158 WARNING [worker_1] mstar.communication.tensors: Deferring cleanup of tensor uuid 33399389-5259-4dd7-8a15-612965b82452 (awaiting TENSOR_RECEIVED ACK)
+2026-06-28 07:58:00,161 INFO [api_server] mstar.api_server.entrypoint: Request e0023746-3719-43e9-b9f2-c0abbaced8d0 submitted  in=['audio', 'text']  out=['text']
+2026-06-28 07:58:00,353 INFO [conductor] mstar.conductor.conductor: Request e0023746-3719-43e9-b9f2-c0abbaced8d0 done
+2026-06-28 07:58:00,354 INFO [api_server] mstar.api_server.entrypoint: API server received e0023746-3719-43e9-b9f2-c0abbaced8d0 done
+2026-06-28 07:58:00,356 INFO [api_server] mstar.api_server.entrypoint: Async stream results received finish for e0023746-3719-43e9-b9f2-c0abbaced8d0
+2026-06-28 07:58:00,357 WARNING [worker_1] mstar.communication.tensors: Deferring cleanup of tensor uuid e46d0286-4ae7-4d13-8867-dc4c3e0635c0 (awaiting TENSOR_RECEIVED ACK)
+2026-06-28 07:58:00,357 WARNING [worker_1] mstar.communication.tensors: Deferring cleanup of tensor uuid bbe9c20b-5575-4c94-ae64-31b524921f8d (awaiting TENSOR_RECEIVED ACK)
+2026-06-28 07:58:00,359 INFO [api_server] mstar.api_server.entrypoint: Request 68f6a11a-7d7a-4a8f-b237-e16788c31003 submitted  in=['audio', 'text']  out=['text']
+2026-06-28 07:58:00,538 INFO [conductor] mstar.conductor.conductor: Request 68f6a11a-7d7a-4a8f-b237-e16788c31003 done
+2026-06-28 07:58:00,539 INFO [api_server] mstar.api_server.entrypoint: API server received 68f6a11a-7d7a-4a8f-b237-e16788c31003 done
+2026-06-28 07:58:00,541 INFO [api_server] mstar.api_server.entrypoint: Async stream results received finish for 68f6a11a-7d7a-4a8f-b237-e16788c31003
+2026-06-28 07:58:00,542 WARNING [worker_1] mstar.communication.tensors: Deferring cleanup of tensor uuid 8add6ed1-b3ab-4e11-9bbf-af2583766d13 (awaiting TENSOR_RECEIVED ACK)
+2026-06-28 07:58:00,543 WARNING [worker_1] mstar.communication.tensors: Deferring cleanup of tensor uuid 114f3745-c94a-45d0-848c-bdfc537f0390 (awaiting TENSOR_RECEIVED ACK)
+2026-06-28 07:58:00,544 INFO [api_server] mstar.api_server.entrypoint: Request c82f8edc-18af-4ccc-a2c7-9c73dcb21ac7 submitted  in=['audio', 'text']  out=['text']
+2026-06-28 07:58:00,758 INFO [conductor] mstar.conductor.conductor: Request c82f8edc-18af-4ccc-a2c7-9c73dcb21ac7 done
+2026-06-28 07:58:00,759 INFO [api_server] mstar.api_server.entrypoint: API server received c82f8edc-18af-4ccc-a2c7-9c73dcb21ac7 done
+2026-06-28 07:58:00,761 INFO [api_server] mstar.api_server.entrypoint: Async stream results received finish for c82f8edc-18af-4ccc-a2c7-9c73dcb21ac7
+2026-06-28 07:58:00,763 WARNING [worker_1] mstar.communication.tensors: Deferring cleanup of tensor uuid 2e4a7a6d-4cd8-4662-a81f-cd272753b769 (awaiting TENSOR_RECEIVED ACK)
+2026-06-28 07:58:00,763 WARNING [worker_1] mstar.communication.tensors: Deferring cleanup of tensor uuid 1578156a-8914-4cb3-b57f-ccc7ddc60646 (awaiting TENSOR_RECEIVED ACK)
+2026-06-28 07:58:00,764 INFO [api_server] mstar.api_server.entrypoint: Request 0430e3fb-5330-41b0-8a0b-e9cdf5e6a6c4 submitted  in=['audio', 'text']  out=['text']
+2026-06-28 07:58:00,926 INFO [conductor] mstar.conductor.conductor: Request 0430e3fb-5330-41b0-8a0b-e9cdf5e6a6c4 done
+2026-06-28 07:58:00,927 INFO [api_server] mstar.api_server.entrypoint: API server received 0430e3fb-5330-41b0-8a0b-e9cdf5e6a6c4 done
+2026-06-28 07:58:00,928 INFO [api_server] mstar.api_server.entrypoint: Async stream results received finish for 0430e3fb-5330-41b0-8a0b-e9cdf5e6a6c4
+2026-06-28 07:58:00,930 WARNING [worker_1] mstar.communication.tensors: Deferring cleanup of tensor uuid 3b963989-3bc0-49d6-83c3-4133545e2f1d (awaiting TENSOR_RECEIVED ACK)
+2026-06-28 07:58:00,931 INFO [api_server] mstar.api_server.entrypoint: Request 3b8826bf-4892-42f5-9cc5-55fcef054c0e submitted  in=['audio', 'text']  out=['text']
+2026-06-28 07:58:01,136 INFO [conductor] mstar.conductor.conductor: Request 3b8826bf-4892-42f5-9cc5-55fcef054c0e done
+2026-06-28 07:58:01,136 INFO [api_server] mstar.api_server.entrypoint: API server received 3b8826bf-4892-42f5-9cc5-55fcef054c0e done
+2026-06-28 07:58:01,139 INFO [api_server] mstar.api_server.entrypoint: Async stream results received finish for 3b8826bf-4892-42f5-9cc5-55fcef054c0e
+2026-06-28 07:58:01,140 WARNING [worker_1] mstar.communication.tensors: Deferring cleanup of tensor uuid 5146a5a3-1f99-448d-bc6d-bb43fad3bae1 (awaiting TENSOR_RECEIVED ACK)
+2026-06-28 07:58:01,142 INFO [api_server] mstar.api_server.entrypoint: Request 80549994-10a2-4d28-bcb1-de80891ed2ec submitted  in=['audio', 'text']  out=['text']
+2026-06-28 07:58:01,368 INFO [conductor] mstar.conductor.conductor: Request 80549994-10a2-4d28-bcb1-de80891ed2ec done
+2026-06-28 07:58:01,369 INFO [api_server] mstar.api_server.entrypoint: API server received 80549994-10a2-4d28-bcb1-de80891ed2ec done
+2026-06-28 07:58:01,371 INFO [api_server] mstar.api_server.entrypoint: Async stream results received finish for 80549994-10a2-4d28-bcb1-de80891ed2ec
+2026-06-28 07:58:01,372 WARNING [worker_1] mstar.communication.tensors: Deferring cleanup of tensor uuid 429f961a-a8c0-4e25-b01d-1c2fc3178de3 (awaiting TENSOR_RECEIVED ACK)
+2026-06-28 07:58:01,376 INFO [api_server] mstar.api_server.entrypoint: Request c254df2d-f9e7-48a3-a4e5-bdb7836e0635 submitted  in=['audio', 'text']  out=['text']
+2026-06-28 07:58:01,563 INFO [conductor] mstar.conductor.conductor: Request c254df2d-f9e7-48a3-a4e5-bdb7836e0635 done
+2026-06-28 07:58:01,563 INFO [api_server] mstar.api_server.entrypoint: API server received c254df2d-f9e7-48a3-a4e5-bdb7836e0635 done
+2026-06-28 07:58:01,565 INFO [api_server] mstar.api_server.entrypoint: Async stream results received finish for c254df2d-f9e7-48a3-a4e5-bdb7836e0635
+2026-06-28 07:58:01,567 WARNING [worker_1] mstar.communication.tensors: Deferring cleanup of tensor uuid 16b9fb9f-f7d2-471e-b004-7e7204457753 (awaiting TENSOR_RECEIVED ACK)
+2026-06-28 07:58:01,567 WARNING [worker_1] mstar.communication.tensors: Deferring cleanup of tensor uuid cef66fc6-242e-497f-8b29-0c7beffa3863 (awaiting TENSOR_RECEIVED ACK)
+2026-06-28 07:58:01,568 INFO [api_server] mstar.api_server.entrypoint: Request a42aa000-66b4-41f8-ba83-5458bdc425c9 submitted  in=['audio', 'text']  out=['text']
+2026-06-28 07:58:01,780 INFO [conductor] mstar.conductor.conductor: Request a42aa000-66b4-41f8-ba83-5458bdc425c9 done
+2026-06-28 07:58:01,781 INFO [api_server] mstar.api_server.entrypoint: API server received a42aa000-66b4-41f8-ba83-5458bdc425c9 done
+2026-06-28 07:58:01,782 INFO [api_server] mstar.api_server.entrypoint: Async stream results received finish for a42aa000-66b4-41f8-ba83-5458bdc425c9
+2026-06-28 07:58:01,783 WARNING [worker_1] mstar.communication.tensors: Deferring cleanup of tensor uuid 3425481e-49f5-4f9f-804d-efbd6d86a6bb (awaiting TENSOR_RECEIVED ACK)
+2026-06-28 07:58:01,785 INFO [api_server] mstar.api_server.entrypoint: Request 5e73fa77-c3dc-4cbd-800f-ae9b193e9550 submitted  in=['audio', 'text']  out=['text']
+2026-06-28 07:58:01,997 INFO [conductor] mstar.conductor.conductor: Request 5e73fa77-c3dc-4cbd-800f-ae9b193e9550 done
+2026-06-28 07:58:01,998 INFO [api_server] mstar.api_server.entrypoint: API server received 5e73fa77-c3dc-4cbd-800f-ae9b193e9550 done
+2026-06-28 07:58:02,001 INFO [api_server] mstar.api_server.entrypoint: Async stream results received finish for 5e73fa77-c3dc-4cbd-800f-ae9b193e9550
+2026-06-28 07:58:02,001 WARNING [worker_1] mstar.communication.tensors: Deferring cleanup of tensor uuid 8232bfd6-cf56-4312-b362-e11d8c7ccad5 (awaiting TENSOR_RECEIVED ACK)
+2026-06-28 07:58:02,002 WARNING [worker_1] mstar.communication.tensors: Deferring cleanup of tensor uuid 7e639fb0-3e16-456e-9b71-dbd0807809ec (awaiting TENSOR_RECEIVED ACK)
+2026-06-28 07:58:02,004 INFO [api_server] mstar.api_server.entrypoint: Request 9479ee56-0677-4bbb-8285-56a182abc1ee submitted  in=['audio', 'text']  out=['text']
+2026-06-28 07:58:02,237 INFO [conductor] mstar.conductor.conductor: Request 9479ee56-0677-4bbb-8285-56a182abc1ee done
+2026-06-28 07:58:02,239 INFO [api_server] mstar.api_server.entrypoint: API server received 9479ee56-0677-4bbb-8285-56a182abc1ee done
+2026-06-28 07:58:02,241 WARNING [worker_1] mstar.communication.tensors: Deferring cleanup of tensor uuid 8016b5da-8692-4c49-8080-47e872f02747 (awaiting TENSOR_RECEIVED ACK)
+2026-06-28 07:58:02,241 WARNING [worker_1] mstar.communication.tensors: Deferring cleanup of tensor uuid a93052f0-1a0a-4cdf-8a0b-0b050e72bc8c (awaiting TENSOR_RECEIVED ACK)
+2026-06-28 07:58:02,242 INFO [api_server] mstar.api_server.entrypoint: Async stream results received finish for 9479ee56-0677-4bbb-8285-56a182abc1ee
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [217288]
+/home/tim/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/multiprocessing/resource_tracker.py:279: UserWarning: resource_tracker: There appear to be 2 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '
