@@ -46,7 +46,7 @@ def series(agg, s, kind, modality):
             v = d.get("p50") if isinstance(d, dict) else None
         elif kind == "itl":
             d = har.get("itl_audio" if modality=="speech" else "itl_text")
-            v = d.get("p50") if isinstance(d, dict) else None
+            v = d.get("mean") if isinstance(d, dict) else None  # mean: p50 is degenerate (=0) at batch (burst arrivals)
         if v is not None and v == v:  # not NaN/None
             xs.append(b); ys.append(v)
     return xs, ys
@@ -73,7 +73,7 @@ for path,(title,modality) in PATHS.items():
         panel(axes[0,0], agg, modality, "aud",  "Throughput (audio sec/s) — higher better", "audio s/s")
         panel(axes[0,1], agg, modality, "rtf",  "RTF p50 — lower better (<1 = real-time)", "RTF", lower_better=True)
     panel(axes[1,0], agg, modality, "ttft", "TTFT p50 (s) — lower better", "s", lower_better=True)
-    panel(axes[1,1], agg, modality, "itl",  "ITL p50 (s) — lower better", "s", lower_better=True)
+    panel(axes[1,1], agg, modality, "itl",  "ITL mean (s) — lower better (p50 degenerate at batch)", "s", lower_better=True)
     axes[0,0].legend(fontsize=9, loc="best")
     fig.tight_layout(rect=[0,0,1,0.96])
     outp = os.path.join(OUT, f"{path}_4metric.png")
