@@ -180,11 +180,17 @@ def main() -> int:
     # also exercise larger T and more shards, and a non-divisible T. All use
     # the production default halo (32); the conv-stack left receptive field is
     # ~4 codec frames (measured: halo>=4 is bit-exact), so 32 has 8x margin.
+    # Includes LARGE chunks (400, 800) to show SP composes safely with a
+    # larger codec_chunk (the throughput path): the conv-stack receptive field
+    # (~4 frames) is fixed and independent of chunk length, so seam-correctness
+    # depends only on halo(32) >= RF(~4), not on T.
     single_cases = [
         (50, 2, 32),
         (128, 2, 32),
         (200, 4, 32),
         (97, 3, 32),    # non-divisible frame count
+        (400, 2, 32),   # large chunk (throughput path)
+        (800, 4, 32),   # large chunk, 4 shards
     ]
     for T, n, h in single_cases:
         results.append((f"single T={T} n={n} h={h}", run_case(T, n, h, None)))
@@ -202,6 +208,7 @@ def main() -> int:
             (50, 2, 32),
             (128, 2, 32),
             (200, 2, 32),
+            (800, 2, 32),   # large chunk across two GPUs
         ]
         for T, n, h in xdev_cases:
             results.append(
