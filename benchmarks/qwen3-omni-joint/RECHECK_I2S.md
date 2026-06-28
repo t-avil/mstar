@@ -3,8 +3,10 @@
 Triggered by a flagged I2S datapoint where M*-new looked marginally below M*-old at low batch, and
 M*-old B=2 was missing from the original sweep. Re-ran I2S B=1/B=2 for both builds, multiple reps,
 on an isolated pair (GPUs 6,7), sequentially (no co-location). Raw runs under `../recheck/` (or the
-session exp dir). Comparison metric = **RTF p50** (length-normalized; aud/s is confounded because
-M*-old transcribes shorter audio than M*-new's prompt-layout answers).
+session exp dir). Comparison metric = **RTF p50** (length-normalized). At I2S B=1/B=2 the two builds emit
+near-equal audio length (within ~3%: B1 new 47.26 s vs old 47.83 s; B2 new 49.32 s vs old 43.55 s; both
+~0.76-0.80 of vLLM), so aud/s and RTF agree closely here. RTF is the general-case fair metric: the audio-length
+confound is pronounced on S2S (M*-old emits only ~0.57 of vLLM there), not on I2S.
 
 ## Results (rep-averaged)
 | cell | M*-new aud/s | M*-new RTF p50 | M*-old aud/s | M*-old RTF p50 |

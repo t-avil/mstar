@@ -1,1 +1,21 @@
-aggregate.py --roots exp_audioenc exp_imageenc exp_throughput exp_rebench (audio-first = canonical isolated 4-way)
+# How the committed deliverable (raw_<path>.json, NUMBERS.md, charts/) is regenerated.
+#
+# The committed raw_<path>.json ARE the canonical curated datapoints. Re-running the
+# old source-root aggregation below does NOT reproduce them 1:1 (the source roots have
+# since gained extra variant tags / different priority-order hits), so the raw files --
+# not the roots -- are authoritative. Regenerate via REFINE MODE, which operates on the
+# committed raw files: folds the I2S B1/B2 recheck per-request dumps into datapoints,
+# recomputes every aggregate cell FROM the datapoints (datapoints == aggregates),
+# stamps units/provenance, and writes NUMBERS.md + charts/.
+#
+# matplotlib lives in the mstar venv (system python3 has none):
+PY=/home/tim/mstar/.venv/bin/python
+
+# 1) refine raw + ratio table + NUMBERS.md + throughput/RTF charts:
+RUN_TS_UTC=$(date -u +%Y%m%dT%H%M%SZ) $PY aggregate.py --refine-dir . --recheck-dir ./recheck
+
+# 2) 4-metric proof charts (error bars, single TTFT p50, missing-cell markers, ITL outlier drop):
+$PY make_proof_charts.py
+
+# --- legacy: original source-root aggregation (does NOT reproduce committed raw; kept for reference) ---
+# aggregate.py --roots exp_audioenc exp_imageenc exp_throughput exp_rebench (audio-first = canonical isolated 4-way)
