@@ -457,10 +457,22 @@ class ThinkerSubmodule(ARNodeSubmodule):
         # Wrap the audio span in ``<|audio_bos|>`` / ``<|audio_eos|>``
         # sentinel token embeddings so the Thinker sees the same
         # prompt layout the HF processor produces.
+        #
+        # When MSTAR_VLLM_AUDIO_SENTINELS=1, use the real Qwen3-Omni audio
+        # marker IDs (151669/151670, what vLLM uses) instead of the legacy
+        # 151647/151648 (mislabeled <|audio_bos|>/<|audio_eos|> in config.py).
+        from mstar.model.qwen3_omni.qwen3_omni_model import (
+            vllm_audio_sentinels_enabled,
+        )
+
         device = self.get_device()
         if self._audio_bos_embed is None or self._audio_eos_embed is None:
-            audio_start_id = self.config.thinker.audio_start_token_id
-            audio_end_id = self.config.thinker.audio_end_token_id
+            if vllm_audio_sentinels_enabled():
+                audio_start_id = 151669
+                audio_end_id = 151670
+            else:
+                audio_start_id = self.config.thinker.audio_start_token_id
+                audio_end_id = self.config.thinker.audio_end_token_id
             start_tok = torch.tensor(
                 [audio_start_id], dtype=torch.long, device=device
             )
@@ -566,6 +578,11 @@ class ThinkerSubmodule(ARNodeSubmodule):
         if graph_walk == "prefill_audio":
             audio_embeds = inputs["audio_embeds"][0].to(device)  # (audio_tokens, hidden)
             audio_len = audio_embeds.shape[0]
+
+            # Env-gated dump of the audio-encoder last_hidden_state for the
+            # cross-system tensor comparison (no-op unless MSTAR_DUMP_DIR set).
+            from mstar.model.qwen3_omni.qwen3_omni_model import _dump_obj
+            _dump_obj("mstar_audio_encoder_last_hidden_state.pt", audio_embeds)
 
             mm_mask = torch.ones(audio_len + 2, dtype=torch.bool, device=device)
             mm_mask[[0, -1]] = 0

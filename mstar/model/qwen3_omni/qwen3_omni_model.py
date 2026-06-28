@@ -55,6 +55,64 @@ from mstar.utils.sampling import SamplingConfig
 logger = logging.getLogger(__name__)
 
 
+def _envflag(name: str) -> bool:
+    """Read a boolean env flag (default OFF). Accepts 1/true/yes/on."""
+    import os as _os
+
+    raw = _os.environ.get(name)
+    if raw is None:
+        return False
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def vllm_prompt_layout_enabled() -> bool:
+    """When ON, replicate vLLM-Omni's prompt layout: position the audio block
+    INSIDE the user turn BEFORE the instruction text, so the effective Thinker
+    sequence is system-turn, then user-turn = [audio][instruction], then
+    assistant. Default OFF -> the legacy layout (audio prefilled as a separate
+    bare block) is byte-identical, preserving encoder parity.
+    """
+    return _envflag("MSTAR_VLLM_PROMPT_LAYOUT")
+
+
+def vllm_audio_sentinels_enabled() -> bool:
+    """When ON, wrap the audio span with the real Qwen3-Omni audio marker token
+    IDs (151669 ``<|audio_start|>`` / 151670 ``<|audio_end|>``, what vLLM uses)
+    instead of the legacy 151647/151648 (mislabeled ``<|audio_bos|>``/
+    ``<|audio_eos|>``). Default OFF. Independent of MSTAR_VLLM_PROMPT_LAYOUT so
+    both can be tested separately."""
+    return _envflag("MSTAR_VLLM_AUDIO_SENTINELS")
+
+
+def _tensor_dump_dir() -> str | None:
+    """Directory for env-gated intermediate-tensor / token dumps, or None."""
+    import os as _os
+
+    return _os.environ.get("MSTAR_DUMP_DIR") or None
+
+
+def _dump_obj(name: str, obj) -> None:
+    """Best-effort dump of a tensor / python object to MSTAR_DUMP_DIR."""
+    d = _tensor_dump_dir()
+    if not d:
+        return
+    try:
+        import os as _os
+
+        _os.makedirs(d, exist_ok=True)
+        path = _os.path.join(d, name)
+        if isinstance(obj, torch.Tensor):
+            torch.save(obj.detach().cpu(), path)
+        else:
+            import json as _json
+
+            with open(path, "w") as f:
+                _json.dump(obj, f, indent=2)
+        logger.info("MSTAR_DUMP: wrote %s", path)
+    except Exception as e:  # never let instrumentation break a run
+        logger.warning("MSTAR_DUMP failed for %s: %s", name, e)
+
+
 def _hf_encoder_attn_impl() -> str:
     """Pick the attention implementation for the HF-wrapper encoder fallback.
 
@@ -570,7 +628,18 @@ class Qwen3OmniModel(Model):
                 kwargs={
                     "audio_output": audio_output,
                     "talker_prefill_done": False,
-                    "num_thinker_prefill_steps": len(input_modalities),
+                    # The Talker consumes one thinker_states chunk per Thinker
+                    # prefill walk, so this MUST equal the actual number of
+                    # Thinker prefill walks -- not len(input_modalities).  The
+                    # vLLM-layout path (MSTAR_VLLM_PROMPT_LAYOUT=1) splits text
+                    # into prefix+suffix around the audio, producing an extra
+                    # prefill_text walk; deriving the count from the real
+                    # schedule keeps the Talker's last-prefill detection aligned.
+                    "num_thinker_prefill_steps": len(
+                        self._build_thinker_prefill_schedule(
+                            input_modalities, input_signals,
+                        )
+                    ),
                     "prefill_chunks_processed": 0,
                     "voice": model_kwargs.get("voice", "Ethan"),
                     "talker_max_tokens": self.get_max_talker_output_tokens(**model_kwargs),
@@ -682,6 +751,27 @@ class Qwen3OmniModel(Model):
         pixel_values_videos = input_signals.get("pixel_values_videos", [])
         video_grid_thws = input_signals.get("video_grid_thw", [])
         video_second_per_grid = input_signals.get("video_second_per_grid", [])
+
+        # --- vLLM prompt-layout schedule -----------------------------------
+        # process_prompt split text_inputs into [prefix, suffix] and wants the
+        # audio interleaved: prefill_text(prefix) -> prefill_audio ->
+        # prefill_text(suffix).  This puts the audio block INSIDE the user turn
+        # before the instruction, matching vLLM.  Only triggers when the flag
+        # is on AND there are exactly the expected two text spans + audio.
+        if (
+            vllm_prompt_layout_enabled()
+            and len(texts) >= 2
+            and len(audio_features) >= 1
+        ):
+            audio_entry: dict[str, TensorPointerInfo] = {
+                "audio_features": audio_features[0],
+            }
+            if len(audio_seqlens) >= 1:
+                audio_entry["audio_seqlens"] = audio_seqlens[0]
+            schedule.append(("prefill_text", {"text_inputs": texts[0]}))
+            schedule.append(("prefill_audio", audio_entry))
+            schedule.append(("prefill_text", {"text_inputs": texts[1]}))
+            return schedule
 
         text_idx = audio_idx = vision_idx = video_idx = 0
         for mod in input_modalities:
@@ -995,6 +1085,30 @@ class Qwen3OmniModel(Model):
             )
         )
 
+    def _user_turn_audio_split_index(
+        self, input_ids: torch.Tensor
+    ) -> int | None:
+        """Index in ``input_ids`` right after ``<|im_start|>user\\n`` where the
+        audio block must be inserted to match vLLM's layout.
+
+        The Qwen ChatML user turn tokenizes as
+        ``[<|im_start|>(151644), user(872), \\n(198), <prompt...>]``.  We locate
+        the ``[im_start, user]`` pair and return the index just past the newline
+        that follows it.  Returns None if no user turn is found.
+        """
+        im_start = self.config.im_start_token_id
+        user_tok = self.config.user_token_id
+        ids = input_ids.tolist()
+        for i in range(len(ids) - 1):
+            if ids[i] == im_start and ids[i + 1] == user_tok:
+                j = i + 2
+                # Skip the single newline token that the template emits after
+                # the role name (id 198 for "\n"); guard against absence.
+                if j < len(ids) and ids[j] == 198:
+                    j += 1
+                return j
+        return None
+
     def process_prompt(
         self,
         prompt: str | None,
@@ -1110,7 +1224,70 @@ class Qwen3OmniModel(Model):
         input_ids = self.tokenizer(
             text, return_tensors="pt"
         )["input_ids"][0]
-        result["text_inputs"] = [input_ids]
+
+        # --- vLLM prompt-layout: audio INSIDE the user turn, BEFORE instr ---
+        #
+        # Legacy M* layout prefills audio as a separate bare block (schedule
+        # [prefill_audio, prefill_text]) so the audio sits OUTSIDE any turn and
+        # the instruction governs -> the model TRANSCRIBES.  vLLM-Omni applies
+        # the stock HF chat template which puts the audio inside the user turn
+        # before the instruction -> the trained "spoken-query -> reply" layout
+        # -> the model ANSWERS.
+        #
+        # To replicate that without retokenizing across the boundary (which can
+        # shift BPE merges), we slice the ALREADY-tokenized full sequence right
+        # after ``<|im_start|>user\n`` into a prefix (system turn + user-turn
+        # opener) and a suffix (instruction + ``<|im_end|>`` + assistant
+        # prompt).  The schedule builder then runs
+        # [prefill_text(prefix), prefill_audio, prefill_text(suffix)], so the
+        # audio walk's BOS/AUDIO/EOS embeddings land between them -> exactly the
+        # vLLM token layout (modulo sentinel IDs + M-RoPE, tracked separately).
+        if (
+            vllm_prompt_layout_enabled()
+            and len(np_audios) > 0
+            and prompt is not None
+        ):
+            split = self._user_turn_audio_split_index(input_ids)
+            if split is not None:
+                prefix_ids = input_ids[:split]
+                suffix_ids = input_ids[split:]
+                result["text_inputs"] = [prefix_ids, suffix_ids]
+                _dump_obj("mstar_thinker_prefix_ids.pt", prefix_ids)
+                _dump_obj("mstar_thinker_suffix_ids.pt", suffix_ids)
+                _dump_obj(
+                    "mstar_thinker_layout.json",
+                    {
+                        "layout": "vllm_user_turn_audio_before_instruction",
+                        "prefix_ids": prefix_ids.tolist(),
+                        "suffix_ids": suffix_ids.tolist(),
+                        "split_index": int(split),
+                        "audio_sentinels": (
+                            [151669, 151670]
+                            if vllm_audio_sentinels_enabled()
+                            else [
+                                self.config.thinker.audio_start_token_id,
+                                self.config.thinker.audio_end_token_id,
+                            ]
+                        ),
+                    },
+                )
+            else:
+                logger.warning(
+                    "MSTAR_VLLM_PROMPT_LAYOUT=1 but could not locate the user "
+                    "turn in the tokenized prompt; falling back to legacy "
+                    "layout for this request."
+                )
+                result["text_inputs"] = [input_ids]
+        else:
+            result["text_inputs"] = [input_ids]
+            _dump_obj("mstar_thinker_input_ids.pt", input_ids)
+            _dump_obj(
+                "mstar_thinker_layout.json",
+                {
+                    "layout": "legacy_audio_separate_block",
+                    "input_ids": input_ids.tolist(),
+                },
+            )
 
         result["pixel_values"] = []
         result["image_grid_thw"] = []
