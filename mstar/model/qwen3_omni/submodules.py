@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Optional
 
 import torch
@@ -39,6 +40,82 @@ from mstar.model.submodule_base import ARNodeInputs, ARNodeSubmodule, ModelInput
 from mstar.utils.sampling import CudaGraphableSampler, SeenTokenMask
 
 logger = logging.getLogger(__name__)
+
+
+# ===================================================================
+# Prefill token-budget graph bucketing (env-gated, default OFF)
+# ===================================================================
+#
+# The multimodal Thinker/Talker prefill graphs are captured at a fixed set of
+# token budgets (PREFILL_TOKEN_BUCKETS et al.). The CUDA-graph runner already
+# rounds an arbitrary prefill length UP to the smallest captured bucket that
+# fits (``CudaGraphRunner._get_padded_num_tokens`` -> ``bisect`` over
+# ``config.get_total_tokens(bs)``) and replays that graph; FlashInfer's
+# ``qo_indptr``-based attention ignores the trailing pad tokens, so this is
+# zero quality cost. A prefill only falls back to EAGER when its length
+# exceeds the LARGEST captured bucket (``_get_padded_num_tokens`` returns
+# ``None``) -- the "eager cliff".
+#
+# Two costs remain with the hardcoded coarse buckets:
+#   1. Round-up waste: a 130-token prefill replays the 256 bucket (~2x the
+#      necessary compute). Finer buckets near common lengths shrink this.
+#   2. The eager cliff: any prefill longer than the top bucket runs eager,
+#      losing the whole CUDA-graph win exactly on the long prompts that cost
+#      the most TTFT.
+#
+# ``MSTAR_PREFILL_BUCKET_PADUP`` (default OFF) widens the captured bucket set
+# to address both: a finer low/mid grid plus one wider top bucket. Each extra
+# bucket costs one more capture (persistent FlashInfer wrappers + static
+# buffers) at warmup, so it is opt-in. Default OFF returns the existing
+# hardcoded lists verbatim, so the captured graph set and per-request dispatch
+# are byte-identical to before this change.
+
+
+def _prefill_padup_enabled() -> bool:
+    """True iff ``MSTAR_PREFILL_BUCKET_PADUP`` requests the widened bucket set.
+
+    Accepts ``1/true/yes/on`` (case-insensitive). Default OFF so the captured
+    prefill graphs and dispatch stay byte-identical.
+    """
+    raw = os.environ.get("MSTAR_PREFILL_BUCKET_PADUP")
+    return raw is not None and raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _resolve_prefill_buckets(
+    default: list[int], override_env: str | None = None
+) -> list[int]:
+    """Resolve the captured prefill token-bucket list for one prefill walk.
+
+    Flag OFF (default): return ``default`` UNCHANGED -- same values, same
+    order -- so the captured set and dispatch are byte-identical.
+
+    Flag ON:
+      * If ``override_env`` names a non-empty env var holding a
+        comma-separated int list, use it verbatim (deduped + sorted). This is
+        the deployment escape hatch for tuning buckets to a measured length
+        histogram without a code change.
+      * Otherwise widen ``default``: union it with a finer low/mid grid (to
+        halve round-up waste near common short prompts) and add one wider top
+        bucket at ``2 * max(default)`` (to push the eager cliff out). The
+        finer grid entries are clamped to ``<= max(default)`` so we only
+        ADD resolution below the existing top, never silently drop a captured
+        size.
+    """
+    if not _prefill_padup_enabled():
+        return default
+    if override_env:
+        raw = os.environ.get(override_env)
+        if raw and raw.strip():
+            vals = sorted({int(x) for x in raw.split(",") if x.strip()})
+            if vals:
+                return vals
+    hi = max(default)
+    extended = set(default)
+    # Finer low/mid grid: power-of-two midpoints that bisect the default gaps.
+    extended.update(b for b in (64, 96, 192, 384, 768, 1536, 3072, 6144) if b <= hi)
+    # One wider top bucket to defer the eager fallback for long prompts.
+    extended.add(hi * 2)
+    return sorted(extended)
 
 
 # ===================================================================
@@ -1014,13 +1091,22 @@ class ThinkerSubmodule(ARNodeSubmodule):
         allocates persistent FlashInfer wrappers + static buffers for the
         full 30B Thinker; revisit after profiling real deployments.
         """
+        # Env-gated token-budget bucketing (default OFF -> the hardcoded
+        # PREFILL_TOKEN_BUCKETS / PREFILL_VISION_TOKEN_BUCKETS verbatim, so the
+        # captured set is byte-identical). See ``_resolve_prefill_buckets``.
+        prefill_text_buckets = _resolve_prefill_buckets(
+            self.PREFILL_TOKEN_BUCKETS, "MSTAR_PREFILL_BUCKETS",
+        )
+        prefill_vision_buckets = _resolve_prefill_buckets(
+            self.PREFILL_VISION_TOKEN_BUCKETS, "MSTAR_PREFILL_VISION_BUCKETS",
+        )
         prefill_text_packed = {
             num_tokens: self._build_prefill_text_packed(num_tokens, device)
-            for num_tokens in self.PREFILL_TOKEN_BUCKETS
+            for num_tokens in prefill_text_buckets
         }
         prefill_vision_packed = {
             num_tokens: self._build_prefill_vision_packed(num_tokens, device)
-            for num_tokens in self.PREFILL_VISION_TOKEN_BUCKETS
+            for num_tokens in prefill_vision_buckets
         }
         num_deepstack = len(self.config.vision.deepstack_visual_indexes)
 
@@ -1938,9 +2024,14 @@ class TalkerSubmodule(ARNodeSubmodule):
         ``forward_batched`` can ``index_select`` per-request last hidden out of
         the packed ``(bs * 9, talker_hidden)`` LLM output before codec_head.
         """
+        # Env-gated token-budget bucketing (default OFF -> verbatim
+        # TALKER_PREFILL_TOKEN_BUCKETS). See ``_resolve_prefill_buckets``.
+        talker_prefill_buckets = _resolve_prefill_buckets(
+            self.TALKER_PREFILL_TOKEN_BUCKETS, "MSTAR_TALKER_PREFILL_BUCKETS",
+        )
         talker_prefill_packed = {
             num_tokens: self._build_talker_prefill_packed(num_tokens, device)
-            for num_tokens in self.TALKER_PREFILL_TOKEN_BUCKETS
+            for num_tokens in talker_prefill_buckets
         }
         return [
             BasicBatchedCudaGraphConfig(
