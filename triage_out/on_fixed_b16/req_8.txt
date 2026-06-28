@@ -1,0 +1,12 @@
+Based on the appearance of the food in the image, these are **spring rolls**.
+
+More specifically, they are **fresh spring rolls** (also known as **summer rolls**). This is evident from several key features:
+
+*   **Translucent Wrapper:** They are wrapped in a thin, translucent rice paper wrapper, which is characteristic of fresh spring rolls. This is different from fried spring rolls, which have a crispy, golden-brown wrapper.
+*   **Fresh Ingredients:** The filling is clearly visible and consists of fresh, uncooked ingredients, including:
+    *   Green leafy vegetables (like lettuce or herbs)
+    *   Shredded vegetables (such as carrots and cucumbers)
+    *   A protein, which appears to be cooked shrimp.
+*   **Serving Style:** They are served cold or at room temperature, often accompanied by a dipping sauce, which is typical for this dish.
+
+This dish is a popular appetizer in Southeast Asian cuisine, particularly Vietnamese.<|im_end|>

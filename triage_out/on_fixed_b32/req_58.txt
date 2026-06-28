@@ -1,0 +1,15 @@
+Based on the components of the dish, this is a **Breakfast Burrito**.
+
+Here is a breakdown of the ingredients visible in the image:
+
+*   **Base:** A large flour tortilla.
+*   **Fillings:**
+    *   **Scrambled Eggs:** The yellow, fluffy portion.
+    *   **Cheese:** Melted orange cheese, likely cheddar or a Mexican blend.
+    *   **Salsa:** A fresh tomato and onion salsa, also known as pico de gallo, on the side.
+    *   **Guacamole:** A green, mashed avocado spread.
+    *   **Sour Cream:** Drizzled on top of the guacamole.
+    *   **Sausage or Chorizo:** The browned, crumbled meat on the side of the plate.
+*   **Garnish:** A drizzle of sour cream over the top.
+
+This combination of a tortilla filled with eggs, cheese, and meat, and served with salsa and guacamole, is characteristic of a breakfast burrito.<|im_end|>

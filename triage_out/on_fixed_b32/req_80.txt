@@ -1,0 +1,9 @@
+Based on the visual characteristics of the food in the image, this dish is **Xiaolongbao** (also known as **soup dumplings**).
+
+Here are the key features that lead to this identification:
+
+*   **Pleated Top:** The most distinctive feature is the top of the dumpling, which is gathered and pleated into a tight, decorative swirl. This is a hallmark of the xiaolongbao-making technique.
+*   **Steamed Preparation:** The dumplings are arranged on a perforated tray, which is characteristic of a bamboo steamer basket used for steaming.
+*   **Dough and Shape:** The dough appears thin and translucent, which is necessary to contain the hot soup filling without bursting during steaming. The overall shape is a small, round pouch.
+
+Xiaolongbao are a famous type of soup dumpling originating from the Jiangnan region of China, particularly associated with Shanghai. They are filled with a mixture of minced pork and a gelatinous broth that melts into a savory soup when steamed.<|im_end|>

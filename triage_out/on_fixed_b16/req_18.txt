@@ -1,0 +1,9 @@
+Based on the visual evidence, this dish is a **Paella**.
+
+Here are the key characteristics that lead to this identification:
+
+*   **The Pan:** It is served in a wide, shallow, black pan known as a *paellera*, which is traditional for this dish.
+*   **The Ingredients:** The dish contains a mix of seafood, including large prawns (*gambas*), mussels (*mejillones*), and what appears to be squid or cuttlefish. It also contains rice, which is the base of the dish.
+*   **The Presentation:** The dish is garnished with lemon wedges and is served with a large serving spoon and fork, ready to be shared.
+
+This specific version, with a generous amount of seafood, is often called **Paella de Mariscos** (Seafood Paella).<|im_end|>

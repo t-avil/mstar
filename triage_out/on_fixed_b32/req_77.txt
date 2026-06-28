@@ -1,0 +1,9 @@
+Based on the visual evidence, the dish shown is **Poutine**.
+
+This is a classic Canadian dish, and its key components are clearly visible in the image:
+
+*   **French Fries:** The base of the dish consists of thick-cut french fries.
+*   **Cheese Curds:** The white, irregularly shaped pieces mixed in with the fries are characteristic of fresh cheese curds, which are a defining ingredient of poutine.
+*   **Gravy:** The entire dish is generously covered in a dark, savory gravy.
+
+The combination of these three elements—fries, cheese curds, and gravy—is unique to poutine.<|im_end|>

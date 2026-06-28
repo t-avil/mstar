@@ -681,21 +681,30 @@ class ThinkerSubmodule(ARNodeSubmodule):
             # 3D-grid span.  Emit the correct per-request advance so the
             # Thinker forward can pass ``pos_id_ns`` through.
             mrope_pos_advance = int(end_pos_base + 1 - start_pos)
-            deepstack = []
-            for deepstack_inp in inputs["deepstack"]:
+            # Store deepstack as per-layer TENSOR keys ``deepstack_<i>`` (one
+            # full-length, token-aligned tensor per ``deepstack_visual_indexes``
+            # entry) rather than a single Python list under ``"deepstack"``.
+            # ``tensor_inputs`` must stay tensor-valued: ``ARNodeInputs.clone()``
+            # (used by the FlashInfer packed runner to build padding slots at
+            # batch) calls ``.clone()`` on each value, which throws on a list.
+            tensor_inputs: dict[str, torch.Tensor] = {
+                "masks_for_talker": masks_for_talker,
+            }
+            for i, deepstack_inp in enumerate(inputs["deepstack"]):
                 full_deepstack = torch.zeros_like(wrapped_embeds)
                 full_deepstack[mm_mask, :] = deepstack_inp
-                deepstack.append(full_deepstack)
+                tensor_inputs[f"deepstack_{i}"] = full_deepstack
 
             return ARNodeInputs(
                 input_seq_len=total_len,
                 input_embeds=wrapped_embeds,
                 custom_pos_ids=pos_ids,
-                tensor_inputs={
-                    "masks_for_talker": masks_for_talker,
-                    "mrope_pos_advance": mrope_pos_advance,
-                    "deepstack": deepstack,
-                }
+                tensor_inputs=tensor_inputs,
+                # Scalar MRoPE 3D-grid advance flows out-of-band (consumed by
+                # ``preprocess`` → ``set_custom_pos_advance``); keep it in
+                # ``kwargs`` (copied verbatim by ``clone()``), never in the
+                # tensor-valued ``tensor_inputs``.
+                kwargs={"mrope_pos_advance": mrope_pos_advance},
             )
 
     def preprocess(
@@ -763,39 +772,30 @@ class ThinkerSubmodule(ARNodeSubmodule):
             # shape; concatenation keeps one buffer per layer.
             # ``forward_batched``/``forward`` reassemble the list from kwargs.
             num_deepstack = len(self.config.vision.deepstack_visual_indexes)
-            # Gather a per-request list-of-layers, materializing the eager
-            # fallback (missing / empty deepstack) per request so the concat
-            # below always sees ``num_deepstack`` token-aligned tensors.
-            per_request_deepstack: list[list[torch.Tensor]] = []
-            for inp in inputs:
-                deepstack_list = inp.tensor_inputs.get("deepstack")
-                if deepstack_list is None or (
-                    isinstance(deepstack_list, torch.Tensor)
-                    and deepstack_list.numel() == 0
-                ):
-                    # Eager fallback / missing deepstack (shouldn't happen in
-                    # normal vision prefill, but keep the path robust).
-                    empty = torch.zeros(
-                        (inp.input_seq_len, self.config.thinker_hidden_size),
-                        dtype=input_embeds.dtype, device=device,
-                    )
-                    per_request_deepstack.append([empty] * num_deepstack)
-                else:
-                    assert len(deepstack_list) == num_deepstack, (
-                        f"deepstack list length ({len(deepstack_list)}) does not "
-                        f"match vision.deepstack_visual_indexes ({num_deepstack})."
-                    )
-                    per_request_deepstack.append(list(deepstack_list))
+            # Each per-request ARNodeInputs stores its deepstack as per-layer
+            # TENSOR keys ``deepstack_<i>`` (see ``prepare_inputs``); concat the
+            # layer-``i`` tensors across requests into one per-layer buffer.
+            # Materialize a token-aligned zero fallback when a request is
+            # missing ``deepstack_<i>`` (shouldn't happen in normal vision
+            # prefill, but keeps the path robust for padding / eager fallbacks).
             for i in range(num_deepstack):
-                extra_inputs[f"deepstack_{i}"] = torch.cat(
-                    [req[i] for req in per_request_deepstack], dim=0
-                )
+                layer_tensors: list[torch.Tensor] = []
+                for inp in inputs:
+                    t = inp.tensor_inputs.get(f"deepstack_{i}")
+                    if t is None:
+                        t = torch.zeros(
+                            (inp.input_seq_len, self.config.thinker_hidden_size),
+                            dtype=input_embeds.dtype, device=device,
+                        )
+                    layer_tensors.append(t)
+                extra_inputs[f"deepstack_{i}"] = torch.cat(layer_tensors, dim=0)
             # Per-request MRoPE position advance vector (one entry per request).
             # ``advance_seq_lens`` consumes it elementwise (``[i]``) so vision
             # advances ``position_id_start`` by each request's 3D-grid span
-            # instead of by ``seq_len``.
+            # instead of by ``seq_len``. It is a scalar side-channel, carried in
+            # ``kwargs`` (not ``tensor_inputs``) so the input stays clone-safe.
             mrope_pos_advance = [
-                inp.tensor_inputs.get("mrope_pos_advance", 0) for inp in inputs
+                inp.kwargs.get("mrope_pos_advance", 0) for inp in inputs
             ]
             extra_inputs["mrope_pos_advance"] = mrope_pos_advance
             # Side-channel: stash on the cache_manager's plan state via the
@@ -1074,21 +1074,23 @@ class ThinkerSubmodule(ARNodeSubmodule):
         # ``preprocess`` doesn't trip over missing keys when the runner pads
         # to padded_bs. We only capture bs=[1] today, so this padding is a
         # belt-and-suspenders safety net rather than a hot path.
+        # Tensor-valued only (matches eager ``prepare_inputs``): per-layer
+        # ``deepstack_<i>`` empty tensors so ``preprocess`` finds the keys and
+        # ``ARNodeInputs.clone()`` (run by the packed runner to build padding
+        # slots) never sees a non-tensor. ``mrope_pos_advance`` is a scalar and
+        # lives in ``kwargs`` instead (see the config below).
         prefill_vision_zero_padding_tensor_inputs = {
             "masks_for_talker": torch.zeros(
                 (2, 0), dtype=torch.float, device=device,
             ),
-            # Use a list (matches eager prepare_inputs) — preprocess turns it
-            # into per-layer ``deepstack_<i>`` keys.
-            "deepstack": [
+        }
+        for i in range(num_deepstack):
+            prefill_vision_zero_padding_tensor_inputs[f"deepstack_{i}"] = (
                 torch.zeros(
                     (0, self.config.thinker_hidden_size),
                     dtype=torch.bfloat16, device=device,
                 )
-                for _ in range(num_deepstack)
-            ],
-            "mrope_pos_advance": 0,
-        }
+            )
         return [
             BasicBatchedCudaGraphConfig(
                 capture_graph_walk="thinker_decode",
@@ -1167,6 +1169,7 @@ class ThinkerSubmodule(ARNodeSubmodule):
                         device=device,
                     ),
                     tensor_inputs=prefill_vision_zero_padding_tensor_inputs,
+                    kwargs={"mrope_pos_advance": 0},
                 ),
             ),
         ]

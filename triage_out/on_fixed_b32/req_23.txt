@@ -1,0 +1,9 @@
+Based on the visual characteristics of the food in the image, this dish is **Xiaolongbao** (also known as **soup dumplings**).
+
+Here are the key features that identify it:
+
+*   **Steamed Dumplings:** They are small, round dumplings that have been cooked by steaming, as indicated by the condensation on the bamboo steamer basket.
+*   **Pleated Top:** The dumplings have a distinctive pleated top, which is pinched to seal in the filling.
+*   **Filling:** This is the most defining characteristic. Xiaolongbao are famous for containing a hot, savory soup made from gelatinized pork stock that melts into liquid when steamed. The dumplings are typically filled with minced pork and other seasonings.
+
+In summary, the combination of the steamed, pleated dumpling form and the expectation of a soup filling points directly to Xiaolongbao, a famous type of soup dumpling originating from the Jiangnan region of China.<|im_end|>

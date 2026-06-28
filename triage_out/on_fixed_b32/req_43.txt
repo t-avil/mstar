@@ -1,0 +1,10 @@
+Based on the visual information provided, this dish is **escargot**.
+
+Here are the key details that lead to this identification:
+
+*   **Main Ingredient:** The dish consists of cooked snails served in their shells. The shells are the most prominent feature.
+*   **Preparation Style:** The snails are served in a rich, dark sauce, which is typical for escargot. This sauce is often made with garlic, butter, and herbs.
+*   **Garnish:** The dish is garnished with a slice of lemon and a sprig of fresh parsley, which are classic accompaniments for escargot.
+*   **Serving Utensils:** The presence of specialized tweezers or a small fork (visible on the right) is characteristic of eating escargot, as these tools are used to extract the snail meat from the shell.
+
+Escargot is a traditional French dish, and the preparation shown is a very common way it is served.<|im_end|>

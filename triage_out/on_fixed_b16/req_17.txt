@@ -1,0 +1,5 @@
+Based on the visual information in the image, here is an identification of the cuisine and dish:
+
+*   **Cuisine**: The dish is a classic example of **French cuisine**. Oysters on the half shell are a quintessential French appetizer, often served raw with a squeeze of lemon and a garnish of parsley.
+
+*   **Dish**: The dish is **raw oysters on the half shell**. They are served chilled on a bed of crushed ice to keep them fresh and cold. Each oyster is garnished with a wedge of lemon and a small sprig of parsley.<|im_end|>
