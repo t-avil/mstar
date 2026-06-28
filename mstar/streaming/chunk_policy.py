@@ -35,6 +35,17 @@ class ChunkPolicy(ABC):
         """
         ...
 
+    def is_single_row_fifo(self) -> bool:
+        """Whether this policy is a non-overlapping, one-item-per-chunk FIFO.
+
+        Only such policies are eligible for the device-backed
+        :class:`PendingTextTensorQueue` storage (window == stride == 1), where a
+        single-row pop is byte-identical to the list path's ``items[0]``.
+        Sliding-window / left-context policies retain a window and stack items,
+        so they keep the list path regardless of ``MSTAR_TALKER_PENDING_QUEUE``.
+        """
+        return False
+
     def continue_after_producer_done(self) -> bool:
         """Whether the buffer should keep producing (empty) chunks after the
         producer signals done and all buffered items have been consumed.
@@ -147,6 +158,9 @@ class FixedChunkPolicy(ChunkPolicy):
 
     def window_size(self) -> int:
         return self._chunk_size
+
+    def is_single_row_fifo(self) -> bool:
+        return self._chunk_size == 1
 
     def continue_after_producer_done(self) -> bool:
         return self._continue_after_done

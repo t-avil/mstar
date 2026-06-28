@@ -5,6 +5,10 @@ import torch
 
 from mstar.graph.base import GraphEdge
 from mstar.streaming.chunk_policy import ChunkPolicy
+from mstar.streaming.pending_text_queue import (
+    PendingTextTensorQueue,
+    pending_queue_mode,
+)
 
 
 @dataclass
@@ -44,6 +48,32 @@ class StreamBuffer:
     _num_tensors_registered = 0
     _num_buffer_writes = 0
 
+    # Device-backed single-tensor FIFO for the Talker text/hidden feed.
+    # See mstar/streaming/pending_text_queue.py and DESIGN_pending_queue.md.
+    #   _pending_mode in {"off", "on", "parity"} (from MSTAR_TALKER_PENDING_QUEUE)
+    #   _use_pending_queue: True only when enabled AND the policy is a
+    #       single-row FIFO (window == stride == 1, e.g. thinker_states).
+    #   _parity: shadow mode -- maintain both paths and assert equality.
+    _pending_mode: str = "off"
+    _use_pending_queue: bool = False
+    _parity: bool = False
+    _pending_queue: PendingTextTensorQueue | None = None
+
+    def __post_init__(self) -> None:
+        self._pending_mode = pending_queue_mode()
+        if self._pending_mode != "off" and self.policy.is_single_row_fifo():
+            self._use_pending_queue = True
+            self._parity = self._pending_mode == "parity"
+            self._pending_queue = PendingTextTensorQueue()
+
+    def _buffer_len(self) -> int:
+        """Number of ready (HOL-ordered) items available to pop."""
+        if self._use_pending_queue and not self._parity:
+            return len(self._pending_queue)
+        # `off` and `parity` both use the list as the length source of truth;
+        # in `parity` the pending queue is a shadow validated on every pop.
+        return len(self._buffer)
+
     def pre_read_register(self, tensor_id: str):
         self._num_tensors_registered += 1
         self._tensor_ids_in_order.append(tensor_id)
@@ -58,7 +88,16 @@ class StreamBuffer:
             if tensor_id not in self._id_to_tensor:
                 return
             self._tensor_ids_in_order.popleft()
-            self._buffer.append(self._id_to_tensor[tensor_id])
+            item = self._id_to_tensor[tensor_id]
+            if self._use_pending_queue:
+                # HOL ordering is already enforced by this loop, so appending
+                # in arrival order is safe; the device FIFO replaces the list's
+                # per-step object churn.
+                self._pending_queue.append(item)
+                if self._parity:
+                    self._buffer.append(item)
+            else:
+                self._buffer.append(item)
             self._num_buffer_writes += 1
             del self._id_to_tensor[tensor_id]
 
@@ -75,7 +114,7 @@ class StreamBuffer:
 
     def has_chunk_ready(self) -> bool:
         self._update_buffer()
-        buf_len = len(self._buffer)
+        buf_len = self._buffer_len()
         if self._producer_done_and_all_read() and buf_len > 0:
             return True
         # When continue_after_producer_done is set, keep producing empty
@@ -96,6 +135,11 @@ class StreamBuffer:
         start_offset is the global position of the first item in the chunk.
         """
         self._update_buffer()
+
+        # Fast path: device-backed single-tensor FIFO (one item per chunk).
+        if self._use_pending_queue and not self._parity:
+            return self._pop_chunk_pending()
+
         buf_len = len(self._buffer)
         window = self.policy.window_size()
         offset = self._consumed  # global position of buffer[0]
@@ -121,14 +165,78 @@ class StreamBuffer:
         if self.policy.continue_after_producer_done():
             is_final = False
 
+        data = self._collate(items)
+        if self._parity:
+            # Shadow-pop the device FIFO and assert byte-identical values, then
+            # return the list result so behavior matches `off` exactly.
+            self._assert_pending_parity(data, stride)
+
         chunk = StreamChunk(
-            data=self._collate(items),
+            data=data,
             chunk_index=self._chunks_popped,
             start_offset=offset,
             is_final=is_final,
         )
         self._chunks_popped += 1
         return chunk
+
+    def _pop_chunk_pending(self) -> StreamChunk:
+        """``pop_chunk`` for the device-backed single-row FIFO (window==stride==1).
+
+        Mirrors the list path for a one-item-per-chunk policy:
+          * empty flush after producer-done -> ``{"data": None}``
+          * otherwise pop exactly one ``[1, hidden]`` row (== list ``items[0]``).
+        """
+        buf_len = len(self._pending_queue)
+        offset = self._consumed
+
+        if self._producer_done_and_all_read() and not self.policy.is_ready(buf_len):
+            # buf_len == 0 here (chunk_size == 1): nothing left to flush.
+            data: dict[str, torch.Tensor | None] = {"data": None}
+            stride = 0
+        else:
+            row = self._pending_queue.pop_slice(1)  # [1, hidden]
+            self._consumed += 1
+            stride = 1
+            data = {"data": row}
+        self.policy.register_chunk(stride)
+
+        is_final = self._producer_done_and_all_read() and len(self._pending_queue) == 0
+        if self.policy.continue_after_producer_done():
+            is_final = False
+
+        chunk = StreamChunk(
+            data=data,
+            chunk_index=self._chunks_popped,
+            start_offset=offset,
+            is_final=is_final,
+        )
+        self._chunks_popped += 1
+        return chunk
+
+    def _assert_pending_parity(
+        self, list_data: dict[str, torch.Tensor | None], stride: int
+    ) -> None:
+        """Parity gate: pop the shadow FIFO and assert it matches the list path."""
+        ref = list_data.get("data")
+        if stride == 0:
+            # Empty flush: the shadow FIFO must also be empty.
+            if len(self._pending_queue) != 0:
+                raise AssertionError(
+                    "PendingTextTensorQueue parity: expected empty FIFO on flush, "
+                    f"got len={len(self._pending_queue)}"
+                )
+            return
+        got = self._pending_queue.pop_slice(stride)
+        if ref is None:
+            raise AssertionError(
+                "PendingTextTensorQueue parity: list path produced no tensor"
+            )
+        if got.shape != ref.shape or not torch.equal(got, ref.to(got.device)):
+            raise AssertionError(
+                "PendingTextTensorQueue parity mismatch: "
+                f"fifo.shape={tuple(got.shape)} list.shape={tuple(ref.shape)}"
+            )
 
     def store_uningested_edge(self, edge: GraphEdge):
         self._waiting_graph_edges.append(edge)
