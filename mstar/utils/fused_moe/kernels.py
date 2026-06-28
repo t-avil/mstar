@@ -404,7 +404,23 @@ def get_default_config(M: int, E: int, N: int, K: int, top_k: int) -> Dict[str, 
     Mirrors sglang's ``get_default_config`` for the unquantized path.
     For decode batch sizes (``M`` on the order of 1--64) we always fall
     into the ``M <= E`` branch since Qwen3-Omni has ``E == 128``.
+
+    When ``MSTAR_FUSED_MOE_TUNED`` is set, a device- and shape-specific
+    tile config (autotuned offline, ported from sglang for the H200) is
+    used instead of this heuristic.  The selection is numerically
+    equivalent -- only the GEMM tiling/pipelining changes -- but is
+    materially faster at decode batch sizes.  ``N`` here is the fused
+    ``2 * moe_intermediate_size`` (GEMM-1 output width); the tuned files
+    are keyed by ``moe_intermediate_size``, so we look them up with
+    ``N // 2``.  Falls back to the heuristic when disabled, the device is
+    unknown, or no matching config file exists.
     """
+    from mstar.utils.fused_moe.tuning import load_tuned_config
+
+    tuned = load_tuned_config(M=M, E=E, n_inter=N // 2)
+    if tuned is not None:
+        return tuned
+
     if M <= E:
         return {
             "BLOCK_SIZE_M": 16,

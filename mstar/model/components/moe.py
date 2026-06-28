@@ -24,6 +24,7 @@ per-expert loop in :func:`dispatch_experts_fused`.
 from __future__ import annotations
 
 import logging
+import os
 
 import torch
 import torch.nn.functional as F
@@ -33,6 +34,65 @@ from mstar.distributed.communication import TPCommGroup
 from mstar.distributed.utils import divide
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Env-gated MoE kernel selection
+# ---------------------------------------------------------------------------
+#
+# MSTAR_FUSED_MOE -- tri-state override of the fused-vs-naive expert dispatch:
+#   unset / "auto" : use the fused Triton grouped-GEMM kernel whenever it is
+#                    importable AND inputs are on CUDA (current default), else
+#                    the naive per-expert loop. Behavior is unchanged.
+#   "0"/"off"/...  : force the naive per-expert loop even on CUDA. Used to
+#                    produce the parity baseline and to bisect kernel issues.
+#   "1"/"on"/...   : force the fused kernel; raises if it is unavailable
+#                    (e.g. sgl-kernel missing or input on CPU) so a
+#                    misconfigured fast-path fails loud instead of silently
+#                    running the slow loop.
+#
+# MSTAR_MOE_EXPERT_PARALLEL -- DESIGN ONLY (default OFF). Recognized here so the
+#   flag is discoverable and logged, but expert parallelism across GPUs is not
+#   yet wired; the current multi-GPU path is tensor-parallel (see
+#   ParallelSparseMoeBlock._dispatch_tp and DESIGN_moe.md). Setting it logs a
+#   one-time warning and otherwise has no effect.
+
+_TRUTHY = ("1", "true", "yes", "on")
+_FALSEY = ("0", "false", "no", "off")
+
+
+def _fused_moe_mode() -> str:
+    """Return 'auto' (default), 'on', or 'off' from ``MSTAR_FUSED_MOE``."""
+    raw = os.environ.get("MSTAR_FUSED_MOE")
+    if raw is None:
+        return "auto"
+    v = raw.strip().lower()
+    if v in _TRUTHY:
+        return "on"
+    if v in _FALSEY:
+        return "off"
+    if v == "auto":
+        return "auto"
+    logger.warning("Unrecognized MSTAR_FUSED_MOE=%r; treating as 'auto'.", raw)
+    return "auto"
+
+
+_EP_WARNED = False
+
+
+def _expert_parallel_requested() -> bool:
+    """Whether ``MSTAR_MOE_EXPERT_PARALLEL`` is set (design-only; warns once)."""
+    global _EP_WARNED
+    raw = os.environ.get("MSTAR_MOE_EXPERT_PARALLEL")
+    requested = raw is not None and raw.strip().lower() in _TRUTHY
+    if requested and not _EP_WARNED:
+        _EP_WARNED = True
+        logger.warning(
+            "MSTAR_MOE_EXPERT_PARALLEL is set but expert parallelism is not yet "
+            "implemented; the multi-GPU path remains tensor-parallel. See "
+            "DESIGN_moe.md for the proposed EP design.",
+        )
+    return requested
 
 
 # Optional fused Triton MoE path. Imports succeed only on CUDA boxes
@@ -149,8 +209,23 @@ def _dispatch(
     selected_experts: torch.Tensor,
     routing_weights: torch.Tensor,
 ) -> torch.Tensor:
-    """Pick fused-Triton if available, otherwise the naive loop."""
-    if _HAS_FUSED and hidden_states.is_cuda:
+    """Pick fused-Triton or the naive loop, honoring ``MSTAR_FUSED_MOE``.
+
+    Default ('auto'): fused when importable and inputs are on CUDA, else
+    naive. 'off' forces naive; 'on' forces fused and raises if unavailable.
+    """
+    mode = _fused_moe_mode()
+    can_fuse = _HAS_FUSED and hidden_states.is_cuda
+
+    if mode == "on" and not can_fuse:
+        raise RuntimeError(
+            "MSTAR_FUSED_MOE=on but the fused MoE kernel is unavailable "
+            f"(_HAS_FUSED={_HAS_FUSED}, is_cuda={hidden_states.is_cuda}). "
+            "Install sgl-kernel and run on CUDA, or unset the flag."
+        )
+
+    use_fused = can_fuse and mode != "off"
+    if use_fused:
         return _fused_experts(
             hidden_states, gate_up_proj, down_proj,
             routing_weights, selected_experts,
@@ -340,6 +415,8 @@ class ParallelSparseMoeBlock(nn.Module):
         self.comm_group = comm_group
         tp_size = comm_group.world_size
         tp_rank = comm_group.rank
+        if tp_size > 1:
+            _expert_parallel_requested()  # design-only: warns if EP requested
 
         self.hidden_size = hidden_size
         self.num_experts = num_experts
@@ -437,6 +514,8 @@ class ParallelSparseMoeBlockWithSharedExpert(nn.Module):
         self.comm_group = comm_group
         tp_size = comm_group.world_size
         tp_rank = comm_group.rank
+        if tp_size > 1:
+            _expert_parallel_requested()  # design-only: warns if EP requested
 
         self.hidden_size = hidden_size
         self.num_experts = num_experts
