@@ -842,6 +842,22 @@ class Worker:
 
     def _build_node_batch(self, batch: ScheduledBatch) -> NodeBatch:
         """Gather input tensors from tensor_manager for all requests in the batch."""
+        # MSTAR_MIXED_WALK replay stub. The scheduler (micro_scheduler.py) can
+        # now emit a mixed prefill+decode batch under MSTAR_MIXED_WALK, but the
+        # mixed varlen forward + CUDA-graph replay are NOT yet wired (the build
+        # helper in mstar/engine/mixed_walk.py is implemented and tested, the
+        # replay in CudaGraphRunner.run_mixed is a stub). Fail loudly rather
+        # than silently mis-executing prefill tokens as decode. To run flag ON
+        # for the TTFT A/B, complete the TODO in CudaGraphRunner.run_mixed and
+        # build the mixed NodeBatch here. See DESIGN_mixed_walk.md.
+        # ``mixed_plan`` is None on every default-path batch, so flag OFF never
+        # touches this branch.
+        if getattr(batch, "mixed_plan", None) is not None:
+            raise NotImplementedError(
+                "MSTAR_MIXED_WALK produced a mixed prefill+decode batch but the "
+                "mixed varlen forward/replay path is not yet wired. "
+                "See DESIGN_mixed_walk.md and CudaGraphRunner.run_mixed."
+            )
         per_request_inputs: dict[str, NameToTensorList] = {}
         per_request_info: dict[CurrentForwardPassInfo] = {}
         final_stream_rids: set[str] = set()
