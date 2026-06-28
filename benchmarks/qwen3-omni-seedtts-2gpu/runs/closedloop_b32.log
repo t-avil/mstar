@@ -1,0 +1,10 @@
+[20260628T000517Z] waiting for M* port 8000 (up to 20 min)
+[20260628T001215Z] PORT OPEN ~380s
+[20260628T001215Z] RUN closed-loop max-concurrency=32, warmup=5, num_requests=160 (matches CSV row)
+[20260628T001442Z] rc=0
+===== RESULT (closed-loop B=32) =====
+Requests : 160/160 succeeded
+RTF           : mean=0.283  p50=0.285  p95=0.381  p99=0.430  (lower is better; <1.0 = real-time)
+Throughput: 105.59 audio sec/s (synthesized audio per wall second)
+Total wall time: 65.67s
+[20260628T001442Z] DONE

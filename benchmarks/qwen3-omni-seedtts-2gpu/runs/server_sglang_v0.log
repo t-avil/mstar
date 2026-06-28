@@ -1,0 +1,310 @@
+[20260627T221502Z] launching sglang_v0 on GPUs 6,7 (CUDA_VISIBLE_DEVICES=6,7)
+2026-06-27 22:15:04,578 [ERROR] sglang_omni.relay.mooncake: Failed to import mooncake: /lib64/libstdc++.so.6: version `GLIBCXX_3.4.30' not found (required by /home/tim/baselines/sglang-omni-v0/.venv/lib/python3.12/site-packages/mooncake/engine.so). MooncakeRelay will not work. Install with: pip install mooncake-transfer-engine
+
+========================================================================
+
+                  SGLANG-OMNI SERVER VERSION = LEGACY                   
+            entry: examples/run_qwen3_omni_speech_server.py             
+========================================================================
+
+2026-06-27 22:15:09,806 [INFO] qwen_vl_utils.vision_process: set VIDEO_TOTAL_PIXELS: 90316800
+2026-06-27 22:15:10,234 [INFO] __main__: Speech server config: thinker_gpu=0 talker_gpu=1 code_predictor_gpu=1 code2wav_gpu=1 thinker_mem_fraction_static=auto talker_mem_fraction_static=auto thinker_max_seq_len=8192
+2026-06-27 22:15:10,234 [INFO] __main__: Starting 9-stage speech pipeline (multiprocess)...
+2026-06-27 22:15:10,336 [INFO] sglang_omni.pipeline.control_plane: Coordinator control plane started
+2026-06-27 22:15:10,336 [INFO] sglang_omni.pipeline.coordinator: Coordinator started
+2026-06-27 22:15:12,385 [ERROR] sglang_omni.relay.mooncake: Failed to import mooncake: /lib64/libstdc++.so.6: version `GLIBCXX_3.4.30' not found (required by /home/tim/baselines/sglang-omni-v0/.venv/lib/python3.12/site-packages/mooncake/engine.so). MooncakeRelay will not work. Install with: pip install mooncake-transfer-engine
+2026-06-27 22:15:12,413 [ERROR] sglang_omni.relay.mooncake: Failed to import mooncake: /lib64/libstdc++.so.6: version `GLIBCXX_3.4.30' not found (required by /home/tim/baselines/sglang-omni-v0/.venv/lib/python3.12/site-packages/mooncake/engine.so). MooncakeRelay will not work. Install with: pip install mooncake-transfer-engine
+2026-06-27 22:15:12,413 [ERROR] sglang_omni.relay.mooncake: Failed to import mooncake: /lib64/libstdc++.so.6: version `GLIBCXX_3.4.30' not found (required by /home/tim/baselines/sglang-omni-v0/.venv/lib/python3.12/site-packages/mooncake/engine.so). MooncakeRelay will not work. Install with: pip install mooncake-transfer-engine
+2026-06-27 22:15:12,415 [ERROR] sglang_omni.relay.mooncake: Failed to import mooncake: /lib64/libstdc++.so.6: version `GLIBCXX_3.4.30' not found (required by /home/tim/baselines/sglang-omni-v0/.venv/lib/python3.12/site-packages/mooncake/engine.so). MooncakeRelay will not work. Install with: pip install mooncake-transfer-engine
+2026-06-27 22:15:12,420 [ERROR] sglang_omni.relay.mooncake: Failed to import mooncake: /lib64/libstdc++.so.6: version `GLIBCXX_3.4.30' not found (required by /home/tim/baselines/sglang-omni-v0/.venv/lib/python3.12/site-packages/mooncake/engine.so). MooncakeRelay will not work. Install with: pip install mooncake-transfer-engine
+2026-06-27 22:15:12,454 [ERROR] sglang_omni.relay.mooncake: Failed to import mooncake: /lib64/libstdc++.so.6: version `GLIBCXX_3.4.30' not found (required by /home/tim/baselines/sglang-omni-v0/.venv/lib/python3.12/site-packages/mooncake/engine.so). MooncakeRelay will not work. Install with: pip install mooncake-transfer-engine
+2026-06-27 22:15:12,471 [ERROR] sglang_omni.relay.mooncake: Failed to import mooncake: /lib64/libstdc++.so.6: version `GLIBCXX_3.4.30' not found (required by /home/tim/baselines/sglang-omni-v0/.venv/lib/python3.12/site-packages/mooncake/engine.so). MooncakeRelay will not work. Install with: pip install mooncake-transfer-engine
+2026-06-27 22:15:12,500 [ERROR] sglang_omni.relay.mooncake: Failed to import mooncake: /lib64/libstdc++.so.6: version `GLIBCXX_3.4.30' not found (required by /home/tim/baselines/sglang-omni-v0/.venv/lib/python3.12/site-packages/mooncake/engine.so). MooncakeRelay will not work. Install with: pip install mooncake-transfer-engine
+2026-06-27 22:15:12,528 [ERROR] sglang_omni.relay.mooncake: Failed to import mooncake: /lib64/libstdc++.so.6: version `GLIBCXX_3.4.30' not found (required by /home/tim/baselines/sglang-omni-v0/.venv/lib/python3.12/site-packages/mooncake/engine.so). MooncakeRelay will not work. Install with: pip install mooncake-transfer-engine
+2026-06-27 22:15:18,043 [INFO] stage.preprocessing: Set CUDA device to cuda:0 for stage preprocessing
+2026-06-27 22:15:18,044 [INFO] stage.preprocessing: Compiling stage preprocessing...
+2026-06-27 22:15:19,242 [INFO] qwen_vl_utils.vision_process: set VIDEO_TOTAL_PIXELS: 90316800
+2026-06-27 22:15:19,602 [INFO] stage.thinker: Set CUDA device to cuda:0 for stage thinker
+2026-06-27 22:15:19,602 [INFO] stage.thinker: Compiling stage thinker...
+2026-06-27 22:15:19,614 [INFO] stage.code_predictor: Set CUDA device to cuda:1 for stage code_predictor
+2026-06-27 22:15:19,614 [INFO] stage.code_predictor: Compiling stage code_predictor...
+2026-06-27 22:15:19,635 [INFO] stage.audio_encoder: Set CUDA device to cuda:0 for stage audio_encoder
+2026-06-27 22:15:19,635 [INFO] stage.audio_encoder: Compiling stage audio_encoder...
+2026-06-27 22:15:19,638 [INFO] stage.image_encoder: Set CUDA device to cuda:0 for stage image_encoder
+2026-06-27 22:15:19,638 [INFO] stage.image_encoder: Compiling stage image_encoder...
+2026-06-27 22:15:19,646 [INFO] stage.decode: Set CUDA device to cuda:0 for stage decode
+2026-06-27 22:15:19,646 [INFO] stage.decode: Compiling stage decode...
+2026-06-27 22:15:19,647 [INFO] stage.code2wav: Set CUDA device to cuda:1 for stage code2wav
+2026-06-27 22:15:19,651 [INFO] stage.code2wav: Compiling stage code2wav...
+2026-06-27 22:15:19,656 [INFO] stage.mm_aggregate: Set CUDA device to cuda:0 for stage mm_aggregate
+2026-06-27 22:15:19,656 [INFO] stage.mm_aggregate: Compiling stage mm_aggregate...
+2026-06-27 22:15:19,661 [INFO] stage.talker_ar: Set CUDA device to cuda:1 for stage talker_ar
+2026-06-27 22:15:19,662 [INFO] stage.talker_ar: Compiling stage talker_ar...
+2026-06-27 22:15:20,794 [INFO] qwen_vl_utils.vision_process: set VIDEO_TOTAL_PIXELS: 90316800
+2026-06-27 22:15:20,833 [INFO] qwen_vl_utils.vision_process: set VIDEO_TOTAL_PIXELS: 90316800
+2026-06-27 22:15:20,846 [INFO] sglang_omni.pipeline.stage.runtime: Initializing shm for stage code_predictor (device=cuda:1)
+2026-06-27 22:15:20,854 [INFO] qwen_vl_utils.vision_process: set VIDEO_TOTAL_PIXELS: 90316800
+2026-06-27 22:15:20,856 [INFO] qwen_vl_utils.vision_process: set VIDEO_TOTAL_PIXELS: 90316800
+2026-06-27 22:15:20,875 [INFO] qwen_vl_utils.vision_process: set VIDEO_TOTAL_PIXELS: 90316800
+2026-06-27 22:15:20,890 [INFO] sglang_omni.pipeline.stage.runtime: Initializing shm for stage code2wav (device=cuda:1)
+2026-06-27 22:15:20,890 [INFO] qwen_vl_utils.vision_process: set VIDEO_TOTAL_PIXELS: 90316800
+2026-06-27 22:15:20,920 [INFO] qwen_vl_utils.vision_process: set VIDEO_TOTAL_PIXELS: 90316800
+2026-06-27 22:15:20,943 [INFO] qwen_vl_utils.vision_process: set VIDEO_TOTAL_PIXELS: 90316800
+Unrecognized keys in `rope_scaling` for 'rope_type'='default': {'interleaved', 'mrope_interleaved', 'mrope_section'}
+Unrecognized keys in `rope_scaling` for 'rope_type'='default': {'interleaved', 'mrope_section'}
+Unrecognized keys in `rope_scaling` for 'rope_type'='default': {'interleaved', 'mrope_interleaved', 'mrope_section'}
+Unrecognized keys in `rope_scaling` for 'rope_type'='default': {'interleaved', 'mrope_section'}
+2026-06-27 22:15:22,641 [INFO] sglang_omni.pipeline.stage.runtime: Initializing shm for stage decode (device=cpu)
+2026-06-27 22:15:22,641 [INFO] sglang_omni.pipeline.stage.runtime: Initializing shm for stage talker_ar (device=cuda:1)
+2026-06-27 22:15:22,641 [INFO] sglang_omni.pipeline.stage.runtime: Initializing shm for stage mm_aggregate (device=cpu)
+2026-06-27 22:15:22,641 [INFO] sglang_omni.pipeline.stage.runtime: Initializing shm for stage thinker (device=cuda:0)
+2026-06-27 22:15:22,642 [INFO] sglang_omni.pipeline.stage.runtime: Initializing shm for stage audio_encoder (device=cpu)
+2026-06-27 22:15:22,642 [INFO] sglang_omni.pipeline.stage.runtime: Initializing shm for stage preprocessing (device=cpu)
+2026-06-27 22:15:22,642 [INFO] sglang_omni.pipeline.stage.runtime: Initializing shm for stage image_encoder (device=cpu)
+The image processor of type `Qwen2VLImageProcessor` is now loaded as a fast processor by default, even if the model checkpoint was saved with a slow processor. This is a breaking change and may produce slightly different outputs. To continue using the slow processor, instantiate this class with `use_fast=False`. Note that this behavior will be extended to all models in a future release.
+2026-06-27 22:15:22,645 [INFO] sglang_omni.pipeline.control_plane: Stage mm_aggregate control plane started
+2026-06-27 22:15:22,646 [INFO] sglang_omni.pipeline.stage.runtime: Stage mm_aggregate started
+Unrecognized keys in `rope_scaling` for 'rope_type'='default': {'mrope_interleaved', 'interleaved', 'mrope_section'}
+2026-06-27 22:15:22,646 [INFO] stage.mm_aggregate: Stage mm_aggregate ready
+Unrecognized keys in `rope_scaling` for 'rope_type'='default': {'interleaved', 'mrope_section'}
+2026-06-27 22:15:22,646 [INFO] sglang_omni.pipeline.worker.runtime: Worker started for stage mm_aggregate
+Unrecognized keys in `rope_scaling` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved', 'interleaved'}
+Unrecognized keys in `rope_scaling` for 'rope_type'='default': {'interleaved', 'mrope_section'}
+Ignored error while writing commit hash to /m-coriander/coriander/hf/hub/models--Qwen--Qwen3-Omni-30B-A3B-Instruct/refs/main: [Errno 13] Permission denied: '/m-coriander/coriander/hf/hub/models--Qwen--Qwen3-Omni-30B-A3B-Instruct/refs/main'.
+2026-06-27 22:15:22,770 [WARNING] huggingface_hub._snapshot_download: Ignored error while writing commit hash to /m-coriander/coriander/hf/hub/models--Qwen--Qwen3-Omni-30B-A3B-Instruct/refs/main: [Errno 13] Permission denied: '/m-coriander/coriander/hf/hub/models--Qwen--Qwen3-Omni-30B-A3B-Instruct/refs/main'.
+Fetching 25 files:   0%|          | 0/25 [00:00<?, ?it/s]Fetching 25 files: 100%|██████████| 25/25 [00:00<00:00, 10998.28it/s]
+Ignored error while writing commit hash to /m-coriander/coriander/hf/hub/models--Qwen--Qwen3-Omni-30B-A3B-Instruct/refs/main: [Errno 13] Permission denied: '/m-coriander/coriander/hf/hub/models--Qwen--Qwen3-Omni-30B-A3B-Instruct/refs/main'.
+2026-06-27 22:15:22,808 [WARNING] huggingface_hub._snapshot_download: Ignored error while writing commit hash to /m-coriander/coriander/hf/hub/models--Qwen--Qwen3-Omni-30B-A3B-Instruct/refs/main: [Errno 13] Permission denied: '/m-coriander/coriander/hf/hub/models--Qwen--Qwen3-Omni-30B-A3B-Instruct/refs/main'.
+Fetching 25 files:   0%|          | 0/25 [00:00<?, ?it/s]Fetching 25 files: 100%|██████████| 25/25 [00:00<00:00, 9931.58it/s]
+2026-06-27 22:15:23,162 [INFO] sglang_omni.models.qwen3_omni.components.image_encoder: PatchEmbed optimized: Conv3d(3→1152) replaced with Linear(1536→1152)
+2026-06-27 22:15:23,167 [INFO] sglang_omni.pipeline.control_plane: Stage image_encoder control plane started
+2026-06-27 22:15:23,168 [INFO] sglang_omni.pipeline.stage.runtime: Stage image_encoder started
+2026-06-27 22:15:23,168 [INFO] stage.image_encoder: Stage image_encoder ready
+2026-06-27 22:15:23,168 [INFO] sglang_omni.engines.omni.engine: OmniEngine started (overlap=False)
+2026-06-27 22:15:23,168 [INFO] sglang_omni.pipeline.worker.runtime: Worker started for stage image_encoder
+Ignored error while writing commit hash to /m-coriander/coriander/hf/hub/models--Qwen--Qwen3-Omni-30B-A3B-Instruct/refs/main: [Errno 13] Permission denied: '/m-coriander/coriander/hf/hub/models--Qwen--Qwen3-Omni-30B-A3B-Instruct/refs/main'.
+2026-06-27 22:15:23,208 [WARNING] huggingface_hub._snapshot_download: Ignored error while writing commit hash to /m-coriander/coriander/hf/hub/models--Qwen--Qwen3-Omni-30B-A3B-Instruct/refs/main: [Errno 13] Permission denied: '/m-coriander/coriander/hf/hub/models--Qwen--Qwen3-Omni-30B-A3B-Instruct/refs/main'.
+Fetching 25 files:   0%|          | 0/25 [00:00<?, ?it/s]Fetching 25 files: 100%|██████████| 25/25 [00:00<00:00, 6203.86it/s]
+2026-06-27 22:15:23,277 [INFO] sglang_omni.pipeline.control_plane: Stage audio_encoder control plane started
+2026-06-27 22:15:23,277 [INFO] sglang_omni.pipeline.stage.runtime: Stage audio_encoder started
+2026-06-27 22:15:23,277 [INFO] stage.audio_encoder: Stage audio_encoder ready
+2026-06-27 22:15:23,277 [INFO] sglang_omni.engines.omni.engine: OmniEngine started (overlap=False)
+2026-06-27 22:15:23,278 [INFO] sglang_omni.pipeline.worker.runtime: Worker started for stage audio_encoder
+2026-06-27 22:15:23,326 [INFO] sglang_omni.pipeline.control_plane: Stage decode control plane started
+2026-06-27 22:15:23,326 [INFO] sglang_omni.pipeline.stage.runtime: Stage decode started
+2026-06-27 22:15:23,326 [INFO] stage.decode: Stage decode ready
+2026-06-27 22:15:23,327 [INFO] sglang_omni.pipeline.worker.runtime: Worker started for stage decode
+2026-06-27 22:15:23,538 [INFO] sglang_omni.pipeline.control_plane: Stage code_predictor control plane started
+2026-06-27 22:15:23,538 [INFO] sglang_omni.pipeline.stage.runtime: Stage code_predictor started
+2026-06-27 22:15:23,539 [INFO] stage.code_predictor: Stage code_predictor ready
+2026-06-27 22:15:23,539 [INFO] sglang_omni.pipeline.worker.runtime: Worker started for stage code_predictor
+2026-06-27 22:15:23,750 [INFO] sglang_omni.pipeline.control_plane: Stage preprocessing control plane started
+2026-06-27 22:15:23,751 [INFO] sglang_omni.pipeline.stage.runtime: Stage preprocessing started
+2026-06-27 22:15:23,751 [INFO] stage.preprocessing: Stage preprocessing ready
+2026-06-27 22:15:23,751 [INFO] sglang_omni.pipeline.worker.runtime: Worker started for stage preprocessing
+2026-06-27 22:15:23,751 [INFO] sglang_omni.pipeline.mp_runner: Stage preprocessing ready
+2026-06-27 22:15:23,751 [INFO] sglang_omni.pipeline.mp_runner: Stage image_encoder ready
+2026-06-27 22:15:23,752 [INFO] sglang_omni.pipeline.mp_runner: Stage audio_encoder ready
+2026-06-27 22:15:23,752 [INFO] sglang_omni.pipeline.mp_runner: Stage mm_aggregate ready
+Ignored error while writing commit hash to /m-coriander/coriander/hf/hub/models--Qwen--Qwen3-Omni-30B-A3B-Instruct/refs/main: [Errno 13] Permission denied: '/m-coriander/coriander/hf/hub/models--Qwen--Qwen3-Omni-30B-A3B-Instruct/refs/main'.
+2026-06-27 22:15:24,202 [WARNING] huggingface_hub._snapshot_download: Ignored error while writing commit hash to /m-coriander/coriander/hf/hub/models--Qwen--Qwen3-Omni-30B-A3B-Instruct/refs/main: [Errno 13] Permission denied: '/m-coriander/coriander/hf/hub/models--Qwen--Qwen3-Omni-30B-A3B-Instruct/refs/main'.
+Fetching 25 files:   0%|          | 0/25 [00:00<?, ?it/s]Fetching 25 files: 100%|██████████| 25/25 [00:00<00:00, 8046.78it/s]
+2026-06-27 22:15:24,478 [INFO] sglang_omni.models.qwen3_omni.components.code2wav_executor: Code2Wav warmup: priming 40 (batch_size, seq_len) pairs on cuda:1 (sizes=[1, 2, 4, 8, 16], seq_lens=[1, 5, 10, 16, 22, 28, 34, 35])
+Unrecognized keys in `rope_scaling` for 'rope_type'='default': {'mrope_section', 'interleaved', 'mrope_interleaved'}
+Unrecognized keys in `rope_scaling` for 'rope_type'='default': {'mrope_section', 'interleaved'}
+Unrecognized keys in `rope_scaling` for 'rope_type'='default': {'mrope_section', 'interleaved', 'mrope_interleaved'}
+Unrecognized keys in `rope_scaling` for 'rope_type'='default': {'mrope_section', 'interleaved'}
+`torch_dtype` is deprecated! Use `dtype` instead!
+`torch_dtype` is deprecated! Use `dtype` instead!
+2026-06-27 22:15:29,182 [INFO] sglang.srt.server_args: Attention backend not specified. Use fa3 backend by default.
+2026-06-27 22:15:29,182 [INFO] sglang.srt.server_args: Attention backend not specified. Use fa3 backend by default.
+2026-06-27 22:15:29,182 [INFO] sglang_omni.models.qwen3_omni.pipeline.stages: Creating talker AR SGLang executor: gpu_id=1 context_length=8192 speech_enabled=True feedback_enabled=True mem_fraction_static=0.929 pre_load_avail_mem=138.28 GB
+2026-06-27 22:15:29,182 [INFO] sglang_omni.models.qwen3_omni.pipeline.stages: Creating thinker SGLang executor: gpu_id=0 context_length=8192 speech_enabled=True mem_fraction_static=0.879 pre_load_avail_mem=136.75 GB
+Unrecognized keys in `rope_scaling` for 'rope_type'='default': {'mrope_section', 'interleaved', 'mrope_interleaved'}
+Unrecognized keys in `rope_scaling` for 'rope_type'='default': {'mrope_section', 'interleaved'}
+Unrecognized keys in `rope_scaling` for 'rope_type'='default': {'mrope_section', 'interleaved', 'mrope_interleaved'}
+Unrecognized keys in `rope_scaling` for 'rope_type'='default': {'mrope_section', 'interleaved'}
+2026-06-27 22:15:33,190 [WARNING] sglang.srt.models.registry: Ignore import error when loading sglang.srt.models.glmasr: cannot import name 'GlmAsrConfig' from 'transformers' (/home/tim/baselines/sglang-omni-v0/.venv/lib/python3.12/site-packages/transformers/__init__.py)
+2026-06-27 22:15:33,190 [WARNING] sglang.srt.models.registry: Ignore import error when loading sglang.srt.models.glmasr: cannot import name 'GlmAsrConfig' from 'transformers' (/home/tim/baselines/sglang-omni-v0/.venv/lib/python3.12/site-packages/transformers/__init__.py)
+2026-06-27 22:15:34,173 [INFO] sglang.srt.model_executor.model_runner: Init torch distributed begin.
+2026-06-27 22:15:34,173 [INFO] sglang.srt.model_executor.model_runner: Init torch distributed begin.
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+2026-06-27 22:15:34,310 [INFO] sglang.srt.model_executor.model_runner: Init torch distributed ends. mem usage=0.09 GB
+2026-06-27 22:15:34,311 [INFO] sglang.srt.model_executor.model_runner: Init torch distributed ends. mem usage=0.09 GB
+2026-06-27 22:15:34,312 [INFO] sglang.srt.model_executor.model_runner: Load weight begin. avail mem=134.27 GB
+2026-06-27 22:15:34,312 [INFO] sglang.srt.model_executor.model_runner: Load weight begin. avail mem=134.03 GB
+2026-06-27 22:15:34,438 [INFO] sglang.srt.utils.common: Multimodal attention backend not set. Use fa3.
+2026-06-27 22:15:34,438 [INFO] sglang.srt.utils.common: Using fa3 as multimodal attention backend.
+2026-06-27 22:15:34,542 [INFO] sglang.srt.model_loader.weight_utils: Found local HF snapshot for Qwen/Qwen3-Omni-30B-A3B-Instruct at /m-coriander/coriander/hf/hub/models--Qwen--Qwen3-Omni-30B-A3B-Instruct/snapshots/26291f793822fb6be9555850f06dfe95f2d7e695; skipping download.
+2026-06-27 22:15:34,604 [INFO] sglang_omni.models.qwen3_omni.components.code2wav_executor: Code2Wav warmup complete in 10.13s; output_len_offset=555
+2026-06-27 22:15:34,607 [INFO] sglang_omni.pipeline.control_plane: Stage code2wav control plane started
+2026-06-27 22:15:34,608 [INFO] sglang_omni.pipeline.stage.runtime: Stage code2wav started
+2026-06-27 22:15:34,608 [INFO] stage.code2wav: Stage code2wav ready
+2026-06-27 22:15:34,608 [INFO] sglang_omni.pipeline.worker.runtime: Worker started for stage code2wav
+Loading safetensors checkpoint shards:   0% Completed | 0/15 [00:00<?, ?it/s]
+Loading safetensors checkpoint shards:  20% Completed | 3/15 [00:00<00:00, 21.46it/s]
+2026-06-27 22:15:34,832 [INFO] sglang.srt.model_loader.weight_utils: Found local HF snapshot for Qwen/Qwen3-Omni-30B-A3B-Instruct at /m-coriander/coriander/hf/hub/models--Qwen--Qwen3-Omni-30B-A3B-Instruct/snapshots/26291f793822fb6be9555850f06dfe95f2d7e695; skipping download.
+Loading safetensors checkpoint shards:   0% Completed | 0/15 [00:00<?, ?it/s]
+Loading safetensors checkpoint shards:  40% Completed | 6/15 [00:00<00:00, 19.99it/s]
+Loading safetensors checkpoint shards:  60% Completed | 9/15 [00:00<00:00,  7.70it/s]
+Loading safetensors checkpoint shards:  73% Completed | 11/15 [00:01<00:00,  9.40it/s]
+Loading safetensors checkpoint shards:  93% Completed | 14/15 [00:01<00:00, 11.95it/s]
+Loading safetensors checkpoint shards:   7% Completed | 1/15 [00:01<00:14,  1.03s/it]
+Loading safetensors checkpoint shards:  13% Completed | 2/15 [00:02<00:15,  1.17s/it]
+Loading safetensors checkpoint shards: 100% Completed | 15/15 [00:02<00:00,  5.57it/s]
+
+2026-06-27 22:15:37,666 [INFO] sglang.srt.model_executor.model_runner: Load weight end. type=Qwen3OmniTalker, dtype=torch.bfloat16, avail mem=126.16 GB, mem usage=7.87 GB.
+2026-06-27 22:15:37,668 [INFO] sglang.srt.model_executor.model_runner: Using KV cache dtype: torch.bfloat16
+2026-06-27 22:15:37,728 [INFO] sglang.srt.mem_cache.memory_pool: KV Cache is allocated. #tokens: 2548131, K size: 58.32 GB, V size: 58.32 GB
+2026-06-27 22:15:37,729 [INFO] sglang.srt.model_executor.model_runner_kv_cache_mixin: Memory pool end. avail mem=9.35 GB
+/home/tim/baselines/sglang-omni-v0/.venv/lib/python3.12/site-packages/sglang/srt/utils/common.py:1232: UserWarning: The given NumPy array is not writable, and PyTorch does not support non-writable tensors. This means writing to this tensor will result in undefined behavior. You may want to copy the array to protect its data or make it writable before converting it to a tensor. This type of warning will be suppressed for the rest of this program. (Triggered internally at /pytorch/torch/csrc/utils/tensor_numpy.cpp:206.)
+  tensor_data = torch.ByteTensor(
+Ignored error while writing commit hash to /m-coriander/coriander/hf/hub/models--Qwen--Qwen3-Omni-30B-A3B-Instruct/refs/main: [Errno 13] Permission denied: '/m-coriander/coriander/hf/hub/models--Qwen--Qwen3-Omni-30B-A3B-Instruct/refs/main'.
+2026-06-27 22:15:38,013 [WARNING] huggingface_hub._snapshot_download: Ignored error while writing commit hash to /m-coriander/coriander/hf/hub/models--Qwen--Qwen3-Omni-30B-A3B-Instruct/refs/main: [Errno 13] Permission denied: '/m-coriander/coriander/hf/hub/models--Qwen--Qwen3-Omni-30B-A3B-Instruct/refs/main'.
+2026-06-27 22:15:38,019 [INFO] sglang_omni.models.qwen3_omni.pipeline.stages: Talker AR SGLang executor initialized: gpu_id=1 post_load_avail_mem=9.25 GB
+2026-06-27 22:15:38,021 [INFO] sglang_omni.pipeline.control_plane: Stage talker_ar control plane started
+2026-06-27 22:15:38,021 [INFO] sglang_omni.pipeline.stage.runtime: Stage talker_ar started
+2026-06-27 22:15:38,021 [INFO] stage.talker_ar: Stage talker_ar ready
+2026-06-27 22:15:38,022 [INFO] sglang_omni.engines.omni.engine: OmniEngine started (overlap=False)
+2026-06-27 22:15:38,022 [INFO] sglang_omni.pipeline.worker.runtime: Worker started for stage talker_ar
+Loading safetensors checkpoint shards:  20% Completed | 3/15 [00:03<00:14,  1.17s/it]
+Loading safetensors checkpoint shards:  27% Completed | 4/15 [00:04<00:13,  1.19s/it]
+Loading safetensors checkpoint shards:  33% Completed | 5/15 [00:05<00:12,  1.21s/it]
+Loading safetensors checkpoint shards:  40% Completed | 6/15 [00:07<00:10,  1.22s/it]
+Loading safetensors checkpoint shards:  47% Completed | 7/15 [00:08<00:09,  1.13s/it]
+Loading safetensors checkpoint shards:  53% Completed | 8/15 [00:09<00:08,  1.15s/it]
+Loading safetensors checkpoint shards:  60% Completed | 9/15 [00:09<00:05,  1.13it/s]
+Loading safetensors checkpoint shards:  67% Completed | 10/15 [00:10<00:04,  1.09it/s]
+Loading safetensors checkpoint shards:  73% Completed | 11/15 [00:11<00:04,  1.02s/it]
+Loading safetensors checkpoint shards:  80% Completed | 12/15 [00:13<00:03,  1.08s/it]
+Loading safetensors checkpoint shards:  87% Completed | 13/15 [00:14<00:02,  1.11s/it]
+Loading safetensors checkpoint shards:  93% Completed | 14/15 [00:15<00:01,  1.13s/it]
+Loading safetensors checkpoint shards: 100% Completed | 15/15 [00:15<00:00,  1.09it/s]
+Loading safetensors checkpoint shards: 100% Completed | 15/15 [00:15<00:00,  1.06s/it]
+
+2026-06-27 22:15:50,853 [INFO] sglang.srt.model_executor.model_runner: Load weight end. type=Qwen3OmniMoeForConditionalGeneration, dtype=torch.bfloat16, avail mem=73.65 GB, mem usage=60.62 GB.
+2026-06-27 22:15:50,858 [INFO] sglang.srt.model_executor.model_runner: Using KV cache dtype: torch.bfloat16
+2026-06-27 22:15:50,911 [INFO] sglang.srt.mem_cache.memory_pool: KV Cache is allocated. #tokens: 626982, K size: 28.70 GB, V size: 28.70 GB
+2026-06-27 22:15:50,912 [INFO] sglang.srt.model_executor.model_runner_kv_cache_mixin: Memory pool end. avail mem=16.08 GB
+/home/tim/baselines/sglang-omni-v0/.venv/lib/python3.12/site-packages/sglang/srt/utils/common.py:1232: UserWarning: The given NumPy array is not writable, and PyTorch does not support non-writable tensors. This means writing to this tensor will result in undefined behavior. You may want to copy the array to protect its data or make it writable before converting it to a tensor. This type of warning will be suppressed for the rest of this program. (Triggered internally at /pytorch/torch/csrc/utils/tensor_numpy.cpp:206.)
+  tensor_data = torch.ByteTensor(
+2026-06-27 22:15:51,095 [INFO] sglang_omni.engines.omni.runtime._hidden_capture: Installed hidden capture hooks on Qwen3MoeLLMModel for layers [0, 24]
+2026-06-27 22:15:51,096 [INFO] sglang_omni.models.qwen3_omni.pipeline.stages: Thinker SGLang executor initialized: gpu_id=0 post_load_avail_mem=15.99 GB
+2026-06-27 22:15:51,099 [INFO] sglang_omni.pipeline.control_plane: Stage thinker control plane started
+2026-06-27 22:15:51,099 [INFO] sglang_omni.pipeline.stage.runtime: Stage thinker started
+2026-06-27 22:15:51,099 [INFO] stage.thinker: Stage thinker ready
+2026-06-27 22:15:51,100 [INFO] sglang_omni.engines.omni.engine: OmniEngine started (overlap=True)
+2026-06-27 22:15:51,100 [INFO] sglang_omni.pipeline.worker.runtime: Worker started for stage thinker
+2026-06-27 22:15:51,100 [INFO] sglang_omni.pipeline.mp_runner: Stage thinker ready
+2026-06-27 22:15:51,100 [INFO] sglang_omni.pipeline.mp_runner: Stage decode ready
+2026-06-27 22:15:51,100 [INFO] sglang_omni.pipeline.mp_runner: Stage talker_ar ready
+2026-06-27 22:15:51,100 [INFO] sglang_omni.pipeline.mp_runner: Stage code_predictor ready
+2026-06-27 22:15:51,100 [INFO] sglang_omni.pipeline.mp_runner: Stage code2wav ready
+2026-06-27 22:15:51,100 [INFO] sglang_omni.pipeline.coordinator: Coordinator registered stage: preprocessing at ipc:///home/tim/tmp/sglang_omni/model-jh2icmty/stage_preprocessing.sock
+2026-06-27 22:15:51,100 [INFO] sglang_omni.pipeline.coordinator: Coordinator registered stage: image_encoder at ipc:///home/tim/tmp/sglang_omni/model-jh2icmty/stage_image_encoder.sock
+2026-06-27 22:15:51,100 [INFO] sglang_omni.pipeline.coordinator: Coordinator registered stage: audio_encoder at ipc:///home/tim/tmp/sglang_omni/model-jh2icmty/stage_audio_encoder.sock
+2026-06-27 22:15:51,100 [INFO] sglang_omni.pipeline.coordinator: Coordinator registered stage: mm_aggregate at ipc:///home/tim/tmp/sglang_omni/model-jh2icmty/stage_mm_aggregate.sock
+2026-06-27 22:15:51,100 [INFO] sglang_omni.pipeline.coordinator: Coordinator registered stage: thinker at ipc:///home/tim/tmp/sglang_omni/model-jh2icmty/stage_thinker.sock
+2026-06-27 22:15:51,100 [INFO] sglang_omni.pipeline.coordinator: Coordinator registered stage: decode at ipc:///home/tim/tmp/sglang_omni/model-jh2icmty/stage_decode.sock
+2026-06-27 22:15:51,100 [INFO] sglang_omni.pipeline.coordinator: Coordinator registered stage: talker_ar at ipc:///home/tim/tmp/sglang_omni/model-jh2icmty/stage_talker_ar.sock
+2026-06-27 22:15:51,100 [INFO] sglang_omni.pipeline.coordinator: Coordinator registered stage: code_predictor at ipc:///home/tim/tmp/sglang_omni/model-jh2icmty/stage_code_predictor.sock
+2026-06-27 22:15:51,100 [INFO] sglang_omni.pipeline.coordinator: Coordinator registered stage: code2wav at ipc:///home/tim/tmp/sglang_omni/model-jh2icmty/stage_code2wav.sock
+2026-06-27 22:15:51,100 [INFO] sglang_omni.pipeline.mp_runner: MultiProcessPipelineRunner started: 9 stages
+2026-06-27 22:15:51,102 [INFO] __main__: Pipeline ready.
+INFO:     Started server process [3930653]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:38554 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+2026-06-27 22:15:51,690 [INFO] sglang_omni.pipeline.coordinator: Coordinator submitted req=a42389bd-fa8e-44a6-9ee6-b18b2a4df2b2 to preprocessing at ipc:///home/tim/tmp/sglang_omni/model-jh2icmty/stage_preprocessing.sock
+2026-06-27 22:16:13,009 [WARNING] sglang.srt.layers.moe.fused_moe_triton.fused_moe_triton_config: Config file not found at /home/tim/baselines/sglang-omni-v0/.venv/lib/python3.12/site-packages/sglang/srt/layers/moe/fused_moe_triton/configs/triton_3_5_1/E=128,N=768,device_name=NVIDIA_H200.json. Fallback to triton version 3.2.0 and use MoE kernel config from /home/tim/baselines/sglang-omni-v0/.venv/lib/python3.12/site-packages/sglang/srt/layers/moe/fused_moe_triton/configs/triton_3_2_0/E=128,N=768,device_name=NVIDIA_H200.json. Performance might be sub-optimal!
+2026-06-27 22:16:13,009 [WARNING] sglang.srt.layers.moe.fused_moe_triton.fused_moe_triton_config: Using MoE kernel config with down_moe=False. Performance might be sub-optimal! Config file not found at /home/tim/baselines/sglang-omni-v0/.venv/lib/python3.12/site-packages/sglang/srt/layers/moe/fused_moe_triton/configs/triton_3_5_1/E=128,N=768,device_name=NVIDIA_H200_down.json, you can create them with https://github.com/sgl-project/sglang/tree/main/benchmark/kernels/fused_moe_triton
+2026-06-27 22:16:14,652 [INFO] sglang_omni.engines.ar.sglang_backend.scheduler.prefill: Disable chunked prefill for projected input-embeds request(s): chunked_req=None waiting=['a42389bd-fa8e-44a6-9ee6-b18b2a4df2b2']
+The following generation flags are not valid and may be ignored: ['temperature']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+INFO:     127.0.0.1:57254 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+2026-06-27 22:17:18,076 [INFO] sglang_omni.pipeline.coordinator: Coordinator submitted req=da9c8400-1c51-4e74-bb9f-b738b30842d5 to preprocessing at ipc:///home/tim/tmp/sglang_omni/model-jh2icmty/stage_preprocessing.sock
+2026-06-27 22:17:18,203 [INFO] sglang_omni.engines.ar.sglang_backend.scheduler.prefill: Disable chunked prefill for projected input-embeds request(s): chunked_req=None waiting=['da9c8400-1c51-4e74-bb9f-b738b30842d5']
+INFO:     127.0.0.1:57254 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+2026-06-27 22:17:23,706 [INFO] sglang_omni.pipeline.coordinator: Coordinator submitted req=bcf7ceae-5aeb-4091-8d9a-a582bd23eba7 to preprocessing at ipc:///home/tim/tmp/sglang_omni/model-jh2icmty/stage_preprocessing.sock
+2026-06-27 22:17:26,575 [INFO] sglang_omni.engines.ar.sglang_backend.scheduler.prefill: Disable chunked prefill for projected input-embeds request(s): chunked_req=None waiting=['bcf7ceae-5aeb-4091-8d9a-a582bd23eba7']
+INFO:     127.0.0.1:50828 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+2026-06-27 22:20:08,736 [INFO] sglang_omni.pipeline.coordinator: Coordinator submitted req=858899d6-d63b-4dbe-abba-dda2099ad894 to preprocessing at ipc:///home/tim/tmp/sglang_omni/model-jh2icmty/stage_preprocessing.sock
+2026-06-27 22:20:09,497 [INFO] sglang_omni.engines.ar.sglang_backend.scheduler.prefill: Disable chunked prefill for projected input-embeds request(s): chunked_req=None waiting=['858899d6-d63b-4dbe-abba-dda2099ad894']
+[W627 22:23:14.663147383 CudaIPCTypes.cpp:100] Producer process tried to deallocate over 1000 memory blocks referred by consumer processes. Deallocation might be significantly slowed down. We assume it will never going to be the case, but if it is, please file but to https://github.com/pytorch/pytorch
+INFO:     127.0.0.1:47204 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+2026-06-27 22:23:32,979 [INFO] sglang_omni.pipeline.coordinator: Coordinator submitted req=b72b84d8-739e-467b-b344-8d4753d3f53a to preprocessing at ipc:///home/tim/tmp/sglang_omni/model-jh2icmty/stage_preprocessing.sock
+2026-06-27 22:23:33,068 [INFO] sglang_omni.engines.ar.sglang_backend.scheduler.prefill: Disable chunked prefill for projected input-embeds request(s): chunked_req=None waiting=['b72b84d8-739e-467b-b344-8d4753d3f53a']
+INFO:     127.0.0.1:47204 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+2026-06-27 22:23:42,328 [INFO] sglang_omni.pipeline.coordinator: Coordinator submitted req=73c63e7c-5343-4cb3-a779-bf8b0b0bffd1 to preprocessing at ipc:///home/tim/tmp/sglang_omni/model-jh2icmty/stage_preprocessing.sock
+2026-06-27 22:23:42,411 [INFO] sglang_omni.engines.ar.sglang_backend.scheduler.prefill: Disable chunked prefill for projected input-embeds request(s): chunked_req=None waiting=['73c63e7c-5343-4cb3-a779-bf8b0b0bffd1']
+INFO:     127.0.0.1:57704 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+2026-06-27 22:26:25,824 [INFO] sglang_omni.pipeline.coordinator: Coordinator submitted req=8fb66661-5925-4a70-bcd1-10f8608c23d9 to preprocessing at ipc:///home/tim/tmp/sglang_omni/model-jh2icmty/stage_preprocessing.sock
+2026-06-27 22:26:25,912 [INFO] sglang_omni.engines.ar.sglang_backend.scheduler.prefill: Disable chunked prefill for projected input-embeds request(s): chunked_req=None waiting=['8fb66661-5925-4a70-bcd1-10f8608c23d9']
+INFO:     127.0.0.1:33716 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+2026-06-27 22:29:40,035 [INFO] sglang_omni.pipeline.coordinator: Coordinator submitted req=8093ccbf-1e3e-4dbd-8425-bc4fcf10e580 to preprocessing at ipc:///home/tim/tmp/sglang_omni/model-jh2icmty/stage_preprocessing.sock
+2026-06-27 22:29:40,977 [INFO] sglang_omni.engines.ar.sglang_backend.scheduler.prefill: Disable chunked prefill for projected input-embeds request(s): chunked_req=None waiting=['8093ccbf-1e3e-4dbd-8425-bc4fcf10e580']
+INFO:     127.0.0.1:52280 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+2026-06-27 22:32:40,045 [INFO] sglang_omni.pipeline.coordinator: Coordinator submitted req=a2b9fefb-744a-4b56-9298-ae7c02fb927c to preprocessing at ipc:///home/tim/tmp/sglang_omni/model-jh2icmty/stage_preprocessing.sock
+2026-06-27 22:32:41,012 [INFO] sglang_omni.engines.ar.sglang_backend.scheduler.prefill: Disable chunked prefill for projected input-embeds request(s): chunked_req=None waiting=['a2b9fefb-744a-4b56-9298-ae7c02fb927c']
+INFO:     127.0.0.1:57802 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+2026-06-27 22:36:21,688 [INFO] sglang_omni.pipeline.coordinator: Coordinator submitted req=57e53d4f-e2e3-4196-8d5d-90dde184b01d to preprocessing at ipc:///home/tim/tmp/sglang_omni/model-jh2icmty/stage_preprocessing.sock
+2026-06-27 22:36:22,480 [INFO] sglang_omni.engines.ar.sglang_backend.scheduler.prefill: Disable chunked prefill for projected input-embeds request(s): chunked_req=None waiting=['57e53d4f-e2e3-4196-8d5d-90dde184b01d']
+INFO:     127.0.0.1:35086 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+2026-06-27 22:39:12,301 [INFO] sglang_omni.pipeline.coordinator: Coordinator submitted req=738c6d92-d62c-4eed-af79-b25022c51751 to preprocessing at ipc:///home/tim/tmp/sglang_omni/model-jh2icmty/stage_preprocessing.sock
+2026-06-27 22:39:13,035 [INFO] sglang_omni.engines.ar.sglang_backend.scheduler.prefill: Disable chunked prefill for projected input-embeds request(s): chunked_req=None waiting=['738c6d92-d62c-4eed-af79-b25022c51751']
+INFO:     127.0.0.1:35086 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+2026-06-27 22:40:38,784 [INFO] sglang_omni.pipeline.coordinator: Coordinator submitted req=963874d1-0bf6-47fc-9829-81d2acdc331e to preprocessing at ipc:///home/tim/tmp/sglang_omni/model-jh2icmty/stage_preprocessing.sock
+2026-06-27 22:40:39,414 [INFO] sglang_omni.engines.ar.sglang_backend.scheduler.prefill: Disable chunked prefill for projected input-embeds request(s): chunked_req=None waiting=['963874d1-0bf6-47fc-9829-81d2acdc331e']
+INFO:     127.0.0.1:35094 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+2026-06-27 22:42:43,617 [INFO] sglang_omni.pipeline.coordinator: Coordinator submitted req=dfb4313b-cbf7-4211-8efc-4dcbd0293004 to preprocessing at ipc:///home/tim/tmp/sglang_omni/model-jh2icmty/stage_preprocessing.sock
+2026-06-27 22:42:43,736 [INFO] sglang_omni.engines.ar.sglang_backend.scheduler.prefill: Disable chunked prefill for projected input-embeds request(s): chunked_req=None waiting=['dfb4313b-cbf7-4211-8efc-4dcbd0293004']
+INFO:     127.0.0.1:49996 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+2026-06-27 22:45:02,748 [INFO] sglang_omni.pipeline.coordinator: Coordinator submitted req=731eac08-e4d7-42be-8934-8f1d3f699567 to preprocessing at ipc:///home/tim/tmp/sglang_omni/model-jh2icmty/stage_preprocessing.sock
+2026-06-27 22:45:02,863 [INFO] sglang_omni.engines.ar.sglang_backend.scheduler.prefill: Disable chunked prefill for projected input-embeds request(s): chunked_req=None waiting=['731eac08-e4d7-42be-8934-8f1d3f699567']
+2026-06-27 22:45:31,551 [ERROR] sglang_omni.pipeline.mp_runner: Stage process 0 (pid=3931823) died with exitcode=-15
+2026-06-27 22:45:31,552 [INFO] sglang_omni.pipeline.coordinator: Sent shutdown to stage: preprocessing
+2026-06-27 22:45:31,552 [INFO] sglang_omni.pipeline.coordinator: Sent shutdown to stage: image_encoder
+2026-06-27 22:45:31,553 [INFO] sglang_omni.pipeline.coordinator: Sent shutdown to stage: audio_encoder
+2026-06-27 22:45:31,553 [INFO] sglang_omni.pipeline.coordinator: Sent shutdown to stage: mm_aggregate
+2026-06-27 22:45:31,553 [INFO] sglang_omni.pipeline.coordinator: Sent shutdown to stage: thinker
+2026-06-27 22:45:31,553 [INFO] sglang_omni.pipeline.coordinator: Sent shutdown to stage: decode
+2026-06-27 22:45:31,553 [INFO] sglang_omni.pipeline.coordinator: Sent shutdown to stage: talker_ar
+2026-06-27 22:45:31,553 [INFO] sglang_omni.pipeline.coordinator: Sent shutdown to stage: code_predictor
+2026-06-27 22:45:31,554 [INFO] sglang_omni.pipeline.coordinator: Sent shutdown to stage: code2wav
+2026-06-27 22:45:31,554 [INFO] sglang_omni.pipeline.stage.runtime: Stage talker_ar received shutdown
+2026-06-27 22:45:31,554 [INFO] sglang_omni.pipeline.stage.runtime: Stage code2wav received shutdown
+2026-06-27 22:45:31,554 [INFO] sglang_omni.pipeline.stage.runtime: Stage code_predictor received shutdown
+2026-06-27 22:45:31,554 [INFO] sglang_omni.pipeline.stage.runtime: Stage talker_ar stopped
+2026-06-27 22:45:31,555 [INFO] sglang_omni.pipeline.stage.runtime: Stage code2wav stopped
+2026-06-27 22:45:31,555 [INFO] sglang_omni.pipeline.stage.runtime: Stage code_predictor stopped
+2026-06-27 22:45:31,555 [INFO] sglang_omni.pipeline.worker.runtime: Worker cancelled for stage code_predictor
+2026-06-27 22:45:31,561 [INFO] sglang_omni.pipeline.worker.runtime: Worker cancelled for stage code2wav
+[W627 22:45:32.114424135 CudaIPCTypes.cpp:16] Producer process has been terminated before all shared CUDA tensors released. See Note [Sharing CUDA tensors]
+2026-06-27 22:46:01,578 [WARNING] sglang_omni.pipeline.mp_runner: Terminating stuck process stage-talker_ar
+2026-06-27 22:46:02,239 [INFO] sglang_omni.pipeline.coordinator: Coordinator completion loop cancelled
+2026-06-27 22:46:02,240 [INFO] sglang_omni.pipeline.coordinator: Coordinator stopped
+INFO:     127.0.0.1:34674 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+2026-06-27 22:47:41,580 [INFO] sglang_omni.pipeline.coordinator: Coordinator submitted req=acc10191-581d-4f12-a7ba-e59db83319e2 to preprocessing at ipc:///home/tim/tmp/sglang_omni/model-jh2icmty/stage_preprocessing.sock
+INFO:     127.0.0.1:34680 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+2026-06-27 22:47:41,582 [INFO] sglang_omni.pipeline.coordinator: Coordinator submitted req=7e944317-9bb3-4f11-b148-627db469e795 to preprocessing at ipc:///home/tim/tmp/sglang_omni/model-jh2icmty/stage_preprocessing.sock
+INFO:     127.0.0.1:34690 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+2026-06-27 22:47:41,582 [INFO] sglang_omni.pipeline.coordinator: Coordinator submitted req=2090d3de-8014-45ce-a17b-afd4b4b7d55d to preprocessing at ipc:///home/tim/tmp/sglang_omni/model-jh2icmty/stage_preprocessing.sock
+INFO:     127.0.0.1:34698 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+2026-06-27 22:47:41,583 [INFO] sglang_omni.pipeline.coordinator: Coordinator submitted req=a5948d2a-a8e2-4acf-be28-09d2624b4a36 to preprocessing at ipc:///home/tim/tmp/sglang_omni/model-jh2icmty/stage_preprocessing.sock
+INFO:     127.0.0.1:46324 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+2026-06-27 22:49:41,682 [INFO] sglang_omni.pipeline.coordinator: Coordinator submitted req=7bf7a029-30de-4175-9c72-553731771a2a to preprocessing at ipc:///home/tim/tmp/sglang_omni/model-jh2icmty/stage_preprocessing.sock
+INFO:     127.0.0.1:46340 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+2026-06-27 22:49:41,683 [INFO] sglang_omni.pipeline.coordinator: Coordinator submitted req=1cf373fa-5c49-4983-b69c-8f285a2f0d9b to preprocessing at ipc:///home/tim/tmp/sglang_omni/model-jh2icmty/stage_preprocessing.sock
+INFO:     127.0.0.1:46346 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+2026-06-27 22:49:41,683 [INFO] sglang_omni.pipeline.coordinator: Coordinator submitted req=cf0ff480-f0ad-4c02-8514-61f971761ebf to preprocessing at ipc:///home/tim/tmp/sglang_omni/model-jh2icmty/stage_preprocessing.sock
+INFO:     127.0.0.1:46356 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+2026-06-27 22:49:41,684 [INFO] sglang_omni.pipeline.coordinator: Coordinator submitted req=5e020f40-3b62-4486-a9d3-eddcc7c5f8cd to preprocessing at ipc:///home/tim/tmp/sglang_omni/model-jh2icmty/stage_preprocessing.sock
+/home/tim/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/multiprocessing/resource_tracker.py:279: UserWarning: resource_tracker: There appear to be 4 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '

@@ -1,0 +1,18 @@
+{
+  "system": "ours",
+  "model": "Qwen3Omni",
+  "request_type": "text_to_speech",
+  "profiling_type": "offline",
+  "num_requests": 20,
+  "num_warmup": 3,
+  "completed": 0,
+  "failed": 20,
+  "wall_time_s": 495.5960182608105,
+  "jct_mean_ms": 0.0,
+  "jct_median_ms": 0.0,
+  "jct_p90_ms": 0.0,
+  "jct_p95_ms": 0.0,
+  "jct_p99_ms": 0.0,
+  "request_throughput": 0.0,
+  "per_request": []
+}

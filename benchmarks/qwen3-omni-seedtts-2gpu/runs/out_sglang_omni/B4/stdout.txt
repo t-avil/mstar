@@ -1,0 +1,26 @@
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'interleaved', 'mrope_section'}
+
+--- Benchmark Results (wall time: 495.60s) ---
+ERROR: benchmark produced no results.
+
+--- Errors (20/20) ---
+  [0] Timeout on reading data from socket
+  [1] Timeout on reading data from socket
+  [2] Timeout on reading data from socket
+  [3] Timeout on reading data from socket
+  [4] Timeout on reading data from socket
+  [5] Timeout on reading data from socket
+  [6] Timeout on reading data from socket
+  [7] Timeout on reading data from socket
+  [8] Timeout on reading data from socket
+  [9] Timeout on reading data from socket
+  [10] Timeout on reading data from socket
+  [11] Timeout on reading data from socket
+  [12] Timeout on reading data from socket
+  [13] Timeout on reading data from socket
+  [14] Timeout on reading data from socket
+  [15] Timeout on reading data from socket
+  [16] Response payload is not completed: <TransferEncodingError: 400, message='Not enough data to satisfy transfer length header.'>
+  [17] Response payload is not completed: <TransferEncodingError: 400, message='Not enough data to satisfy transfer length header.'>
+  [18] Response payload is not completed: <TransferEncodingError: 400, message='Not enough data to satisfy transfer length header.'>
+  [19] Response payload is not completed: <TransferEncodingError: 400, message='Not enough data to satisfy transfer length header.'>

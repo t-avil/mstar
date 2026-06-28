@@ -1,0 +1,9 @@
+# Generated audio/text outputs — per-request metrics are persisted in results.json,
+# every datapoint in raw.json. Never commit the raw WAVs (multi-GB per sweep).
+*.wav
+runs/out_*/**/req_*.txt
+
+# Re-include the JSON metrics that the repo-root .gitignore (`*.json`) would drop.
+# These ARE the benchmark deliverable (CLAUDE.md: raw.json = every datapoint).
+!raw.json
+!runs/**/results.json

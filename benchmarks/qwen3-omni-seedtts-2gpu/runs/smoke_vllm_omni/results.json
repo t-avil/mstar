@@ -1,0 +1,27 @@
+{
+  "system": "ours",
+  "model": "Qwen3Omni",
+  "request_type": "text_to_speech",
+  "profiling_type": "offline",
+  "num_requests": 1,
+  "num_warmup": 0,
+  "completed": 1,
+  "failed": 0,
+  "wall_time_s": 2.596319811185822,
+  "jct_mean_ms": 2586.0500109847635,
+  "jct_median_ms": 2586.0500109847635,
+  "jct_p90_ms": 2586.0500109847635,
+  "jct_p95_ms": 2586.0500109847635,
+  "jct_p99_ms": 2586.0500109847635,
+  "request_throughput": 0.38516056292127904,
+  "per_request": [
+    {
+      "request_id": 0,
+      "jct_ms": 2586.0500109847635,
+      "type": "text_to_speech",
+      "output_bytes": {
+        "audio": 156418
+      }
+    }
+  ]
+}

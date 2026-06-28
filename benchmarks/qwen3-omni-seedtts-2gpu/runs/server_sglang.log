@@ -1,0 +1,182 @@
+[20260627T210758Z] launching sglang on GPUs 6,7 (CUDA_VISIBLE_DEVICES=6,7)
+[2026-06-27 21:08:13] INFO vision_process.py:42: set VIDEO_TOTAL_PIXELS: 90316800
+[2026-06-27 21:08:13] ERROR mooncake.py:24: Failed to import mooncake: /lib64/libstdc++.so.6: version `GLIBCXX_3.4.30' not found (required by /home/tim/baselines/sglang-omni/.venv/lib/python3.11/site-packages/mooncake/engine.so). MooncakeRelay will not work. Install with: pip install mooncake-transfer-engine
+[2026-06-27 21:08:13] INFO control_plane.py:398: Coordinator control plane started
+[2026-06-27 21:08:13] INFO coordinator.py:97: Coordinator started
+[2026-06-27 21:08:13] INFO mp_runner.py:405: Configured stage process env defaults: SGLANG_JIT_DEEPGEMM_PRECOMPILE
+[2026-06-27 21:08:13] INFO stage_workers.py:246: StageGroup preprocessing: spawned 1 process(es) (pids=[3453524])
+[2026-06-27 21:08:13] INFO stage_workers.py:246: StageGroup image_encoder: spawned 1 process(es) (pids=[3453525])
+[2026-06-27 21:08:13] INFO stage_workers.py:246: StageGroup audio_encoder: spawned 1 process(es) (pids=[3453532])
+[2026-06-27 21:08:13] INFO stage_workers.py:246: StageGroup mm_aggregate: spawned 1 process(es) (pids=[3453534])
+[2026-06-27 21:08:13] INFO stage_workers.py:246: StageGroup thinker: spawned 1 process(es) (pids=[3453535])
+[2026-06-27 21:08:13] INFO stage_workers.py:246: StageGroup decode: spawned 1 process(es) (pids=[3453536])
+[2026-06-27 21:08:14] INFO stage_workers.py:246: StageGroup talker_ar: spawned 1 process(es) (pids=[3453537])
+[2026-06-27 21:08:14] INFO stage_workers.py:246: StageGroup code2wav: spawned 1 process(es) (pids=[3453538])
+[2026-06-27 21:08:25] INFO vision_process.py:42: set VIDEO_TOTAL_PIXELS: 90316800
+[2026-06-27 21:08:26] ERROR mooncake.py:24: Failed to import mooncake: /lib64/libstdc++.so.6: version `GLIBCXX_3.4.30' not found (required by /home/tim/baselines/sglang-omni/.venv/lib/python3.11/site-packages/mooncake/engine.so). MooncakeRelay will not work. Install with: pip install mooncake-transfer-engine
+[2026-06-27 21:08:26] INFO stage_workers.py:427: Set current CUDA device to 0 for stage thinker
+[2026-06-27 21:08:26] INFO stage_workers.py:430: Building scheduler for thinker (tp_rank=0/1) ...
+[2026-06-27 21:08:26] INFO stage_workers.py:620: Acquired GPU startup lock for stage thinker: /home/tim/tmp/launch-tmp/sglang_omni_gpu_6_startup.lock
+[2026-06-27 21:08:26] INFO vision_process.py:42: set VIDEO_TOTAL_PIXELS: 90316800
+Unrecognized keys in `rope_scaling` for 'rope_type'='default': {'mrope_interleaved', 'interleaved', 'mrope_section'}
+Unrecognized keys in `rope_scaling` for 'rope_type'='default': {'interleaved', 'mrope_section'}
+`torch_dtype` is deprecated! Use `dtype` instead!
+[2026-06-27 21:08:26] ERROR mooncake.py:24: Failed to import mooncake: /lib64/libstdc++.so.6: version `GLIBCXX_3.4.30' not found (required by /home/tim/baselines/sglang-omni/.venv/lib/python3.11/site-packages/mooncake/engine.so). MooncakeRelay will not work. Install with: pip install mooncake-transfer-engine
+[2026-06-27 21:08:26] INFO vision_process.py:42: set VIDEO_TOTAL_PIXELS: 90316800
+[2026-06-27 21:08:26] INFO server_args.py:1697: Attention backend not specified. Use fa3 backend by default.
+[2026-06-27 21:08:26] INFO stages.py:991: sglang_ar_startup stage=thinker gpu_id=0 tp_rank=0/1 context_length=8192 total_gpu_memory_fraction=None effective_total_gpu_memory_fraction=None mem_fraction_static=0.857 encoder_mem_reserve=0.05 pre_load_avail_mem=139.29827880859375 pid=3453535 pre_load_process_mem=0.50GiB
+[2026-06-27 21:08:26] INFO model_worker.py:327: Configured SGLang backend policy: arch=Qwen3OmniThinkerForCausalLM effective_quantization=None server_quantization=None moe_runner_backend=auto fp8_gemm_backend=auto
+[2026-06-27 21:08:27] INFO vision_process.py:42: set VIDEO_TOTAL_PIXELS: 90316800
+[2026-06-27 21:08:27] ERROR mooncake.py:24: Failed to import mooncake: /lib64/libstdc++.so.6: version `GLIBCXX_3.4.30' not found (required by /home/tim/baselines/sglang-omni/.venv/lib/python3.11/site-packages/mooncake/engine.so). MooncakeRelay will not work. Install with: pip install mooncake-transfer-engine
+[2026-06-27 21:08:27] INFO vision_process.py:42: set VIDEO_TOTAL_PIXELS: 90316800
+[2026-06-27 21:08:27] INFO vision_process.py:42: set VIDEO_TOTAL_PIXELS: 90316800
+[2026-06-27 21:08:27] INFO vision_process.py:42: set VIDEO_TOTAL_PIXELS: 90316800
+[2026-06-27 21:08:27] INFO stage_workers.py:427: Set current CUDA device to 0 for stage audio_encoder
+[2026-06-27 21:08:27] INFO stage_workers.py:430: Building scheduler for audio_encoder (tp_rank=0/1) ...
+[2026-06-27 21:08:27] ERROR mooncake.py:24: Failed to import mooncake: /lib64/libstdc++.so.6: version `GLIBCXX_3.4.30' not found (required by /home/tim/baselines/sglang-omni/.venv/lib/python3.11/site-packages/mooncake/engine.so). MooncakeRelay will not work. Install with: pip install mooncake-transfer-engine
+[2026-06-27 21:08:27] ERROR mooncake.py:24: Failed to import mooncake: /lib64/libstdc++.so.6: version `GLIBCXX_3.4.30' not found (required by /home/tim/baselines/sglang-omni/.venv/lib/python3.11/site-packages/mooncake/engine.so). MooncakeRelay will not work. Install with: pip install mooncake-transfer-engine
+[2026-06-27 21:08:27] ERROR mooncake.py:24: Failed to import mooncake: /lib64/libstdc++.so.6: version `GLIBCXX_3.4.30' not found (required by /home/tim/baselines/sglang-omni/.venv/lib/python3.11/site-packages/mooncake/engine.so). MooncakeRelay will not work. Install with: pip install mooncake-transfer-engine
+[2026-06-27 21:08:27] INFO vision_process.py:42: set VIDEO_TOTAL_PIXELS: 90316800
+[2026-06-27 21:08:27] ERROR mooncake.py:24: Failed to import mooncake: /lib64/libstdc++.so.6: version `GLIBCXX_3.4.30' not found (required by /home/tim/baselines/sglang-omni/.venv/lib/python3.11/site-packages/mooncake/engine.so). MooncakeRelay will not work. Install with: pip install mooncake-transfer-engine
+[2026-06-27 21:08:27] INFO stage_workers.py:430: Building scheduler for mm_aggregate (tp_rank=0/1) ...
+[2026-06-27 21:08:27] INFO stage_workers.py:430: Building scheduler for decode (tp_rank=0/1) ...
+[2026-06-27 21:08:27] INFO control_plane.py:294: Stage mm_aggregate control plane started
+[2026-06-27 21:08:27] INFO runtime.py:188: Stage mm_aggregate started
+[2026-06-27 21:08:27] INFO stage_workers.py:393: Process mm_aggregate ready with stages=['mm_aggregate']
+[2026-06-27 21:08:27] INFO stage_workers.py:292: Process mm_aggregate ready
+[2026-06-27 21:08:27] INFO stage_workers.py:427: Set current CUDA device to 0 for stage image_encoder
+[2026-06-27 21:08:27] INFO stage_workers.py:430: Building scheduler for image_encoder (tp_rank=0/1) ...
+[2026-06-27 21:08:27] ERROR mooncake.py:24: Failed to import mooncake: /lib64/libstdc++.so.6: version `GLIBCXX_3.4.30' not found (required by /home/tim/baselines/sglang-omni/.venv/lib/python3.11/site-packages/mooncake/engine.so). MooncakeRelay will not work. Install with: pip install mooncake-transfer-engine
+[2026-06-27 21:08:27] INFO stage_workers.py:430: Building scheduler for preprocessing (tp_rank=0/1) ...
+The image processor of type `Qwen2VLImageProcessor` is now loaded as a fast processor by default, even if the model checkpoint was saved with a slow processor. This is a breaking change and may produce slightly different outputs. To continue using the slow processor, instantiate this class with `use_fast=False`. Note that this behavior will be extended to all models in a future release.
+[2026-06-27 21:08:27] INFO stage_workers.py:427: Set current CUDA device to 1 for stage code2wav
+[2026-06-27 21:08:27] INFO stage_workers.py:430: Building scheduler for code2wav (tp_rank=0/1) ...
+[2026-06-27 21:08:27] INFO stage_workers.py:620: Acquired GPU startup lock for stage code2wav: /home/tim/tmp/launch-tmp/sglang_omni_gpu_7_startup.lock
+[2026-06-27 21:08:27] INFO stage_workers.py:427: Set current CUDA device to 1 for stage talker_ar
+[2026-06-27 21:08:27] INFO stage_workers.py:430: Building scheduler for talker_ar (tp_rank=0/1) ...
+[2026-06-27 21:08:27] WARNING registry.py:107: Ignore import error when loading sglang.srt.models.glmasr: cannot import name 'GlmAsrConfig' from 'transformers' (/home/tim/baselines/sglang-omni/.venv/lib/python3.11/site-packages/transformers/__init__.py)
+Unrecognized keys in `rope_scaling` for 'rope_type'='default': {'mrope_section', 'interleaved', 'mrope_interleaved'}
+Unrecognized keys in `rope_scaling` for 'rope_type'='default': {'mrope_section', 'interleaved'}
+[2026-06-27 21:08:28] INFO model_runner.py:694: Init torch distributed begin.
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[2026-06-27 21:08:28] INFO model_runner.py:800: Init torch distributed ends. mem usage=0.09 GB
+[2026-06-27 21:08:28] INFO model_runner.py:807: Load weight begin. avail mem=138.19 GB
+[2026-06-27 21:08:28] INFO control_plane.py:294: Stage decode control plane started
+[2026-06-27 21:08:28] INFO runtime.py:188: Stage decode started
+[2026-06-27 21:08:28] INFO stage_workers.py:393: Process decode ready with stages=['decode']
+[2026-06-27 21:08:28] INFO stage_workers.py:292: Process decode ready
+[2026-06-27 21:08:28] INFO common.py:2924: Found local HF snapshot for Qwen/Qwen3-Omni-30B-A3B-Instruct at /m-coriander/coriander/hf/hub/models--Qwen--Qwen3-Omni-30B-A3B-Instruct/snapshots/26291f793822fb6be9555850f06dfe95f2d7e695; skipping download.
+Loading safetensors checkpoint shards:   0% Completed | 0/15 [00:00<?, ?it/s]
+[2026-06-27 21:08:28] INFO control_plane.py:294: Stage preprocessing control plane started
+[2026-06-27 21:08:28] INFO runtime.py:188: Stage preprocessing started
+[2026-06-27 21:08:28] INFO stage_workers.py:393: Process preprocessing ready with stages=['preprocessing']
+[2026-06-27 21:08:28] INFO stage_workers.py:292: Process preprocessing ready
+Ignored error while writing commit hash to /m-coriander/coriander/hf/hub/models--Qwen--Qwen3-Omni-30B-A3B-Instruct/refs/main: [Errno 13] Permission denied: '/m-coriander/coriander/hf/hub/models--Qwen--Qwen3-Omni-30B-A3B-Instruct/refs/main'.
+[2026-06-27 21:08:31] WARNING _snapshot_download.py:300: Ignored error while writing commit hash to /m-coriander/coriander/hf/hub/models--Qwen--Qwen3-Omni-30B-A3B-Instruct/refs/main: [Errno 13] Permission denied: '/m-coriander/coriander/hf/hub/models--Qwen--Qwen3-Omni-30B-A3B-Instruct/refs/main'.
+[2026-06-27 21:08:33] INFO stage_workers.py:620: Acquired GPU startup lock for stage talker_ar: /home/tim/tmp/launch-tmp/sglang_omni_gpu_7_startup.lock
+[2026-06-27 21:08:33] INFO control_plane.py:294: Stage code2wav control plane started
+[2026-06-27 21:08:33] INFO runtime.py:165: Scheduler thread for stage code2wav set CUDA device to 1
+[2026-06-27 21:08:33] INFO runtime.py:188: Stage code2wav started
+[2026-06-27 21:08:33] INFO stage_workers.py:393: Process code2wav ready with stages=['code2wav']
+[2026-06-27 21:08:33] INFO stage_workers.py:292: Process code2wav ready
+Unrecognized keys in `rope_scaling` for 'rope_type'='default': {'interleaved', 'mrope_section', 'mrope_interleaved'}
+Unrecognized keys in `rope_scaling` for 'rope_type'='default': {'interleaved', 'mrope_section'}
+`torch_dtype` is deprecated! Use `dtype` instead!
+[2026-06-27 21:08:33] INFO server_args.py:1697: Attention backend not specified. Use fa3 backend by default.
+[2026-06-27 21:08:33] INFO stages.py:1072: sglang_ar_startup stage=talker_ar gpu_id=1 tp_rank=0/1 context_length=32768 total_gpu_memory_fraction=None mem_fraction_static=0.907 pre_load_avail_mem=138.3729248046875 pid=3453537 pre_load_process_mem=0.50GiB
+[2026-06-27 21:08:33] INFO model_worker.py:327: Configured SGLang backend policy: arch=Qwen3OmniTalker effective_quantization=None server_quantization=None moe_runner_backend=flashinfer_cutlass fp8_gemm_backend=auto
+[2026-06-27 21:08:34] WARNING registry.py:107: Ignore import error when loading sglang.srt.models.glmasr: cannot import name 'GlmAsrConfig' from 'transformers' (/home/tim/baselines/sglang-omni/.venv/lib/python3.11/site-packages/transformers/__init__.py)
+[2026-06-27 21:08:34] INFO model_runner.py:694: Init torch distributed begin.
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[2026-06-27 21:08:34] INFO model_runner.py:800: Init torch distributed ends. mem usage=0.09 GB
+[2026-06-27 21:08:34] INFO model_runner.py:807: Load weight begin. avail mem=138.28 GB
+[2026-06-27 21:08:35] INFO common.py:2924: Found local HF snapshot for Qwen/Qwen3-Omni-30B-A3B-Instruct at /m-coriander/coriander/hf/hub/models--Qwen--Qwen3-Omni-30B-A3B-Instruct/snapshots/26291f793822fb6be9555850f06dfe95f2d7e695; skipping download.
+Loading safetensors checkpoint shards:   0% Completed | 0/15 [00:00<?, ?it/s]
+Loading safetensors checkpoint shards:   7% Completed | 1/15 [00:00<00:02,  6.10it/s]
+Loading safetensors checkpoint shards:  13% Completed | 2/15 [00:00<00:03,  3.30it/s]
+Loading safetensors checkpoint shards:  20% Completed | 3/15 [00:00<00:03,  3.48it/s]
+Loading safetensors checkpoint shards:  27% Completed | 4/15 [00:01<00:03,  3.19it/s]
+Loading safetensors checkpoint shards:  33% Completed | 5/15 [00:01<00:03,  2.91it/s]
+Loading safetensors checkpoint shards:  40% Completed | 6/15 [00:01<00:03,  2.76it/s]
+Loading safetensors checkpoint shards:  47% Completed | 7/15 [00:09<00:22,  2.79s/it]
+Loading safetensors checkpoint shards:  53% Completed | 8/15 [00:10<00:14,  2.06s/it]
+Loading safetensors checkpoint shards:  60% Completed | 9/15 [00:10<00:09,  1.59s/it]
+Loading safetensors checkpoint shards:  67% Completed | 10/15 [00:11<00:06,  1.22s/it]
+Loading safetensors checkpoint shards:  73% Completed | 11/15 [00:11<00:03,  1.03it/s]
+Loading safetensors checkpoint shards:  80% Completed | 12/15 [00:11<00:02,  1.31it/s]
+Loading safetensors checkpoint shards:  87% Completed | 13/15 [00:12<00:01,  1.53it/s]
+Loading safetensors checkpoint shards:  93% Completed | 14/15 [00:12<00:00,  1.73it/s]
+Loading safetensors checkpoint shards:   7% Completed | 1/15 [00:20<04:49, 20.65s/it]
+Loading safetensors checkpoint shards: 100% Completed | 15/15 [00:36<00:00,  7.71s/it]
+Loading safetensors checkpoint shards: 100% Completed | 15/15 [00:36<00:00,  2.46s/it]
+
+Loading safetensors checkpoint shards:  13% Completed | 2/15 [00:43<04:47, 22.11s/it]
+[2026-06-27 21:09:12] INFO model_runner.py:949: Load weight end. type=Qwen3OmniTalker, dtype=torch.bfloat16, avail mem=130.51 GB, mem usage=7.77 GB.
+[2026-06-27 21:09:12] INFO common.py:2924: Using KV cache dtype: torch.bfloat16
+[2026-06-27 21:09:12] INFO memory_pool.py:604: KV Cache is allocated. #tokens: 2570135, K size: 58.83 GB, V size: 58.83 GB
+[2026-06-27 21:09:12] INFO model_runner_kv_cache_mixin.py:646: Memory pool end. avail mem=12.76 GB
+/home/tim/baselines/sglang-omni/.venv/lib/python3.11/site-packages/sglang/srt/utils/common.py:1232: UserWarning: The given NumPy array is not writable, and PyTorch does not support non-writable tensors. This means writing to this tensor will result in undefined behavior. You may want to copy the array to protect its data or make it writable before converting it to a tensor. This type of warning will be suppressed for the rest of this program. (Triggered internally at /pytorch/torch/csrc/utils/tensor_numpy.cpp:206.)
+  tensor_data = torch.ByteTensor(
+[2026-06-27 21:09:12] INFO model_runner.py:1999: Capture cuda graph begin. This can take up to several minutes. avail mem=12.67 GB
+[2026-06-27 21:09:12] INFO common.py:2924: Capture cuda graph bs [1, 2, 4, 8, 12, 16]
+  0%|          | 0/6 [00:00<?, ?it/s]Capturing batches (bs=16 avail_mem=12.67 GB):   0%|          | 0/6 [00:00<?, ?it/s]Loading safetensors checkpoint shards:  20% Completed | 3/15 [00:55<03:29, 17.46s/it]
+Loading safetensors checkpoint shards:  27% Completed | 4/15 [01:17<03:31, 19.24s/it]
+Loading safetensors checkpoint shards:  33% Completed | 5/15 [01:40<03:24, 20.47s/it]
+Loading safetensors checkpoint shards:  40% Completed | 6/15 [02:02<03:10, 21.18s/it]
+Loading safetensors checkpoint shards:  47% Completed | 7/15 [02:18<02:35, 19.42s/it]
+Loading safetensors checkpoint shards:  53% Completed | 8/15 [02:41<02:23, 20.57s/it]
+Loading safetensors checkpoint shards:  60% Completed | 9/15 [02:41<01:25, 14.22s/it]
+Loading safetensors checkpoint shards:  67% Completed | 10/15 [03:04<01:23, 16.66s/it]
+Loading safetensors checkpoint shards:  73% Completed | 11/15 [03:26<01:13, 18.47s/it]
+Loading safetensors checkpoint shards:  80% Completed | 12/15 [03:48<00:58, 19.63s/it]
+Loading safetensors checkpoint shards:  87% Completed | 13/15 [04:11<00:41, 20.53s/it]
+Loading safetensors checkpoint shards:  93% Completed | 14/15 [04:33<00:21, 21.11s/it]
+Loading safetensors checkpoint shards: 100% Completed | 15/15 [04:34<00:00, 14.86s/it]
+Loading safetensors checkpoint shards: 100% Completed | 15/15 [04:34<00:00, 18.29s/it]
+
+[2026-06-27 21:13:02] INFO model_runner.py:949: Load weight end. type=Qwen3OmniThinkerForCausalLM, dtype=torch.bfloat16, avail mem=81.22 GB, mem usage=56.97 GB.
+[2026-06-27 21:13:02] INFO common.py:2924: Using KV cache dtype: torch.bfloat16
+[2026-06-27 21:13:03] INFO memory_pool.py:604: KV Cache is allocated. #tokens: 671266, K size: 30.73 GB, V size: 30.73 GB
+[2026-06-27 21:13:03] INFO model_runner_kv_cache_mixin.py:646: Memory pool end. avail mem=19.70 GB
+/home/tim/baselines/sglang-omni/.venv/lib/python3.11/site-packages/sglang/srt/utils/common.py:1232: UserWarning: The given NumPy array is not writable, and PyTorch does not support non-writable tensors. This means writing to this tensor will result in undefined behavior. You may want to copy the array to protect its data or make it writable before converting it to a tensor. This type of warning will be suppressed for the rest of this program. (Triggered internally at /pytorch/torch/csrc/utils/tensor_numpy.cpp:206.)
+  tensor_data = torch.ByteTensor(
+[2026-06-27 21:13:03] INFO _hidden_capture.py:72: Installed hidden capture hooks on Qwen3MoeLLMModel for layers [0, 24]
+[2026-06-27 21:13:03] INFO model_runner.py:1999: Capture cuda graph begin. This can take up to several minutes. avail mem=19.60 GB
+[2026-06-27 21:13:03] INFO common.py:2924: Capture cuda graph bs [1, 2, 4, 8, 12, 16]
+  0%|          | 0/6 [00:00<?, ?it/s]Capturing batches (bs=16 avail_mem=19.60 GB):   0%|          | 0/6 [00:00<?, ?it/s][2026-06-27 21:13:04] WARNING fused_moe_triton_config.py:111: Config file not found at /home/tim/baselines/sglang-omni/.venv/lib/python3.11/site-packages/sglang/srt/layers/moe/fused_moe_triton/configs/triton_3_5_1/E=128,N=768,device_name=NVIDIA_H200.json. Fallback to triton version 3.2.0 and use MoE kernel config from /home/tim/baselines/sglang-omni/.venv/lib/python3.11/site-packages/sglang/srt/layers/moe/fused_moe_triton/configs/triton_3_2_0/E=128,N=768,device_name=NVIDIA_H200.json. Performance might be sub-optimal!
+[2026-06-27 21:13:04] WARNING fused_moe_triton_config.py:120: Using MoE kernel config with down_moe=False. Performance might be sub-optimal! Config file not found at /home/tim/baselines/sglang-omni/.venv/lib/python3.11/site-packages/sglang/srt/layers/moe/fused_moe_triton/configs/triton_3_5_1/E=128,N=768,device_name=NVIDIA_H200_down.json, you can create them with https://github.com/sgl-project/sglang/tree/main/benchmark/kernels/fused_moe_triton
+Capturing batches (bs=16 avail_mem=19.60 GB):  17%|█▋        | 1/6 [00:01<00:09,  1.88s/it]Capturing batches (bs=12 avail_mem=19.55 GB):  17%|█▋        | 1/6 [00:01<00:09,  1.88s/it]Capturing batches (bs=12 avail_mem=19.55 GB):  33%|███▎      | 2/6 [00:02<00:05,  1.39s/it]Capturing batches (bs=8 avail_mem=19.54 GB):  33%|███▎      | 2/6 [00:02<00:05,  1.39s/it] Capturing batches (bs=8 avail_mem=19.54 GB):  50%|█████     | 3/6 [00:03<00:02,  1.18it/s]Capturing batches (bs=4 avail_mem=19.53 GB):  50%|█████     | 3/6 [00:03<00:02,  1.18it/s]Capturing batches (bs=4 avail_mem=19.53 GB):  67%|██████▋   | 4/6 [00:03<00:01,  1.21it/s]Capturing batches (bs=2 avail_mem=19.52 GB):  67%|██████▋   | 4/6 [00:03<00:01,  1.21it/s]Capturing batches (bs=2 avail_mem=19.52 GB):  83%|████████▎ | 5/6 [00:04<00:00,  1.25it/s]Capturing batches (bs=1 avail_mem=19.51 GB):  83%|████████▎ | 5/6 [00:04<00:00,  1.25it/s]Capturing batches (bs=1 avail_mem=19.51 GB): 100%|██████████| 6/6 [00:05<00:00,  1.24it/s]Capturing batches (bs=1 avail_mem=19.51 GB): 100%|██████████| 6/6 [00:05<00:00,  1.09it/s]
+[2026-06-27 21:13:09] INFO model_runner.py:2013: Capture cuda graph end. Time elapsed: 6.47 s. mem usage=0.10 GB. avail mem=19.50 GB.
+[2026-06-27 21:13:10] INFO stages.py:1011: sglang_ar_started stage=thinker gpu_id=0 tp_rank=0/1 context_length=8192 total_gpu_memory_fraction=None effective_total_gpu_memory_fraction=None mem_fraction_static=0.857 pre_load_avail_mem=139.29827880859375 post_load_avail_mem=19.49835205078125 pid=3453535 pre_load_process_mem=0.50GiB post_load_process_mem=119.29GiB
+[2026-06-27 21:13:10] INFO stage_workers.py:620: Acquired GPU startup lock for stage audio_encoder: /home/tim/tmp/launch-tmp/sglang_omni_gpu_6_startup.lock
+[2026-06-27 21:13:10] INFO control_plane.py:294: Stage thinker control plane started
+[2026-06-27 21:13:10] INFO runtime.py:165: Scheduler thread for stage thinker set CUDA device to 0
+[2026-06-27 21:13:10] INFO runtime.py:188: Stage thinker started
+[2026-06-27 21:13:10] INFO stage_workers.py:393: Process thinker ready with stages=['thinker']
+Unrecognized keys in `rope_scaling` for 'rope_type'='default': {'interleaved', 'mrope_interleaved', 'mrope_section'}
+[2026-06-27 21:13:10] INFO stage_workers.py:292: Process thinker ready
+Unrecognized keys in `rope_scaling` for 'rope_type'='default': {'interleaved', 'mrope_section'}
+Ignored error while writing commit hash to /m-coriander/coriander/hf/hub/models--Qwen--Qwen3-Omni-30B-A3B-Instruct/refs/main: [Errno 13] Permission denied: '/m-coriander/coriander/hf/hub/models--Qwen--Qwen3-Omni-30B-A3B-Instruct/refs/main'.
+[2026-06-27 21:13:10] WARNING _snapshot_download.py:300: Ignored error while writing commit hash to /m-coriander/coriander/hf/hub/models--Qwen--Qwen3-Omni-30B-A3B-Instruct/refs/main: [Errno 13] Permission denied: '/m-coriander/coriander/hf/hub/models--Qwen--Qwen3-Omni-30B-A3B-Instruct/refs/main'.
+[2026-06-27 21:13:16] INFO stage_workers.py:620: Acquired GPU startup lock for stage image_encoder: /home/tim/tmp/launch-tmp/sglang_omni_gpu_6_startup.lock
+Unrecognized keys in `rope_scaling` for 'rope_type'='default': {'interleaved', 'mrope_interleaved', 'mrope_section'}
+Unrecognized keys in `rope_scaling` for 'rope_type'='default': {'interleaved', 'mrope_section'}
+[2026-06-27 21:13:16] INFO control_plane.py:294: Stage audio_encoder control plane started
+[2026-06-27 21:13:16] INFO runtime.py:165: Scheduler thread for stage audio_encoder set CUDA device to 0
+[2026-06-27 21:13:16] INFO runtime.py:188: Stage audio_encoder started
+[2026-06-27 21:13:16] INFO stage_workers.py:393: Process audio_encoder ready with stages=['audio_encoder']
+[2026-06-27 21:13:16] INFO stage_workers.py:292: Process audio_encoder ready
+Ignored error while writing commit hash to /m-coriander/coriander/hf/hub/models--Qwen--Qwen3-Omni-30B-A3B-Instruct/refs/main: [Errno 13] Permission denied: '/m-coriander/coriander/hf/hub/models--Qwen--Qwen3-Omni-30B-A3B-Instruct/refs/main'.
+[2026-06-27 21:13:16] WARNING _snapshot_download.py:300: Ignored error while writing commit hash to /m-coriander/coriander/hf/hub/models--Qwen--Qwen3-Omni-30B-A3B-Instruct/refs/main: [Errno 13] Permission denied: '/m-coriander/coriander/hf/hub/models--Qwen--Qwen3-Omni-30B-A3B-Instruct/refs/main'.
+[2026-06-27 21:13:21] INFO image_encoder.py:80: PatchEmbed optimized: Conv3d(3→1152) replaced with Linear(1536→1152)
+[2026-06-27 21:13:21] INFO control_plane.py:294: Stage image_encoder control plane started
+[2026-06-27 21:13:21] INFO runtime.py:165: Scheduler thread for stage image_encoder set CUDA device to 0
+[2026-06-27 21:13:21] INFO runtime.py:188: Stage image_encoder started
+[2026-06-27 21:13:21] INFO stage_workers.py:393: Process image_encoder ready with stages=['image_encoder']
+[2026-06-27 21:13:21] INFO stage_workers.py:292: Process image_encoder ready

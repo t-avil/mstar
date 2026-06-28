@@ -1,0 +1,42 @@
+# Exact commands used — Qwen3-Omni Seed-TTS, 2-GPU (Figure 5 reproduction)
+# Hardware: 8x NVIDIA H200 (143 GB), used GPUs 6,7. Model cached in shared HF store.
+# Model: Qwen/Qwen3-Omni-30B-A3B-Instruct  |  Dataset: seed-tts-eval (en, meta.lst)
+# Disaggregation (both systems): Thinker on one GPU, Talker+Code2Wav on the other.
+
+export HF_HOME=/m-coriander/coriander/hf
+export CUDA_VISIBLE_DEVICES=6,7
+
+# ---- M* (ours) server: upstream mstar-project/mstar main ----
+mstar-serve --config configs/qwen3omni_2gpu.yaml --host 0.0.0.0 --port 8000 \
+            --tensor-comm-protocol SHM --log-level INFO
+
+# ---- vLLM-Omni server: vllm 0.21.0+cu129, vllm-omni @60c15004 (0.21.0 line) ----
+vllm serve Qwen/Qwen3-Omni-30B-A3B-Instruct --omni \
+     --deploy-config vllm_omni/deploy/qwen3_omni_moe.yaml \
+     --stage-init-timeout 1800 --init-timeout 3600 --host 0.0.0.0 --port 8091
+
+# ---- Benchmark sweep (per system), B in {1,4,8,16,32}, offline sized-waves ----
+# num_requests = max(10, 5*B); num_warmup=3; max_tokens=256 + greedy thinker baked
+# into the harness (benchmark/base.py Qwen3Omni.get_model_kwargs).
+for B in 1 4 8 16 32; do
+  N=$((B*5)); [ "$N" -lt 10 ] && N=10
+  python -m benchmark.runner \
+    --url http://127.0.0.1:<PORT> --model qwen3omni \
+    --request-type text_to_speech --dataset seed_tts \
+    --seed-tts-dir /home/tim/seedtts-cache/seedtts_testset --seed-tts-locale en \
+    --profiling-type offline --batch-size "$B" --num-requests "$N" --num-warmup 3 \
+    --inference-system <ours|vllm_omni> --local-cache /home/tim/seedtts-cache \
+    --output-dir runs/out_<sys>/B${B}
+done
+
+# ---- Closed-loop datapoint (to match the reference CSV protocol "Max con.") ----
+# B=32, num_warmup=5, num_requests=160, continuous max-concurrency=32.
+python -m benchmark.runner \
+  --url http://127.0.0.1:<PORT> --model qwen3omni \
+  --request-type text_to_speech --dataset seed_tts \
+  --seed-tts-dir /home/tim/seedtts-cache/seedtts_testset --seed-tts-locale en \
+  --profiling-type closed_loop --max-concurrency 32 --num-requests 160 --num-warmup 5 \
+  --inference-system <ours|vllm_omni> --output-dir runs/out_<sys>_closedloop/B32
+
+# ---- Build raw.json (every datapoint) + charts ----
+python benchmarks/qwen3-omni-seedtts-2gpu/analyze.py

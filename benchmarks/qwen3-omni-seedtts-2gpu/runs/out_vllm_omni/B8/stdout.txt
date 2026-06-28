@@ -1,0 +1,20 @@
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'interleaved'}
+
+--- Benchmark Results (wall time: 145.91s) ---
+Offline Benchmark Results (40 requests, batch=8)
+──────────────────────────────────────────────────
+Request type breakdown: text_to_speech=40
+Requests : 40/40 succeeded
+TTFT (audio)  : mean=1.404s  p50=1.418s  p95=1.483s  p99=1.487s
+E2E           : mean=19.811s  p50=23.593s  p95=29.226s  p99=31.467s
+ITL  (audio)  : mean=0.562s  p50=0.451s  p95=1.223s  p99=1.291s
+Audio SV      : mean=1.000s  p50=1.000s  p05=1.000s  p10=1.000s  (higher is better)
+RTF           : mean=0.312  p50=0.314  p95=0.352  p99=0.388  (lower is better; <1.0 = real-time)
+Audio dur    : mean=65.781s
+Prompt tokens: 1095 total
+Output bytes (audio): 126300104 total (1351 chunks)
+Throughput: 0.27 req/s (successful only)
+Throughput: 18.03 audio sec/s (synthesized audio per wall second)
+Total wall time: 145.91s
+
+Saved 40 outputs to /home/tim/mstar/benchmarks/qwen3-omni-seedtts-2gpu/runs/out_vllm_omni/B8/

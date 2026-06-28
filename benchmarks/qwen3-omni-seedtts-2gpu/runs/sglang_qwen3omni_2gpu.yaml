@@ -1,0 +1,269 @@
+model_path: Qwen/Qwen3-Omni-30B-A3B-Instruct
+stages:
+- name: preprocessing
+  factory: sglang_omni.models.qwen3_omni.stages.create_preprocessing_executor
+  factory_args:
+    thinker_max_seq_len: 8192
+  next:
+  - image_encoder
+  - audio_encoder
+  - mm_aggregate
+  terminal: false
+  route_fn: sglang_omni.models.qwen3_omni.request_builders.resolve_preprocessing_next_stages
+  gpu: null
+  tp_size: 1
+  parallelism:
+    tp: 1
+  process: preprocessing
+  runtime:
+    resources:
+      total_gpu_memory_fraction: null
+    max_seq_len: null
+    video_fps: null
+    sglang_server_args:
+      mem_fraction_static: null
+  runtime_arg_map:
+    max_seq_len: thinker_max_seq_len
+    video_fps: video_fps
+  wait_for: null
+  wait_for_fn: null
+  merge_fn: null
+  stream_to: []
+  stream_done_to_fn: null
+  can_accept_stream_before_payload: false
+  project_payload:
+    image_encoder: sglang_omni.models.qwen3_omni.request_builders.project_preprocessing_to_image_encoder
+    audio_encoder: sglang_omni.models.qwen3_omni.request_builders.project_preprocessing_to_audio_encoder
+    mm_aggregate: sglang_omni.models.qwen3_omni.request_builders.project_preprocessing_to_mm_aggregate
+  relay: null
+- name: image_encoder
+  factory: sglang_omni.models.qwen3_omni.stages.create_image_encoder_executor
+  factory_args:
+    device: cuda
+    dtype: null
+  next: mm_aggregate
+  terminal: false
+  route_fn: null
+  gpu: 0
+  tp_size: 1
+  parallelism:
+    tp: 1
+  process: image_encoder
+  runtime:
+    resources:
+      total_gpu_memory_fraction: null
+    max_seq_len: null
+    video_fps: null
+    sglang_server_args:
+      mem_fraction_static: null
+  runtime_arg_map: {}
+  wait_for: null
+  wait_for_fn: null
+  merge_fn: null
+  stream_to: []
+  stream_done_to_fn: null
+  can_accept_stream_before_payload: false
+  project_payload:
+    mm_aggregate: sglang_omni.models.qwen3_omni.request_builders.project_encoder_to_mm_aggregate
+  relay: null
+- name: audio_encoder
+  factory: sglang_omni.models.qwen3_omni.stages.create_audio_encoder_executor
+  factory_args:
+    device: cuda
+    dtype: null
+  next: mm_aggregate
+  terminal: false
+  route_fn: null
+  gpu: 0
+  tp_size: 1
+  parallelism:
+    tp: 1
+  process: audio_encoder
+  runtime:
+    resources:
+      total_gpu_memory_fraction: null
+    max_seq_len: null
+    video_fps: null
+    sglang_server_args:
+      mem_fraction_static: null
+  runtime_arg_map: {}
+  wait_for: null
+  wait_for_fn: null
+  merge_fn: null
+  stream_to: []
+  stream_done_to_fn: null
+  can_accept_stream_before_payload: false
+  project_payload:
+    mm_aggregate: sglang_omni.models.qwen3_omni.request_builders.project_encoder_to_mm_aggregate
+  relay: null
+- name: mm_aggregate
+  factory: sglang_omni.models.qwen3_omni.stages.create_aggregate_executor
+  factory_args: {}
+  next:
+  - thinker
+  - talker_ar
+  terminal: false
+  route_fn: sglang_omni.models.qwen3_omni.request_builders.resolve_mm_aggregate_next_stages
+  gpu: null
+  tp_size: 1
+  parallelism:
+    tp: 1
+  process: mm_aggregate
+  runtime:
+    resources:
+      total_gpu_memory_fraction: null
+    max_seq_len: null
+    video_fps: null
+    sglang_server_args:
+      mem_fraction_static: null
+  runtime_arg_map: {}
+  wait_for:
+  - preprocessing
+  - image_encoder
+  - audio_encoder
+  wait_for_fn: sglang_omni.models.qwen3_omni.request_builders.resolve_mm_aggregate_wait_sources
+  merge_fn: sglang_omni.models.qwen3_omni.merge.merge_for_thinker
+  stream_to: []
+  stream_done_to_fn: null
+  can_accept_stream_before_payload: false
+  project_payload:
+    talker_ar: sglang_omni.models.qwen3_omni.request_builders.project_mm_aggregate_to_talker_ar
+  relay: null
+- name: thinker
+  factory: sglang_omni.models.qwen3_omni.stages.create_sglang_thinker_executor_from_config
+  factory_args:
+    thinker_max_seq_len: 8192
+    speech_enabled: true
+  next: decode
+  terminal: false
+  route_fn: sglang_omni.models.qwen3_omni.request_builders.resolve_thinker_next_stages
+  gpu: 0
+  tp_size: 1
+  parallelism:
+    tp: 1
+  process: thinker
+  runtime:
+    resources:
+      total_gpu_memory_fraction: null
+    max_seq_len: null
+    video_fps: null
+    sglang_server_args:
+      mem_fraction_static: null
+  runtime_arg_map:
+    max_seq_len: thinker_max_seq_len
+  wait_for: null
+  wait_for_fn: null
+  merge_fn: null
+  stream_to:
+  - talker_ar
+  - decode
+  stream_done_to_fn: sglang_omni.models.qwen3_omni.request_builders.resolve_thinker_stream_done_targets
+  can_accept_stream_before_payload: false
+  project_payload:
+    decode: sglang_omni.models.qwen3_omni.request_builders.project_thinker_to_decode
+  relay: null
+- name: decode
+  factory: sglang_omni.models.qwen3_omni.stages.create_decode_executor
+  factory_args: {}
+  next: null
+  terminal: true
+  route_fn: null
+  gpu: null
+  tp_size: 1
+  parallelism:
+    tp: 1
+  process: decode
+  runtime:
+    resources:
+      total_gpu_memory_fraction: null
+    max_seq_len: null
+    video_fps: null
+    sglang_server_args:
+      mem_fraction_static: null
+  runtime_arg_map: {}
+  wait_for: null
+  wait_for_fn: null
+  merge_fn: null
+  stream_to: []
+  stream_done_to_fn: null
+  can_accept_stream_before_payload: true
+  project_payload: {}
+  relay: null
+- name: talker_ar
+  factory: sglang_omni.models.qwen3_omni.stages.create_talker_ar_executor_from_config
+  factory_args:
+    talker_max_seq_len: 32768
+    speech_enabled: true
+    feedback_enabled: true
+    enable_partial_start: true
+    partial_start_min_chunks: 5
+  next: code2wav
+  terminal: false
+  route_fn: null
+  gpu: 1
+  tp_size: 1
+  parallelism:
+    tp: 1
+  process: talker_ar
+  runtime:
+    resources:
+      total_gpu_memory_fraction: null
+    max_seq_len: null
+    video_fps: null
+    sglang_server_args:
+      mem_fraction_static: null
+  runtime_arg_map:
+    max_seq_len: talker_max_seq_len
+  wait_for: null
+  wait_for_fn: null
+  merge_fn: null
+  stream_to:
+  - code2wav
+  stream_done_to_fn: null
+  can_accept_stream_before_payload: true
+  project_payload:
+    code2wav: sglang_omni.models.qwen3_omni.request_builders.project_talker_to_code2wav
+  relay: null
+- name: code2wav
+  factory: sglang_omni.models.qwen3_omni.components.code2wav_scheduler.create_code2wav_scheduler
+  factory_args:
+    device: cuda
+  next: null
+  terminal: true
+  route_fn: null
+  gpu: 1
+  tp_size: 1
+  parallelism:
+    tp: 1
+  process: code2wav
+  runtime:
+    resources:
+      total_gpu_memory_fraction: null
+    max_seq_len: null
+    video_fps: null
+    sglang_server_args:
+      mem_fraction_static: null
+  runtime_arg_map: {}
+  wait_for: null
+  wait_for_fn: null
+  merge_fn: null
+  stream_to: []
+  stream_done_to_fn: null
+  can_accept_stream_before_payload: true
+  project_payload: {}
+  relay: null
+name: Qwen/Qwen3-Omni-30B-A3B-Instruct
+entry_stage: null
+relay_backend: shm
+fused_stages: []
+runtime_overrides: {}
+env_defaults:
+  SGLANG_JIT_DEEPGEMM_PRECOMPILE: '0'
+placement:
+  max_total_gpu_memory_fraction_per_gpu: 1.0
+  require_memory_fraction_for_colocation: false
+placement_policy: sglang_omni.models.qwen3_omni.placement.Qwen3OmniPlacementPolicy
+endpoints:
+  base_path: /home/tim/tmp/sglang_omni
+terminal_stages_fn: sglang_omni.models.qwen3_omni.request_builders.resolve_terminal_stages
+config_cls: Qwen3OmniSpeechPipelineConfig
