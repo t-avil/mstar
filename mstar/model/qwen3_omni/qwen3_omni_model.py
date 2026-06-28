@@ -1196,20 +1196,36 @@ class Qwen3OmniModel(Model):
         # the placeholders avoids noise from the unfilled embeddings.
         # if self._processor is not None:
             # try:
+        system_text = (
+            "You are Qwen, a virtual human developed by the "
+            "Qwen team, Alibaba Group, capable of perceiving "
+            "auditory and visual inputs, as well as generating "
+            "text and speech."
+        )
         messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are Qwen, a virtual human developed by the "
-                    "Qwen team, Alibaba Group, capable of perceiving "
-                    "auditory and visual inputs, as well as generating "
-                    "text and speech."
-                ),
-            },
+            {"role": "system", "content": system_text},
         ]
-        if prompt is not None:
+        # FIX 1 (vLLM token parity): the OpenAI adapter's flatten_messages
+        # concatenates ALL message text -- including the client's system
+        # message -- into a single ``prompt`` blob, which we then re-wrap in
+        # our OWN system turn.  That double-counts the system text: M*'s user
+        # turn becomes [duplicated system text][instruction] whereas vLLM's
+        # stock chat template puts the system text ONLY in the system turn and
+        # leaves the user turn = [instruction].  Under MSTAR_VLLM_PROMPT_LAYOUT
+        # we strip a leading copy of the system text (plus the ``\n`` join
+        # flatten_messages inserts) from the prompt so the user turn is
+        # instruction-only and the rendered tokens match vLLM exactly.  Default
+        # OFF path is untouched (byte-identical).
+        user_prompt = prompt
+        if vllm_prompt_layout_enabled() and prompt is not None:
+            for sep in ("\n", ""):
+                dup = system_text + sep
+                if prompt.startswith(dup):
+                    user_prompt = prompt[len(dup):]
+                    break
+        if user_prompt is not None:
             messages.append(
-                {"role": "user", "content": prompt},
+                {"role": "user", "content": user_prompt},
             )
 
         # apply_chat_template with TEXT-ONLY content -> no modality

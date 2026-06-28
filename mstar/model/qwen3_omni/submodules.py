@@ -605,6 +605,21 @@ class ThinkerSubmodule(ARNodeSubmodule):
                 device,
                 self.config.thinker.position_id_per_seconds,
             )
+            # FIX 2 (vLLM/HF M-RoPE parity): for AUDIO-ONLY input, HF's
+            # get_rope_index takes its ELSE branch (no vision grid) and assigns
+            # purely SEQUENTIAL position ids in all 3 M-RoPE dims -- so the
+            # audio span's height/width ramp with the temporal component.  M*'s
+            # get_rope_index_audio instead pins h/w to a constant (start_pos+1),
+            # which is the only place M*'s positions diverge from HF/vLLM.
+            # Under MSTAR_VLLM_PROMPT_LAYOUT, set h/w == temporal so the full
+            # 3D position_id tensor is byte-identical to HF get_rope_index.
+            from mstar.model.qwen3_omni.qwen3_omni_model import (
+                vllm_prompt_layout_enabled,
+            )
+            if vllm_prompt_layout_enabled():
+                audio_pos_ids = audio_pos_ids.clone()
+                audio_pos_ids[1] = audio_pos_ids[0]
+                audio_pos_ids[2] = audio_pos_ids[0]
             end_pos_ids = get_rope_index_text(
                 1, start_pos + 1 + audio_len, device
             )
