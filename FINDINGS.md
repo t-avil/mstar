@@ -88,16 +88,38 @@ tokens, 9-tok verbatim transcription (finish=stop). Same tokens reordered → op
 Only **1/50 librispeech clips** (the lone spoken *question*) runs long; the other 49 (statements)
 transcribe identically even in vLLM's layout. The "100 s degeneration" = the Talker **faithfully
 vocalizing the Thinker's essay** (~0.63 s/word, linear) — no babble (hence rep_penalty had no
-effect). Alignable with **no code change** (reorder instruction-first, or isolate audio in its
-own turn). M\* is the faithful transcriber. An env-gated `MSTAR_VLLM_PROMPT_LAYOUT` to make M\*
-replicate vLLM's behavior + a full diff (text/audio/tensors) is in progress.
+effect). M\* is the faithful transcriber.
+
+### ✅ RESOLVED — byte-identical to vLLM took TWO fixes, not just token order (`vllm-layout` @ `09e96b8`)
+The earlier "alignable with no code change / just reorder the instruction" claim was **incomplete**:
+token-layout reorder alone did **not** flip M\* to answer. Making the prompt *truly* identical to
+vLLM — **tokens AND 3D M-RoPE positions** — required two env-gated fixes (`MSTAR_VLLM_PROMPT_LAYOUT=1`,
+default OFF = byte-identical baseline, 18/18 varlen parity green):
+
+- **FIX 1 — system-prompt duplication (token-level).** `flatten_messages` folds the client system
+  message into the user blob, which `process_prompt` re-wraps in its own system turn → duplicated
+  system text. Stripping it makes M\*'s token count **exact** vs vLLM's live `/tokenize`: clip4
+  119→**84**=84, clip2 157→**122**=122, clip0 180→**145**=145.
+- **FIX 2 — audio M-RoPE height/width (the missing piece).** HF `get_rope_index`
+  (`modeling_qwen3_omni_moe.py:296`) gates the 3D-MRoPE branch on image/video grid; for **audio-only**
+  input it falls to the else branch = **sequential** positions in all 3 dims. M\* instead pinned the
+  audio span's h/w to a **constant** (only temporal ramped). Setting audio h/w == temporal makes
+  positions **EXACT** vs HF `get_rope_index` (clip4/2/0 all 3×N exact).
+
+**Result — M\* now ANSWERS like vLLM on the same weights.** clip4, same "transcribe" prompt:
+default OFF → transcribes (45 chars / 1.68 s audio); **FIX1+FIX2 ON → answers** (2560 chars /
+162 s essay), matching vLLM's spoken-query→reply (vLLM ~256 tok / ~104 s; M\* longer only because
+the runner allowed 512 vs 256 output tokens). Statement clips stay short under all variants — no
+question to answer, matching vLLM on declaratives. **Verdict:** "prompt positioning is THE cause"
+is vindicated *provided* "positioning" includes the 3D M-RoPE positions, not just token order.
+This unblocks a **fair** I2S/S2S rebench (same audio length → apples-to-apples RTF).
 
 ### Latent M\* bugs found (harmless for transcription, worth fixing)
 - Audio sentinel token IDs **151647/151648** are labeled `<|audio_bos|>/<|audio_eos|>` in
   `config.py` but are actually `<|object_ref_end|>/<|box_start|>` in the tokenizer; the real
   audio markers are **151669/151670** (what vLLM uses).
 - `flatten_messages` ("v1 simplification", `adapters.py:57`) drops multi-turn role structure —
-  fine for single-turn, latent for multi-turn.
+  fine for single-turn, latent for multi-turn (now stripped under the layout flag — FIX 1 above).
 
 ---
 
@@ -128,19 +150,45 @@ vLLM-Omni bakes each stage onto a device — no per-stage sequence-split, no per
 structural MTP (full RVQ frame/step), stateless re-prefill + `torch.compile(epilogue_fusion=False)`
 for the code predictor, batch+graph the vocoder (SGLang's is batch=1 — M\* can beat it).
 
-**First, run the config-only sweep** (PD-disagg vs colocated vs TP2 vs max_concurrent=32) — high
-information, zero code — before committing to the Code2Wav-SP build.
+### ✅ Config / streaming sweep — RESULTS (B=1)
+Ran the placement + streaming sweep. **The default `qwen3omni_2gpu` placement is already optimal
+for B=1** — every alternative placement regresses or needs 3 GPUs. The only B=1 win is a *streaming*
+param (codec_chunk), not placement:
+
+| Lever | B=1 verdict |
+|---|---|
+| **default `qwen3omni_2gpu`** (Thinker rank1, Talker+Code2Wav rank0) | **already optimal** ✅ |
+| **codec_chunk 25→15** (`codec-chunk` branch, pushed) | ✅ **WIN** — S2S RTF 0.167 beats vLLM 0.193; TTFA −24.5%, ITL −11%; I2S ITL −40% (all ≥10% vs M\*-old). Keep chunk ≥ left_context (15/15) — naive 25→15 w/ lc=25 gives a −10 pop stride and **corrupts audio** (drops ~38%). |
+| **colocated** (all on 1 worker) | ❌ −12 to −36% on every path — colocating serializes on the same SMs, losing the default split's component pipeline overlap. |
+| **pd_disaggregated** | ❌ regresses at B=1 (+ needs 3 GPUs) — prefill/decode split is a throughput lever, not a single-stream one. |
+| **thinker_tp2 / full_tp2** | ⚠️ needs 3 GPUs — not A/B-able on a pair. |
+
+**Takeaway:** the "apply vLLM/SGLang placement insights" lever is *exhausted* — M\* already embodies
+the best B=1 split. Remaining B=1 wins are Qwen3-Omni-specific **code** changes (codec_chunk ✅,
+Code2Wav SP next), not config.
+
+- **Image preprocess → GPU** (`gpu-img-preprocess` branch, pushed): correct + parity-faithful
+  (cos ≥0.999983, grid_thw bit-exact), **7–100× faster per image** (1900×1300: 64 ms→0.6 ms). But
+  on food101 (512×512) CPU preprocess is only ~2 ms, so I2T TTFT barely moves (0.238→0.232 s). The
+  175 ms cost is **image-size-driven** — only materializes at ~3000 px. Real win, wrong dataset to
+  show it; the dominant food101 I2T TTFT cost is prefill walks / conductor round-trips, not preprocess.
 
 ---
 
 ## 6. Deliverables & status
 
-- **Pushed to fork** (CLAUDE.md git workflow): `bench/qwen3-omni-{i2s,s2s}-vllm` and
+- **Bench branches pushed** (CLAUDE.md git workflow): `bench/qwen3-omni-{i2s,s2s}-vllm` and
   `…-mstar-old`, each merged to `benchmarks`. Each carries `raw.json` + RTF/throughput charts +
   10 audio samples/batch.
-- **Committed:** backend-parity unit tests (`test_qwen3_omni_varlen_backend_parity.py`).
-- **Pending:** M\*-new branches; 4 comparison charts (I2S/S2S × tput/RTF); the config-sweep;
-  Code2Wav-SP; the `MSTAR_VLLM_PROMPT_LAYOUT` equivalence proof.
+- **Code branches pushed to fork (checkpoints):**
+  - `vllm-layout` @ `09e96b8` — token+position parity with vLLM (FIX1 + FIX2), env-gated. ⭐
+  - `codec-chunk` — codec_chunk 25→15 S2S win (config default change).
+  - `gpu-img-preprocess` @ `0cb3f98` — env-gated GPU image preprocess.
+  - backend-parity unit tests (`test_qwen3_omni_varlen_backend_parity.py`, 18 cases) ride `vllm-layout`.
+- **In progress:** fair behavior-matched I2S+S2S B=1 rebench (M\*-new-aligned vs vLLM vs M\*-old, same
+  max_tokens → same audio length) — tests whether the I2S ~46%/1.8× margin survives length-matching.
+- **Pending:** M\*-new bench branches; 4 comparison charts (I2S/S2S × tput/RTF); Code2Wav sequence
+  parallelism (the I2S/long-audio differentiator); merge prefill walks (S2T/I2T TTFT).
 
 **Fairness note:** vLLM's longer S2S/I2S audio (it answers vs transcribes) confounds raw RTF —
 use **median RTF + length-independent TTFT/ITL** for the headline comparison.
