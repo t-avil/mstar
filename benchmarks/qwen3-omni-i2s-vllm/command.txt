@@ -1,0 +1,9 @@
+# vLLM-Omni Qwen3-Omni I2S (image_to_speech) — closed-loop max-concurrency sweep, seed=42
+# Server: vLLM-Omni @60c15004 (0.21.0 line), vllm 0.21.0+cu129, 2-GPU
+#   deploy qwen3_omni_moe.yaml: stage0/thinker->cuda:0 ; stage1/talker + stage2/code2wav->cuda:1 ; seed:42/stage
+# Client (this repo) benchmark.runner, per batch B in {1,2,4,8,16,32}:
+python -m benchmark.runner --url http://127.0.0.1:8093 --model qwen3omni \
+  --request-type image_to_speech --dataset food101 \
+  --profiling-type closed_loop --max-concurrency B --num-requests N --num-warmup 5 \
+  --inference-system vllm_omni --local-cache /home/tim/tmp/libri_wavs
+# num_requests N per B: 1->12 2->20 4->24 8->40 16->80 32->160

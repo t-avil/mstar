@@ -1,0 +1,23 @@
+`trust_remote_code` is not supported anymore.
+Please check that the Hugging Face dataset 'ethz/food101' isn't based on a loading script and remove `trust_remote_code`.
+If the dataset is based on a loading script, please ask the dataset author to remove it and convert it to a standard format like Parquet.
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'interleaved'}
+
+--- Benchmark Results (wall time: 118.49s) ---
+Closed-Loop Benchmark Results (12 requests, max_concurrency=1)
+──────────────────────────────────────────────────
+Request type breakdown: image_to_speech=12
+Requests : 12/12 succeeded
+TTFT (audio)  : mean=0.580s  p50=0.582s  p95=0.601s  p99=0.601s
+E2E           : mean=9.873s  p50=9.736s  p95=12.795s  p99=12.853s
+ITL  (audio)  : mean=0.297s  p50=0.276s  p95=0.390s  p99=0.398s
+Audio SV      : mean=1.000s  p50=1.000s  p05=1.000s  p10=1.000s  (higher is better)
+RTF           : mean=0.157  p50=0.156  p95=0.160  p99=0.162  (lower is better; <1.0 = real-time)
+Audio dur    : mean=62.958s
+Prompt tokens: 3110 total
+Output bytes (audio): 36264032 total (388 chunks)
+Throughput: 0.10 req/s (successful only)
+Throughput: 6.38 audio sec/s (synthesized audio per wall second)
+Total wall time: 118.49s
+
+Saved 12 outputs to /home/tim/exp_vllm_i2s_s2s/out_vllm_omni/image_to_speech/B1/
