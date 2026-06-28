@@ -106,9 +106,9 @@ token faster because it never leaves its fast pre-recorded path.
 
 | metric | B=1 (M\*-new / vLLM) | B=32 (M\*-new / vLLM) |
 |---|---|---|
-| throughput audio s/s | 11.57 / 6.39 ✅ | 94.73 / 47.85 ✅ (~2×) |
+| throughput audio s/s | 11.47 / 6.39 ✅ | 94.73 / 47.85 ✅ (~2×) |
 | RTF p50 (lower=better) | 0.086 / 0.157 ✅ | 0.322 / 0.655 ✅ (~2×) |
-| TTFT s (p50, audio) | 0.447 / 0.558 ✅ | 1.071 / 2.494 ✅ |
+| TTFT s (p50, audio) | 0.414 / 0.558 ✅ | 1.071 / 2.494 ✅ |
 | ITL s (mean, audio) | 0.092 / 0.297 ✅ | 0.346 / 1.227 ✅ |
 
 **Throughput / RTF · B=1** — *Technical:* speech wall-time is Talker + Code2Wav; M\* unrolls the 16-RVQ
@@ -179,9 +179,13 @@ arrives much faster on M\*.
   first-token flat. Throughput/ITL still win.
 - **S2T TTFT at B=32** (0.373 vs 0.283): same scheduling gap (gpu-mel removed the balloon; the
   residual is the missing piggyback). M\* wins S2T TTFT at B=1.
-- These are the documented **future lever**: piggyback / chunked-prefill (a mixed prefill+decode walk +
-  a combined CUDA-graph key) — high-risk, deferred to a supervised effort. M\*-old vs M\*-new on image
-  is ~tie (the engine is shared; native-vision/gpu-img help mainly at batch / on large images).
+- These are the documented **considered-and-deferred lever**: the in-scope scheduler reorder (Lever 2, option-i)
+  was ruled out by code analysis as order-invariant (RR already fair); the only remaining fix is piggyback /
+  chunked-prefill (a new mixed prefill+decode walk + a combined CUDA-graph key + same-walk-invariant change +
+  full re-parity) — high-risk and **out of #131 scope** (encoder + perf). GPU-mel already won the throughput
+  headline, so piggyback would only shave residual text-path TTFT-at-batch; it ships default-OFF and is deferred
+  to a supervised effort. M\*-old vs M\*-new on image is ~tie (the engine is shared; native-vision/gpu-img help
+  mainly at batch / on large images).
 
 *Sources: `research_engine.md`, `research_encoders.md`, `research_vllm.md` (file:line-cited), the
 committed `raw_<path>.json`, `FINDINGS.md`, `LEVERS_REPORT.md`.*
