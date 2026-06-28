@@ -737,37 +737,65 @@ class ThinkerSubmodule(ARNodeSubmodule):
 
         extra_inputs = {}
         if graph_walk == "prefill_vision":
-            assert len(inputs) == 1, \
-                "Batching not implemented for Thinker vision prefill"
-            inp = inputs[0]
-            # Q3(b): emit deepstack as separate keys ``deepstack_<i>`` so each
+            from mstar.model.qwen3_omni.qwen3_omni_model import (
+                batch_vision_prefill_enabled,
+            )
+            if not batch_vision_prefill_enabled():
+                assert len(inputs) == 1, \
+                    "Batching not implemented for Thinker vision prefill"
+            # Q3(b): emit deepstack as per-layer keys ``deepstack_<i>`` so each
             # tensor gets its own static buffer in the captured config (the
             # runner's static-buffer interning is per-key and tensor-typed;
             # passing a list-of-tensors under one key would not get interned
             # and addresses captured into the graph would be stale at replay).
+            #
+            # For the BATCHED path each ``deepstack_<i>`` holds ALL requests'
+            # layer-``i`` features concatenated along the token dim — a
+            # request-offset layout inside a single per-layer buffer, exactly
+            # mirroring how ``input_embeds`` is ``torch.cat``'d across requests
+            # above. The per-request blocks are full-length, token-aligned, and
+            # zero outside that request's vision tokens, so the model's
+            # ``_deepstack_process`` (``hidden_states += visual_embeds`` over the
+            # concatenated ``(total_tokens, hidden)`` activations) adds each
+            # request's features at the right offsets. Keying per-request
+            # instead (``deepstack_<req>_<i>``) would collide with the captured
+            # static-buffer scheme and the fixed ``(num_tokens, hidden)`` bucket
+            # shape; concatenation keeps one buffer per layer.
             # ``forward_batched``/``forward`` reassemble the list from kwargs.
             num_deepstack = len(self.config.vision.deepstack_visual_indexes)
-            deepstack_list = inp.tensor_inputs.get("deepstack")
-            if deepstack_list is None or (
-                isinstance(deepstack_list, torch.Tensor) and deepstack_list.numel() == 0
-            ):
-                # Eager fallback / missing deepstack (shouldn't happen in
-                # normal vision prefill, but keep the path robust).
-                empty = torch.zeros(
-                    (inp.input_seq_len, self.config.thinker_hidden_size),
-                    dtype=input_embeds.dtype, device=device,
+            # Gather a per-request list-of-layers, materializing the eager
+            # fallback (missing / empty deepstack) per request so the concat
+            # below always sees ``num_deepstack`` token-aligned tensors.
+            per_request_deepstack: list[list[torch.Tensor]] = []
+            for inp in inputs:
+                deepstack_list = inp.tensor_inputs.get("deepstack")
+                if deepstack_list is None or (
+                    isinstance(deepstack_list, torch.Tensor)
+                    and deepstack_list.numel() == 0
+                ):
+                    # Eager fallback / missing deepstack (shouldn't happen in
+                    # normal vision prefill, but keep the path robust).
+                    empty = torch.zeros(
+                        (inp.input_seq_len, self.config.thinker_hidden_size),
+                        dtype=input_embeds.dtype, device=device,
+                    )
+                    per_request_deepstack.append([empty] * num_deepstack)
+                else:
+                    assert len(deepstack_list) == num_deepstack, (
+                        f"deepstack list length ({len(deepstack_list)}) does not "
+                        f"match vision.deepstack_visual_indexes ({num_deepstack})."
+                    )
+                    per_request_deepstack.append(list(deepstack_list))
+            for i in range(num_deepstack):
+                extra_inputs[f"deepstack_{i}"] = torch.cat(
+                    [req[i] for req in per_request_deepstack], dim=0
                 )
-                for i in range(num_deepstack):
-                    extra_inputs[f"deepstack_{i}"] = empty
-            else:
-                assert len(deepstack_list) == num_deepstack, (
-                    f"deepstack list length ({len(deepstack_list)}) does not match "
-                    f"vision.deepstack_visual_indexes ({num_deepstack})."
-                )
-                for i, t in enumerate(deepstack_list):
-                    extra_inputs[f"deepstack_{i}"] = t
+            # Per-request MRoPE position advance vector (one entry per request).
+            # ``advance_seq_lens`` consumes it elementwise (``[i]``) so vision
+            # advances ``position_id_start`` by each request's 3D-grid span
+            # instead of by ``seq_len``.
             mrope_pos_advance = [
-                inp.tensor_inputs.get("mrope_pos_advance", 0)
+                inp.tensor_inputs.get("mrope_pos_advance", 0) for inp in inputs
             ]
             extra_inputs["mrope_pos_advance"] = mrope_pos_advance
             # Side-channel: stash on the cache_manager's plan state via the
@@ -899,13 +927,19 @@ class ThinkerSubmodule(ARNodeSubmodule):
 
     # prefill_vision buckets are larger than text/audio because video
     # produces many vision tokens per request (UCF101 ≈ 1k–4k tokens; 8192
-    # gives headroom for VideoMME-style longer clips). Capture only bs=1
-    # because mstar's eager prefill_vision asserts a single request per step
-    # (``preprocess`` line in this file), and V2T runs at concurrency 1
-    # today. Costs ~4 captures × persistent FlashInfer wrappers + static
-    # buffers for the 30B Thinker; revisit if memory becomes a constraint.
+    # gives headroom for VideoMME-style longer clips).
+    #
+    # Capture bs=1 by default (V2T runs at concurrency 1 today and the eager
+    # prefill_vision path asserts a single request per step unless
+    # ``MSTAR_BATCH_VISION_PREFILL`` is set). When that flag IS set the walk
+    # batches like prefill_audio, so capture the same batch sizes as the
+    # shared text/audio prefill graph (``PREFILL_CAPTURE_BATCH_SIZES``) so the
+    # batched (bs, summed-num_tokens) shapes have a captured graph to replay.
+    # Each capture costs persistent FlashInfer wrappers + static buffers for
+    # the 30B Thinker; revisit if memory becomes a constraint.
     PREFILL_VISION_TOKEN_BUCKETS = [128, 256, 512, 1024, 2048, 4096, 8192, 16384]
     PREFILL_VISION_CAPTURE_BATCH_SIZES = [1]
+    PREFILL_VISION_BATCH_CAPTURE_BATCH_SIZES = [1, 2, 4]
 
     def _build_prefill_text_packed(
         self, num_tokens: int, device: torch.device,
@@ -1022,6 +1056,17 @@ class ThinkerSubmodule(ARNodeSubmodule):
             num_tokens: self._build_prefill_vision_packed(num_tokens, device)
             for num_tokens in self.PREFILL_VISION_TOKEN_BUCKETS
         }
+        # When MSTAR_BATCH_VISION_PREFILL is set, prefill_vision batches like
+        # prefill_audio, so capture the batched (bs>1) shapes too; otherwise
+        # the eager assert holds it to bs=1 and capturing more wastes memory.
+        from mstar.model.qwen3_omni.qwen3_omni_model import (
+            batch_vision_prefill_enabled,
+        )
+        prefill_vision_capture_bs = (
+            self.PREFILL_VISION_BATCH_CAPTURE_BATCH_SIZES
+            if batch_vision_prefill_enabled()
+            else self.PREFILL_VISION_CAPTURE_BATCH_SIZES
+        )
         num_deepstack = len(self.config.vision.deepstack_visual_indexes)
 
         # zero_padding for prefill_vision must include empty entries for the
@@ -1109,7 +1154,7 @@ class ThinkerSubmodule(ARNodeSubmodule):
                 labels=["main"],
                 compile=True,
                 causal_attention=True,
-                capture_batch_sizes=self.PREFILL_VISION_CAPTURE_BATCH_SIZES,
+                capture_batch_sizes=prefill_vision_capture_bs,
                 zero_padding_input=ARNodeInputs(
                     input_seq_len=0,
                     input_embeds=torch.zeros(
