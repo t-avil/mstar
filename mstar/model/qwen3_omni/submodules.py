@@ -866,6 +866,26 @@ class ThinkerSubmodule(ARNodeSubmodule):
 
         # Decode: produce logits for text token sampling
         if graph_walk == "thinker_decode" or request_info.step_metadata.get("is_last_prefill", False):
+            # --- Thinker speculative-decode hook (MSTAR_THINKER_SPEC, default OFF) ---
+            # This single-token decode is the baseline path. A faithful
+            # speculative decode replaces it with a propose -> packed multi-token
+            # verify -> accept loop driven by ThinkerSpecController (see
+            # mstar/model/qwen3_omni/thinker_spec.py). The hook is INERT today:
+            # it only emits a one-time notice so the integration point is
+            # discoverable. Wiring the multi-token verify forward + KV rollback
+            # is the GPU-side work item; control flow is unchanged here so
+            # baseline parity is preserved.
+            from mstar.model.qwen3_omni.thinker_spec import thinker_spec_enabled
+            if graph_walk == "thinker_decode" and thinker_spec_enabled():
+                if not getattr(self, "_spec_hook_logged", False):
+                    import logging as _logging
+                    _logging.getLogger(__name__).warning(
+                        "MSTAR_THINKER_SPEC is ON but the Thinker speculative "
+                        "decode is scaffold-only; running the faithful baseline "
+                        "single-token decode (no behavior change). See "
+                        "thinker_spec.py / DESIGN_spec.md."
+                    )
+                    self._spec_hook_logged = True
             logits = self.model.lm_head(hidden[-1:, :])
             result["logits"] = [logits]
 
