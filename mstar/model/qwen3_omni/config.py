@@ -341,6 +341,117 @@ class Code2WavConfig:
 
 
 # ---------------------------------------------------------------------------
+# Optimization switchboard (#131)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class OptimizationConfig:
+    """Single switchboard for the Qwen3-Omni serving optimizations (issue #131).
+
+    One reviewable config block instead of five scattered ``os.environ`` reads.
+    Each field gates one validated win; every field resolves from three sources
+    with this precedence (**last wins**):
+
+        dataclass default  <  YAML ``model_kwargs: {optim: {...}}``  <  ``MSTAR_*`` env
+
+    Env wins last so a benchmark ablation sweep can flip any path with a single
+    exported variable and no YAML edit (see ``benchmark/serving_scripts``); this
+    keeps ONE code path for prod + ablations -- prod sets the YAML block,
+    ablations export the env var, both land in the same ``OptimizationConfig``.
+
+    Defaults reproduce the **byte-identical baseline wherever parity matters**:
+    the numerically-approximate / output-shape-changing wins (``gpu_mel``,
+    ``gpu_image_preprocess``, ``vllm_prompt_layout``, ``vllm_audio_sentinels``)
+    ship OFF; the already-validated, parity-green wins ship ON (native encoders,
+    ``codec_chunk_frames=15``).
+    """
+
+    # Native batched mstar encoders vs the thin HF-wrapper submodules.
+    # Parity: cos≈1.0 fp32 / ≥0.9999 bf16 (18-case backend-equivalence test).
+    native_audio_encoder: bool = True
+    native_vision_encoder: bool = True
+
+    # GPU log-mel feature extraction, off the TTFT-critical host CPU path.
+    # Matches HF WhisperFeatureExtractor within fp tol -> default OFF for strict
+    # byte-parity; flip ON for the TTFT win.
+    gpu_mel: bool = False
+
+    # On-device image resize/patchify (no CPU round-trip). pixel_values cos
+    # >0.9999, grid_thw bit-exact -> default OFF for byte-parity.
+    gpu_image_preprocess: bool = False
+
+    # vLLM-Omni prompt layout (FIX1 system-dedup + FIX2 audio M-RoPE h/w) so M*
+    # emits the SAME audio/text as vLLM. CHANGES output -> default OFF keeps the
+    # legacy layout byte-identical. Required ON for same-audio vs-vLLM parity.
+    vllm_prompt_layout: bool = False
+
+    # Wrap audio spans with vLLM's real marker IDs (151669/151670). Independent
+    # of vllm_prompt_layout so each can be A/B'd alone. Default OFF.
+    vllm_audio_sentinels: bool = False
+
+    # Talker->Code2Wav streaming chunk size (codec frames). 15 beats vLLM on S2S
+    # while keeping chunk >= left_context. Mirrored into ``code2wav`` on resolve
+    # so the existing ``config.code2wav.codec_chunk_frames`` read sites stay the
+    # single consumer (this field is just the unified knob).
+    codec_chunk_frames: int = 15
+
+    # field name -> MSTAR_* env var. Class-level (NOT annotated) so the
+    # dataclass machinery does not treat these maps as fields.
+    _BOOL_ENV = {
+        "native_audio_encoder": "MSTAR_QWEN3_NATIVE_AUDIO_ENCODER",
+        "native_vision_encoder": "MSTAR_QWEN3_NATIVE_VISION_ENCODER",
+        "gpu_mel": "MSTAR_GPU_MEL",
+        "gpu_image_preprocess": "MSTAR_GPU_IMAGE_PREPROCESS",
+        "vllm_prompt_layout": "MSTAR_VLLM_PROMPT_LAYOUT",
+        "vllm_audio_sentinels": "MSTAR_VLLM_AUDIO_SENTINELS",
+    }
+    _INT_ENV = {
+        "codec_chunk_frames": "MSTAR_CODEC_CHUNK_FRAMES",
+    }
+
+    @classmethod
+    def keys(cls) -> set[str]:
+        """All recognized config keys (used to filter model_kwargs)."""
+        return set(cls._BOOL_ENV) | set(cls._INT_ENV)
+
+    @staticmethod
+    def _parse_bool(raw: str) -> bool:
+        return raw.strip().lower() in ("1", "true", "yes", "on")
+
+    def apply_overrides(self, overrides: dict[str, Any] | None) -> "OptimizationConfig":
+        """Overlay an explicit YAML/kwargs dict (known keys only; skip None)."""
+        import logging
+        for k, v in (overrides or {}).items():
+            if v is None:
+                continue
+            if k in self._BOOL_ENV:
+                setattr(self, k, bool(v))
+            elif k in self._INT_ENV:
+                setattr(self, k, int(v))
+            else:
+                logging.getLogger(__name__).warning(
+                    "OptimizationConfig: ignoring unknown optim key %r "
+                    "(known: %s)", k, sorted(self.keys()),
+                )
+        return self
+
+    def apply_env(self) -> "OptimizationConfig":
+        """Overlay ``MSTAR_*`` env vars (env wins over defaults/YAML)."""
+        for fname, env in self._BOOL_ENV.items():
+            raw = os.environ.get(env)
+            if raw is not None:
+                setattr(self, fname, self._parse_bool(raw))
+        for fname, env in self._INT_ENV.items():
+            raw = os.environ.get(env)
+            if raw is not None and raw.strip():
+                setattr(self, fname, int(raw))
+        return self
+
+    def as_dict(self) -> dict[str, Any]:
+        return {k: getattr(self, k) for k in sorted(self.keys())}
+
+
+# ---------------------------------------------------------------------------
 # Top-level model config
 # ---------------------------------------------------------------------------
 
@@ -371,33 +482,44 @@ class Qwen3OmniModelConfig:
     code_predictor: CodePredictorConfig = field(default_factory=CodePredictorConfig)
     code2wav: Code2WavConfig = field(default_factory=Code2WavConfig)
 
-    # --- Native encoder toggles ------------------------------------------
-    # Default on: the native mstar audio/vision encoders (batched, decoupled
-    # from transformers) replace the thin HF-wrapper submodules. Set either flag
-    # to False to fall back to the HF wrapper (kept as a reference for one
-    # release so regressions can be bisected). See
-    # mstar/model/qwen3_omni/components/{audio_encoder,vision_encoder}.py.
+    # --- Optimization switchboard (#131) ---------------------------------
+    # Single config block gating every serving win (native encoders, gpu_mel,
+    # gpu_image_preprocess, vllm_prompt_layout, codec_chunk_frames, ...). See
+    # OptimizationConfig above for per-field semantics and the
+    # default<YAML<env precedence. ``native_{audio,vision}_encoder`` below are
+    # kept as derived mirrors so existing ``config.native_*_encoder`` read
+    # sites are unchanged; they are synced from ``optim`` in __post_init__.
+    optim: OptimizationConfig = field(default_factory=OptimizationConfig)
     native_audio_encoder: bool = True
     native_vision_encoder: bool = True
 
+    def _sync_optim(self) -> None:
+        """Push the unified switchboard into the legacy/derived fields that the
+        rest of the model reads, so ``optim`` is the single source of truth."""
+        self.native_audio_encoder = self.optim.native_audio_encoder
+        self.native_vision_encoder = self.optim.native_vision_encoder
+        self.code2wav.codec_chunk_frames = self.optim.codec_chunk_frames
+
+    def apply_optim_overrides(self, overrides: dict[str, Any] | None) -> None:
+        """Fold YAML ``model_kwargs`` / constructor kwargs into ``optim``.
+
+        Precedence is explicit overrides first, then env (env wins), matching
+        OptimizationConfig's contract. Called from ``Qwen3OmniModel.__init__``
+        so prod (YAML block) and benchmark ablations (MSTAR_* env) drive the
+        exact same resolution.
+        """
+        self.optim.apply_overrides(overrides)
+        self.optim.apply_env()
+        self._sync_optim()
+
     def __post_init__(self) -> None:
-        # Env overrides for the native-encoder toggles, so the M*-old (HF
-        # wrapper) vs M*-new (native) serving comparison can be driven without
-        # editing YAML or constructor kwargs: export
-        # MSTAR_QWEN3_NATIVE_AUDIO_ENCODER=0 / MSTAR_QWEN3_NATIVE_VISION_ENCODER=0
-        # (accepts 0/1/false/true/no/yes). Unset => keep the dataclass default.
-        import os as _os
-
-        def _envflag(name: str, current: bool) -> bool:
-            raw = _os.environ.get(name)
-            if raw is None:
-                return current
-            return raw.strip().lower() in ("1", "true", "yes", "on")
-
-        self.native_audio_encoder = _envflag(
-            "MSTAR_QWEN3_NATIVE_AUDIO_ENCODER", self.native_audio_encoder)
-        self.native_vision_encoder = _envflag(
-            "MSTAR_QWEN3_NATIVE_VISION_ENCODER", self.native_vision_encoder)
+        # Resolve the switchboard from env (default<env at construction time;
+        # YAML/kwargs are layered later via apply_optim_overrides), then mirror
+        # into the derived fields. This drives the M*-old (HF wrapper) vs M*-new
+        # (native) comparison and every other win without editing code: export
+        # e.g. MSTAR_QWEN3_NATIVE_AUDIO_ENCODER=0 / MSTAR_GPU_MEL=1.
+        self.optim.apply_env()
+        self._sync_optim()
 
         # Sanity check: all codec special token IDs must be < the Talker's
         # codec_embedding vocab size (talker_text.vocab_size, typically 3072).
@@ -553,6 +675,9 @@ class Qwen3OmniModelConfig:
                 "talker",
                 "code_predictor",
                 "code2wav",
+                # ``optim`` is resolved from defaults/YAML-model_kwargs/env, not
+                # from the HF checkpoint config.json, so never take it from raw.
+                "optim",
             }
         }
         top_kwargs = {k: v for k, v in raw.items() if k in top_fields}

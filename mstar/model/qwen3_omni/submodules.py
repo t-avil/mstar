@@ -458,16 +458,12 @@ class ThinkerSubmodule(ARNodeSubmodule):
         # sentinel token embeddings so the Thinker sees the same
         # prompt layout the HF processor produces.
         #
-        # When MSTAR_VLLM_AUDIO_SENTINELS=1, use the real Qwen3-Omni audio
-        # marker IDs (151669/151670, what vLLM uses) instead of the legacy
+        # When config.optim.vllm_audio_sentinels is on, use the real Qwen3-Omni
+        # audio marker IDs (151669/151670, what vLLM uses) instead of the legacy
         # 151647/151648 (mislabeled <|audio_bos|>/<|audio_eos|> in config.py).
-        from mstar.model.qwen3_omni.qwen3_omni_model import (
-            vllm_audio_sentinels_enabled,
-        )
-
         device = self.get_device()
         if self._audio_bos_embed is None or self._audio_eos_embed is None:
-            if vllm_audio_sentinels_enabled():
+            if self.config.optim.vllm_audio_sentinels:
                 audio_start_id = 151669
                 audio_end_id = 151670
             else:
@@ -611,12 +607,9 @@ class ThinkerSubmodule(ARNodeSubmodule):
             # audio span's height/width ramp with the temporal component.  M*'s
             # get_rope_index_audio instead pins h/w to a constant (start_pos+1),
             # which is the only place M*'s positions diverge from HF/vLLM.
-            # Under MSTAR_VLLM_PROMPT_LAYOUT, set h/w == temporal so the full
-            # 3D position_id tensor is byte-identical to HF get_rope_index.
-            from mstar.model.qwen3_omni.qwen3_omni_model import (
-                vllm_prompt_layout_enabled,
-            )
-            if vllm_prompt_layout_enabled():
+            # Under config.optim.vllm_prompt_layout, set h/w == temporal so the
+            # full 3D position_id tensor is byte-identical to HF get_rope_index.
+            if self.config.optim.vllm_prompt_layout:
                 audio_pos_ids = audio_pos_ids.clone()
                 audio_pos_ids[1] = audio_pos_ids[0]
                 audio_pos_ids[2] = audio_pos_ids[0]

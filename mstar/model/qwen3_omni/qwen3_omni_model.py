@@ -29,7 +29,6 @@ Text-only mode:
 """
 
 import logging
-import os
 from pathlib import Path
 
 import torch
@@ -55,10 +54,11 @@ from mstar.utils.sampling import SamplingConfig
 
 logger = logging.getLogger(__name__)
 
-# Opt-in GPU log-mel feature extraction (default OFF = byte-identical HF CPU path).
-# When set, audio mel spectrograms are computed on the GPU instead of HF's CPU
-# WhisperFeatureExtractor, moving that work off the TTFT-critical host CPU path.
-_GPU_MEL = os.environ.get("MSTAR_GPU_MEL", "0") in ("1", "true", "True")
+# All serving-optimization toggles (gpu_mel, gpu_image_preprocess,
+# vllm_prompt_layout, native encoders, codec_chunk_frames, ...) are resolved
+# once into ``config.optim`` (see mstar/model/qwen3_omni/config.py,
+# OptimizationConfig). The model reads ``self.config.optim.<flag>`` instead of
+# scattering os.environ lookups across this file.
 
 
 def gpu_log_mel(waveform, mel_filters, window, n_fft, hop):
@@ -79,35 +79,6 @@ def gpu_log_mel(waveform, mel_filters, window, n_fft, hop):
     log = torch.maximum(log, log.max() - 8.0)
     log = (log + 4.0) / 4.0
     return log.to(torch.float32)
-
-
-def _envflag(name: str) -> bool:
-    """Read a boolean env flag (default OFF). Accepts 1/true/yes/on."""
-    import os as _os
-
-    raw = _os.environ.get(name)
-    if raw is None:
-        return False
-    return raw.strip().lower() in ("1", "true", "yes", "on")
-
-
-def vllm_prompt_layout_enabled() -> bool:
-    """When ON, replicate vLLM-Omni's prompt layout: position the audio block
-    INSIDE the user turn BEFORE the instruction text, so the effective Thinker
-    sequence is system-turn, then user-turn = [audio][instruction], then
-    assistant. Default OFF -> the legacy layout (audio prefilled as a separate
-    bare block) is byte-identical, preserving encoder parity.
-    """
-    return _envflag("MSTAR_VLLM_PROMPT_LAYOUT")
-
-
-def vllm_audio_sentinels_enabled() -> bool:
-    """When ON, wrap the audio span with the real Qwen3-Omni audio marker token
-    IDs (151669 ``<|audio_start|>`` / 151670 ``<|audio_end|>``, what vLLM uses)
-    instead of the legacy 151647/151648 (mislabeled ``<|audio_bos|>``/
-    ``<|audio_eos|>``). Default OFF. Independent of MSTAR_VLLM_PROMPT_LAYOUT so
-    both can be tested separately."""
-    return _envflag("MSTAR_VLLM_AUDIO_SENTINELS")
 
 
 def _tensor_dump_dir() -> str | None:
@@ -192,20 +163,14 @@ def _resolve_local_hf_snapshot(repo_id: str, cache_dir: str | None = None) -> st
 # which runs smart_resize + rescale + normalize + patchify on CPU.  That CPU
 # round-trip + numpy processing is the single biggest I2T TTFT cost (~175 ms).
 #
-# When ``MSTAR_GPU_IMAGE_PREPROCESS=1`` we run the *identical* algorithm fully
-# on the GPU so the image never leaves the device.  The resize re-uses
-# torchvision's functional ``resize`` (bicubic + antialias) -- the very same
-# kernel HF's torchvision backend calls -- just on a CUDA tensor, so the
+# When ``config.optim.gpu_image_preprocess`` is on we run the *identical*
+# algorithm fully on the GPU so the image never leaves the device.  The resize
+# re-uses torchvision's functional ``resize`` (bicubic + antialias) -- the very
+# same kernel HF's torchvision backend calls -- just on a CUDA tensor, so the
 # output matches HF's CPU ``pixel_values`` within fp tolerance (grid_thw is
 # bit-exact; pixel_values cos > 0.9999, max-abs <= ~3 uint8 levels from
 # CPU-vs-GPU bicubic rounding).  Default OFF keeps current behaviour byte for
 # byte.
-
-
-def _gpu_image_preprocess_enabled() -> bool:
-    import os
-
-    return os.environ.get("MSTAR_GPU_IMAGE_PREPROCESS", "0") == "1"
 
 
 def _smart_resize(
@@ -353,17 +318,27 @@ class Qwen3OmniModel(Model):
         ]
 
         # Load config from pretrained checkpoint
-        from mstar.model.qwen3_omni.config import Qwen3OmniModelConfig
+        from mstar.model.qwen3_omni.config import (
+            OptimizationConfig,
+            Qwen3OmniModelConfig,
+        )
 
         local_dir = _resolve_local_hf_snapshot(model_path_hf, cache_dir=cache_dir)
         self.config = Qwen3OmniModelConfig.from_pretrained(local_dir)
         self.local_dir = local_dir
 
-        # Allow yaml model_kwargs / constructor kwargs to toggle native encoders
-        # (e.g. model_kwargs: {native_audio_encoder: true, native_vision_encoder: true}).
-        for _flag in ("native_audio_encoder", "native_vision_encoder"):
-            if _flag in kwargs:
-                setattr(self.config, _flag, bool(kwargs[_flag]))
+        # Fold the unified optimization switchboard from yaml model_kwargs /
+        # constructor kwargs into config.optim. Accepts a nested block
+        #   model_kwargs: {optim: {gpu_mel: true, vllm_prompt_layout: true}}
+        # and/or legacy flat keys (native_audio_encoder, gpu_mel,
+        # codec_chunk_frames, ...). MSTAR_* env still overrides both (handled
+        # inside apply_optim_overrides), so benchmark ablations need no YAML.
+        _optim_overrides = dict(kwargs.pop("optim", None) or {})
+        for _k in list(kwargs):
+            if _k in OptimizationConfig.keys():
+                _optim_overrides[_k] = kwargs.pop(_k)
+        self.config.apply_optim_overrides(_optim_overrides)
+        logger.info("Qwen3-Omni optimizations resolved: %s", self.config.optim.as_dict())
 
         # Tokenizer (Thinker uses a Qwen-family tokenizer)
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -923,7 +898,7 @@ class Qwen3OmniModel(Model):
         # before the instruction, matching vLLM.  Only triggers when the flag
         # is on AND there are exactly the expected two text spans + audio.
         if (
-            vllm_prompt_layout_enabled()
+            self.config.optim.vllm_prompt_layout
             and len(texts) >= 2
             and len(audio_features) >= 1
         ):
@@ -1351,7 +1326,7 @@ class Qwen3OmniModel(Model):
 
         # When GPU image preprocessing is enabled we keep the raw GPU tensors
         # and never round-trip through CPU/numpy (see _gpu_image_preprocess).
-        gpu_img_preprocess = _gpu_image_preprocess_enabled()
+        gpu_img_preprocess = self.config.optim.gpu_image_preprocess
 
         pil_images: list = []
         if not gpu_img_preprocess:
@@ -1369,11 +1344,14 @@ class Qwen3OmniModel(Model):
                     img_u8 = img_u8.permute(1, 2, 0)  # CHW -> HWC
                 pil_images.append(img_u8.cpu().contiguous().numpy())
 
-        # GPU log-mel is opt-in (MSTAR_GPU_MEL=1) and only when CUDA is present in
-        # this worker; otherwise the raw audio is converted to numpy for the HF
-        # (CPU) feature_extractor exactly as before. Default OFF = byte-identical.
+        # GPU log-mel is opt-in (config.optim.gpu_mel) and only when CUDA is
+        # present in this worker; otherwise the raw audio is converted to numpy
+        # for the HF (CPU) feature_extractor exactly as before. Default OFF =
+        # byte-identical.
         _use_gpu_mel = (
-            _GPU_MEL and self._processor is not None and torch.cuda.is_available()
+            self.config.optim.gpu_mel
+            and self._processor is not None
+            and torch.cuda.is_available()
         )
         np_audios: list = []
         if not _use_gpu_mel:
@@ -1427,7 +1405,7 @@ class Qwen3OmniModel(Model):
         # instruction-only and the rendered tokens match vLLM exactly.  Default
         # OFF path is untouched (byte-identical).
         user_prompt = prompt
-        if vllm_prompt_layout_enabled() and prompt is not None:
+        if self.config.optim.vllm_prompt_layout and prompt is not None:
             for sep in ("\n", ""):
                 dup = system_text + sep
                 if prompt.startswith(dup):
@@ -1469,7 +1447,7 @@ class Qwen3OmniModel(Model):
         # audio walk's BOS/AUDIO/EOS embeddings land between them -> exactly the
         # vLLM token layout (modulo sentinel IDs + M-RoPE, tracked separately).
         if (
-            vllm_prompt_layout_enabled()
+            self.config.optim.vllm_prompt_layout
             and len(np_audios) > 0
             and prompt is not None
         ):
@@ -1489,7 +1467,7 @@ class Qwen3OmniModel(Model):
                         "split_index": int(split),
                         "audio_sentinels": (
                             [151669, 151670]
-                            if vllm_audio_sentinels_enabled()
+                            if self.config.optim.vllm_audio_sentinels
                             else [
                                 self.config.thinker.audio_start_token_id,
                                 self.config.thinker.audio_end_token_id,

@@ -5,9 +5,27 @@ node_groups:
     ranks: [1]
   - node_names: [Thinker]
     ranks: [1]
-  
+
   - node_names: [Talker]
     ranks: [0]
-  
+
   - node_names: [Code2Wav]
     ranks: [0]
+
+# Unified Qwen3-Omni optimization switchboard (#131). One reviewable block that
+# gates every serving win; see mstar/model/qwen3_omni/config.py
+# (OptimizationConfig) for per-field semantics. The values below are the
+# shipped defaults (native encoders ON, codec_chunk_frames=15, parity-sensitive
+# wins OFF) -- the block is commented so this config is unchanged behaviourally.
+# Uncomment to ship a performance preset; MSTAR_* env vars still override these
+# (env wins), so benchmark ablations need no YAML edit.
+#
+# model_kwargs:
+#   optim:
+#     native_audio_encoder: true
+#     native_vision_encoder: true
+#     gpu_mel: false               # MSTAR_GPU_MEL
+#     gpu_image_preprocess: false  # MSTAR_GPU_IMAGE_PREPROCESS
+#     vllm_prompt_layout: false    # MSTAR_VLLM_PROMPT_LAYOUT (same-audio vs vLLM)
+#     vllm_audio_sentinels: false  # MSTAR_VLLM_AUDIO_SENTINELS
+#     codec_chunk_frames: 15       # MSTAR_CODEC_CHUNK_FRAMES
