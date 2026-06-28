@@ -13,6 +13,9 @@
 from __future__ import annotations
 
 import logging
+import os
+import time
+from collections import defaultdict
 from typing import Any, Optional
 
 import torch
@@ -2029,6 +2032,47 @@ class Code2WavSubmodule(NodeSubmodule):
         self.full_seqlen = self.config.code2wav.codec_left_context_frames + \
             self.config.code2wav.codec_chunk_frames
 
+        # --- Audio latency-split instrumentation (sub-lever B measurement) ---
+        # Gated by MSTAR_AUDIO_LATENCY_SPLIT=<period_in_chunks> (default 0=OFF).
+        # When > 0, ``forward_batched`` times the vocoder ConvNet forward
+        # ("vocoder_fwd") separately from the int16 PCM conversion
+        # ("detok_int16") and logs a p50/p95/mean histogram every <period>
+        # chunks. Mirrors the MSTAR_PHASE_TIMING histogram in worker.py.
+        #
+        # This is the "critical first step" latency breakdown: combined with
+        # MSTAR_PHASE_TIMING run on the Talker worker (talker-decode step
+        # time) and on the Code2Wav worker (vocoder step time), it gives the
+        # talker-decode vs vocoder vs detok split. When OFF the path is
+        # byte-identical (one int comparison, no extra cuda syncs). See
+        # DESIGN_async_audio.md.
+        self._lat_period = int(os.environ.get("MSTAR_AUDIO_LATENCY_SPLIT", "0") or "0")
+        self._lat_buf: dict[str, list[float]] = defaultdict(list)
+        self._lat_iter = 0
+
+    def _lat_flush(self) -> None:
+        """Log a vocoder-vs-detok latency histogram every ``_lat_period`` chunks."""
+        if self._lat_period <= 0 or self._lat_iter % self._lat_period != 0:
+            return
+        parts = []
+        for name in sorted(self._lat_buf):
+            vs = self._lat_buf[name]
+            if not vs:
+                continue
+            vs_sorted = sorted(vs)
+            n = len(vs_sorted)
+            if name == "batch_size":
+                parts.append(f"{name}: mean={sum(vs_sorted) / n:.1f} n={n}")
+                continue
+            p50 = vs_sorted[n // 2] * 1000
+            p95 = vs_sorted[min(n - 1, int(n * 0.95))] * 1000
+            mean = (sum(vs_sorted) / n) * 1000
+            parts.append(f"{name}: p50={p50:.2f}ms p95={p95:.2f}ms mean={mean:.2f}ms n={n}")
+        logger.info(
+            "Code2Wav audio-latency-split iter=%d: %s",
+            self._lat_iter, " | ".join(parts),
+        )
+        self._lat_buf.clear()
+
     def get_stateless_flavor(self) -> str:
         # Code2Wav vocoder runs in fp32 with no autocast and no torch.compile.
         return "audio_codec"
@@ -2154,15 +2198,38 @@ class Code2WavSubmodule(NodeSubmodule):
         if codec_tokens is None or codec_tokens.numel() == 0:
             return {rid: {} for rid in request_ids}
 
+        # Fast path when instrumentation is OFF: byte-identical, no syncs.
+        _timing = self._lat_period > 0
+        _on_cuda = _timing and codec_tokens.is_cuda
+        if _on_cuda:
+            torch.cuda.synchronize(codec_tokens.device)
+        _t0 = time.perf_counter() if _timing else 0.0
+
         wavs = self.code2wav(
             codec_tokens, position_ids
         )
+
+        if _timing:
+            if _on_cuda:
+                torch.cuda.synchronize(codec_tokens.device)
+            _t1 = time.perf_counter()
 
         results: dict[str, NameToTensorList] = {}
         for i, rid in enumerate(request_ids):
             wav = wavs[i]
             audio_int16 = (wav.clamp(-1, 1) * 32767).to(torch.int16).squeeze()
             results[rid] = {"audio_chunk": [audio_int16]}
+
+        if _timing:
+            if _on_cuda:
+                torch.cuda.synchronize(codec_tokens.device)
+            _t2 = time.perf_counter()
+            self._lat_buf["vocoder_fwd"].append(_t1 - _t0)
+            self._lat_buf["detok_int16"].append(_t2 - _t1)
+            self._lat_buf["batch_size"].append(float(codec_tokens.shape[0]))
+            self._lat_iter += 1
+            self._lat_flush()
+
         return results
 
     def forward(
