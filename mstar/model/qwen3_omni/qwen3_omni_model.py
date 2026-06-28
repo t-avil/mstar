@@ -29,6 +29,7 @@ Text-only mode:
 """
 
 import logging
+import os
 from pathlib import Path
 
 import torch
@@ -53,6 +54,31 @@ from mstar.streaming.topology import Connection, PartitionTopology, StreamingGra
 from mstar.utils.sampling import SamplingConfig
 
 logger = logging.getLogger(__name__)
+
+# Opt-in GPU log-mel feature extraction (default OFF = byte-identical HF CPU path).
+# When set, audio mel spectrograms are computed on the GPU instead of HF's CPU
+# WhisperFeatureExtractor, moving that work off the TTFT-critical host CPU path.
+_GPU_MEL = os.environ.get("MSTAR_GPU_MEL", "0") in ("1", "true", "True")
+
+
+def gpu_log_mel(waveform, mel_filters, window, n_fft, hop):
+    """GPU log-mel matching HF ``WhisperFeatureExtractor._np_extract_fbank_features``.
+
+    ``waveform`` (any 1-D-reshapable tensor) -> ``(n_mel, T)`` float32 on the input
+    device, ``T = floor(len/hop)`` (== HF's valid, un-padded frame count). Same hann
+    window (periodic), center+reflect STFT, power spectrogram, drop-last-frame, log10,
+    per-clip max-8 clamp, and (x+4)/4 normalization. Module-level so the parity test
+    (test_qwen3_omni_gpu_mel_parity.py) guards the exact production transform.
+    """
+    wav = waveform.reshape(-1)
+    stft = torch.stft(wav, n_fft=n_fft, hop_length=hop, window=window,
+                      center=True, pad_mode="reflect", return_complex=True)  # (n_freq, T+1)
+    mag = stft[..., :-1].abs().pow(2)                 # drop last frame -> (n_freq, T)
+    mel = mel_filters.T @ mag                         # (n_mel, T)
+    log = torch.clamp(mel, min=1e-10).log10()
+    log = torch.maximum(log, log.max() - 8.0)
+    log = (log + 4.0) / 4.0
+    return log.to(torch.float32)
 
 
 def _envflag(name: str) -> bool:
@@ -363,6 +389,10 @@ class Qwen3OmniModel(Model):
 
         # Lazy submodule cache -- each worker only loads what it needs
         self._submodule_cache: dict[str, NodeSubmodule | None] = {}
+
+        # GPU log-mel state (MSTAR_GPU_MEL=1): cached filterbank + window per
+        # device, built lazily on first audio request. Default OFF -> HF path.
+        self._gpu_mel_state: dict | None = None
 
     # -----------------------------------------------------------------------
     # Model ABC: KV cache config
@@ -1243,6 +1273,40 @@ class Qwen3OmniModel(Model):
                 return j
         return None
 
+    def _audio_mel_gpu(self, waveform: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """GPU log-mel matching HF ``WhisperFeatureExtractor`` (MSTAR_GPU_MEL=1).
+
+        The HF feature_extractor runs the STFT + mel filterbank + log on the CPU
+        (numpy); for a 30 s clip that is ~tens of ms on the TTFT critical path and
+        is amplified under host-CPU contention (the same poll-loop sensitivity that
+        inflates M*'s TTFT). This computes the identical transform on the GPU.
+
+        Returns ``(input_features (n_mel, T) float32 CPU, audio_seqlen (1,) long)``
+        — byte-compatible with the HF path's per-audio output so everything
+        downstream is unchanged. Numerically matches HF to cos>=0.9999 / max-abs
+        ~1e-5 (test_qwen3_omni_gpu_mel_parity.py): same hann window (periodic),
+        center+reflect STFT, power spectrogram, drop-last-frame, log10, max-8 clamp,
+        (x+4)/4. ``T = floor(len/hop)`` == HF's valid (un-padded) frame count.
+        """
+        fe = self._processor.feature_extractor
+        dev = waveform.device if waveform.is_cuda else torch.device("cuda")
+        st = self._gpu_mel_state
+        if st is None or st["dev"] != dev:
+            import numpy as np
+            st = {
+                "dev": dev,
+                "filters": torch.tensor(np.asarray(fe.mel_filters),
+                                        dtype=torch.float32, device=dev),  # (n_freq, n_mel)
+                "window": torch.hann_window(fe.n_fft, periodic=True, device=dev),
+                "n_fft": fe.n_fft, "hop": fe.hop_length,
+            }
+            self._gpu_mel_state = st
+        wav = waveform.to(dev, torch.float32)
+        log = gpu_log_mel(wav, st["filters"], st["window"], st["n_fft"], st["hop"])
+        feat = log.cpu()                                  # CPU float32 == HF contract
+        seqlen = torch.tensor([feat.shape[1]], dtype=torch.long)
+        return feat, seqlen
+
     def process_prompt(
         self,
         prompt: str | None,
@@ -1305,9 +1369,16 @@ class Qwen3OmniModel(Model):
                     img_u8 = img_u8.permute(1, 2, 0)  # CHW -> HWC
                 pil_images.append(img_u8.cpu().contiguous().numpy())
 
+        # GPU log-mel is opt-in (MSTAR_GPU_MEL=1) and only when CUDA is present in
+        # this worker; otherwise the raw audio is converted to numpy for the HF
+        # (CPU) feature_extractor exactly as before. Default OFF = byte-identical.
+        _use_gpu_mel = (
+            _GPU_MEL and self._processor is not None and torch.cuda.is_available()
+        )
         np_audios: list = []
-        for waveform in raw_audio_inputs:
-            np_audios.append(waveform.cpu().numpy())
+        if not _use_gpu_mel:
+            for waveform in raw_audio_inputs:
+                np_audios.append(waveform.cpu().numpy())
 
         # ----- Preferred path: text-only chat template + separate modality processors -----
         #
@@ -1477,27 +1548,33 @@ class Qwen3OmniModel(Model):
                 result["pixel_values"].append(img_out["pixel_values"])
                 result["image_grid_thw"] += img_out["image_grid_thw"]
 
-        for audio in np_audios:
-            feat_extractor = self._processor.feature_extractor
-            sr = getattr(feat_extractor, "sampling_rate", 16000)
-            aud_out = feat_extractor(
-                audio, sampling_rate=sr,
-                padding=True,
-                truncation=False,
-                return_attention_mask=True,
-                return_tensors="pt"
-            )
-            aud_out["input_features"] = (
-                aud_out["input_features"]
-                .permute(0, 2, 1)[aud_out["attention_mask"].bool()]
-                .permute(1, 0)
-            )
-            result["audio_seqlens"].append(
-                aud_out["attention_mask"].sum(-1).to(torch.long)
-            )
-            result["audio_features"].append(
-                aud_out["input_features"]
-            )
+        if _use_gpu_mel:
+            for waveform in raw_audio_inputs:
+                feat, seqlen = self._audio_mel_gpu(waveform)   # (n_mel, T), (1,)
+                result["audio_seqlens"].append(seqlen)
+                result["audio_features"].append(feat)
+        else:
+            for audio in np_audios:
+                feat_extractor = self._processor.feature_extractor
+                sr = getattr(feat_extractor, "sampling_rate", 16000)
+                aud_out = feat_extractor(
+                    audio, sampling_rate=sr,
+                    padding=True,
+                    truncation=False,
+                    return_attention_mask=True,
+                    return_tensors="pt"
+                )
+                aud_out["input_features"] = (
+                    aud_out["input_features"]
+                    .permute(0, 2, 1)[aud_out["attention_mask"].bool()]
+                    .permute(1, 0)
+                )
+                result["audio_seqlens"].append(
+                    aud_out["attention_mask"].sum(-1).to(torch.long)
+                )
+                result["audio_features"].append(
+                    aud_out["input_features"]
+                )
 
         # Video uses the video_processor; left as TODO since our
         # prefill_vision walk doesn't yet handle video frame stacks.

@@ -108,26 +108,35 @@ def _sdpa_varlen_padded(q, k, v, cu_seqlens, scale):
 
 
 def _sdpa_varlen_adaptive(q, k, v, cu_seqlens, scale):
-    # Pick dense vs per-segment from segment STRUCTURE (no GPU sync — uses tensor
-    # shapes only). Benchmarked on H200 (bench_encoder_fast.py):
-    #   * FEW BIG segments (vision: ~728-tok images) -> per-segment always wins
-    #     (cross-segment compute saved >> launch overhead of a few kernels).
-    #   * MANY TINY segments (audio: ~50-tok windows) -> the dense single kernel
-    #     beats hundreds of tiny per-segment kernels (launch-bound) UNTIL the
-    #     total grows enough that dense's O(total^2) mask explodes (~bs32).
-    # Decision metric M = total^2 / n_seg (= total * mean_seg), a proxy for the
-    # dense/per-segment compute ratio: dense ~ total^2, per-segment ~ Σ L_i^2
-    # (≈ total*mean_seg for similar lengths), so per-segment wins when M exceeds a
-    # launch-cost threshold. Calibrated on H200 (bench_encoder_fast.py): τ≈5e5
-    # cleanly separates vision (few big segments → M high → per_segment at every
-    # batch) from audio (many tiny windows → M low at small batch → dense, then
-    # crosses to per_segment ~bs32 as the dense O(n²) mask explodes). Shapes only,
-    # no GPU sync.
+    # SDPA-only fallback selector (reached only when flash_attn is unavailable;
+    # when flash_attn or the flashinfer path is live they are both ~2-7x faster than
+    # any SDPA variant and are used instead — see varlen_attention / the backend
+    # matrix in exp_audioenc/raw.json). Picks dense vs per-segment from segment
+    # STRUCTURE alone (no GPU sync — tensor shapes only).
+    #
+    # The discriminator is MEAN SEGMENT LENGTH, i.e. the per-segment SDPA kernel
+    # regime, NOT total size (the old M = total^2/n_seg metric was inverted: audio
+    # at large batch has HIGH M yet still wants dense, while vision at batch 1 has
+    # LOWER M yet wants per_segment — a single scalar on M cannot separate them):
+    #   * SMALL segments (audio: ~100-tok windows) -> each per-segment SDPA is
+    #     launch-bound, so n_seg tiny kernels lose to ONE dense masked kernel even
+    #     though dense does n_seg x more attention work. Dense wins audio across
+    #     b1..b32 (bench_audio_backend_matrix.py).
+    #   * BIG segments (vision: ~728-tok images) -> each per-segment SDPA is
+    #     compute-bound and efficient, so per_segment wins and dense wastes the
+    #     O(total^2) cross-segment block.
+    # Crossover measured on H200 at fixed total~6k: dense wins seg<=~300, per_segment
+    # wins seg>=~400 -> threshold 350 sits in the gap and cleanly splits audio (104)
+    # from vision (728). A total cap keeps dense's O(total^2) mask from blowing up at
+    # extreme batch (small-seg + huge total -> per_segment is the memory-safe choice).
+    _DENSE_MEAN_SEG = 350
+    _DENSE_TOTAL_CAP = 16384
     total = q.shape[0]
     n_seg = max(cu_seqlens.shape[0] - 1, 1)
-    if (total * total) / n_seg > 500_000:
-        return _sdpa_varlen_per_segment(q, k, v, cu_seqlens, scale)
-    return _sdpa_varlen_dense(q, k, v, cu_seqlens, scale)
+    mean_seg = total / n_seg
+    if mean_seg < _DENSE_MEAN_SEG and total <= _DENSE_TOTAL_CAP:
+        return _sdpa_varlen_dense(q, k, v, cu_seqlens, scale)
+    return _sdpa_varlen_per_segment(q, k, v, cu_seqlens, scale)
 
 
 # --------------------------------------------------------------------------- #
