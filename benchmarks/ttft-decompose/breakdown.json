@@ -1,0 +1,148 @@
+{
+  "s2t": {
+    "api->preproc enqueue": {
+      "median_ms": 0.681864,
+      "p99_ms": 1.2316033999999998,
+      "n": 25
+    },
+    "preprocess (CPU)": {
+      "median_ms": 18.039116,
+      "p99_ms": 32.00440623999999,
+      "n": 25
+    },
+    "  preproc->conductor": {
+      "median_ms": 1.394072,
+      "p99_ms": 1.83390808,
+      "n": 25
+    },
+    "  conductor dispatch": {
+      "median_ms": 1.280654,
+      "p99_ms": 4.299437759999995,
+      "n": 25
+    },
+    "  conductor->worker submit": {
+      "median_ms": 3.645259,
+      "p99_ms": 5.110583759999999,
+      "n": 25
+    },
+    "ADMISSION total (preproc_end->submit)": {
+      "median_ms": 6.329829,
+      "p99_ms": 8.853772399999999,
+      "n": 25
+    },
+    "encoder+prefill wall (submit->emit)": {
+      "median_ms": 51.507127,
+      "p99_ms": 70.55033212,
+      "n": 25
+    },
+    "  worker_emit->chunk_ready": {
+      "median_ms": 27.072294,
+      "p99_ms": 36.90164303999998,
+      "n": 25
+    },
+    "  chunk_ready->api_first_chunk": {
+      "median_ms": 1.363487,
+      "p99_ms": 2.6847310399999986,
+      "n": 25
+    },
+    "emit->client total (emit->api_chunk)": {
+      "median_ms": 28.466336,
+      "p99_ms": 37.90907579999998,
+      "n": 25
+    },
+    "TOTAL server TTFT (api_recv->api_chunk)": {
+      "median_ms": 105.488402,
+      "p99_ms": 133.11500487999996,
+      "n": 25
+    }
+  },
+  "i2t": {
+    "api->preproc enqueue": {
+      "median_ms": 0.829433,
+      "p99_ms": 1.3169763199999998,
+      "n": 25
+    },
+    "preprocess (CPU)": {
+      "median_ms": 20.543759,
+      "p99_ms": 31.72701287999998,
+      "n": 25
+    },
+    "  preproc->conductor": {
+      "median_ms": 1.309396,
+      "p99_ms": 1.8341623599999997,
+      "n": 25
+    },
+    "  conductor dispatch": {
+      "median_ms": 1.035189,
+      "p99_ms": 1.6027862800000001,
+      "n": 25
+    },
+    "  conductor->worker submit": {
+      "median_ms": 6.328487,
+      "p99_ms": 11.3401374,
+      "n": 25
+    },
+    "ADMISSION total (preproc_end->submit)": {
+      "median_ms": 8.343923,
+      "p99_ms": 13.12489528,
+      "n": 25
+    },
+    "encoder+prefill wall (submit->emit)": {
+      "median_ms": 62.060374,
+      "p99_ms": 81.54970559999997,
+      "n": 25
+    },
+    "  worker_emit->chunk_ready": {
+      "median_ms": 27.125272,
+      "p99_ms": 28.2576106,
+      "n": 25
+    },
+    "  chunk_ready->api_first_chunk": {
+      "median_ms": 1.30453,
+      "p99_ms": 1.9186903999999998,
+      "n": 25
+    },
+    "emit->client total (emit->api_chunk)": {
+      "median_ms": 28.07845,
+      "p99_ms": 29.841918999999997,
+      "n": 25
+    },
+    "TOTAL server TTFT (api_recv->api_chunk)": {
+      "median_ms": 119.562833,
+      "p99_ms": 139.2181382,
+      "n": 25
+    }
+  },
+  "node_timing": {
+    "Thinker/prefill_audio": {
+      "n": 30,
+      "p50_ms": 22.3,
+      "mean_ms": 57.51
+    },
+    "Thinker/prefill_text": {
+      "n": 60,
+      "p50_ms": 21.48,
+      "mean_ms": 21.65
+    },
+    "Thinker/prefill_vision": {
+      "n": 30,
+      "p50_ms": 32.32,
+      "mean_ms": 32.04
+    },
+    "Thinker/thinker_decode": {
+      "n": 5650,
+      "p50_ms": 6.56,
+      "mean_ms": 6.61
+    },
+    "audio_encoder/prefill_audio": {
+      "n": 30,
+      "p50_ms": 27.2,
+      "mean_ms": 42.24
+    },
+    "vision_encoder/prefill_vision": {
+      "n": 30,
+      "p50_ms": 28.42,
+      "mean_ms": 30.82
+    }
+  }
+}

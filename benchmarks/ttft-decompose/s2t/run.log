@@ -1,0 +1,22 @@
+`trust_remote_code` is not supported anymore.
+Please check that the Hugging Face dataset 'openslr/librispeech_asr' isn't based on a loading script and remove `trust_remote_code`.
+If the dataset is based on a loading script, please ask the dataset author to remove it and convert it to a standard format like Parquet.
+Using the latest cached version of the dataset since openslr/librispeech_asr couldn't be found on the Hugging Face Hub (offline mode is enabled).
+Found the latest cached dataset configuration 'clean' at /m-coriander/coriander/tmp/claude-1072/-home-tim/62167ff1-f44b-495d-8500-0e89b3623c0a/scratchpad/ttft/hfds/openslr___librispeech_asr/clean/0.0.0/71cacbfb7e2354c4226d01e70d77d5fca3d04ba1 (last modified on Sun Jun 28 08:24:27 2026).
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'interleaved', 'mrope_section'}
+
+--- Benchmark Results (wall time: 5.19s) ---
+Closed-Loop Benchmark Results (25 requests, max_concurrency=1)
+──────────────────────────────────────────────────
+Request type breakdown: audio_to_text=25
+Requests : 25/25 succeeded
+TTFT (text)  : mean=0.112s  p50=0.109s  p95=0.123s  p99=0.137s
+E2E          : mean=0.207s  p50=0.201s  p95=0.246s  p99=0.280s
+ITL  (text)  : mean=0.007s  p50=0.007s  p95=0.010s  p99=0.012s
+Text tokens: 354 total (14.2 avg/req)
+Output bytes (text): 1654 total (354 chunks)
+Throughput: 4.82 req/s (successful only)
+Throughput: 68.23 text tok/s
+Total wall time: 5.19s
+
+Saved 25 outputs to /home/tim/ttft-wt/benchmarks/ttft-decompose/s2t/

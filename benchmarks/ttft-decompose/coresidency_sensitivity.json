@@ -1,0 +1,8 @@
+{
+  "note": "S2T B=1 TTFT p50 (client, ms) under three CPU co-residency conditions, identical workload/model/server.",
+  "isolated_single_server_thisrun": 109,
+  "co_located_fair_b1_mstar_plus_vllm": 317,
+  "heavy_cpu_contention_384spinners_loadavg620": 8107,
+  "recovery_after_contention": 105,
+  "interpretation": "TTFT path is CPU/IPC-poll-bound (4 cross-process hops, each with ~1ms poll/sleep) and contention-sensitive; decode/ITL is GPU-CUDA-graph-bound and stays ~flat. The ~0.30s fair-b1 figure did NOT reproduce in isolation."
+}

@@ -1,0 +1,19 @@
+Using the latest cached version of the dataset since ethz/food101 couldn't be found on the Hugging Face Hub (offline mode is enabled).
+Found the latest cached dataset configuration 'default' at /m-coriander/coriander/tmp/claude-1072/-home-tim/62167ff1-f44b-495d-8500-0e89b3623c0a/scratchpad/ttft/hfds/ethz___food101/default/0.0.0/83488de741c1bd1ce27aa6a2b33e19c7bdf92ca9 (last modified on Sun Jun 28 08:24:27 2026).
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'interleaved'}
+
+--- Benchmark Results (wall time: 32.50s) ---
+Closed-Loop Benchmark Results (25 requests, max_concurrency=1)
+──────────────────────────────────────────────────
+Request type breakdown: image_to_text=25
+Requests : 25/25 succeeded
+TTFT (text)  : mean=0.124s  p50=0.123s  p95=0.139s  p99=0.142s
+E2E          : mean=1.300s  p50=1.442s  p95=1.844s  p99=1.883s
+ITL  (text)  : mean=0.007s  p50=0.007s  p95=0.008s  p99=0.010s
+Text tokens: 4316 total (172.6 avg/req)
+Output bytes (text): 19082 total (4316 chunks)
+Throughput: 0.77 req/s (successful only)
+Throughput: 132.81 text tok/s
+Total wall time: 32.50s
+
+Saved 25 outputs to /home/tim/ttft-wt/benchmarks/ttft-decompose/i2t/
