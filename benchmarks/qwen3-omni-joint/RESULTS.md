@@ -12,10 +12,10 @@ Agent D's post-fix same-session re-run vs vLLM; integrated S2S/I2S = coordinator
 
 | Path | vs vLLM | vs M*-old | ≥10% over BOTH |
 |---|---|---|---|
-| **S2T** audio→text | tok/s **1.19–1.35×**, req/s **~2.0×** (B32 25.4 vs 12.7) | **1.69–4.72×** | ✅ every batch |
+| **S2T** audio→text | tok/s **1.39–1.65×**, req/s **1.58–1.89×** (B32 20.1 vs 12.7) | **2.40–5.51×** | ✅ every batch |
 | **S2S** audio→speech | RTF **1.57–1.77×**, tput **1.50–2.02×** | 1.75–4.09× | ✅ every batch |
 | **I2S** image→speech | tput/RTF **1.84–2.24×** (~2×) | ~tie (1.0–1.08×) | ✅ vs vLLM every batch |
-| **I2T** image→text | tput **1.36–1.93×** | ~tie (B8/B32 ✅) | ✅ vs vLLM every batch |
+| **I2T** image→text | tput **1.35–1.94×** (TTFT still >vLLM at high B) | ~tie (B8/16/32 ✅) | ✅ vs vLLM every batch |
 
 **Targets hit:** S2S & I2S ~2× vs vLLM at batch; S2T ~2× req/s (1.2–1.35× tok/s); I2T 1.4–1.9×. vs M*-old the
 audio paths are decisive (1.7–4.7×, GPU-mel); image is ~tie (native ≈ old on this flash_attn box; GPU-img adds
@@ -27,7 +27,8 @@ the margin). **The paper's "~2–2.5× throughput at batch over vLLM" holds once
   S2T TTFT ballooned to 4.4 s. On-GPU (`torch.stft`, ~0.4 ms) it's gone: **S2T req/s scales ~2× vLLM at B32 and
   TTFT stays flat 0.10→0.42 s.** Same mechanism keeps S2S real-time (RTF<1) through B=32.
 - **GPU image preprocess** (`MSTAR_GPU_IMAGE_PREPROCESS`) is the analogous image lever: the HF CPU resize/patchify
-  serialized (I2T TTFT ballooned to 7.9 s); on-GPU it's flat (0.31→0.76 s) and **I2T scales 1.4–1.9× vLLM**.
+  serialized (I2T TTFT ballooned to 7.9 s); on-GPU the balloon is gone (0.31→0.76 s) and **I2T scales 1.35–1.94×
+  vLLM throughput** — though I2T TTFT (0.76 s @B32) is still ~3.7× vLLM's 0.21 s (residual image-prefill gap).
 - **Root-cause clarity:** the high-batch text-path plateaus were **CPU-preprocessing serialization, NOT a
   scheduler/architecture deficit.** (The scheduler uses ROUND_ROBIN, already fair; a reorder lever was evaluated
   by code analysis and rejected as order-invariant — zero GPU spent.) Moving preprocessing on-device is the fix.
@@ -49,7 +50,9 @@ the margin). **The paper's "~2–2.5× throughput at batch over vLLM" holds once
 ## Honest negatives / caveats
 - vs **M*-old, image is ~tie** (native ≈ old on this flash_attn box; the native>HF gap is patch-embed Conv3d only).
   GPU-img is what gives image its margin, and it's neutral on the 512 px food101 benchmark (big only on large images).
-- S2T **req/s ~2×** but **tok/s 1.2–1.35×** (vLLM emits ~24 tok/req vs M* ~14.6 → metric-dependent; both are wins).
+- S2T **req/s 1.58–1.89×** and **tok/s 1.39–1.65×** (both wins; metric-dependent magnitude).
+- **I2T TTFT** stays above vLLM at high batch (0.76 s vs 0.21 s @B32) — throughput scales/wins but TTFT is the one
+  honest remaining image gap (a future image-prefill lever, same family as S2T-TTFT).
 - Clients co-located on node-0 during some runs; A/B deltas clean, absolute latency may be slightly inflated
   (re-confirm with a remote client). Contention-depressed first numbers were caught and re-run fair.
 - Further S2T headroom exists via piggyback/chunked-prefill (mixed prefill+decode + new CUDA-graph key) — a large,
