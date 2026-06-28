@@ -399,6 +399,38 @@ class Qwen3OmniModelConfig:
         self.native_vision_encoder = _envflag(
             "MSTAR_QWEN3_NATIVE_VISION_ENCODER", self.native_vision_encoder)
 
+        # Env overrides for the Talker->Code2Wav streaming chunk size, so the
+        # batch-throughput vs B=1-latency tradeoff can be swept without editing
+        # YAML. The vocoder is captured as a CUDA graph keyed on chunk size at
+        # startup, so this is a static-per-server knob (set before launch), not
+        # a dynamic per-step value. A larger chunk means fewer, larger,
+        # fully-batched vocoder launches -> higher throughput at B>=8 (Lever 1);
+        # the default 15/15 stays the low-TTFA setting. Unset => dataclass
+        # default (byte-identical). Constraint: keep chunk >= left_context
+        # (chunk < left_context corrupts audio via a negative pop stride).
+        def _envint(name: str, current: int) -> int:
+            raw = _os.environ.get(name)
+            if raw is None or raw.strip() == "":
+                return current
+            try:
+                return int(raw.strip())
+            except ValueError:
+                return current
+
+        self.code2wav.codec_chunk_frames = _envint(
+            "MSTAR_CODEC_CHUNK_FRAMES", self.code2wav.codec_chunk_frames)
+        self.code2wav.codec_left_context_frames = _envint(
+            "MSTAR_CODEC_LEFT_CONTEXT_FRAMES", self.code2wav.codec_left_context_frames)
+        if self.code2wav.codec_chunk_frames < self.code2wav.codec_left_context_frames:
+            raise ValueError(
+                "codec_chunk_frames "
+                f"({self.code2wav.codec_chunk_frames}) must be >= "
+                "codec_left_context_frames "
+                f"({self.code2wav.codec_left_context_frames}); a smaller chunk "
+                "than the left context produces a negative pop stride and "
+                "corrupts the synthesized audio."
+            )
+
         # Sanity check: all codec special token IDs must be < the Talker's
         # codec_embedding vocab size (talker_text.vocab_size, typically 3072).
         # HF's class-level defaults for Qwen3OmniMoeTalkerConfig put these
