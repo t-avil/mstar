@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Optional
 
 import torch
@@ -39,6 +40,21 @@ from mstar.model.submodule_base import ARNodeInputs, ARNodeSubmodule, ModelInput
 from mstar.utils.sampling import CudaGraphableSampler, SeenTokenMask
 
 logger = logging.getLogger(__name__)
+
+
+def _decode_capture_batch_sizes() -> list[int]:
+    """Decode CUDA-graph capture buckets for Thinker / Talker / Code2Wav decode.
+
+    Defaults to ``[1, 2, 4, 8, 16, 32]``. Setting ``MSTAR_DECODE_BUCKET_64=1``
+    appends ``64`` so high-batch decode stays on captured graphs instead of
+    falling back to eager (the engine default ``DEFAULT_AR_CAPTURE_BATCH_SIZES``
+    already includes 64). Gated OFF by default to keep capture memory/time
+    unchanged unless explicitly A/B'd.
+    """
+    sizes = [1, 2, 4, 8, 16, 32]
+    if os.environ.get("MSTAR_DECODE_BUCKET_64", "0") == "1":
+        sizes.append(64)
+    return sizes
 
 
 # ===================================================================
@@ -1065,7 +1081,7 @@ class ThinkerSubmodule(ARNodeSubmodule):
                     }
                 ),
                 compile=True,
-                capture_batch_sizes=[1, 2, 4, 8, 16, 32],
+                capture_batch_sizes=_decode_capture_batch_sizes(),
             ),
             FlashInferPackedCudaGraphConfig(
                 capture_graph_walk="prefill_text",
@@ -1952,7 +1968,7 @@ class TalkerSubmodule(ARNodeSubmodule):
                     ),
                     input_seq_len=1,
                 ),
-                capture_batch_sizes=[1, 2, 4, 8, 16, 32],
+                capture_batch_sizes=_decode_capture_batch_sizes(),
                 compile=True
             ),
             FlashInferPackedCudaGraphConfig(
@@ -2050,7 +2066,7 @@ class Code2WavSubmodule(NodeSubmodule):
                         "position_ids": torch.arange(self.full_seqlen, device=device)
                     },
                 ),
-                capture_batch_sizes=[1, 2, 4, 8, 16, 32],
+                capture_batch_sizes=_decode_capture_batch_sizes(),
                 compile=False
             ),
         ]

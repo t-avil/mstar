@@ -1,5 +1,14 @@
 model: "qwen3_omni"
 max_seq_len: 32768
+
+# KV cache paging. Overrides KVCacheConfig defaults (kv_store.py: max_num_pages=2048)
+# for every AR node (Thinker + Talker). Raised above the 2048 default so high-batch
+# decode does not hit the KV page ceiling and admission-throttle on H200.
+# Tunable: size to available HBM (8192 is a safe H200 starting point).
+# Do NOT set cpu_offload_pages here — CPU offload adds copy latency to the decode path.
+kv_cache:
+  max_num_pages: 8192
+
 node_groups:
   - node_names: [Thinker]
     ranks: [0, 1]
