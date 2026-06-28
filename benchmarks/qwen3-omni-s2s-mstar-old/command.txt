@@ -1,0 +1,10 @@
+# M*-old (upstream main, HF-wrapper encoder) Qwen3-Omni S2S (audio_to_speech)
+# closed-loop max-concurrency sweep, seed=42, 2-GPU H200.
+# Server: mstar upstream main @ae7d173, configs/qwen3omni_2gpu.yaml
+#   (Thinker on one GPU; Talker+Code2Wav on the other), --tensor-comm-protocol SHM
+# Client (this repo) benchmark.runner, per batch B in {1,2,4,8,16,32}:
+python -m benchmark.runner --url http://127.0.0.1:8097 --model qwen3omni \
+  --request-type audio_to_speech --dataset libri \
+  --profiling-type closed_loop --max-concurrency B --num-requests N --num-warmup 5 \
+  --inference-system ours --local-cache /home/tim/tmp/libri_wavs
+# num_requests N per B: 1->12 2->20 4->24 8->40 16->80 32->160
