@@ -1,0 +1,27 @@
+`trust_remote_code` is not supported anymore.
+Please check that the Hugging Face dataset 'ethz/food101' isn't based on a loading script and remove `trust_remote_code`.
+If the dataset is based on a loading script, please ask the dataset author to remove it and convert it to a standard format like Parquet.
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'interleaved', 'mrope_section'}
+
+--- Benchmark Results (wall time: 34.87s) ---
+Closed-Loop Benchmark Results (24 requests, max_concurrency=4)
+──────────────────────────────────────────────────
+Request type breakdown: image_to_speech=24
+Requests : 24/24 succeeded
+TTFT (audio)  : mean=0.811s  p50=0.744s  p95=1.310s  p99=1.379s
+TTFT (text)   : mean=0.538s  p50=0.455s  p95=0.903s  p99=1.038s
+E2E           : mean=5.533s  p50=5.595s  p95=8.555s  p99=8.724s
+ITL  (audio)  : mean=0.213s  p50=0.207s  p95=0.354s  p99=0.438s
+ITL  (text)   : mean=0.009s  p50=0.009s  p95=0.012s  p99=0.037s
+Audio SV      : mean=1.000s  p50=1.000s  p05=1.000s  p10=1.000s  (higher is better)
+RTF           : mean=0.126  p50=0.125  p95=0.144  p99=0.148  (lower is better; <1.0 = real-time)
+Audio dur    : mean=44.976s
+Text tokens: 4179 total (174.1 avg/req)
+Output bytes (audio): 51812610 total (557 chunks)
+Output bytes (text): 18517 total (4179 chunks)
+Throughput: 0.69 req/s (successful only)
+Throughput: 119.84 text tok/s
+Throughput: 30.95 audio sec/s (synthesized audio per wall second)
+Total wall time: 34.87s
+
+Saved 48 outputs to /home/tim/exp_mstar_oldsweep/out_mstar_old/image_to_speech/B4/
