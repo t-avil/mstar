@@ -13,10 +13,15 @@ What is asserted (the issue's acceptance + landmines):
     EVERY DeepStack level individually, and matching post-spatial-merge token
     counts across several image resolutions.
 
-bf16 bar: cosine > 0.999 and relative-L2 < 0.05. The native vision patch embed
-is computed as a matmul instead of the (pathologically slow) bf16 Conv3d; that
-is a ~2e-3 bf16 perturbation at the patch level which amplifies through 27
-residual layers but stays within this bar (and is exact in fp32).
+bf16 bar: the native encoders are *fp32-exact* vs HF (see
+``test_qwen3_omni_native_encoders_ci.py``, fp32 cos > 0.9999); in the production
+bf16 dtype the measured cosine is ~0.9999, so this test pins ``COS_MIN = 0.9999``
+as the tightest true value (the guaranteed contract is cos > 0.999 — the encoders
+are *not* bit-identical in bf16). ``RELL2_MAX`` stays a looser secondary sanity
+bound. The native vision patch embed is computed as a matmul instead of the
+(pathologically slow) bf16 Conv3d; that is a ~2e-3 bf16 perturbation at the patch
+level which amplifies through 27 residual layers but stays within this bar (cos >
+0.999, measured ~0.9999) and is exact in fp32.
 """
 from __future__ import annotations
 
@@ -32,8 +37,11 @@ import torch
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="native encoders require CUDA")
 
 DEVICE = "cuda:0"
-COS_MIN = 0.999
-RELL2_MAX = 0.05
+# bf16 encoder-vs-HF acceptance. The encoders are fp32-exact (cos > 0.9999, see the
+# CI structural test); in bf16 the measured cosine is ~0.9999, pinned here as the
+# tightest true value. The *contract* we guarantee is cos > 0.999 (not bit-identical).
+COS_MIN = 0.9999
+RELL2_MAX = 0.05  # looser secondary L2 sanity bound (cos is the primary gate)
 
 
 def _resolve_checkpoint() -> str | None:
