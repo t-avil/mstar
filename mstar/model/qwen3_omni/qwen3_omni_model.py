@@ -110,6 +110,65 @@ def vllm_audio_sentinels_enabled() -> bool:
     return _envflag("MSTAR_VLLM_AUDIO_SENTINELS")
 
 
+def audio_token_stride() -> int:
+    """Prefill-cost reduction for the speech-input path (S2T / S2S TTFT).
+
+    Integer stride ``S`` for downsampling the audio-encoder output tokens
+    *before* the Thinker prefills them (Qwen2.5-Omni-style segmentwise
+    pooling). The number of audio tokens the Thinker must prefill drops by
+    ~``S`` (TTFT reduction is near-proportional to the token cut, since audio
+    prefill attention is O(n^2) in the audio span). The M-RoPE positions for
+    the audio span are recomputed for the reduced count, so the rest of the
+    sequence stays contiguous (see ``ThinkerSubmodule.prepare_inputs``).
+
+    Default ``1`` == OFF == byte-identical to baseline. ``2`` / ``4`` are the
+    literature sweet spots (~3x near-lossless on ASR/S2TT reported), but every
+    value > 1 MUST clear the WER / output-parity gate before production use --
+    see ``DESIGN_token_reduction.md``.
+    """
+    import os as _os
+
+    raw = _os.environ.get("MSTAR_AUDIO_TOKEN_STRIDE")
+    if raw is None:
+        return 1
+    try:
+        s = int(raw)
+    except ValueError:
+        return 1
+    return s if s >= 1 else 1
+
+
+def vision_token_merge_factor() -> int:
+    """Prefill-cost reduction for the image-input path (I2T / I2S TTFT).
+
+    Integer merge factor ``F`` for collapsing redundant vision tokens *before*
+    the Thinker prefills them. Must be a perfect square (1, 4, 9, ...) so the
+    reduction is an integer per-axis spatial merge on top of the encoder's
+    native ``spatial_merge_size``; ``sqrt(F)`` must divide the post-merge grid
+    H and W. The Thinker vision token count (and DeepStack tensors) drop by
+    ~``F`` and the M-RoPE vision positions are recomputed against an effective
+    merge size so positions match the reduced count.
+
+    Default ``1`` == OFF == byte-identical to baseline.
+
+    EXPERIMENTAL SCAFFOLD: the current reducer is a uniform spatial
+    average-merge. A quality-gated, content-aware selection (ToMe / PruMerge+)
+    should replace the averaging step; the count/position plumbing here is the
+    reusable part. Every value > 1 MUST clear the image-task quality gate -- see
+    ``DESIGN_token_reduction.md``.
+    """
+    import os as _os
+
+    raw = _os.environ.get("MSTAR_VISION_TOKEN_MERGE")
+    if raw is None:
+        return 1
+    try:
+        f = int(raw)
+    except ValueError:
+        return 1
+    return f if f >= 1 else 1
+
+
 def _tensor_dump_dir() -> str | None:
     """Directory for env-gated intermediate-tensor / token dumps, or None."""
     import os as _os

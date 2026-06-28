@@ -16,6 +16,7 @@ import logging
 from typing import Any, Optional
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from mstar.communication.tensors import NameToTensorList
@@ -39,6 +40,143 @@ from mstar.model.submodule_base import ARNodeInputs, ARNodeSubmodule, ModelInput
 from mstar.utils.sampling import CudaGraphableSampler, SeenTokenMask
 
 logger = logging.getLogger(__name__)
+
+
+# ===================================================================
+# Token-reduction helpers (prefill-cost / TTFT reduction)
+# ===================================================================
+#
+# These genuinely SHRINK the multimodal token sequence the Thinker must
+# prefill (orthogonal to vision-prefill batching, so the wins stack). They are
+# NOT attention pruning (FastV-style) -- that leaves the sequence length
+# unchanged, breaks FlashAttention's packed layout, and hurts OCR/grounding.
+# Here we reduce the actual number of tokens, then recompute the M-RoPE
+# positions for the reduced count so the rest of the sequence stays contiguous.
+#
+# Both paths are env-gated and default OFF (stride/factor == 1 -> no-op ->
+# byte-identical to baseline). See ``DESIGN_token_reduction.md``.
+
+
+def _pool_audio_tokens(embeds: torch.Tensor, stride: int) -> torch.Tensor:
+    """Segmentwise average-pool audio-encoder output tokens along the sequence
+    axis by ``stride`` (Qwen2.5-Omni-style audio token downsampling).
+
+    Parameters
+    ----------
+    embeds : torch.Tensor
+        ``(num_audio_tokens, hidden)`` -- the audio encoder ``last_hidden_state``
+        for ONE request (prefill_audio is single-request per walk, so there is
+        no cross-request bleed).
+    stride : int
+        Pooling stride == kernel. ``ceil_mode=True`` + ``count_include_pad=False``
+        so a ragged tail collapses into one correctly-averaged token rather than
+        being dropped or zero-padded.
+
+    Returns
+    -------
+    torch.Tensor
+        ``(ceil(num_audio_tokens / stride), hidden)``. A no-op (returns the
+        input unchanged) when ``stride <= 1`` or there is <= 1 token.
+    """
+    if stride <= 1 or embeds.shape[0] <= 1:
+        return embeds
+    # (tokens, hidden) -> (1, hidden, tokens) for avg_pool1d over the time axis.
+    x = embeds.transpose(0, 1).unsqueeze(0).float()
+    x = F.avg_pool1d(
+        x, kernel_size=stride, stride=stride,
+        ceil_mode=True, count_include_pad=False,
+    )
+    return x.squeeze(0).transpose(0, 1).to(embeds.dtype)
+
+
+def _spatial_merge_factor_axis(factor: int) -> int:
+    """Per-axis spatial merge for a perfect-square ``factor`` (e.g. 4 -> 2).
+
+    Returns 1 (no-op) when ``factor`` is not a usable perfect square > 1.
+    """
+    if factor <= 1:
+        return 1
+    axis = int(round(factor ** 0.5))
+    if axis * axis != factor:
+        logger.warning(
+            "MSTAR_VISION_TOKEN_MERGE=%d is not a perfect square; ignoring.",
+            factor,
+        )
+        return 1
+    return axis
+
+
+def _merge_vision_tokens(
+    embeds: torch.Tensor,
+    deepstack: list[torch.Tensor],
+    grid_thw: torch.Tensor,
+    factor: int,
+    base_spatial_merge_size: int,
+) -> tuple[torch.Tensor, list[torch.Tensor], int]:
+    """EXPERIMENTAL scaffold: uniformly spatial-merge already-merged vision
+    tokens by an extra per-axis factor of ``sqrt(factor)``.
+
+    The encoder has already produced one token per ``base_spatial_merge_size``
+    x ``base_spatial_merge_size`` patch block, laid out row-major over the
+    post-merge grid ``(T, H//sm, W//sm)``. We average each
+    ``axis`` x ``axis`` block of those tokens (and the matching DeepStack
+    tokens), reducing the count by ``factor``.
+
+    Returns ``(merged_embeds, merged_deepstack, effective_spatial_merge_size)``
+    where the effective merge size (= ``base_spatial_merge_size * axis``) is fed
+    to ``get_rope_index_vision`` so the recomputed M-RoPE positions match the
+    reduced token count. A no-op (factor 1 / non-divisible grid) returns the
+    inputs unchanged with the base merge size.
+
+    NOTE: averaging is a placeholder for a quality-gated, content-aware merge
+    (ToMe / PruMerge+). The token-count + position plumbing is what is reusable;
+    swap the pooling for the selection policy once the quality gate is wired.
+    """
+    axis = _spatial_merge_factor_axis(factor)
+    if axis == 1:
+        return embeds, deepstack, base_spatial_merge_size
+
+    if grid_thw is None or grid_thw.numel() == 0:
+        logger.warning("vision token merge requested without image_grid_thw; skipping.")
+        return embeds, deepstack, base_spatial_merge_size
+
+    g = grid_thw if grid_thw.dim() == 2 else grid_thw.unsqueeze(0)
+    sm = base_spatial_merge_size
+
+    # Validate divisibility for every image before mutating anything; merging a
+    # non-divisible grid would desync token count vs positions -> bail safely.
+    for i in range(g.shape[0]):
+        h = int(g[i, 1].item()) // sm
+        w = int(g[i, 2].item()) // sm
+        if h % axis != 0 or w % axis != 0:
+            logger.warning(
+                "vision merge axis=%d does not divide post-merge grid (%d,%d); "
+                "skipping merge for safety.", axis, h, w,
+            )
+            return embeds, deepstack, base_spatial_merge_size
+
+    def _merge_one(x: torch.Tensor) -> torch.Tensor:
+        out_chunks = []
+        off = 0
+        for i in range(g.shape[0]):
+            t = int(g[i, 0].item())
+            h = int(g[i, 1].item()) // sm
+            w = int(g[i, 2].item()) // sm
+            n = t * h * w
+            block = x[off:off + n].reshape(t, h, w, x.shape[-1])
+            # (t, h, w, c) -> (c, t, h, w) -> avg_pool over (h, w)
+            block = block.permute(3, 0, 1, 2).float()
+            block = F.avg_pool2d(block, kernel_size=axis, stride=axis)
+            block = block.permute(1, 2, 3, 0).reshape(-1, x.shape[-1])
+            out_chunks.append(block.to(x.dtype))
+            off += n
+        return torch.cat(out_chunks, dim=0)
+
+    merged_embeds = _merge_one(embeds)
+    merged_deepstack = [
+        _merge_one(d) if d.numel() else d for d in deepstack
+    ]
+    return merged_embeds, merged_deepstack, sm * axis
 
 
 # ===================================================================
@@ -577,12 +715,24 @@ class ThinkerSubmodule(ARNodeSubmodule):
 
         if graph_walk == "prefill_audio":
             audio_embeds = inputs["audio_embeds"][0].to(device)  # (audio_tokens, hidden)
-            audio_len = audio_embeds.shape[0]
 
             # Env-gated dump of the audio-encoder last_hidden_state for the
             # cross-system tensor comparison (no-op unless MSTAR_DUMP_DIR set).
-            from mstar.model.qwen3_omni.qwen3_omni_model import _dump_obj
+            # Dump the RAW encoder output (pre-downsampling) so encoder parity
+            # comparisons are unaffected by token reduction.
+            from mstar.model.qwen3_omni.qwen3_omni_model import (
+                _dump_obj,
+                audio_token_stride,
+            )
             _dump_obj("mstar_audio_encoder_last_hidden_state.pt", audio_embeds)
+
+            # Token-reduction (S2T/S2S TTFT): downsample the audio span before
+            # the Thinker prefills it. Default stride 1 == no-op. ``audio_len``
+            # is read AFTER pooling so the M-RoPE positions, talker masks,
+            # sequence length, and ``advance_seq_lens`` all use the reduced
+            # count -- keeping the rest of the sequence contiguous.
+            audio_embeds = _pool_audio_tokens(audio_embeds, audio_token_stride())
+            audio_len = audio_embeds.shape[0]
 
             mm_mask = torch.ones(audio_len + 2, dtype=torch.bool, device=device)
             mm_mask[[0, -1]] = 0
@@ -637,6 +787,27 @@ class ThinkerSubmodule(ARNodeSubmodule):
 
         if graph_walk == "prefill_vision":
             vision_embeds = inputs["vision_embeds"][0].to(device)
+
+            grid_thw = inputs.get("image_grid_thw", [None])[0]
+
+            # Token-reduction (I2T/I2S TTFT): optional extra spatial merge of
+            # vision tokens before the Thinker prefills them. Default factor 1 ==
+            # no-op. The DeepStack tensors are merged identically and an
+            # EFFECTIVE spatial merge size is returned so the M-RoPE vision
+            # positions (computed from the grid) match the reduced token count.
+            # EXPERIMENTAL scaffold -- see ``_merge_vision_tokens``.
+            from mstar.model.qwen3_omni.qwen3_omni_model import (
+                vision_token_merge_factor,
+            )
+            base_sm = self.config.vision.spatial_merge_size
+            deepstack_inputs = list(inputs["deepstack"])
+            vision_embeds, deepstack_inputs, eff_sm = _merge_vision_tokens(
+                vision_embeds,
+                deepstack_inputs,
+                grid_thw.to(device) if grid_thw is not None else None,
+                vision_token_merge_factor(),
+                base_sm,
+            )
             vision_len = vision_embeds.shape[0]
 
             mm_mask = torch.ones(vision_len + 2, dtype=torch.bool, device=device)
@@ -652,8 +823,8 @@ class ThinkerSubmodule(ARNodeSubmodule):
             # h/w from the spatial grid after merging).  If a proper
             # ``image_grid_thw`` is available, use ``get_rope_index_vision``;
             # otherwise fall back to a 1-D sequence (test path without
-            # AutoImageProcessor).
-            grid_thw = inputs.get("image_grid_thw", [None])[0]
+            # AutoImageProcessor).  ``eff_sm`` >= ``base_sm`` when extra token
+            # merge is enabled, so the recomputed positions match ``vision_len``.
             seconds_per_grid = inputs.get("video_second_per_grid", [])
             seconds_per_grid = seconds_per_grid[0].item() if seconds_per_grid else None
             vision_pos_ids = get_rope_index_vision(
@@ -661,7 +832,7 @@ class ThinkerSubmodule(ARNodeSubmodule):
                 start_pos + 1,  # leave room for the BOS token
                 position_id_per_seconds=self.config.thinker.position_id_per_seconds,
                 device=device,
-                spatial_merge_size=self.config.vision.spatial_merge_size,
+                spatial_merge_size=eff_sm,
                 seconds_per_grid=seconds_per_grid
             )
 
@@ -682,7 +853,7 @@ class ThinkerSubmodule(ARNodeSubmodule):
             # Thinker forward can pass ``pos_id_ns`` through.
             mrope_pos_advance = int(end_pos_base + 1 - start_pos)
             deepstack = []
-            for deepstack_inp in inputs["deepstack"]:
+            for deepstack_inp in deepstack_inputs:
                 full_deepstack = torch.zeros_like(wrapped_embeds)
                 full_deepstack[mm_mask, :] = deepstack_inp
                 deepstack.append(full_deepstack)
