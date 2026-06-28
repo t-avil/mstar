@@ -2,21 +2,30 @@
 
 Reproduction of the M\* paper (arXiv 2606.12688) Figure 5: Qwen3-Omni Seed-TTS on
 2 GPUs, RTF (lower=better) + audio throughput (higher=better), batch sweep
-B∈{1,4,8,16,32}. Run on 8×H200 (GPUs 6,7), model `Qwen/Qwen3-Omni-30B-A3B-Instruct`,
+B∈{1,2,4,8,16,32}. Run on 8×H200 (GPUs 6,7), model `Qwen/Qwen3-Omni-30B-A3B-Instruct`,
 Seed-TTS-eval (en). See `charts/fig5a_rtf.png`, `charts/fig5b_throughput.png`,
 `raw.json` (every per-request datapoint).
 
-## Headline result (offline sized-waves, warmup=3)
+## Headline result — closed-loop max-concurrency (canonical), warmup=5
+
+Protocol = **closed-loop max-concurrency (continuous batching)** — the protocol the
+fork's own benchmark scripts use (`run_omni_paths.sh`, `serving_scripts/*`) and the
+reference CSV's "Max con." column. Data under `runs/cl/`. (An initial offline
+sized-waves sweep — `runs/out_*/` — is retained as a cross-check; it gave matching
+RTF but ~25–30% lower throughput due to tail-of-wave GPU idle, which is exactly why
+closed-loop is the correct protocol.)
 
 | B | M\* RTF | vLLM RTF | M\* tput | vLLM tput | M\* tput advantage |
 |---|---|---|---|---|---|
-| 1  | 0.081 | 0.161 | 12.7 | 6.5 | 2.0× |
-| 4  | 0.117 | 0.242 | 25.3 | 13.5 | 1.9× |
-| 8  | 0.135 | 0.312 | 42.5 | 18.0 | 2.4× |
-| 16 | 0.177 | 0.389 | 63.1 | 26.7 | 2.4× |
-| 32 | 0.301 | 0.536 | 81.0 | 38.2 | 2.1× |
+| 1  | 0.081 | 0.162 | 12.7  | 6.4  | 2.0× |
+| 2  | 0.099 | 0.202 | 19.8  | 9.9  | 2.0× |
+| 4  | 0.113 | 0.248 | 34.6  | 15.7 | 2.2× |
+| 8  | 0.130 | 0.326 | 55.3  | 23.0 | 2.4× |
+| 16 | 0.170 | 0.450 | 86.2  | 34.6 | 2.5× |
+| 32 | 0.281 | 0.640 | 107.2 | 46.8 | 2.3× |
 
-M\* beats vLLM-Omni on **both** RTF and throughput at every batch size, ~2–2.4×,
+Matches the team's reference CSV (same closed-loop protocol) within ~1–12% across the
+curve. M\* beats vLLM-Omni on **both** RTF and throughput at every batch size, ~2–2.5×,
 reproducing the paper's "2.7× higher throughput vs vLLM-Omni" claim. All runs
 completed 100% (310 requests each).
 

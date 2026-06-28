@@ -27,7 +27,11 @@ SYS_META = [
     ("ours",        "M*",          "#6a3df0"),
     ("vllm_omni",   "vLLM-Omni",   "#ff7f0e"),
 ]
-BATCHES = [1, 4, 8, 16, 32]
+# Canonical protocol = closed-loop max-concurrency (matches the fork's
+# benchmark scripts + the reference CSV). Data under runs/cl/out_<sys>/B<B>.
+# Offline sized-waves data is retained under runs/out_<sys>/ as a cross-check.
+BATCHES = [1, 2, 4, 8, 16, 32]
+PROTOCOL = "closed_loop (max-concurrency continuous batching), num_warmup=5"
 
 
 def pct(sorted_vals, p):
@@ -60,7 +64,7 @@ def parse_harness_stdout(path):
 
 
 def load_point(system, B):
-    outdir = os.path.join(RUNS, f"out_{system}", f"B{B}")
+    outdir = os.path.join(RUNS, "cl", f"out_{system}", f"B{B}")
     rj = os.path.join(outdir, "results.json")
     if not os.path.isfile(rj):
         return None
@@ -116,7 +120,7 @@ def build_raw():
         "git_commit": git_commit(),
         "model": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
         "device": {"cuda_visible_devices": "6,7", "gpu_name": "NVIDIA H200", "n_gpus": 2},
-        "protocol": {"profiling": "offline", "warmup_iters": 3, "batch_sizes": BATCHES,
+        "protocol": {"profiling": "closed_loop", "warmup_iters": 5, "batch_sizes": BATCHES,
                      "max_tokens": 256, "thinker_temperature": 0.0,
                      "audio_pcm": "24kHz int16 mono", "dataset": "seed-tts-eval en",
                      "disaggregation": "Thinker on one GPU; Talker+Code2Wav on the other"},
