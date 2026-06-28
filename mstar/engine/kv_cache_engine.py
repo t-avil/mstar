@@ -15,6 +15,7 @@ from mstar.engine.base import (
     PlannedBatch,
     PreparedBatch,
 )
+from mstar.engine import batchfill_stats
 from mstar.engine.cache_manager import BatchedCacheManager, WorkspaceBufferManager
 from mstar.engine.cpu_page_pool import CPUPagePool
 from mstar.engine.cuda_graph_runner import CudaGraphRunner
@@ -819,6 +820,7 @@ class KVCacheEngine(BaseEngine):
         submod_mgmt.tp_group.barrier()
 
         if self._can_use_cuda_graph(batch, node_inputs):
+            path = "cuda_graph"
             if self.enable_nvtx:
                 range_push("kv_cache.cuda_graph_path", synchronize=False)
             try:
@@ -827,6 +829,7 @@ class KVCacheEngine(BaseEngine):
                 if self.enable_nvtx:
                     range_pop(synchronize=False)
         elif submodule.can_batch(batch, node_inputs):
+            path = "batched"
             if self.enable_nvtx:
                 range_push("kv_cache.batched_path", synchronize=False)
             try:
@@ -837,6 +840,7 @@ class KVCacheEngine(BaseEngine):
                 if self.enable_nvtx:
                     range_pop(synchronize=False)
         else:
+            path = "sequential"
             if self.enable_nvtx:
                 range_push("kv_cache.sequential_path", synchronize=False)
             try:
@@ -846,6 +850,16 @@ class KVCacheEngine(BaseEngine):
             finally:
                 if self.enable_nvtx:
                     range_pop(synchronize=False)
+        # Batch-fill instrumentation (MSTAR_BATCHFILL_STATS, default OFF). When
+        # disabled this is a single attribute load + bool check -> no overhead.
+        # Records the actual batch size used per replay so we can tell whether
+        # the Talker/Thinker AR-decode graphs fill at B=32 or desync into small
+        # back-to-back replays.
+        if batchfill_stats.ENABLED:
+            batchfill_stats.record(
+                batch.node_name, batch.graph_walk,
+                len(batch.request_ids), path,
+            )
         return output
 
     def postprocess_batch(self, planned: PlannedBatch, output: NodeOutput) -> None:
@@ -1124,6 +1138,8 @@ class KVCacheEngine(BaseEngine):
         return cache_mgmt.cpu_page_pool.is_offloaded(request_id)
 
     def shutdown(self) -> None:
+        if batchfill_stats.ENABLED:
+            batchfill_stats.dump_summary()
         for submodule_mgmt in self.submodule_management.values():
             cache_mgmt = submodule_mgmt.kv_management
             cache_mgmt.kv_cache = None
