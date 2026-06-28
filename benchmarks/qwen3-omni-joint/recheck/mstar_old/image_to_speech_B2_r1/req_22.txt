@@ -1,0 +1,7 @@
+Based on the visual evidence, this dish is **Gyoza**.
+
+Here is a breakdown of the identification:
+
+*   **Dish:** The dish consists of dumplings with a distinct, crispy, golden-brown bottom and a softer, pleated top. This specific cooking method is known as pan-frying or *yaki-gyoza*, where dumplings are first pan-fried and then steamed to cook the filling and dough completely. The arrangement of dumplings next to each other, often referred to as "giant gyoza" or "gyoza with a twist," is also a popular presentation.
+
+*   **Cuisine:** Gyoza is a type of pan-fried dumpling that is a staple of **Japanese** cuisine. It is widely believed to have originated from Chinese *jiaozi*, but it has been adapted and popularized in Japan. The cartoon logo on the plate, featuring a character wearing a red hat, is strongly associated with **Gyoza no Ohsho (The King of Gyoza)**, a very famous Japanese chain restaurant specializing in this dish.<|im_end|>

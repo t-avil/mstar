@@ -1,0 +1,6 @@
+Based on the appearance of the dish, these are most likely **Samosas**.
+
+Here is a breakdown of the reasoning:
+*   **Shape and Texture:** They are spherical and have a deep-fried, golden-brown, and crispy exterior, which is characteristic of samosas.
+*   **Ingredients:** Samosas are typically filled with a savory mixture of ingredients. Common fillings include spiced potatoes, peas, and onions, which would explain the visible texture and small green flecks (likely herbs like cilantro or green chilies) within the filling.
+*   **Presentation:** They are served hot as an appetizer or snack, often garnished with a fresh herb, in this case, mint leaves, which adds a cool contrast to the warm, spiced filling.<|im_end|>

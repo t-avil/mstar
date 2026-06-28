@@ -1,0 +1,3 @@
+Here is a caption for the food image:
+
+A beautifully plated pork chop, served with a rich, dark sauce and topped with a generous dollop of creamy, crumbled blue cheese. The meat rests on a bed of vibrant green beans and tender broccoli, with a few roasted cherry tomatoes adding a pop of color to the dish.<|im_end|>

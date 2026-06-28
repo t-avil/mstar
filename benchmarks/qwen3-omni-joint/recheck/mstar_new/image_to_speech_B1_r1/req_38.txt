@@ -1,0 +1,3 @@
+Based on the visual details, this food is a **donut**.
+
+More specifically, it appears to be a **poppy seed donut**. This is indicated by the dark specks on the light brown glaze, which are characteristic of poppy seeds. The donut is also topped with a small mound of white frosting and some chopped nuts.<|im_end|>

@@ -1,0 +1,11 @@
+Based on the visual information, this dish is a type of **grilled fish taco**.
+
+Here are the key components that identify it:
+
+*   **Base:** The fish is served in a soft, flatbread-like tortilla that appears to be grilled, as indicated by the char marks.
+*   **Protein:** The main ingredient is grilled fish, most likely a white fish like tilapia or cod, cut into thick pieces and scored before grilling.
+*   **Toppings:** The taco is generously topped with fresh ingredients, including:
+    *   A fresh green salad of arugula and cilantro.
+    *   Thinly sliced red onions.
+    *   Sliced red bell peppers.
+*   **Accompaniments:** It is served with a side of shredded white and red cabbage slaw and a lemon wedge for squeezing over the dish.<|im_end|>

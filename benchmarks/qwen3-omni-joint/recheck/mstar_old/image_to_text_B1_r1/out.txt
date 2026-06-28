@@ -1,0 +1,17 @@
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'interleaved'}
+
+--- Benchmark Results (wall time: 47.68s) ---
+Closed-Loop Benchmark Results (30 requests, max_concurrency=1)
+──────────────────────────────────────────────────
+Request type breakdown: image_to_text=30
+Requests : 30/30 succeeded
+TTFT (text)  : mean=0.393s  p50=0.396s  p95=0.436s  p99=0.456s
+E2E          : mean=1.589s  p50=1.658s  p95=2.122s  p99=2.143s
+ITL  (text)  : mean=0.007s  p50=0.007s  p95=0.008s  p99=0.009s
+Text tokens: 5300 total (176.7 avg/req)
+Output bytes (text): 23247 total (5300 chunks)
+Throughput: 0.63 req/s (successful only)
+Throughput: 111.16 text tok/s
+Total wall time: 47.68s
+
+Saved 30 outputs to /home/tim/exp_rebench/recheck/mstar_old/image_to_text_B1_r1/

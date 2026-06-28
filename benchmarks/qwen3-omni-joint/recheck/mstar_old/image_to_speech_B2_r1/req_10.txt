@@ -1,0 +1,12 @@
+Based on the ingredients visible in the image, the dish shown is a **Greek salad**.
+
+This is identifiable by the classic combination of fresh ingredients:
+*   **Cucumber:** Sliced into thick rounds.
+*   **Tomatoes:** Red cherry tomatoes are visible.
+*   **Red Onion:** Finely chopped or diced.
+*   **Olives:** Black olives are mixed in.
+*   **Feta Cheese:** White, crumbly cheese, characteristic of feta.
+*   **Fresh Herbs:** Sprigs of dill are used as a garnish, along with other greens like lettuce.
+*   **Lettuce:** A base of green lettuce is visible.
+
+This salad is typically served with a light vinaigrette dressing, which may be drizzled over the top.<|im_end|>

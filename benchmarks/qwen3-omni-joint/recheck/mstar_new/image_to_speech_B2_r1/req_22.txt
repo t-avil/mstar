@@ -1,0 +1,6 @@
+Based on the visual evidence, the cuisine and dish are:
+
+*   **Cuisine**: Japanese
+*   **Dish**: Gyoza (Japanese-style dumplings)
+
+The dish consists of pan-fried dumplings with a characteristic golden-brown, crispy bottom and a softer, pleated top. This style of cooking is known as *yaki-gyoza*. The plate also features a cartoon graphic of a chef, which is a common decorative element in Japanese restaurants.<|im_end|>

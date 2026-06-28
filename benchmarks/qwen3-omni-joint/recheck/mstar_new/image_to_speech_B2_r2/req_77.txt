@@ -1,0 +1,9 @@
+Based on the visual evidence in the photo, the dish shown is a classic example of **Poutine**.
+
+This dish is a staple of **Québécois cuisine** from the province of Quebec, Canada. The key components visible in the image are:
+
+*   **French Fries**: The base of the dish, which appear to be thick-cut and golden-brown.
+*   **Gravy**: A brown, savory gravy is generously poured over the fries.
+*   **Cheese Curds**: While not perfectly clear, the lumpy, irregular shapes and pale, creamy color of the toppings are characteristic of fresh cheese curds, which are the third essential ingredient in a traditional poutine.
+
+This combination of fries, gravy, and cheese curds is the defining feature of poutine.<|im_end|>

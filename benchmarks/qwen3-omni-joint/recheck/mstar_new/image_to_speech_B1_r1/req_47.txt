@@ -1,0 +1,10 @@
+Based on the visual evidence in the photo, the dish is **Tiramisu**.
+
+This is a classic Italian dessert, and its key ingredients are clearly visible:
+
+*   **Ladyfinger Cookies (Savoiardi):** The base and layers of the dessert consist of these characteristic sponge cookies.
+*   **Mascarpone Cream:** The white, creamy layers between the cookies are made from mascarpone cheese, coffee, and eggs.
+*   **Coffee:** The ladyfingers are soaked in coffee, which is evident from their dark color.
+*   **Cocoa Powder:** The entire dessert is generously dusted with unsweetened cocoa powder on top.
+
+The dessert is presented in a small, elegant, individual serving size, which is a common way to serve tiramisu in cafes and restaurants.<|im_end|>

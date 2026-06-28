@@ -1,0 +1,4 @@
+Based on the visual evidence, here is an identification of the cuisine and dish:
+
+*   **Cuisine**: The dish is from an American fast-casual restaurant chain.
+*   **Dish**: The dish is frozen yogurt, served in a paper cup with toppings. The specific brand is **Red Mango**, as indicated by the logo on the white cardboard box.<|im_end|>

@@ -1,0 +1,11 @@
+Based on the visual details in the image, the dish shown is **Paella**.
+
+Here are the key characteristics that lead to this identification:
+
+*   **Cooking Vessel:** The food is served in a wide, shallow, black pan known as a *paellera*, which is the traditional cookware for this dish.
+*   **Main Ingredients:** The dish contains the classic components of a seafood paella:
+    *   **Rice:** A bed of rice is visible, which has taken on a reddish-orange color. This is characteristic of paella, colored by saffron.
+    *   **Seafood:** There are large, cooked prawns (*gambas*) and several open clam shells (*almejas*).
+*   **Garnish:** A lemon wedge is placed on top, a common garnish for paella that is typically squeezed over the dish before eating to add a fresh, acidic note.
+
+Given these elements, it can be confidently identified as a seafood paella.<|im_end|>

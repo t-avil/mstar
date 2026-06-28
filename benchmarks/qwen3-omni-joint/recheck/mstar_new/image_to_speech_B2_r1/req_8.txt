@@ -1,0 +1,13 @@
+Based on the visual information provided, the food shown is **spring rolls**.
+
+More specifically, these appear to be **Vietnamese fresh spring rolls**, also known as **summer rolls** or *Gỏi cuốn*.
+
+Here are the key characteristics that lead to this identification:
+
+*   **Wrapper**: The rolls are wrapped in a thin, translucent rice paper wrapper, which is characteristic of fresh spring rolls. This is different from fried spring rolls, which are wrapped in a thicker, non-transparent wrapper and are deep-fried.
+*   **Ingredients**: The filling consists of fresh, uncooked ingredients. From the visible cross-section, you can clearly identify:
+    *   Green leafy vegetables (likely lettuce and mint or cilantro)
+    *   Shredded carrots
+    *   Possibly other vegetables like cucumber or bean sprouts
+    *   A pinkish ingredient that could be cooked shrimp or thinly sliced ham
+*   **Serving Style**: They are served cold on a plate with a small bowl of dipping sauce, which is the typical way to serve these rolls.<|im_end|>

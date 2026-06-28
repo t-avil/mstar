@@ -1,0 +1,3 @@
+Of course, here is a caption for the food image:
+
+A plate of gnocchi with a savory mushroom ragu and a generous topping of thinly shaved Parmesan cheese.<|im_end|>

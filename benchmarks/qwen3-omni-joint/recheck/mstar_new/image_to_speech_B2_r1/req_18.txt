@@ -1,0 +1,13 @@
+Based on the ingredients and presentation, this dish is a **seafood paella**.
+
+Here's a breakdown of the key elements in the image that lead to this identification:
+
+*   **Pan:** It's served in a wide, shallow, black pan, which is characteristic of a traditional paella pan (paellera).
+*   **Base:** The bottom layer consists of saffron-infused rice, identifiable by its distinct golden-orange color.
+*   **Seafood:** The dish is loaded with a variety of seafood, including:
+    *   Mussels
+    *   Prawns (shrimp)
+    *   White fish (the piece on the left plate appears to be a fish fillet)
+*   **Garnishes:** The dish is garnished with lemon wedges and a fresh herb, likely parsley.
+
+While a classic paella is typically made with chicken, rabbit, and chorizo, this version is a "seafood paella" (paella de mariscos), where the meat is replaced by an assortment of shellfish and fish.<|im_end|>

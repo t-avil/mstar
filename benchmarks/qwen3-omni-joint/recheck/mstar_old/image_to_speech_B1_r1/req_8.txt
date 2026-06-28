@@ -1,0 +1,9 @@
+Based on the visual characteristics of the food in the image, this dish is most likely **spring rolls**.
+
+Here's a breakdown of the features that lead to this identification:
+
+*   **Wrapping:** The rolls are encased in a thin, translucent wrapper that becomes soft and slightly sticky when soaked. This is characteristic of rice paper, a common wrapper for this type of roll.
+*   **Fillings:** The visible fillings are fresh and colorful, including green vegetables (like lettuce or herbs) and orange ingredients (like carrots or mango).
+*   **Shape and Presentation:** The rolls are cut into bite-sized pieces and served on a plate, a typical presentation for appetizers.
+
+There are two main types of spring rolls: **fresh spring rolls** (also known as summer rolls) and **fried spring rolls**. Based on the light, fresh appearance of the wrapper and fillings, this appears to be **fresh spring rolls**.<|im_end|>

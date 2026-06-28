@@ -1,0 +1,3 @@
+Based on the image provided, here is a caption for the food:
+
+"Golden, crispy KFC fries spilling from their iconic red and white paper sleeve, served in a white takeout box."<|im_end|>

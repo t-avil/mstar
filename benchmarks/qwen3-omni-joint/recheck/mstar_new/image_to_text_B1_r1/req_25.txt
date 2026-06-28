@@ -1,0 +1,12 @@
+Based on the visual evidence in the image, the dish shown is **Fish Tacos**.
+
+Here are the key components that lead to this identification:
+
+*   **Tortillas:** The dish is served in soft, round tortillas that appear to be lightly toasted or grilled, which is typical for fish tacos.
+*   **Main Protein:** The primary filling is a golden-brown, battered, and fried piece of fish, likely a white fish such as cod or tilapia.
+*   **Toppings:** The tacos are generously topped with a variety of fresh ingredients, including:
+    *   **Shredded Lettuce:** A large amount of finely shredded green lettuce.
+    *   **Diced Tomatoes:** Bright red, fresh tomato pieces.
+    *   **Sour Cream:** A creamy white sauce, likely sour cream or Mexican crema, drizzled on top.
+    *   **Cilantro:** Small green specks of chopped cilantro are visible.
+*   **Serving Style:** The tacos are served on a white paper plate lined with parchment paper, a common presentation for casual or fast-casual Mexican food establishments.<|im_end|>

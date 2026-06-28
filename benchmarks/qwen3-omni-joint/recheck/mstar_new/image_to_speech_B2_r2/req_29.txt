@@ -1,0 +1,3 @@
+Of course. Based on the food presented in the image, here is a caption that describes the dish:
+
+A beautifully seared prime rib roast, cooked to a perfect medium-rare, is the centerpiece of this classic American meal. It's served on a sizzling cast-iron plate alongside a delicious-looking pan of golden, crispy home fries. A small cup of creamy horseradish sauce is provided for dipping, and a few slices of fresh avocado are placed as a garnish.<|im_end|>

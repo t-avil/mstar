@@ -1,0 +1,3 @@
+Of course, here is a caption for the image of the food:
+
+**Crispy fried chicken wings and golden french fries, served in paper trays on a wooden table.**<|im_end|>

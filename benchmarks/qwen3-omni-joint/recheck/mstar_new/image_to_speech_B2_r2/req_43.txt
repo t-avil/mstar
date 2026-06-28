@@ -1,0 +1,11 @@
+Hello, this is a dish called **Escargot**.
+
+More specifically, it's **Burgundy Escargot**. This is a classic French dish where edible snails, typically the *Helix pomatia* (Roman snail), are cooked and served in their shells.
+
+They are usually prepared by:
+*   **Sautéing:** The snails are first cooked in a butter and garlic mixture, often referred to as "escargot butter" or *aioli*.
+*   **Serving in shells:** The cooked snails are placed back into their original shells.
+*   **Baking:** They are then placed on a baking sheet and baked until the butter is bubbling and the shells are warm.
+*   **Garnishing:** The dish is traditionally garnished with fresh parsley and lemon wedges, as seen in the image.
+
+The snails are typically eaten with a special **escargot fork** to extract the meat from the shell.<|im_end|>

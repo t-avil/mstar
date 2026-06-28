@@ -1,0 +1,9 @@
+Based on the appearance of the food in the image, these are **spring rolls**.
+
+They are characterized by being made with a thin, translucent rice paper wrapper that is filled with a variety of fresh ingredients. Common fillings include:
+
+*   **Vegetables:** Such as shredded carrots, cucumber, lettuce, and herbs like mint and cilantro.
+*   **Protein:** Often includes cooked shrimp or tofu.
+*   **Noodles:** Sometimes vermicelli rice noodles are added.
+
+They are typically served cold and are often accompanied by a dipping sauce, like peanut sauce or a sweet chili sauce, which is visible in the small white bowl next to the rolls.<|im_end|>

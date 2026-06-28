@@ -1,0 +1,11 @@
+Based on the visual information provided, this dish is **escargots**.
+
+More specifically, this is a classic French preparation known as **"escargots de Bourgogne"** (Burgundy snails).
+
+Here are the key details that identify the dish:
+
+*   **Main Ingredient:** The dish features large, cooked snails served in their spiral shells.
+*   **Preparation:** The snails are typically cooked in a butter-based sauce with garlic, parsley, and sometimes white wine or herbs de Provence. The sauce is often served in the same shell.
+*   **Garnish:** The lemon wedge and fresh parsley sprig are classic accompaniments for this dish.
+
+This is a well-known delicacy in French cuisine.<|im_end|>

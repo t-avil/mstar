@@ -1,0 +1,13 @@
+Based on the visual details in the image, the dish shown is **Thai Fried Rice**, also known as **Khao Pad**.
+
+Here is a breakdown of the key components that lead to this identification:
+
+*   **Mounded Rice:** The most prominent feature is a mound of cooked rice, which is the base of the dish.
+*   **Yellow Color:** The rice has a distinct yellow hue, which indicates that it was cooked with **turmeric**, a common ingredient in this specific Thai variation of fried rice.
+*   **Toppings and Garnishes:** The dish is garnished with:
+    *   **Sliced cucumber**
+    *   **A slice of lime**
+    *   **Sliced tomato**
+    *   **Green onions (scallions)**
+
+This combination of turmeric-colored rice and the specific garnishes is a classic presentation for Thai Fried Rice.<|im_end|>

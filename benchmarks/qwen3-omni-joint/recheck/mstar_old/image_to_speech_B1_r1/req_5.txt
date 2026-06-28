@@ -1,0 +1,10 @@
+Based on the image provided, the dish shown is **Paella**.
+
+Here are the specific details that lead to this conclusion:
+
+*   **Serving Vessel:** The food is served in a wide, shallow, black metal pan, which is characteristic of a paella pan (or *paellera*). This type of pan allows for the even cooking of the rice and the formation of the crispy, golden-brown layer known as *socarrat* at the bottom.
+*   **Key Ingredients:** The dish clearly contains:
+    *   **Rice:** The base of the dish is rice, which appears to be cooked in a flavorful, reddish broth.
+    *   **Seafood:** There are several pieces of cooked shrimp and at least one whole clams or mussels visible on top.
+    *   **Lemon Wedge:** A wedge of lemon is placed on top, a common garnish for paella to add a fresh, acidic note.
+*   **Presentation:** The dish is served family-style in the pan it was cooked in, which is the traditional way to serve paella.<|im_end|>

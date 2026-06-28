@@ -1,0 +1,31 @@
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'interleaved', 'mrope_section'}
+
+--- Benchmark Results (wall time: 214.05s) ---
+Closed-Loop Benchmark Results (60 requests, max_concurrency=1)
+──────────────────────────────────────────────────
+Request type breakdown: image_to_speech=60
+Requests : 55/60 succeeded
+TTFT (audio)  : mean=0.412s  p50=0.414s  p95=0.447s  p99=0.503s
+TTFT (text)   : mean=0.279s  p50=0.281s  p95=0.313s  p99=0.369s
+E2E           : mean=3.567s  p50=3.912s  p95=5.413s  p99=5.883s
+ITL  (audio)  : mean=0.092s  p50=0.089s  p95=0.110s  p99=0.118s
+ITL  (text)   : mean=0.007s  p50=0.007s  p95=0.008s  p99=0.009s
+Audio SV      : mean=1.000s  p50=1.000s  p05=1.000s  p10=1.000s  (higher is better)
+RTF           : mean=0.090  p50=0.087  p95=0.113  p99=0.134  (lower is better; <1.0 = real-time)
+Audio dur    : mean=44.143s
+Text tokens: 9989 total (178.4 avg/req)
+Output bytes (audio): 118657470 total (2124 chunks)
+Output bytes (text): 43600 total (9989 chunks)
+Throughput: 0.26 req/s (successful only)
+Throughput: 46.67 text tok/s
+Throughput: 11.55 audio sec/s (synthesized audio per wall second)
+Total wall time: 214.05s
+
+--- Errors (5/60) ---
+  [55] Response payload is not completed: <TransferEncodingError: 400, message='Not enough data to satisfy transfer length header.'>
+  [56] Cannot connect to host 127.0.0.1:8175 ssl:default [Connect call failed ('127.0.0.1', 8175)]
+  [57] Cannot connect to host 127.0.0.1:8175 ssl:default [Connect call failed ('127.0.0.1', 8175)]
+  [58] Cannot connect to host 127.0.0.1:8175 ssl:default [Connect call failed ('127.0.0.1', 8175)]
+  [59] Cannot connect to host 127.0.0.1:8175 ssl:default [Connect call failed ('127.0.0.1', 8175)]
+
+Saved 112 outputs to /home/tim/exp_rebench/recheck/mstar_new/image_to_speech_B1_r3/

@@ -1,0 +1,12 @@
+Based on the visual information in the image, here is an analysis of the cuisine and dish:
+
+**Dish Identification:**
+The dish shown is **Raw oysters on the half shell**. This is a classic appetizer in which oysters are served live in their shells, typically on a bed of crushed ice to keep them cold and fresh. They are traditionally eaten raw, either plain or with a squeeze of lemon juice and/or a condiment like cocktail sauce.
+
+**Cuisine Identification:**
+This dish is a staple of **Seafood cuisine**. It is particularly prominent in several culinary traditions, including:
+*   **French cuisine**: Often served as an *amuse-bouche* or *entrée*, known as *huîtres*.
+*   **American cuisine**: A very popular appetizer in the United States, especially in coastal areas like the Gulf Coast and the East Coast.
+*   **British cuisine**: A traditional offering in fish and chip shops and seafood restaurants.
+
+The presentation, with a simple garnish of lemon wedges and a small sprig of parsley, is a classic and common way to serve this dish worldwide.<|im_end|>

@@ -1,0 +1,13 @@
+Based on the components in the image, this dish is a **Breakfast Burrito**.
+
+Here is a breakdown of the ingredients that lead to this identification:
+
+*   **Base:** A soft tortilla is folded to contain all the fillings, which is characteristic of a burrito.
+*   **Protein:** The fillings include scrambled eggs, which are a common breakfast protein.
+*   **Toppings:** The burrito is generously topped with:
+    *   Melted yellow cheese.
+    *   A dollop of guacamole (avocado mash).
+    *   A drizzle of sour cream.
+    *   A fresh tomato and onion salsa, also known as pico de gallo.
+
+The combination of a tortilla filled with scrambled eggs, cheese, and classic Mexican-style toppings like guacamole and salsa is a very popular and recognizable breakfast burrito.<|im_end|>

@@ -1,0 +1,10 @@
+Based on the visual evidence in the image, this dish is **Poutine**.
+
+Here's a breakdown of the identification:
+
+*   **Key Ingredients:** The dish is composed of three main components:
+    1.  **French Fries:** The base is made of thick-cut, golden-brown french fries.
+    2.  **Gravy:** A rich, brown gravy is generously poured over the fries.
+    3.  **Cheese Curds:** Although not as distinct as in some photos, the lumpy, irregular white or off-white solids mixed in with the fries and gravy are characteristic of cheese curds, which are a hallmark of this dish.
+
+*   **Cuisine:** Poutine is a very popular and iconic dish that originated in the province of Quebec, Canada. It is considered a national dish of Quebec and is a staple of Canadian cuisine.<|im_end|>
