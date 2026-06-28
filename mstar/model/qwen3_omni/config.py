@@ -288,8 +288,8 @@ class Code2WavConfig:
     # ``Qwen3OmniMoeCode2WavConfig`` (which has no such field today but could
     # add one; the HF method ``chunked_decode(chunk_size=...)`` also uses the
     # same bare name with different semantics).
-    codec_chunk_frames: int = 25
-    codec_left_context_frames: int = 25
+    codec_chunk_frames: int = 15
+    codec_left_context_frames: int = 15
     attention_bias: bool = False
     attention_dropout: float = 0.0
     codebook_dim: int = 512
