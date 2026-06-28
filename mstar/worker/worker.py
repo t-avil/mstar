@@ -12,6 +12,7 @@ from time import sleep
 import torch
 
 from mstar.api_server.request_types import APIServerMessage, ResultTensors
+from mstar.utils.ttft_trace import trace as _ttft_trace
 from mstar.communication.communicator import CommProtocol, ZMQCommunicator
 from mstar.communication.event import EventWakeup
 from mstar.communication.tensors import NameToTensorList, create_tensor_communication_manager
@@ -256,6 +257,19 @@ class Worker:
         # CPU offloading: LRU tracking and eviction policy
         self._last_active: dict[tuple[str, str], float] = {}  # (request_id, node_name) -> monotonic timestamp
         self.eviction_policy = EvictionPolicy.LRU
+
+        # Per-node GPU timing (env-gated, default OFF). When MSTAR_NODE_TIMING
+        # is set to a positive integer N, the worker records exact GPU kernel
+        # time per (node_name, graph_walk) via CUDA events and logs an
+        # aggregate every N recorded samples. Used to break TTFT into
+        # encoder-forward vs Thinker-prefill. Byte-identical default path when
+        # unset.
+        self._node_timing_period: int = int(os.environ.get("MSTAR_NODE_TIMING", "0") or "0")
+        self._node_timing: dict[tuple[str, str], list[float]] = defaultdict(list)
+        self._node_timing_count: int = 0
+        # TTFT cross-process boundary traces: dedup so each fires once/request.
+        self._ttft_submit_seen: set[tuple[str, str]] = set()  # (rid, node_name)
+        self._ttft_emit_seen: set[str] = set()  # rids that already traced first emit
 
         # Async-scheduling cross-iter state. Initialized here (rather than in
         # run()) because _remove_request — which can be invoked indirectly
@@ -1000,6 +1014,10 @@ class Worker:
                 )
 
         if outputs.emit_to_client:
+            if (self._node_timing_period > 0
+                    and request_id not in self._ttft_emit_seen):
+                self._ttft_emit_seen.add(request_id)
+                _ttft_trace(request_id, "worker_emit")
             self.worker_graphs_manager.buffer_output_signals(
                 request_id, outputs.emit_to_client
             )
@@ -1202,11 +1220,18 @@ class Worker:
                 synchronize=False,
             )
         try:
+            _timing_on = self._node_timing_period > 0
+            start_ev = None
+            if _timing_on and torch.cuda.is_available():
+                start_ev = torch.cuda.Event(enable_timing=True)
+                start_ev.record(torch.cuda.default_stream(self.device))
             output = engine.execute_with_max_batch_size(node_batch)
             if torch.cuda.is_available():
-                event = torch.cuda.Event()
+                event = torch.cuda.Event(enable_timing=_timing_on)
                 event.record(torch.cuda.default_stream(self.device))
                 output.completion_event = event
+                if start_ev is not None:
+                    output.start_event = start_ev
             return output
         finally:
             # Safety net: ensure advance_event fires even if the engine
@@ -1649,6 +1674,34 @@ class Worker:
                     range_pop(synchronize=False)
             else:
                 torch.cuda.default_stream().synchronize()
+
+        # Per-node GPU timing (env-gated). completion_event is now synced, so
+        # start_event.elapsed_time is valid. Records exact GPU kernel ms per
+        # (node, graph_walk) and logs an aggregate every N samples.
+        if self._node_timing_period > 0:
+            start_ev = getattr(output, "start_event", None)
+            if start_ev is not None and output.completion_event is not None:
+                try:
+                    dt_ms = start_ev.elapsed_time(output.completion_event)
+                    self._node_timing[(batch_N.node_name, batch_N.graph_walk)].append(dt_ms)
+                    self._node_timing_count += 1
+                    if self._node_timing_count % self._node_timing_period == 0:
+                        parts = []
+                        for (nn, gw), vs in sorted(self._node_timing.items()):
+                            if not vs:
+                                continue
+                            sv = sorted(vs)
+                            n = len(sv)
+                            parts.append(
+                                f"{nn}/{gw}: p50={sv[n // 2]:.2f}ms "
+                                f"mean={sum(sv) / n:.2f}ms n={n}"
+                            )
+                        logger.info(
+                            "Worker %s node-timing: %s",
+                            self.worker_id, " | ".join(parts),
+                        )
+                except Exception:
+                    pass
 
         if self.enable_nvtx:
             range_pop(synchronize=False)
@@ -2391,6 +2444,15 @@ class Worker:
                 # advance_seq_lens.
                 fallthrough_advance_event = threading.Event()
                 node_batch.metadata["advance_event"] = fallthrough_advance_event
+                if (self._node_timing_period > 0
+                        and isinstance(getattr(batch, "graph_walk", None), str)
+                        and batch.graph_walk.startswith("prefill")):
+                    for _rid in node_batch.request_ids:
+                        _key = (_rid, batch.node_name)
+                        if _key not in self._ttft_submit_seen:
+                            self._ttft_submit_seen.add(_key)
+                            _ttft_trace(_rid, "worker_submit",
+                                        node=batch.node_name, walk=batch.graph_walk)
                 future = gpu_executor.submit(
                     self._execute_on_gpu_thread, batch, node_batch,
                     None, fallthrough_advance_event,

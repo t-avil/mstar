@@ -13,6 +13,7 @@ import torch
 import yaml
 
 from mstar.api_server.request_types import APIServerMessage, RequestComplete
+from mstar.utils.ttft_trace import trace as _ttft_trace
 from mstar.communication.communicator import CommProtocol, ZMQCommunicator
 from mstar.conductor.request_info import (
     CurrentForwardConductorMetadata,
@@ -590,6 +591,7 @@ class Conductor:
         self, body: NewRequestConductor
     ):
         """Actually dispatch a request to workers (no admission check)."""
+        _ttft_trace(body.request_id, "cond_ingest")
         logger.debug("Conductor ingesting request %s", body.request_id)
         worker_graph_to_workers = self._assign_worker_graphs_to_workers()
 
@@ -715,6 +717,7 @@ class Conductor:
                         body=message,
                     ),
                 )
+        _ttft_trace(body.request_id, "cond_dispatch")
 
     def _resolve_worker_partition(
         self, worker_graph_ids: list[str],

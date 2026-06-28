@@ -22,6 +22,7 @@ from starlette.concurrency import run_in_threadpool
 
 from mstar.api_server.data_worker import PreprocessWorker
 from mstar.api_server.request_types import APIServerMessage, PreprocessInput, ResultChunk
+from mstar.utils.ttft_trace import trace as _ttft_trace
 from mstar.communication.communicator import CommProtocol, ZMQCommunicator
 from mstar.model.registry import HF_MODELS
 from mstar.utils.logging_config import quiet_noisy_loggers
@@ -256,6 +257,7 @@ class APIServer:
                 "final_outputs": {},
             }
 
+        _ttft_trace(request_id, "api_recv")
         self.preprocess_worker.new_request(PreprocessInput(
             request_id=request_id,
             text=text,
@@ -365,6 +367,7 @@ class APIServer:
         """
         start = time.time()
         finished = False
+        _first_chunk_traced = False
         try:
             while True:
                 if time.time() - start > self.timeout_seconds:
@@ -383,6 +386,9 @@ class APIServer:
                     else:
                         done = True
 
+                if new_chunks and not _first_chunk_traced:
+                    _ttft_trace(request_id, "api_first_chunk")
+                    _first_chunk_traced = True
                 for chunk in new_chunks:
                     yield chunk
 

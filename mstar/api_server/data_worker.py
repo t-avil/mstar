@@ -16,6 +16,7 @@ except (ImportError, RuntimeError, OSError):
     VideoDecoder = None
 
 from mstar.api_server.request_types import PreprocessInput, ResultChunk, ResultTensors
+from mstar.utils.ttft_trace import trace as _ttft_trace
 from mstar.communication.communicator import CommProtocol, ZMQCommunicator
 from mstar.communication.tensors import NameToTensorList, create_tensor_communication_manager
 from mstar.model.base import Model
@@ -170,6 +171,7 @@ class PreprocessWorkerThread:
         tcp_transfer_device="",
     ):
         self.in_queue = in_queue
+        self._ttft_chunk_seen: set[str] = set()  # rids that already traced first chunk_ready
         self.result_tensor_queue = result_tensor_queue
         self.cleanup_request_queue = cleanup_request_queue
         self.abort_request_queue = abort_request_queue
@@ -200,6 +202,7 @@ class PreprocessWorkerThread:
     def _process_input(
         self, input: PreprocessInput
     ):
+        _ttft_trace(input.request_id, "preproc_start")
         tensors: NameToTensorList = {}
         input_metadata = {}
 
@@ -283,6 +286,7 @@ class PreprocessWorkerThread:
                 model_kwargs=input.model_kwargs
             ),
         )
+        _ttft_trace(input.request_id, "preproc_end")
         self.communicator.send("conductor", msg)
 
     def _read_result_tensor(
@@ -315,6 +319,10 @@ class PreprocessWorkerThread:
             did_work = True
             for graph_edge in graph_edges:
                 modality = graph_edge.name.replace("_output", "")
+
+                if request_id not in self._ttft_chunk_seen:
+                    self._ttft_chunk_seen.add(request_id)
+                    _ttft_trace(request_id, "chunk_ready", modality=modality)
 
                 for tensor_info in graph_edge.tensor_info:
                     logger.debug("Reading in OUTPUT tensor %s with uuid %s", graph_edge.name, tensor_info.uuid)

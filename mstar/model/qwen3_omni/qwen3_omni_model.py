@@ -1032,6 +1032,14 @@ class Qwen3OmniModel(Model):
         if tensors is None:
             tensors = {}
 
+        # Env-gated preprocess timing (MSTAR_NODE_TIMING). Measures the
+        # synchronous mel-spectrogram / image feature-extraction cost that
+        # sits on the TTFT critical path BEFORE prefill. Off by default.
+        import os as _os
+        import time as _time_pp
+        _pp_timing = int(_os.environ.get("MSTAR_NODE_TIMING", "0") or "0") > 0
+        _pp_t0 = _time_pp.perf_counter() if _pp_timing else 0.0
+
         # ----- Convert raw modality tensors to PIL/numpy form for HF -----
         raw_image_inputs = tensors.get("image_inputs", [])
         raw_audio_inputs = tensors.get("audio_inputs", [])
@@ -1168,6 +1176,13 @@ class Qwen3OmniModel(Model):
             )
             result["video_grid_thw"] += vid_out["video_grid_thw"]
             result["pixel_values_videos"].append(vid_out["pixel_values_videos"])
+
+        if _pp_timing:
+            _dt_ms = (_time_pp.perf_counter() - _pp_t0) * 1000.0
+            logger.info(
+                "process_prompt timing: %.2fms (n_audio=%d n_image=%d n_video=%d)",
+                _dt_ms, len(np_audios), len(pil_images), len(raw_video_inputs),
+            )
 
         return result
 
