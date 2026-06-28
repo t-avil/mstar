@@ -11,12 +11,14 @@ Stateful engines (paged KV cache, FlashInfer planning, sampling, CFG) live in
 ``kv_cache_engine.py`` and do NOT use this class.
 """
 
+import contextlib
 import logging
 from dataclasses import dataclass
 
 import torch
 
 from mstar.distributed.communication import WorkerTPGroups
+from mstar.engine.precision import vocoder_precision_context
 from mstar.engine.base import (
     BaseEngine,
     EngineType,
@@ -222,7 +224,10 @@ class StatelessEngine(BaseEngine):
         submodule = self.submodules.get(batch.node_name)
         per_submodule_dtype = submodule.get_autocast_dtype() if submodule is not None else None
         try:
-            with self._inference_context(per_submodule_dtype):
+            # Vocoder (audio_codec) fp32-vs-TF32 toggle, scoped to its forward
+            # only so it never leaks into the bf16 engines. No-op unless
+            # MSTAR_VOCODER_FP32_PRECISION is set. See mstar/engine/precision.py.
+            with self._vocoder_precision_context(), self._inference_context(per_submodule_dtype):
                 return super().execute_batch(batch)
         finally:
             if self.enable_nvtx:
@@ -281,6 +286,18 @@ class StatelessEngine(BaseEngine):
             )
 
     # ─── Internals ─────────────────────────────────────────────────────
+
+    def _vocoder_precision_context(self):
+        """Vocoder fp32/TF32 precision scope, only for the audio_codec engine.
+
+        Returns a no-op context for every other engine flavor (so the bf16
+        encoder/decoder/flow engines are untouched), and the env-gated
+        ``vocoder_precision_context`` for the audio codec. Itself a no-op
+        unless ``MSTAR_VOCODER_FP32_PRECISION`` is set.
+        """
+        if self.config.name == "audio_codec":
+            return vocoder_precision_context()
+        return contextlib.nullcontext()
 
     def _inference_context(self, autocast_dtype_override: torch.dtype | None = None):
         """Pick the right grad/autocast context.
@@ -506,13 +523,17 @@ class StatelessEngine(BaseEngine):
         if not torch.cuda.is_available() or self.device is None:
             return
 
-        for node_name, submodule in self.submodules.items():
-            if self.config.apply_torch_compile:
-                self._apply_torch_compile(node_name, submodule)
-            if self.config.cuda_graph_capable:
-                self._capture_codec_graphs(node_name, submodule)
-            if self.config.enable_piecewise_runner:
-                self._install_piecewise_runner(node_name, submodule)
+        # Capture CUDA graphs under the same vocoder precision used at replay
+        # time, so the captured matmul/conv kernels match the runtime toggle.
+        # No-op for non-vocoder engines and when the env var is unset.
+        with self._vocoder_precision_context():
+            for node_name, submodule in self.submodules.items():
+                if self.config.apply_torch_compile:
+                    self._apply_torch_compile(node_name, submodule)
+                if self.config.cuda_graph_capable:
+                    self._capture_codec_graphs(node_name, submodule)
+                if self.config.enable_piecewise_runner:
+                    self._install_piecewise_runner(node_name, submodule)
 
     def _apply_torch_compile(self, node_name: str, submodule: NodeSubmodule) -> None:
         try:
