@@ -1,0 +1,1261 @@
+{
+  "benchmark": "ttft-decompose",
+  "description": "B=1 per-stage TTFT decomposition for Qwen3-Omni S2T/I2T on M* (8xH200, GPUs 0,1, isolated single server). Cross-process monotonic-clock boundary traces + per-node GPU CUDA-event timing.",
+  "timestamp_utc": "20260628T083556Z",
+  "device": {
+    "cuda_visible_devices": "0,1",
+    "gpu_name": "NVIDIA H200",
+    "n_gpu": 2
+  },
+  "model": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
+  "units": "ms",
+  "warmup_iters": 5,
+  "stage_order": [
+    "api_to_preproc",
+    "preprocess_cpu",
+    "admission_total",
+    "  preproc_to_conductor",
+    "  conductor_dispatch",
+    "  conductor_to_submit",
+    "encoder_plus_prefill_wall",
+    "emit_to_client_total",
+    "  worker_emit_to_chunk",
+    "  chunk_to_api",
+    "total_server_ttft"
+  ],
+  "node_timing_gpu_ms": {
+    "Thinker/prefill_audio": {
+      "n": 30,
+      "p50_ms": 22.3,
+      "mean_ms": 57.51
+    },
+    "Thinker/prefill_text": {
+      "n": 60,
+      "p50_ms": 21.48,
+      "mean_ms": 21.65
+    },
+    "Thinker/prefill_vision": {
+      "n": 30,
+      "p50_ms": 32.32,
+      "mean_ms": 32.04
+    },
+    "Thinker/thinker_decode": {
+      "n": 5650,
+      "p50_ms": 6.56,
+      "mean_ms": 6.61
+    },
+    "audio_encoder/prefill_audio": {
+      "n": 30,
+      "p50_ms": 27.2,
+      "mean_ms": 42.24
+    },
+    "vision_encoder/prefill_vision": {
+      "n": 30,
+      "p50_ms": 28.42,
+      "mean_ms": 30.82
+    }
+  },
+  "datapoints": [
+    {
+      "path": "S2T",
+      "walk": "prefill_audio",
+      "iter": 0,
+      "phase": "warmup",
+      "rid": "e479ca0e-1604-49a5-9275-562c299a805c",
+      "stages_ms": {
+        "api_to_preproc": 1.01587,
+        "preprocess_cpu": 371.914212,
+        "admission_total": 8.649738,
+        "  preproc_to_conductor": 2.204296,
+        "  conductor_dispatch": 1.80942,
+        "  conductor_to_submit": 4.636022,
+        "encoder_plus_prefill_wall": 1457.667226,
+        "emit_to_client_total": 30.869518,
+        "  worker_emit_to_chunk": 30.340752,
+        "  chunk_to_api": 0.528766,
+        "total_server_ttft": 1870.116564
+      }
+    },
+    {
+      "path": "S2T",
+      "walk": "prefill_audio",
+      "iter": 1,
+      "phase": "warmup",
+      "rid": "7446cb1b-f56e-46ed-b4df-45aefa19ebfd",
+      "stages_ms": {
+        "api_to_preproc": 0.676726,
+        "preprocess_cpu": 20.43707,
+        "admission_total": 5.739833,
+        "  preproc_to_conductor": 1.609323,
+        "  conductor_dispatch": 1.089469,
+        "  conductor_to_submit": 3.041041,
+        "encoder_plus_prefill_wall": 68.047755,
+        "emit_to_client_total": 28.646384,
+        "  worker_emit_to_chunk": 27.101277,
+        "  chunk_to_api": 1.545107,
+        "total_server_ttft": 123.547768
+      }
+    },
+    {
+      "path": "S2T",
+      "walk": "prefill_audio",
+      "iter": 2,
+      "phase": "warmup",
+      "rid": "e824bff9-8a69-4c43-80b9-85bed7f0fa4c",
+      "stages_ms": {
+        "api_to_preproc": 0.515726,
+        "preprocess_cpu": 18.474543,
+        "admission_total": 5.151588,
+        "  preproc_to_conductor": 1.508532,
+        "  conductor_dispatch": 1.008149,
+        "  conductor_to_submit": 2.634907,
+        "encoder_plus_prefill_wall": 68.784621,
+        "emit_to_client_total": 26.924554,
+        "  worker_emit_to_chunk": 25.606565,
+        "  chunk_to_api": 1.317989,
+        "total_server_ttft": 119.851032
+      }
+    },
+    {
+      "path": "S2T",
+      "walk": "prefill_audio",
+      "iter": 3,
+      "phase": "warmup",
+      "rid": "f7ba3c23-2abb-4950-8e45-703305fdb8a5",
+      "stages_ms": {
+        "api_to_preproc": 1.276488,
+        "preprocess_cpu": 27.055589,
+        "admission_total": 6.595354,
+        "  preproc_to_conductor": 1.942958,
+        "  conductor_dispatch": 1.155578,
+        "  conductor_to_submit": 3.496818,
+        "encoder_plus_prefill_wall": 85.413259,
+        "emit_to_client_total": 28.88574,
+        "  worker_emit_to_chunk": 28.387259,
+        "  chunk_to_api": 0.498481,
+        "total_server_ttft": 149.22643
+      }
+    },
+    {
+      "path": "S2T",
+      "walk": "prefill_audio",
+      "iter": 4,
+      "phase": "warmup",
+      "rid": "823689a5-33b8-4852-947b-7d2b3a2d8b68",
+      "stages_ms": {
+        "api_to_preproc": 0.684368,
+        "preprocess_cpu": 21.591736,
+        "admission_total": 8.322512,
+        "  preproc_to_conductor": 0.979426,
+        "  conductor_dispatch": 0.981139,
+        "  conductor_to_submit": 6.361947,
+        "encoder_plus_prefill_wall": 72.49112,
+        "emit_to_client_total": 28.942955,
+        "  worker_emit_to_chunk": 27.055219,
+        "  chunk_to_api": 1.887736,
+        "total_server_ttft": 132.032691
+      }
+    },
+    {
+      "path": "S2T",
+      "walk": "prefill_audio",
+      "iter": 5,
+      "phase": "measure",
+      "rid": "888b7e8c-8e4c-490f-9bef-80b1bb7dea3e",
+      "stages_ms": {
+        "api_to_preproc": 0.57164,
+        "preprocess_cpu": 19.54932,
+        "admission_total": 5.661787,
+        "  preproc_to_conductor": 1.278962,
+        "  conductor_dispatch": 0.926377,
+        "  conductor_to_submit": 3.456448,
+        "encoder_plus_prefill_wall": 50.053145,
+        "emit_to_client_total": 28.843277,
+        "  worker_emit_to_chunk": 27.330187,
+        "  chunk_to_api": 1.51309,
+        "total_server_ttft": 104.679169
+      }
+    },
+    {
+      "path": "S2T",
+      "walk": "prefill_audio",
+      "iter": 6,
+      "phase": "measure",
+      "rid": "3bcc15b8-57d8-4225-9e0c-5e76b03c21b4",
+      "stages_ms": {
+        "api_to_preproc": 1.172273,
+        "preprocess_cpu": 19.880443,
+        "admission_total": 7.028478,
+        "  preproc_to_conductor": 1.148036,
+        "  conductor_dispatch": 1.480511,
+        "  conductor_to_submit": 4.399931,
+        "encoder_plus_prefill_wall": 52.291323,
+        "emit_to_client_total": 26.978484,
+        "  worker_emit_to_chunk": 25.931327,
+        "  chunk_to_api": 1.047157,
+        "total_server_ttft": 107.351001
+      }
+    },
+    {
+      "path": "S2T",
+      "walk": "prefill_audio",
+      "iter": 7,
+      "phase": "measure",
+      "rid": "4a183526-3cb8-4ea0-a631-efcde02dd3ce",
+      "stages_ms": {
+        "api_to_preproc": 0.674442,
+        "preprocess_cpu": 19.416624,
+        "admission_total": 6.329829,
+        "  preproc_to_conductor": 1.63514,
+        "  conductor_dispatch": 2.094905,
+        "  conductor_to_submit": 2.599784,
+        "encoder_plus_prefill_wall": 49.852027,
+        "emit_to_client_total": 27.130991,
+        "  worker_emit_to_chunk": 25.683229,
+        "  chunk_to_api": 1.447762,
+        "total_server_ttft": 103.403913
+      }
+    },
+    {
+      "path": "S2T",
+      "walk": "prefill_audio",
+      "iter": 8,
+      "phase": "measure",
+      "rid": "69aeda75-ef50-4a49-8e21-1784bdfefbae",
+      "stages_ms": {
+        "api_to_preproc": 0.196241,
+        "preprocess_cpu": 33.533218,
+        "admission_total": 6.634653,
+        "  preproc_to_conductor": 1.837612,
+        "  conductor_dispatch": 1.151782,
+        "  conductor_to_submit": 3.645259,
+        "encoder_plus_prefill_wall": 52.956341,
+        "emit_to_client_total": 27.326191,
+        "  worker_emit_to_chunk": 26.516428,
+        "  chunk_to_api": 0.809763,
+        "total_server_ttft": 120.646644
+      }
+    },
+    {
+      "path": "S2T",
+      "walk": "prefill_audio",
+      "iter": 9,
+      "phase": "measure",
+      "rid": "1c8b96a3-fd8a-4f0f-b51a-8277eb09311a",
+      "stages_ms": {
+        "api_to_preproc": 0.962741,
+        "preprocess_cpu": 20.658069,
+        "admission_total": 6.481404,
+        "  preproc_to_conductor": 1.624995,
+        "  conductor_dispatch": 0.979857,
+        "  conductor_to_submit": 3.876552,
+        "encoder_plus_prefill_wall": 52.104125,
+        "emit_to_client_total": 27.849799,
+        "  worker_emit_to_chunk": 27.264389,
+        "  chunk_to_api": 0.58541,
+        "total_server_ttft": 108.056138
+      }
+    },
+    {
+      "path": "S2T",
+      "walk": "prefill_audio",
+      "iter": 10,
+      "phase": "measure",
+      "rid": "69ce27b5-c363-4b2b-b9be-e366f285c8c1",
+      "stages_ms": {
+        "api_to_preproc": 0.403309,
+        "preprocess_cpu": 18.039116,
+        "admission_total": 6.964803,
+        "  preproc_to_conductor": 0.981078,
+        "  conductor_dispatch": 1.325551,
+        "  conductor_to_submit": 4.658174,
+        "encoder_plus_prefill_wall": 71.752633,
+        "emit_to_client_total": 39.892521,
+        "  worker_emit_to_chunk": 39.11829,
+        "  chunk_to_api": 0.774231,
+        "total_server_ttft": 137.052382
+      }
+    },
+    {
+      "path": "S2T",
+      "walk": "prefill_audio",
+      "iter": 11,
+      "phase": "measure",
+      "rid": "1cf51ab6-f35b-4a39-ab0b-a03ec3fbf041",
+      "stages_ms": {
+        "api_to_preproc": 1.180805,
+        "preprocess_cpu": 18.560291,
+        "admission_total": 7.401362,
+        "  preproc_to_conductor": 1.501071,
+        "  conductor_dispatch": 1.394413,
+        "  conductor_to_submit": 4.505878,
+        "encoder_plus_prefill_wall": 57.870266,
+        "emit_to_client_total": 27.09711,
+        "  worker_emit_to_chunk": 26.460865,
+        "  chunk_to_api": 0.636245,
+        "total_server_ttft": 112.109834
+      }
+    },
+    {
+      "path": "S2T",
+      "walk": "prefill_audio",
+      "iter": 12,
+      "phase": "measure",
+      "rid": "767420cd-d4bb-4bd1-8328-711153e052d0",
+      "stages_ms": {
+        "api_to_preproc": 0.681864,
+        "preprocess_cpu": 17.940089,
+        "admission_total": 7.992301,
+        "  preproc_to_conductor": 1.626698,
+        "  conductor_dispatch": 1.112153,
+        "  conductor_to_submit": 5.25345,
+        "encoder_plus_prefill_wall": 49.38369,
+        "emit_to_client_total": 28.04519,
+        "  worker_emit_to_chunk": 26.630807,
+        "  chunk_to_api": 1.414383,
+        "total_server_ttft": 104.043134
+      }
+    },
+    {
+      "path": "S2T",
+      "walk": "prefill_audio",
+      "iter": 13,
+      "phase": "measure",
+      "rid": "ac98d248-d287-4d5d-92b9-b0ebbbfc0b8f",
+      "stages_ms": {
+        "api_to_preproc": 0.23548,
+        "preprocess_cpu": 18.401985,
+        "admission_total": 5.692642,
+        "  preproc_to_conductor": 1.59394,
+        "  conductor_dispatch": 1.246813,
+        "  conductor_to_submit": 2.851889,
+        "encoder_plus_prefill_wall": 50.33194,
+        "emit_to_client_total": 27.129349,
+        "  worker_emit_to_chunk": 25.679273,
+        "  chunk_to_api": 1.450076,
+        "total_server_ttft": 101.791396
+      }
+    },
+    {
+      "path": "S2T",
+      "walk": "prefill_audio",
+      "iter": 14,
+      "phase": "measure",
+      "rid": "3060488a-f089-46f3-ad85-fdd045e7c9b7",
+      "stages_ms": {
+        "api_to_preproc": 0.61911,
+        "preprocess_cpu": 17.809905,
+        "admission_total": 5.559825,
+        "  preproc_to_conductor": 1.010031,
+        "  conductor_dispatch": 1.967485,
+        "  conductor_to_submit": 2.582309,
+        "encoder_plus_prefill_wall": 53.169868,
+        "emit_to_client_total": 30.569493,
+        "  worker_emit_to_chunk": 28.405346,
+        "  chunk_to_api": 2.164147,
+        "total_server_ttft": 107.728201
+      }
+    },
+    {
+      "path": "S2T",
+      "walk": "prefill_audio",
+      "iter": 15,
+      "phase": "measure",
+      "rid": "2018560b-77b1-49ce-938d-0732e4b5206c",
+      "stages_ms": {
+        "api_to_preproc": 0.474896,
+        "preprocess_cpu": 18.21702,
+        "admission_total": 6.35722,
+        "  preproc_to_conductor": 1.394072,
+        "  conductor_dispatch": 1.319933,
+        "  conductor_to_submit": 3.643215,
+        "encoder_plus_prefill_wall": 51.507127,
+        "emit_to_client_total": 27.702691,
+        "  worker_emit_to_chunk": 26.473514,
+        "  chunk_to_api": 1.229177,
+        "total_server_ttft": 104.258954
+      }
+    },
+    {
+      "path": "S2T",
+      "walk": "prefill_audio",
+      "iter": 16,
+      "phase": "measure",
+      "rid": "44fdf6b8-ba36-4759-a1ac-13b1dd1a660a",
+      "stages_ms": {
+        "api_to_preproc": 0.601714,
+        "preprocess_cpu": 17.325555,
+        "admission_total": 6.355037,
+        "  preproc_to_conductor": 1.072234,
+        "  conductor_dispatch": 1.335245,
+        "  conductor_to_submit": 3.947558,
+        "encoder_plus_prefill_wall": 51.863727,
+        "emit_to_client_total": 28.957627,
+        "  worker_emit_to_chunk": 27.465398,
+        "  chunk_to_api": 1.492229,
+        "total_server_ttft": 105.10366
+      }
+    },
+    {
+      "path": "S2T",
+      "walk": "prefill_audio",
+      "iter": 17,
+      "phase": "measure",
+      "rid": "6fe02a57-f8d3-4d84-8a9b-2bc2b2b97d56",
+      "stages_ms": {
+        "api_to_preproc": 0.751478,
+        "preprocess_cpu": 25.098058,
+        "admission_total": 6.765618,
+        "  preproc_to_conductor": 1.659117,
+        "  conductor_dispatch": 1.300924,
+        "  conductor_to_submit": 3.805577,
+        "encoder_plus_prefill_wall": 53.091101,
+        "emit_to_client_total": 27.665586,
+        "  worker_emit_to_chunk": 26.965115,
+        "  chunk_to_api": 0.700471,
+        "total_server_ttft": 113.371841
+      }
+    },
+    {
+      "path": "S2T",
+      "walk": "prefill_audio",
+      "iter": 18,
+      "phase": "measure",
+      "rid": "a3087a7f-b2f9-4ab4-84c6-5cd4d88edb66",
+      "stages_ms": {
+        "api_to_preproc": 0.697927,
+        "preprocess_cpu": 17.89394,
+        "admission_total": 5.525254,
+        "  preproc_to_conductor": 0.970523,
+        "  conductor_dispatch": 0.978104,
+        "  conductor_to_submit": 3.576627,
+        "encoder_plus_prefill_wall": 51.796226,
+        "emit_to_client_total": 29.826108,
+        "  worker_emit_to_chunk": 28.244917,
+        "  chunk_to_api": 1.581191,
+        "total_server_ttft": 105.739455
+      }
+    },
+    {
+      "path": "S2T",
+      "walk": "prefill_audio",
+      "iter": 19,
+      "phase": "measure",
+      "rid": "86d3ba9f-0d1a-4b09-b03c-152fe09fc377",
+      "stages_ms": {
+        "api_to_preproc": 0.79387,
+        "preprocess_cpu": 18.167606,
+        "admission_total": 5.705132,
+        "  preproc_to_conductor": 0.985716,
+        "  conductor_dispatch": 0.927679,
+        "  conductor_to_submit": 3.791737,
+        "encoder_plus_prefill_wall": 52.217973,
+        "emit_to_client_total": 27.911802,
+        "  worker_emit_to_chunk": 26.622245,
+        "  chunk_to_api": 1.289557,
+        "total_server_ttft": 104.796383
+      }
+    },
+    {
+      "path": "S2T",
+      "walk": "prefill_audio",
+      "iter": 20,
+      "phase": "measure",
+      "rid": "cc1d702b-0d67-4515-9a6a-82447f11b7bc",
+      "stages_ms": {
+        "api_to_preproc": 0.728363,
+        "preprocess_cpu": 16.957518,
+        "admission_total": 5.07918,
+        "  preproc_to_conductor": 1.238721,
+        "  conductor_dispatch": 1.280654,
+        "  conductor_to_submit": 2.559805,
+        "encoder_plus_prefill_wall": 66.743046,
+        "emit_to_client_total": 27.19076,
+        "  worker_emit_to_chunk": 26.55907,
+        "  chunk_to_api": 0.63169,
+        "total_server_ttft": 116.698867
+      }
+    },
+    {
+      "path": "S2T",
+      "walk": "prefill_audio",
+      "iter": 21,
+      "phase": "measure",
+      "rid": "38a2cfcf-f7b1-46d4-a401-e3c50da1ec9a",
+      "stages_ms": {
+        "api_to_preproc": 1.247645,
+        "preprocess_cpu": 27.163169,
+        "admission_total": 5.736698,
+        "  preproc_to_conductor": 1.643483,
+        "  conductor_dispatch": 1.179423,
+        "  conductor_to_submit": 2.913792,
+        "encoder_plus_prefill_wall": 49.813288,
+        "emit_to_client_total": 28.828325,
+        "  worker_emit_to_chunk": 27.072294,
+        "  chunk_to_api": 1.756031,
+        "total_server_ttft": 112.789125
+      }
+    },
+    {
+      "path": "S2T",
+      "walk": "prefill_audio",
+      "iter": 22,
+      "phase": "measure",
+      "rid": "1181308b-eb4c-4503-a720-0a33cfb4c649",
+      "stages_ms": {
+        "api_to_preproc": 0.595795,
+        "preprocess_cpu": 17.55788,
+        "admission_total": 5.189234,
+        "  preproc_to_conductor": 1.361995,
+        "  conductor_dispatch": 1.062429,
+        "  conductor_to_submit": 2.76481,
+        "encoder_plus_prefill_wall": 49.343121,
+        "emit_to_client_total": 28.663619,
+        "  worker_emit_to_chunk": 27.40651,
+        "  chunk_to_api": 1.257109,
+        "total_server_ttft": 101.349649
+      }
+    },
+    {
+      "path": "S2T",
+      "walk": "prefill_audio",
+      "iter": 23,
+      "phase": "measure",
+      "rid": "983db2b8-610d-4716-9b36-8401487b993e",
+      "stages_ms": {
+        "api_to_preproc": 0.553853,
+        "preprocess_cpu": 17.333537,
+        "admission_total": 7.540409,
+        "  preproc_to_conductor": 1.822179,
+        "  conductor_dispatch": 1.651144,
+        "  conductor_to_submit": 4.067086,
+        "encoder_plus_prefill_wall": 51.229404,
+        "emit_to_client_total": 28.574136,
+        "  worker_emit_to_chunk": 27.273113,
+        "  chunk_to_api": 1.301023,
+        "total_server_ttft": 105.231339
+      }
+    },
+    {
+      "path": "S2T",
+      "walk": "prefill_audio",
+      "iter": 24,
+      "phase": "measure",
+      "rid": "7fc6b161-ac81-4eeb-a2fa-59327ff582a1",
+      "stages_ms": {
+        "api_to_preproc": 1.00919,
+        "preprocess_cpu": 16.339419,
+        "admission_total": 9.125816,
+        "  preproc_to_conductor": 0.915221,
+        "  conductor_dispatch": 4.995606,
+        "  conductor_to_submit": 3.214989,
+        "encoder_plus_prefill_wall": 51.295773,
+        "emit_to_client_total": 27.718204,
+        "  worker_emit_to_chunk": 26.23599,
+        "  chunk_to_api": 1.482214,
+        "total_server_ttft": 105.488402
+      }
+    },
+    {
+      "path": "S2T",
+      "walk": "prefill_audio",
+      "iter": 25,
+      "phase": "measure",
+      "rid": "23d90bce-43b7-451d-b724-1798d8441857",
+      "stages_ms": {
+        "api_to_preproc": 0.711548,
+        "preprocess_cpu": 24.121688,
+        "admission_total": 6.550457,
+        "  preproc_to_conductor": 1.615591,
+        "  conductor_dispatch": 1.146424,
+        "  conductor_to_submit": 3.788442,
+        "encoder_plus_prefill_wall": 50.012085,
+        "emit_to_client_total": 29.635694,
+        "  worker_emit_to_chunk": 28.397093,
+        "  chunk_to_api": 1.238601,
+        "total_server_ttft": 111.031472
+      }
+    },
+    {
+      "path": "S2T",
+      "walk": "prefill_audio",
+      "iter": 26,
+      "phase": "measure",
+      "rid": "5d93f8ee-798b-44d8-af55-2df0b874cabd",
+      "stages_ms": {
+        "api_to_preproc": 0.699169,
+        "preprocess_cpu": 17.289872,
+        "admission_total": 5.774194,
+        "  preproc_to_conductor": 1.626448,
+        "  conductor_dispatch": 1.349436,
+        "  conductor_to_submit": 2.79831,
+        "encoder_plus_prefill_wall": 53.739035,
+        "emit_to_client_total": 29.494324,
+        "  worker_emit_to_chunk": 26.645198,
+        "  chunk_to_api": 2.849126,
+        "total_server_ttft": 106.996594
+      }
+    },
+    {
+      "path": "S2T",
+      "walk": "prefill_audio",
+      "iter": 27,
+      "phase": "measure",
+      "rid": "266881ef-2419-4f4b-8147-490af2631586",
+      "stages_ms": {
+        "api_to_preproc": 0.444771,
+        "preprocess_cpu": 16.598344,
+        "admission_total": 5.844758,
+        "  preproc_to_conductor": 0.897785,
+        "  conductor_dispatch": 1.270007,
+        "  conductor_to_submit": 3.676966,
+        "encoder_plus_prefill_wall": 49.936893,
+        "emit_to_client_total": 31.628166,
+        "  worker_emit_to_chunk": 29.882261,
+        "  chunk_to_api": 1.745905,
+        "total_server_ttft": 104.452932
+      }
+    },
+    {
+      "path": "S2T",
+      "walk": "prefill_audio",
+      "iter": 28,
+      "phase": "measure",
+      "rid": "47126ad1-e26f-408d-af78-772e99b2ffbd",
+      "stages_ms": {
+        "api_to_preproc": 0.692859,
+        "preprocess_cpu": 16.847635,
+        "admission_total": 6.127449,
+        "  preproc_to_conductor": 0.738177,
+        "  conductor_dispatch": 1.128468,
+        "  conductor_to_submit": 4.260804,
+        "encoder_plus_prefill_wall": 51.194031,
+        "emit_to_client_total": 28.466336,
+        "  worker_emit_to_chunk": 27.102849,
+        "  chunk_to_api": 1.363487,
+        "total_server_ttft": 103.32831
+      }
+    },
+    {
+      "path": "S2T",
+      "walk": "prefill_audio",
+      "iter": 29,
+      "phase": "measure",
+      "rid": "03982f73-f246-4dc2-995f-5a1b845df497",
+      "stages_ms": {
+        "api_to_preproc": 0.402338,
+        "preprocess_cpu": 17.34896,
+        "admission_total": 5.582719,
+        "  preproc_to_conductor": 1.419711,
+        "  conductor_dispatch": 1.320012,
+        "  conductor_to_submit": 2.842996,
+        "encoder_plus_prefill_wall": 49.689415,
+        "emit_to_client_total": 28.961101,
+        "  worker_emit_to_chunk": 27.250909,
+        "  chunk_to_api": 1.710192,
+        "total_server_ttft": 101.984533
+      }
+    },
+    {
+      "path": "I2T",
+      "walk": "prefill_vision",
+      "iter": 0,
+      "phase": "warmup",
+      "rid": "fc88b573-f5c8-4cfb-810e-0c4c1e16c79d",
+      "stages_ms": {
+        "api_to_preproc": 0.682895,
+        "preprocess_cpu": 32.219556,
+        "admission_total": 16.027896,
+        "  preproc_to_conductor": 1.496424,
+        "  conductor_dispatch": 1.01568,
+        "  conductor_to_submit": 13.515792,
+        "encoder_plus_prefill_wall": 102.687368,
+        "emit_to_client_total": 28.428149,
+        "  worker_emit_to_chunk": 26.911945,
+        "  chunk_to_api": 1.516204,
+        "total_server_ttft": 180.045864
+      }
+    },
+    {
+      "path": "I2T",
+      "walk": "prefill_vision",
+      "iter": 1,
+      "phase": "warmup",
+      "rid": "8c3cee35-2cc5-460f-b158-bfa146d84454",
+      "stages_ms": {
+        "api_to_preproc": 0.924825,
+        "preprocess_cpu": 15.470056,
+        "admission_total": 7.636782,
+        "  preproc_to_conductor": 1.22436,
+        "  conductor_dispatch": 1.061078,
+        "  conductor_to_submit": 5.351344,
+        "encoder_plus_prefill_wall": 93.240605,
+        "emit_to_client_total": 28.115274,
+        "  worker_emit_to_chunk": 27.367723,
+        "  chunk_to_api": 0.747551,
+        "total_server_ttft": 145.387542
+      }
+    },
+    {
+      "path": "I2T",
+      "walk": "prefill_vision",
+      "iter": 2,
+      "phase": "warmup",
+      "rid": "d94b1b72-d69c-4504-a74d-51788dbfe7b3",
+      "stages_ms": {
+        "api_to_preproc": 0.748462,
+        "preprocess_cpu": 19.150688,
+        "admission_total": 13.336035,
+        "  preproc_to_conductor": 0.677147,
+        "  conductor_dispatch": 0.885877,
+        "  conductor_to_submit": 11.773011,
+        "encoder_plus_prefill_wall": 70.300364,
+        "emit_to_client_total": 28.934271,
+        "  worker_emit_to_chunk": 27.468332,
+        "  chunk_to_api": 1.465939,
+        "total_server_ttft": 132.46982
+      }
+    },
+    {
+      "path": "I2T",
+      "walk": "prefill_vision",
+      "iter": 3,
+      "phase": "warmup",
+      "rid": "874a1881-7ce1-4916-ab66-ed9f3fdbb235",
+      "stages_ms": {
+        "api_to_preproc": 0.789213,
+        "preprocess_cpu": 17.313878,
+        "admission_total": 6.998654,
+        "  preproc_to_conductor": 1.390788,
+        "  conductor_dispatch": 0.932205,
+        "  conductor_to_submit": 4.675661,
+        "encoder_plus_prefill_wall": 66.116374,
+        "emit_to_client_total": 29.833087,
+        "  worker_emit_to_chunk": 27.760366,
+        "  chunk_to_api": 2.072721,
+        "total_server_ttft": 121.051206
+      }
+    },
+    {
+      "path": "I2T",
+      "walk": "prefill_vision",
+      "iter": 4,
+      "phase": "warmup",
+      "rid": "1e682abf-8c46-4049-b418-18afba3c0b01",
+      "stages_ms": {
+        "api_to_preproc": 1.236618,
+        "preprocess_cpu": 16.383445,
+        "admission_total": 10.700266,
+        "  preproc_to_conductor": 1.562893,
+        "  conductor_dispatch": 1.02251,
+        "  conductor_to_submit": 8.114863,
+        "encoder_plus_prefill_wall": 63.488648,
+        "emit_to_client_total": 29.80778,
+        "  worker_emit_to_chunk": 28.021995,
+        "  chunk_to_api": 1.785785,
+        "total_server_ttft": 121.616757
+      }
+    },
+    {
+      "path": "I2T",
+      "walk": "prefill_vision",
+      "iter": 5,
+      "phase": "measure",
+      "rid": "3abfaf5f-2732-4343-b363-796ba3d15c71",
+      "stages_ms": {
+        "api_to_preproc": 0.829433,
+        "preprocess_cpu": 24.013136,
+        "admission_total": 7.879894,
+        "  preproc_to_conductor": 0.977653,
+        "  conductor_dispatch": 0.893178,
+        "  conductor_to_submit": 6.009063,
+        "encoder_plus_prefill_wall": 61.340644,
+        "emit_to_client_total": 27.057252,
+        "  worker_emit_to_chunk": 26.629807,
+        "  chunk_to_api": 0.427445,
+        "total_server_ttft": 121.120359
+      }
+    },
+    {
+      "path": "I2T",
+      "walk": "prefill_vision",
+      "iter": 6,
+      "phase": "measure",
+      "rid": "a23835af-11fe-4e1b-8314-69a93f29bf89",
+      "stages_ms": {
+        "api_to_preproc": 0.848401,
+        "preprocess_cpu": 19.066804,
+        "admission_total": 8.322592,
+        "  preproc_to_conductor": 1.536304,
+        "  conductor_dispatch": 1.390847,
+        "  conductor_to_submit": 5.395441,
+        "encoder_plus_prefill_wall": 58.54597,
+        "emit_to_client_total": 27.693878,
+        "  worker_emit_to_chunk": 27.107897,
+        "  chunk_to_api": 0.585981,
+        "total_server_ttft": 114.477645
+      }
+    },
+    {
+      "path": "I2T",
+      "walk": "prefill_vision",
+      "iter": 7,
+      "phase": "measure",
+      "rid": "2c8cad9e-e001-4747-9e0c-5bd522c64625",
+      "stages_ms": {
+        "api_to_preproc": 0.653972,
+        "preprocess_cpu": 20.558411,
+        "admission_total": 9.507593,
+        "  preproc_to_conductor": 1.181566,
+        "  conductor_dispatch": 1.605577,
+        "  conductor_to_submit": 6.72045,
+        "encoder_plus_prefill_wall": 60.775374,
+        "emit_to_client_total": 27.379871,
+        "  worker_emit_to_chunk": 26.696806,
+        "  chunk_to_api": 0.683065,
+        "total_server_ttft": 118.875221
+      }
+    },
+    {
+      "path": "I2T",
+      "walk": "prefill_vision",
+      "iter": 8,
+      "phase": "measure",
+      "rid": "c0bd241e-b792-415b-9ce8-fd9cf4837caa",
+      "stages_ms": {
+        "api_to_preproc": 1.251801,
+        "preprocess_cpu": 20.104135,
+        "admission_total": 8.343923,
+        "  preproc_to_conductor": 1.08969,
+        "  conductor_dispatch": 0.915411,
+        "  conductor_to_submit": 6.338822,
+        "encoder_plus_prefill_wall": 60.551743,
+        "emit_to_client_total": 26.86103,
+        "  worker_emit_to_chunk": 26.164444,
+        "  chunk_to_api": 0.696586,
+        "total_server_ttft": 117.112632
+      }
+    },
+    {
+      "path": "I2T",
+      "walk": "prefill_vision",
+      "iter": 9,
+      "phase": "measure",
+      "rid": "778fcb87-4833-4fc8-9c4c-6bf604ee814c",
+      "stages_ms": {
+        "api_to_preproc": 0.630857,
+        "preprocess_cpu": 17.267359,
+        "admission_total": 7.997098,
+        "  preproc_to_conductor": 1.234225,
+        "  conductor_dispatch": 1.390216,
+        "  conductor_to_submit": 5.372657,
+        "encoder_plus_prefill_wall": 62.060374,
+        "emit_to_client_total": 28.472495,
+        "  worker_emit_to_chunk": 27.141206,
+        "  chunk_to_api": 1.331289,
+        "total_server_ttft": 116.428183
+      }
+    },
+    {
+      "path": "I2T",
+      "walk": "prefill_vision",
+      "iter": 10,
+      "phase": "measure",
+      "rid": "b8511337-b9f3-42a4-9f84-916428fd972b",
+      "stages_ms": {
+        "api_to_preproc": 1.337558,
+        "preprocess_cpu": 20.543759,
+        "admission_total": 7.862308,
+        "  preproc_to_conductor": 1.388213,
+        "  conductor_dispatch": 1.035189,
+        "  conductor_to_submit": 5.438906,
+        "encoder_plus_prefill_wall": 60.31526,
+        "emit_to_client_total": 27.851562,
+        "  worker_emit_to_chunk": 27.182257,
+        "  chunk_to_api": 0.669305,
+        "total_server_ttft": 117.910447
+      }
+    },
+    {
+      "path": "I2T",
+      "walk": "prefill_vision",
+      "iter": 11,
+      "phase": "measure",
+      "rid": "f4b0a02c-5ff4-4701-997f-b073b3c64ef2",
+      "stages_ms": {
+        "api_to_preproc": 0.904344,
+        "preprocess_cpu": 21.8225,
+        "admission_total": 13.168936,
+        "  preproc_to_conductor": 0.895972,
+        "  conductor_dispatch": 1.009351,
+        "  conductor_to_submit": 11.263613,
+        "encoder_plus_prefill_wall": 62.544394,
+        "emit_to_client_total": 29.904835,
+        "  worker_emit_to_chunk": 27.969257,
+        "  chunk_to_api": 1.935578,
+        "total_server_ttft": 128.345009
+      }
+    },
+    {
+      "path": "I2T",
+      "walk": "prefill_vision",
+      "iter": 12,
+      "phase": "measure",
+      "rid": "ec6a3e6a-2b4e-4b51-a593-a4f34b2b007d",
+      "stages_ms": {
+        "api_to_preproc": 0.44393,
+        "preprocess_cpu": 18.348896,
+        "admission_total": 8.335171,
+        "  preproc_to_conductor": 1.580901,
+        "  conductor_dispatch": 0.877914,
+        "  conductor_to_submit": 5.876356,
+        "encoder_plus_prefill_wall": 65.547138,
+        "emit_to_client_total": 29.161459,
+        "  worker_emit_to_chunk": 27.296246,
+        "  chunk_to_api": 1.865213,
+        "total_server_ttft": 121.836594
+      }
+    },
+    {
+      "path": "I2T",
+      "walk": "prefill_vision",
+      "iter": 13,
+      "phase": "measure",
+      "rid": "fb6e230f-10da-4973-a8a4-6d31c9eb0cd1",
+      "stages_ms": {
+        "api_to_preproc": 0.23592,
+        "preprocess_cpu": 20.626172,
+        "admission_total": 12.853817,
+        "  preproc_to_conductor": 1.442484,
+        "  conductor_dispatch": 0.945736,
+        "  conductor_to_submit": 10.465597,
+        "encoder_plus_prefill_wall": 64.002472,
+        "emit_to_client_total": 26.850514,
+        "  worker_emit_to_chunk": 26.247918,
+        "  chunk_to_api": 0.602596,
+        "total_server_ttft": 124.568895
+      }
+    },
+    {
+      "path": "I2T",
+      "walk": "prefill_vision",
+      "iter": 14,
+      "phase": "measure",
+      "rid": "92410e6e-1304-471e-87b9-e37ef02e5064",
+      "stages_ms": {
+        "api_to_preproc": 0.78705,
+        "preprocess_cpu": 16.624353,
+        "admission_total": 7.119653,
+        "  preproc_to_conductor": 1.439429,
+        "  conductor_dispatch": 0.88098,
+        "  conductor_to_submit": 4.799244,
+        "encoder_plus_prefill_wall": 63.747282,
+        "emit_to_client_total": 28.519035,
+        "  worker_emit_to_chunk": 26.816634,
+        "  chunk_to_api": 1.702401,
+        "total_server_ttft": 116.797373
+      }
+    },
+    {
+      "path": "I2T",
+      "walk": "prefill_vision",
+      "iter": 15,
+      "phase": "measure",
+      "rid": "5bdc0c80-4123-40fd-b98c-381c6d450c89",
+      "stages_ms": {
+        "api_to_preproc": 0.708603,
+        "preprocess_cpu": 22.404535,
+        "admission_total": 8.860712,
+        "  preproc_to_conductor": 1.243849,
+        "  conductor_dispatch": 0.888341,
+        "  conductor_to_submit": 6.728522,
+        "encoder_plus_prefill_wall": 62.046343,
+        "emit_to_client_total": 28.156887,
+        "  worker_emit_to_chunk": 26.852357,
+        "  chunk_to_api": 1.30453,
+        "total_server_ttft": 122.17708
+      }
+    },
+    {
+      "path": "I2T",
+      "walk": "prefill_vision",
+      "iter": 16,
+      "phase": "measure",
+      "rid": "794331be-1015-4574-a320-76f6f2fcba7b",
+      "stages_ms": {
+        "api_to_preproc": 0.471181,
+        "preprocess_cpu": 16.600076,
+        "admission_total": 8.136806,
+        "  preproc_to_conductor": 1.866685,
+        "  conductor_dispatch": 1.576824,
+        "  conductor_to_submit": 4.693297,
+        "encoder_plus_prefill_wall": 63.982512,
+        "emit_to_client_total": 28.80539,
+        "  worker_emit_to_chunk": 27.337778,
+        "  chunk_to_api": 1.467612,
+        "total_server_ttft": 117.995965
+      }
+    },
+    {
+      "path": "I2T",
+      "walk": "prefill_vision",
+      "iter": 17,
+      "phase": "measure",
+      "rid": "e53620f7-aab3-43a3-9a8f-fa85b89187c7",
+      "stages_ms": {
+        "api_to_preproc": 0.844756,
+        "preprocess_cpu": 14.936964,
+        "admission_total": 9.03415,
+        "  preproc_to_conductor": 1.074998,
+        "  conductor_dispatch": 1.165923,
+        "  conductor_to_submit": 6.793229,
+        "encoder_plus_prefill_wall": 86.603148,
+        "emit_to_client_total": 28.542699,
+        "  worker_emit_to_chunk": 27.125272,
+        "  chunk_to_api": 1.417427,
+        "total_server_ttft": 139.961717
+      }
+    },
+    {
+      "path": "I2T",
+      "walk": "prefill_vision",
+      "iter": 18,
+      "phase": "measure",
+      "rid": "31a31fd2-48e2-47d0-af19-97237576fe97",
+      "stages_ms": {
+        "api_to_preproc": 0.842883,
+        "preprocess_cpu": 22.031971,
+        "admission_total": 11.125068,
+        "  preproc_to_conductor": 1.18402,
+        "  conductor_dispatch": 0.906578,
+        "  conductor_to_submit": 9.03447,
+        "encoder_plus_prefill_wall": 63.616468,
+        "emit_to_client_total": 28.284405,
+        "  worker_emit_to_chunk": 26.749994,
+        "  chunk_to_api": 1.534411,
+        "total_server_ttft": 125.900795
+      }
+    },
+    {
+      "path": "I2T",
+      "walk": "prefill_vision",
+      "iter": 19,
+      "phase": "measure",
+      "rid": "c28f62ac-5ec8-4bb1-b518-507fc5f27809",
+      "stages_ms": {
+        "api_to_preproc": 0.859097,
+        "preprocess_cpu": 14.979728,
+        "admission_total": 12.517278,
+        "  preproc_to_conductor": 1.642962,
+        "  conductor_dispatch": 1.038965,
+        "  conductor_to_submit": 9.835351,
+        "encoder_plus_prefill_wall": 60.879969,
+        "emit_to_client_total": 28.07845,
+        "  worker_emit_to_chunk": 27.336417,
+        "  chunk_to_api": 0.742033,
+        "total_server_ttft": 117.314522
+      }
+    },
+    {
+      "path": "I2T",
+      "walk": "prefill_vision",
+      "iter": 20,
+      "phase": "measure",
+      "rid": "d027cd63-71e6-4047-9d03-0206473121b4",
+      "stages_ms": {
+        "api_to_preproc": 0.445913,
+        "preprocess_cpu": 16.300591,
+        "admission_total": 8.421709,
+        "  preproc_to_conductor": 1.193645,
+        "  conductor_dispatch": 0.899577,
+        "  conductor_to_submit": 6.328487,
+        "encoder_plus_prefill_wall": 61.96292,
+        "emit_to_client_total": 28.198178,
+        "  worker_emit_to_chunk": 27.662521,
+        "  chunk_to_api": 0.535657,
+        "total_server_ttft": 115.329311
+      }
+    },
+    {
+      "path": "I2T",
+      "walk": "prefill_vision",
+      "iter": 21,
+      "phase": "measure",
+      "rid": "3cd0f697-fedd-4a1f-a74f-62140c3c60fc",
+      "stages_ms": {
+        "api_to_preproc": 0.821271,
+        "preprocess_cpu": 23.167299,
+        "admission_total": 8.291696,
+        "  preproc_to_conductor": 1.632597,
+        "  conductor_dispatch": 1.060516,
+        "  conductor_to_submit": 5.598583,
+        "encoder_plus_prefill_wall": 63.877065,
+        "emit_to_client_total": 27.958771,
+        "  worker_emit_to_chunk": 27.177099,
+        "  chunk_to_api": 0.781672,
+        "total_server_ttft": 124.116102
+      }
+    },
+    {
+      "path": "I2T",
+      "walk": "prefill_vision",
+      "iter": 22,
+      "phase": "measure",
+      "rid": "ebfe8c29-01ed-48e1-abe3-60f0ab742ac5",
+      "stages_ms": {
+        "api_to_preproc": 0.876102,
+        "preprocess_cpu": 22.033784,
+        "admission_total": 8.074453,
+        "  preproc_to_conductor": 1.435083,
+        "  conductor_dispatch": 0.858627,
+        "  conductor_to_submit": 5.780743,
+        "encoder_plus_prefill_wall": 60.866299,
+        "emit_to_client_total": 27.712195,
+        "  worker_emit_to_chunk": 26.489538,
+        "  chunk_to_api": 1.222657,
+        "total_server_ttft": 119.562833
+      }
+    },
+    {
+      "path": "I2T",
+      "walk": "prefill_vision",
+      "iter": 23,
+      "phase": "measure",
+      "rid": "30bd6ddb-38d5-4819-8c95-cc2c3f257be3",
+      "stages_ms": {
+        "api_to_preproc": 0.871706,
+        "preprocess_cpu": 15.259644,
+        "admission_total": 9.529977,
+        "  preproc_to_conductor": 1.330288,
+        "  conductor_dispatch": 1.043271,
+        "  conductor_to_submit": 7.156418,
+        "encoder_plus_prefill_wall": 58.601783,
+        "emit_to_client_total": 29.642685,
+        "  worker_emit_to_chunk": 28.309213,
+        "  chunk_to_api": 1.333472,
+        "total_server_ttft": 113.905795
+      }
+    },
+    {
+      "path": "I2T",
+      "walk": "prefill_vision",
+      "iter": 24,
+      "phase": "measure",
+      "rid": "bba76ab1-5daf-49e3-843a-d4e76bfef04d",
+      "stages_ms": {
+        "api_to_preproc": 0.965716,
+        "preprocess_cpu": 12.616324,
+        "admission_total": 7.970138,
+        "  preproc_to_conductor": 1.731174,
+        "  conductor_dispatch": 1.225391,
+        "  conductor_to_submit": 5.013573,
+        "encoder_plus_prefill_wall": 63.278656,
+        "emit_to_client_total": 29.018306,
+        "  worker_emit_to_chunk": 27.437987,
+        "  chunk_to_api": 1.580319,
+        "total_server_ttft": 113.84914
+      }
+    },
+    {
+      "path": "I2T",
+      "walk": "prefill_vision",
+      "iter": 25,
+      "phase": "measure",
+      "rid": "626a87a2-31f0-4bb8-ab98-3de19db87a00",
+      "stages_ms": {
+        "api_to_preproc": 0.515286,
+        "preprocess_cpu": 34.162974,
+        "admission_total": 10.828006,
+        "  preproc_to_conductor": 1.629693,
+        "  conductor_dispatch": 1.593949,
+        "  conductor_to_submit": 7.604364,
+        "encoder_plus_prefill_wall": 61.910572,
+        "emit_to_client_total": 29.446634,
+        "  worker_emit_to_chunk": 28.094203,
+        "  chunk_to_api": 1.352431,
+        "total_server_ttft": 136.863472
+      }
+    },
+    {
+      "path": "I2T",
+      "walk": "prefill_vision",
+      "iter": 26,
+      "phase": "measure",
+      "rid": "5c2a7266-8acf-4bb7-b583-98961b1732bf",
+      "stages_ms": {
+        "api_to_preproc": 0.819128,
+        "preprocess_cpu": 13.516032,
+        "admission_total": 7.237839,
+        "  preproc_to_conductor": 1.309396,
+        "  conductor_dispatch": 1.369706,
+        "  conductor_to_submit": 4.558737,
+        "encoder_plus_prefill_wall": 59.060665,
+        "emit_to_client_total": 28.013824,
+        "  worker_emit_to_chunk": 26.532862,
+        "  chunk_to_api": 1.480962,
+        "total_server_ttft": 108.647488
+      }
+    },
+    {
+      "path": "I2T",
+      "walk": "prefill_vision",
+      "iter": 27,
+      "phase": "measure",
+      "rid": "f294896e-a0da-406c-8bf8-0bf164b587be",
+      "stages_ms": {
+        "api_to_preproc": 1.01553,
+        "preprocess_cpu": 20.64553,
+        "admission_total": 8.886891,
+        "  preproc_to_conductor": 0.77372,
+        "  conductor_dispatch": 1.150921,
+        "  conductor_to_submit": 6.96225,
+        "encoder_plus_prefill_wall": 63.179738,
+        "emit_to_client_total": 27.540921,
+        "  worker_emit_to_chunk": 26.271904,
+        "  chunk_to_api": 1.269017,
+        "total_server_ttft": 121.26861
+      }
+    },
+    {
+      "path": "I2T",
+      "walk": "prefill_vision",
+      "iter": 28,
+      "phase": "measure",
+      "rid": "ac863185-f116-4c36-8fe1-d0d5a4c00023",
+      "stages_ms": {
+        "api_to_preproc": 0.512562,
+        "preprocess_cpu": 21.471228,
+        "admission_total": 12.985433,
+        "  preproc_to_conductor": 0.743565,
+        "  conductor_dispatch": 0.877565,
+        "  conductor_to_submit": 11.364303,
+        "encoder_plus_prefill_wall": 63.888542,
+        "emit_to_client_total": 27.956128,
+        "  worker_emit_to_chunk": 27.394072,
+        "  chunk_to_api": 0.562056,
+        "total_server_ttft": 126.813893
+      }
+    },
+    {
+      "path": "I2T",
+      "walk": "prefill_vision",
+      "iter": 29,
+      "phase": "measure",
+      "rid": "4d9af0b2-c32a-4cb2-807c-e84cf9cc15bf",
+      "stages_ms": {
+        "api_to_preproc": 1.246263,
+        "preprocess_cpu": 21.514271,
+        "admission_total": 7.568812,
+        "  preproc_to_conductor": 1.268276,
+        "  conductor_dispatch": 0.918375,
+        "  conductor_to_submit": 5.382161,
+        "encoder_plus_prefill_wall": 63.052839,
+        "emit_to_client_total": 27.81623,
+        "  worker_emit_to_chunk": 26.451492,
+        "  chunk_to_api": 1.364738,
+        "total_server_ttft": 121.198415
+      }
+    }
+  ],
+  "status": "complete"
+}

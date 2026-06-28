@@ -1,0 +1,19 @@
+# Server (instrumented M*, ttft-profile branch, env-gated MSTAR_NODE_TIMING):
+PYTHONPATH=/home/tim/ttft-wt PATH=$VENV/bin:$PATH HF_HOME=/m-coriander/coriander/hf \
+HF_HUB_OFFLINE=1 CUDA_VISIBLE_DEVICES=0,1 \
+MSTAR_QWEN3_NATIVE_AUDIO_ENCODER=1 MSTAR_QWEN3_NATIVE_VISION_ENCODER=1 MSTAR_NODE_TIMING=10 \
+timeout 1500 python -m mstar.cli.main serve qwen3_omni \
+  --config configs/qwen3omni_2gpu.yaml --gpus 0,1 --tensor-comm-protocol SHM \
+  --cache-dir $HF_HOME/hub --socket-path-prefix /home/tim/.ttftsock/ --port 8140
+
+# Clients (5 warmup + 25 measured, B=1, closed-loop):
+python -m benchmark.runner --url http://0.0.0.0:8140 --model qwen3omni --inference-system ours \
+  --request-type audio_to_text --dataset libri    --num-requests 25 --num-warmup 5 \
+  --batch-size 1 --profiling-type closed_loop --max-concurrency 1 --output-dir benchmarks/ttft-decompose/s2t
+python -m benchmark.runner --url http://0.0.0.0:8140 --model qwen3omni --inference-system ours \
+  --request-type image_to_text --dataset food101 --num-requests 25 --num-warmup 5 \
+  --batch-size 1 --profiling-type closed_loop --max-concurrency 1 --output-dir benchmarks/ttft-decompose/i2t
+
+# Decompose: python benchmarks/ttft-decompose/parse_ttft.py <server.log> 5
+# raw.json:  python benchmarks/ttft-decompose/make_raw.py <server.log> raw.json 5
+# charts:    python benchmarks/ttft-decompose/chart_ttft.py raw.json charts/

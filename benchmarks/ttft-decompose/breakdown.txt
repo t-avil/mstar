@@ -1,0 +1,37 @@
+# parsed 60 traced rids; node-timing best total n=5830
+
+# Node-timing GPU-kernel split (p50/mean ms per node/walk, cumulative):
+  Thinker           /prefill_audio    p50=  22.30ms mean=  57.51ms n=30
+  Thinker           /prefill_text     p50=  21.48ms mean=  21.65ms n=60
+  Thinker           /prefill_vision   p50=  32.32ms mean=  32.04ms n=30
+  Thinker           /thinker_decode   p50=   6.56ms mean=   6.61ms n=5650
+  audio_encoder     /prefill_audio    p50=  27.20ms mean=  42.24ms n=30
+  vision_encoder    /prefill_vision   p50=  28.42ms mean=  30.82ms n=30
+
+===== S2T (audio->text)  (walk=prefill_audio)  total_traced=30 measured(after 5 warmup)=25 =====
+stage                                       median_ms     p99_ms    n
+api->preproc enqueue                             0.68       1.23   25
+preprocess (CPU)                                18.04      32.00   25
+  preproc->conductor                             1.39       1.83   25
+  conductor dispatch                             1.28       4.30   25
+  conductor->worker submit                       3.65       5.11   25
+ADMISSION total (preproc_end->submit)            6.33       8.85   25
+encoder+prefill wall (submit->emit)             51.51      70.55   25
+  worker_emit->chunk_ready                      27.07      36.90   25
+  chunk_ready->api_first_chunk                   1.36       2.68   25
+emit->client total (emit->api_chunk)            28.47      37.91   25
+TOTAL server TTFT (api_recv->api_chunk)        105.49     133.12   25
+
+===== I2T (image->text)  (walk=prefill_vision)  total_traced=30 measured(after 5 warmup)=25 =====
+stage                                       median_ms     p99_ms    n
+api->preproc enqueue                             0.83       1.32   25
+preprocess (CPU)                                20.54      31.73   25
+  preproc->conductor                             1.31       1.83   25
+  conductor dispatch                             1.04       1.60   25
+  conductor->worker submit                       6.33      11.34   25
+ADMISSION total (preproc_end->submit)            8.34      13.12   25
+encoder+prefill wall (submit->emit)             62.06      81.55   25
+  worker_emit->chunk_ready                      27.13      28.26   25
+  chunk_ready->api_first_chunk                   1.30       1.92   25
+emit->client total (emit->api_chunk)            28.08      29.84   25
+TOTAL server TTFT (api_recv->api_chunk)        119.56     139.22   25
