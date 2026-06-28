@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import copy
 import logging
+import os
 
 import numpy as np
 import torch
@@ -15,6 +17,48 @@ from mstar.model.qwen3_omni.config import Code2WavConfig
 from mstar.utils.attention import apply_rope_pos_ids, rms_norm, sliding_window_attn
 
 logger = logging.getLogger(__name__)
+
+
+def _env_flag(name: str, default: str = "0") -> bool:
+    return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _code2wav_sp_config() -> dict:
+    """Read the Code2Wav sequence-parallelism (frame-dim shard) env config.
+
+    All knobs are read at construction time so a default-OFF process is
+    byte-identical to the un-instrumented vocoder.
+
+    - ``MSTAR_CODE2WAV_SP``         : master enable (default OFF).
+    - ``MSTAR_CODE2WAV_SP_NSHARD``  : number of contiguous frame shards (default 2).
+    - ``MSTAR_CODE2WAV_SP_HALO``    : left-context halo in *codec frames* prepended
+                                      to each non-first shard so the causal conv
+                                      stack sees true context (default 32). Must be
+                                      >= the conv stack's causal receptive field in
+                                      frames for the recombined waveform to be
+                                      bit-exact vs the single-pass vocoder.
+    - ``MSTAR_CODE2WAV_SP_DEVICES`` : comma list of devices, one per shard, e.g.
+                                      ``cuda:0,cuda:1``. Absent => every shard runs
+                                      on the vocoder's own device (single-GPU shard
+                                      mode, used to prove the halo/seam math in
+                                      isolation from cross-device transfer).
+    - ``MSTAR_CODE2WAV_SP_COMPILE`` : torch.compile each per-device conv stack
+                                      (default ON) so SP-on is not penalised vs the
+                                      compiled single-device baseline.
+    """
+    enabled = _env_flag("MSTAR_CODE2WAV_SP")
+    nshard = int(os.environ.get("MSTAR_CODE2WAV_SP_NSHARD", "2"))
+    halo = int(os.environ.get("MSTAR_CODE2WAV_SP_HALO", "32"))
+    devices_raw = os.environ.get("MSTAR_CODE2WAV_SP_DEVICES", "").strip()
+    devices = [d.strip() for d in devices_raw.split(",") if d.strip()] or None
+    compile_shards = _env_flag("MSTAR_CODE2WAV_SP_COMPILE", "1")
+    return {
+        "enabled": enabled,
+        "nshard": max(1, nshard),
+        "halo": max(0, halo),
+        "devices": devices,
+        "compile": compile_shards,
+    }
 
 
 class Qwen3OmniMoeCausalConvNet(nn.Module):
@@ -364,10 +408,11 @@ class SnakeBeta(nn.Module):
         """
         if self.alpha is None:
             return
-        exp_alpha = torch.exp(self.alpha).unsqueeze(0).unsqueeze(-1).contiguous()
-        inv_beta_safe = (
-            1.0 / (torch.exp(self.beta) + self.no_div_by_zero)
-        ).unsqueeze(0).unsqueeze(-1).contiguous()
+        with torch.no_grad():
+            exp_alpha = torch.exp(self.alpha).unsqueeze(0).unsqueeze(-1).detach().contiguous()
+            inv_beta_safe = (
+                1.0 / (torch.exp(self.beta) + self.no_div_by_zero)
+            ).unsqueeze(0).unsqueeze(-1).detach().contiguous()
         self.register_buffer("exp_alpha", exp_alpha, persistent=False)
         self.register_buffer("inv_beta_safe", inv_beta_safe, persistent=False)
         # nn.Module.__setattr__ removes these from _parameters when set to None.
@@ -457,6 +502,160 @@ class Qwen3OmniMoeCode2Wav(nn.Module):
         ]
         self.decoder = nn.ModuleList(decoder)
 
+        # --- Sequence-parallelism (frame-dim shard) state (default OFF). ---
+        # Read env config at construction so a default process is identical to
+        # the un-instrumented vocoder. ``_sp_stacks`` maps a device string to a
+        # callable running the upsample+decoder conv stack on that device; it is
+        # populated lazily in ``consolidate`` only when SP is enabled.
+        self._sp = _code2wav_sp_config()
+        self._sp_stacks: dict[str, callable] = {}
+        if self._sp["enabled"]:
+            logger.info("Code2Wav SEQUENCE PARALLELISM enabled: %s", self._sp)
+
+    # ------------------------------------------------------------------
+    # Conv stack (upsample + decoder): the expensive ~1280x upsample part.
+    # Split out so it can be run per-shard / per-device for SP. It is fully
+    # causal (left-pad-only convs, right-cropped transposed convs), so its
+    # output for frames [a, b) depends only on input frames in
+    # [a - receptive_field, b); a halo of that many frames makes a shard's
+    # output bit-exact vs the single-pass output.
+    # ------------------------------------------------------------------
+    def _conv_out_len(self, T: int) -> int:
+        """Output sample count of the upsample+decoder stack for ``T`` input frames.
+
+        The upsample stack (kernel=stride=factor, pad=0) is exact (``L*factor``).
+        Each decoder transposed conv (kernel=2*rate, stride=rate, pad=rate) yields
+        ``(L-1)*rate`` -- i.e. it drops ``rate`` samples of causal warmup. The
+        intervening causal convs are length-preserving. The net map is affine:
+        ``L_out = total_upsample * T - C`` with a constant warmup loss ``C``
+        (=555 for the Qwen3-Omni config). Used to align per-shard trims so the
+        recombined waveform length and content match the single-pass output
+        exactly (no boundary off-by-C seam).
+        """
+        L = T
+        for f in self.config.upsampling_ratios:
+            L = L * f
+        for r in self.config.upsample_rates:
+            L = (L - 1) * r
+        return L
+
+    @property
+    def _sp_boundary_loss(self) -> int:
+        up = int(self.total_upsample)
+        return up * 64 - self._conv_out_len(64)
+
+    def _conv_stack(self, hidden_bct: torch.Tensor) -> torch.Tensor:
+        """hidden_bct: [B, H, T] (post pre_transformer, permuted) -> wav [B, 1, T*up]."""
+        hidden = hidden_bct
+        for blocks in self.upsample:
+            for block in blocks:
+                hidden = block(hidden)
+        wav = hidden
+        for block in self.decoder:
+            wav = block(wav)
+        return wav.clamp(min=-1, max=1)
+
+    def _build_sp_stacks(self):
+        """Create one conv-stack callable per SP device (replicated weights).
+
+        Called from ``consolidate`` after SnakeBeta params are folded so the
+        deep-copied replicas carry the consolidated buffers. The base device's
+        stack reuses ``self`` (no copy); extra devices get a deep-copied,
+        ``.to(device)`` replica of just the upsample+decoder modules.
+        """
+        base_dev = str(next(self.parameters()).device)
+        devices = self._sp["devices"] or [base_dev]
+        # Map each shard index to a device (cycle if fewer devices than shards).
+        self._sp_shard_devices = [
+            devices[i % len(devices)] for i in range(self._sp["nshard"])
+        ]
+        self._sp_holders: list[nn.Module] = []
+        seen: dict[str, callable] = {}
+        for dev in self._sp_shard_devices:
+            if dev in seen:
+                continue
+            if dev == base_dev:
+                stack = self._conv_stack
+            else:
+                # Deep-copy the conv-stack modules onto the target device. A
+                # lightweight holder module keeps them as attributes (retained
+                # in ``self._sp_holders``) so their buffers/params survive and
+                # move together.
+                holder = nn.Module()
+                holder.upsample = copy.deepcopy(self.upsample).to(dev)
+                holder.decoder = copy.deepcopy(self.decoder).to(dev)
+                self._sp_holders.append(holder)
+
+                def make_stack(h):
+                    def run(hidden_bct):
+                        hidden = hidden_bct
+                        for blocks in h.upsample:
+                            for block in blocks:
+                                hidden = block(hidden)
+                        wav = hidden
+                        for block in h.decoder:
+                            wav = block(wav)
+                        return wav.clamp(min=-1, max=1)
+                    return run
+
+                stack = make_stack(holder)
+            if self._sp["compile"]:
+                stack = torch.compile(stack, dynamic=False)
+            seen[dev] = stack
+        self._sp_device_stacks = seen
+
+    def _forward_sp(self, codes: torch.Tensor, position_ids: torch.Tensor) -> torch.Tensor:
+        """Frame-dim sequence-parallel vocoder.
+
+        The cheap, long-range part (code embedding + sliding-window
+        pre_transformer) runs once on the full chunk on the base device so the
+        attention context is exactly the single-pass context. The expensive
+        upsample+decoder conv stack is then sharded over contiguous frame ranges,
+        each carrying a left-context ``halo`` of real frames; each shard runs on
+        its assigned device, the halo samples are trimmed, and the waveforms are
+        concatenated. With ``halo >= conv receptive field`` this is bit-exact vs
+        the single-pass output.
+        """
+        if codes.shape[1] != self.config.num_quantizers:
+            raise ValueError(f"Expected {self.config.num_quantizers} layer of codes, got {codes.shape[1]}")
+        hidden = self.code_embedding(codes + self.code_offset).mean(1)
+        hidden = self.pre_transformer(input_embeds=hidden, position_ids=position_ids)
+        hidden = hidden.permute(0, 2, 1)  # [B, H, T]
+
+        T = hidden.shape[-1]
+        up = int(self.total_upsample)
+        C = self._sp_boundary_loss  # constant causal-warmup sample loss
+        nshard = self._sp["nshard"]
+        halo = self._sp["halo"]
+
+        # Contiguous, near-even frame boundaries [a_k, b_k).
+        bounds = [(k * T) // nshard for k in range(nshard + 1)]
+        base_dev = hidden.device
+        wav_parts: list[torch.Tensor] = []
+        for k in range(nshard):
+            a, b = bounds[k], bounds[k + 1]
+            if b <= a:
+                continue
+            ctx = min(halo, a)  # real left-context frames available
+            in_lo = a - ctx
+            dev = self._sp_shard_devices[k]
+            stack = self._sp_device_stacks[dev]
+            shard_in = hidden[..., in_lo:b]
+            if str(shard_in.device) != dev:
+                shard_in = shard_in.to(dev, non_blocking=True)
+            wav_k = stack(shard_in)  # [B, 1, up*(b-in_lo) - C]
+            # Trim the halo's worth of samples. Shard 0 (ctx==0) carries the
+            # single pass's leading causal warmup (-C) and keeps everything;
+            # interior shards trim ``up*ctx - C`` so their first kept sample is
+            # the steady-state sample for frame ``a`` -- exactly aligned with the
+            # single-pass waveform (no off-by-C seam).
+            trim = 0 if ctx == 0 else up * ctx - C
+            wav_k = wav_k[..., trim:]
+            if wav_k.device != base_dev:
+                wav_k = wav_k.to(base_dev, non_blocking=True)
+            wav_parts.append(wav_k)
+        return torch.cat(wav_parts, dim=-1)
+
     def consolidate(self):
         self.pre_transformer.consolidate()
         # Pre-fold SnakeBeta exp(alpha) / 1/(exp(beta)+eps) on every instance
@@ -464,14 +663,21 @@ class Qwen3OmniMoeCode2Wav(nn.Module):
         for module in self.modules():
             if isinstance(module, SnakeBeta):
                 module.consolidate_snake_params()
+        if self._sp["enabled"]:
+            # SP path: keep the python forward as the dispatcher; compile each
+            # per-device conv stack instead of the whole forward (the embed +
+            # pre_transformer part is cheap and runs eager).
+            self._build_sp_stacks()
+            self._single_forward = self._forward_single
+            return
         # Compile the forward to fuse the SnakeBeta + Conv1d + F.pad
         # element-wise chains in the upsample/decoder stacks (the dominant
         # cost). The pre_transformer carries ``@torch.compiler.disable`` so
         # it remains an eager graph break and its custom RoPE/RMSNorm/SDPA
         # kernels are unaffected.
-        self.forward = torch.compile(self.forward, dynamic=False)
+        self._single_forward = torch.compile(self._forward_single, dynamic=False)
 
-    def forward(
+    def _forward_single(
         self, codes: torch.Tensor,
         position_ids: torch.Tensor,
         **kwargs
@@ -481,13 +687,21 @@ class Qwen3OmniMoeCode2Wav(nn.Module):
         hidden = self.code_embedding(codes + self.code_offset).mean(1)
         hidden = self.pre_transformer(input_embeds=hidden, position_ids=position_ids)
         hidden = hidden.permute(0, 2, 1)
-        for blocks in self.upsample:
-            for block in blocks:
-                hidden = block(hidden)
-        wav = hidden
-        for block in self.decoder:
-            wav = block(wav)
-        return wav.clamp(min=-1, max=1)
+        return self._conv_stack(hidden)
+
+    def forward(
+        self, codes: torch.Tensor,
+        position_ids: torch.Tensor,
+        **kwargs
+    ):
+        if self._sp["enabled"]:
+            return self._forward_sp(codes, position_ids)
+        # ``consolidate`` sets ``_single_forward`` (compiled). Before consolidate
+        # (e.g. raw load), fall back to the eager single forward.
+        fwd = getattr(self, "_single_forward", None)
+        if fwd is None:
+            return self._forward_single(codes, position_ids, **kwargs)
+        return fwd(codes, position_ids, **kwargs)
 
     def chunked_decode_streaming(
         self,

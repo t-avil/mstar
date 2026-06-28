@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Optional
 
 import torch
@@ -1997,6 +1998,14 @@ class Code2WavSubmodule(NodeSubmodule):
         self.full_seqlen = self.config.code2wav.codec_left_context_frames + \
             self.config.code2wav.codec_chunk_frames
 
+        # Code2Wav frame-dim sequence parallelism (env-gated, default OFF). When
+        # ON, the vocoder forward shards frames across devices with per-shard
+        # left-context halos and cross-device copies -- not CUDA-graph capturable
+        # -- so graph capture is disabled and the chunk runs eager.
+        self._sp_enabled = os.environ.get(
+            "MSTAR_CODE2WAV_SP", "0"
+        ).strip().lower() in ("1", "true", "yes", "on")
+
     def get_stateless_flavor(self) -> str:
         # Code2Wav vocoder runs in fp32 with no autocast and no torch.compile.
         return "audio_codec"
@@ -2006,6 +2015,9 @@ class Code2WavSubmodule(NodeSubmodule):
         self._latest_seq_len.pop(request_id, None)
 
     def get_cuda_graph_configs(self, device, tp_world_size: int = 1):
+        if self._sp_enabled:
+            # SP path is cross-device + dynamic -> not graph-capturable.
+            return []
         num_quantizers = self.config.code2wav.num_quantizers
         return [
             BasicBatchedCudaGraphConfig(
@@ -2161,6 +2173,8 @@ class Code2WavSubmodule(NodeSubmodule):
         }) == 1
 
     def can_use_cuda_graphs(self, batch, model_inputs: list[NodeInputs]):
+        if self._sp_enabled:
+            return False
         res = super().can_use_cuda_graphs(batch, model_inputs) \
             and self.can_batch(batch, model_inputs) \
                 and model_inputs[0].tensor_inputs["codec_tokens"].shape[1] == self.full_seqlen
