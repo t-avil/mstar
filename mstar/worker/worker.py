@@ -257,6 +257,16 @@ class Worker:
         self._last_active: dict[tuple[str, str], float] = {}  # (request_id, node_name) -> monotonic timestamp
         self.eviction_policy = EvictionPolicy.LRU
 
+        # Per-node GPU timing (env-gated, default OFF). When MSTAR_NODE_TIMING
+        # is set to a positive integer N, the worker records exact GPU kernel
+        # time per (node_name, graph_walk) via CUDA events and logs an
+        # aggregate every N recorded samples. Used to break TTFT into
+        # encoder-forward vs Thinker-prefill. Byte-identical default path when
+        # unset.
+        self._node_timing_period: int = int(os.environ.get("MSTAR_NODE_TIMING", "0") or "0")
+        self._node_timing: dict[tuple[str, str], list[float]] = defaultdict(list)
+        self._node_timing_count: int = 0
+
         # Async-scheduling cross-iter state. Initialized here (rather than in
         # run()) because _remove_request — which can be invoked indirectly
         # from _process_messages on any iter — reads/writes them.
@@ -1202,11 +1212,18 @@ class Worker:
                 synchronize=False,
             )
         try:
+            _timing_on = self._node_timing_period > 0
+            start_ev = None
+            if _timing_on and torch.cuda.is_available():
+                start_ev = torch.cuda.Event(enable_timing=True)
+                start_ev.record(torch.cuda.default_stream(self.device))
             output = engine.execute_with_max_batch_size(node_batch)
             if torch.cuda.is_available():
-                event = torch.cuda.Event()
+                event = torch.cuda.Event(enable_timing=_timing_on)
                 event.record(torch.cuda.default_stream(self.device))
                 output.completion_event = event
+                if start_ev is not None:
+                    output.start_event = start_ev
             return output
         finally:
             # Safety net: ensure advance_event fires even if the engine
@@ -1649,6 +1666,34 @@ class Worker:
                     range_pop(synchronize=False)
             else:
                 torch.cuda.default_stream().synchronize()
+
+        # Per-node GPU timing (env-gated). completion_event is now synced, so
+        # start_event.elapsed_time is valid. Records exact GPU kernel ms per
+        # (node, graph_walk) and logs an aggregate every N samples.
+        if self._node_timing_period > 0:
+            start_ev = getattr(output, "start_event", None)
+            if start_ev is not None and output.completion_event is not None:
+                try:
+                    dt_ms = start_ev.elapsed_time(output.completion_event)
+                    self._node_timing[(batch_N.node_name, batch_N.graph_walk)].append(dt_ms)
+                    self._node_timing_count += 1
+                    if self._node_timing_count % self._node_timing_period == 0:
+                        parts = []
+                        for (nn, gw), vs in sorted(self._node_timing.items()):
+                            if not vs:
+                                continue
+                            sv = sorted(vs)
+                            n = len(sv)
+                            parts.append(
+                                f"{nn}/{gw}: p50={sv[n // 2]:.2f}ms "
+                                f"mean={sum(sv) / n:.2f}ms n={n}"
+                            )
+                        logger.info(
+                            "Worker %s node-timing: %s",
+                            self.worker_id, " | ".join(parts),
+                        )
+                except Exception:
+                    pass
 
         if self.enable_nvtx:
             range_pop(synchronize=False)

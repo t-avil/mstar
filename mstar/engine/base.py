@@ -124,6 +124,11 @@ class NodeOutput:
     # _execute_on_gpu_thread; engines don't populate it themselves.
     completion_event: "torch.cuda.Event | None" = None
 
+    # Optional GPU-timing start event, set by the worker only when
+    # MSTAR_NODE_TIMING is enabled. Pairs with completion_event to measure
+    # exact per-node GPU kernel time. None on the default (untimed) path.
+    start_event: "torch.cuda.Event | None" = None
+
 
 class BaseEngine(ABC):
     def __init__(self, enable_nvtx: bool = False, **kwargs):
