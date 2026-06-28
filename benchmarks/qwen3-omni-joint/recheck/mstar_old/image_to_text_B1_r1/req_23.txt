@@ -1,0 +1,8 @@
+Based on the visual information provided, this food is **Xiaolongbao** (also known as **soup dumplings**).
+
+Here are the key characteristics that lead to this identification:
+
+*   **Steamed Dumplings:** They are small, plump dumplings that have been cooked by steaming, as indicated by the condensation on the parchment paper and the bamboo steamer basket they are served in.
+*   **Pleated Top:** The most distinctive feature is the top of the dumpling, which is gathered and pleated into a small, neat "bun" or "flower" shape. This is a hallmark of the xiaolongbao preparation method.
+*   **Thin Skin:** The skin appears thin and translucent, which is necessary to contain the hot soup filling without breaking during cooking.
+*   **Soup Filling:** The name "soup dumpling" comes from the fact that they are filled with a savory broth (usually pork-based) and gelatin. When steamed, the gelatin melts into a hot, flavorful soup.<|im_end|>

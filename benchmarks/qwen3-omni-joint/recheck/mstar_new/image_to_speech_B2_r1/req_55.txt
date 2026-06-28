@@ -1,0 +1,7 @@
+Based on the visual evidence in the image, the dish shown is **French Onion Soup**.
+
+Here are the specific details that lead to this identification:
+
+*   **Rich, Dark Broth:** The soup has a deep, reddish-brown color, which is characteristic of a broth made by slowly caramelizing onions and simmering them with beef or chicken stock.
+*   **Toasted Bread and Melted Cheese:** The most telling feature is the large slice of toasted bread (a "crouton") floating on top, generously covered with melted cheese. The cheese is browned and bubbly, a technique known as "gratinating" that is a signature of this dish.
+*   **Garnish:** The soup is garnished with finely chopped green herbs, which are most likely fresh parsley, a common accompaniment to French Onion Soup.<|im_end|>

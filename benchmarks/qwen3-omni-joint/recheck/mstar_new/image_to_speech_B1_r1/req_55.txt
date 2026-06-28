@@ -1,0 +1,10 @@
+Based on the visual details in the image, this dish is **French Onion Soup**.
+
+Here are the key elements that identify it:
+
+*   **Rich, Dark Broth:** The soup has a deep brown, glossy color, which is characteristic of a broth made by caramelizing a large amount of onions.
+*   **Crusty Bread:** A slice of toasted or grilled bread is placed on top, acting as a base for the cheese.
+*   **Melted Cheese:** A generous amount of cheese, likely Gruyère or a similar variety, has been melted over the bread, forming a golden-brown, bubbly crust.
+*   **Garnish:** The dish is garnished with finely chopped fresh herbs, which appear to be parsley.
+
+This combination of a savory onion broth, a cheesy and toasted bread topping, and a fresh herb garnish is the classic presentation of French Onion Soup.<|im_end|>

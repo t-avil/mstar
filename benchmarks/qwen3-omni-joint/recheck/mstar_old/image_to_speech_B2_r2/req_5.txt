@@ -1,0 +1,11 @@
+Based on the visual details in the image, the dish shown is a **seafood paella**.
+
+Here is a breakdown of the key features that lead to this identification:
+
+*   **Serving Vessel:** The dish is served in a large, round, shallow pan, which is characteristic of a *paellera*, the traditional pan used for cooking paella.
+*   **Main Ingredients:** The dish is loaded with seafood, which is the defining feature of seafood paella. Clearly visible ingredients include:
+    *   Large shrimp (*gambas*).
+    *   Clams (*almejas*).
+    *   Slices of calamari (*calamares*).
+*   **Rice Base:** Although the rice is mostly covered by the seafood, its reddish-orange color is visible underneath. This color is typically achieved by using saffron, a signature ingredient in paella.
+*   **Presentation:** The dish is served directly in the cooking pan, which is a common way to present paella in restaurants, allowing the server to slice and serve it at the table.<|im_end|>

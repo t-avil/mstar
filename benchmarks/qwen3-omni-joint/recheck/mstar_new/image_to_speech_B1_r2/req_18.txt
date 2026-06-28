@@ -1,0 +1,12 @@
+Based on the visual characteristics of the dish, this appears to be a **Seafood Paella**.
+
+Here is a breakdown of the key components that lead to this conclusion:
+
+*   **The Pan:** The dish is served in a wide, shallow pan known as a *paellera*, which is the traditional cookware for paella.
+*   **The Rice:** The base of the dish is rice, which has absorbed the liquid and taken on a rich, reddish-orange color. This color is typically achieved with saffron, a hallmark ingredient in paella.
+*   **The Seafood:** The pan is filled with a generous amount of seafood, including:
+    *   Whole mussels in their shells.
+    *   Large prawns or shrimp.
+*   **The Garnish:** The dish is garnished with lemon wedges, which are served alongside to be squeezed over the food before eating, a classic presentation for paella.
+
+This is a classic Spanish dish that is a variation of the more well-known *Arroz Valencian* (Valencian rice), which traditionally uses rabbit and chicken. This version, where seafood is the main ingredient, is known as *Paella de Marisco*.<|im_end|>

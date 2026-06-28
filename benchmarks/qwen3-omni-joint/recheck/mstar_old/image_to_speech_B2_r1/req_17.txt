@@ -1,0 +1,5 @@
+Based on the visual information in the photo, here is an identification of the cuisine and dish:
+
+*   **Cuisine:** This dish is a classic example of **French cuisine**. Raw oysters on the half shell are a very traditional and celebrated appetizer in France. They are also extremely popular in **seafood restaurants worldwide**, including in North America and other coastal regions.
+
+*   **Dish:** The dish is **Raw Oysters on the Half Shell**. The oysters are served fresh and uncooked, resting in their natural, rough outer shell on a bed of crushed ice to keep them chilled. They are typically served with lemon wedges to squeeze over the meat for a bright, acidic flavor and a garnish of fresh herbs, such as parsley or chives.<|im_end|>

@@ -1,0 +1,9 @@
+Based on the visual details in the image, the dish is **Paella**.
+
+Here's a breakdown of the key features that lead to this identification:
+
+*   **Cooking Vessel:** The dish is served in a wide, shallow, round pan known as a *paellera*, which is the traditional pan for making and serving paella.
+*   **Base and Color:** The base appears to be rice, which has a deep reddish-orange color. This is characteristic of paella, which gets its color from saffron, a key ingredient.
+*   **Seafood Toppings:** The most prominent toppings are large, pink shrimp (*gambas*) and several open-shell clams (*almejas*). These are classic ingredients for a seafood paella (*paella de mariscos*).
+
+In summary, the combination of rice cooked in a *paellera* with saffron and topped with shrimp and clams is the hallmark of a traditional Spanish seafood paella.<|im_end|>

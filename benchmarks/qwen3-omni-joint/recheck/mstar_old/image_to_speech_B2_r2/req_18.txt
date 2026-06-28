@@ -1,0 +1,13 @@
+Based on the visual evidence, this dish is a type of **Paella**.
+
+More specifically, it appears to be a **Seafood Paella** or **Paella de Mariscos**. This can be determined by several key features:
+
+*   **The Pan:** The dish is served in a wide, shallow, round pan with two handles, which is known as a *paellera*. This pan is specifically designed for cooking paella.
+*   **The Ingredients:** The dish is a rich mix of various seafood, including:
+    *   **Mussels** (*mejillones*)
+    *   **Shrimp/Prawns** (*gambas*)
+    *   **Squid** (*calamares*), visible as rings.
+*   **The Base:** The seafood is served over a bed of rice that has absorbed the flavorful broth, giving it a characteristic golden-orange color, which is typically achieved with saffron.
+*   **The Garnish:** The presence of lemon wedges is a classic accompaniment to paella, meant to be squeezed over the dish before eating.
+
+Paella is a famous rice dish from the Valencia region of Spain.<|im_end|>

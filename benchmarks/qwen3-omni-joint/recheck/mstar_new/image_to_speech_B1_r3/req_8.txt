@@ -1,0 +1,3 @@
+Based on the appearance of the food in the image, these are **spring rolls**.
+
+More specifically, given the translucent rice paper wrapper, they are likely **Vietnamese summer rolls** (also known as **gỏi cuốn**). These are a type of fresh spring roll that is not fried. They are typically made by wrapping raw vegetables (such as lettuce, cucumber, and herbs), vermicelli rice noodles, and sometimes cooked shrimp or pork in a thin rice paper wrapper and serving them cold, often with a dipping sauce like peanut or hoisin sauce.<|im_end|>

@@ -1,0 +1,8 @@
+Based on the visual evidence, the dish is **donuts**.
+
+The cuisine is **American**.
+
+Here is a breakdown of the identification:
+
+*   **Dish:** The items are clearly donuts. They are round, fried pastries with a hole in the center. Some are coated in granulated sugar, while others appear to be plain or have a glaze.
+*   **Cuisine:** Donuts are a quintessential American food item, with a long history in the United States. They are a staple of American bakeries, diners, and coffee shops.<|im_end|>

@@ -1,0 +1,11 @@
+Based on the image provided, the food dish shown is **tacos**.
+
+Here are the specific details that lead to this conclusion:
+
+*   **Shell:** The dish consists of soft, folded tortillas that are golden brown, which is characteristic of tacos.
+*   **Toppings:** The tacos are filled with a combination of ingredients:
+    *   **Protein:** A brownish filling that appears to be either fried meat or fish, such as pulled pork, carnitas, or fish.
+    *   **Vegetables:** A generous amount of shredded white cabbage is used as a topping.
+    *   **Garnish:** A lime wedge is placed on the side of the container, which is a very common garnish for tacos.
+
+The combination of soft tortillas filled with meat and topped with shredded cabbage is a very common style of taco.<|im_end|>

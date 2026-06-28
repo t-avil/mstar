@@ -1,0 +1,24 @@
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'interleaved'}
+
+--- Benchmark Results (wall time: 120.13s) ---
+Closed-Loop Benchmark Results (30 requests, max_concurrency=1)
+──────────────────────────────────────────────────
+Request type breakdown: image_to_speech=30
+Requests : 30/30 succeeded
+TTFT (audio)  : mean=0.556s  p50=0.555s  p95=0.637s  p99=0.651s
+TTFT (text)   : mean=0.352s  p50=0.356s  p95=0.431s  p99=0.436s
+E2E           : mean=4.004s  p50=4.119s  p95=5.715s  p99=5.782s
+ITL  (audio)  : mean=0.150s  p50=0.145s  p95=0.181s  p99=0.196s
+ITL  (text)   : mean=0.007s  p50=0.007s  p95=0.009s  p99=0.010s
+Audio SV      : mean=1.000s  p50=1.000s  p05=1.000s  p10=1.000s  (higher is better)
+RTF           : mean=0.088  p50=0.086  p95=0.093  p99=0.121  (lower is better; <1.0 = real-time)
+Audio dur    : mean=46.443s
+Text tokens: 5411 total (180.4 avg/req)
+Output bytes (audio): 66877770 total (717 chunks)
+Output bytes (text): 23672 total (5411 chunks)
+Throughput: 0.25 req/s (successful only)
+Throughput: 45.04 text tok/s
+Throughput: 11.60 audio sec/s (synthesized audio per wall second)
+Total wall time: 120.13s
+
+Saved 60 outputs to /home/tim/exp_rebench/recheck/mstar_old/image_to_speech_B1_r1/

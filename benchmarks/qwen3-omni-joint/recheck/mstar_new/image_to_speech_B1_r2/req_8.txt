@@ -1,0 +1,14 @@
+Based on the visual information you provided, the food shown is **spring rolls**.
+
+More specifically, they appear to be **Vietnamese fresh spring rolls** (also known as *gỏi cuốn*). This is indicated by several key features:
+
+*   **Translucent Wrapper:** They are wrapped in a thin, rice paper wrapper that becomes translucent when wet.
+*   **Fresh Ingredients:** The filling is clearly visible and consists of fresh, raw ingredients such as:
+    *   Shredded vegetables (likely carrots and cucumber)
+    *   Lettuce or other leafy greens
+    *   Herbs (such as mint and cilantro)
+    *   Rice vermicelli noodles
+    *   A protein, which appears to be either cooked shrimp or pork.
+*   **Serving Style:** They are served cold or at room temperature on a plate, often with a dipping sauce on the side.
+
+These are distinct from deep-fried spring rolls, which have a golden, crispy wrapper and are typically filled with cooked ingredients.<|im_end|>

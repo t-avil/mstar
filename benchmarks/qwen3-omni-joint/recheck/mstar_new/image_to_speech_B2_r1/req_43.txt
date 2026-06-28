@@ -1,0 +1,3 @@
+Based on the visual information, this dish is **escargots**.
+
+More specifically, it appears to be **French escargots de Bourgogne** (Burgundy snails). This is a classic French dish that consists of cooked snails served in their shells, typically with a rich, herby butter sauce made with garlic, parsley, and often white wine or brandy. The lemon wedge and fresh parsley are common garnishes for this dish.<|im_end|>

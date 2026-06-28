@@ -1,0 +1,3 @@
+Of course, here is a caption for the image of the food:
+
+**A beautifully presented seared duck breast, served with a rich, glossy sauce and a side of vibrant orange carrots.**<|im_end|>

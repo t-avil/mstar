@@ -18050,119 +18050,49 @@
     "B1": {
       "mstar_new": {
         "recomputed": {
-          "n": 50,
-          "n_with_audio": 50,
-          "rtf_mean": 0.08878722544236371,
-          "rtf_p50": 0.08610636900928507,
-          "rtf_p95": 0.10084541817668424,
-          "rtf_p99": 0.12433660939531976,
-          "rtf_std": 0.008410724820837923,
-          "audio_dur_mean": 46.82905,
-          "audio_dur_p50": 49.6634375,
-          "jct_mean_s": 4.0475261695636435,
-          "audio_throughput": 11.569057178095749,
-          "request_throughput": 0.2470487267645991,
-          "wall_time_s": 202.38922359491698,
-          "text_token_throughput": 45.501434495503865
+          "n": 175,
+          "n_with_audio": 175,
+          "rtf_p50": 0.08627266824462067,
+          "rtf_mean": 0.08914687305713327,
+          "rtf_p95": 0.11040389932032255,
+          "audio_throughput": 11.46821457434939,
+          "request_throughput": 0.2548926294921979,
+          "text_token_throughput": null
         },
         "harness": {
           "ttft_audio": {
-            "mean": 0.452,
-            "p50": 0.447,
-            "p95": 0.5,
-            "p99": 0.506
+            "p50": 0.414
           },
           "itl_audio": {
-            "mean": 0.092,
-            "p50": 0.088,
-            "p95": 0.11,
-            "p99": 0.12
-          },
-          "ttft_text": {
-            "mean": 0.317,
-            "p50": 0.314,
-            "p95": 0.328,
-            "p99": 0.369
-          },
-          "itl_text": {
-            "mean": 0.007,
-            "p50": 0.007,
-            "p95": 0.008,
-            "p99": 0.01
-          },
-          "rtf_reported": {
-            "mean": 0.089,
-            "p50": 0.086,
-            "p95": 0.101,
-            "p99": 0.124
-          },
-          "audio_dur_reported": 46.829,
-          "audio_throughput_reported": 11.57,
-          "req_throughput_reported": 0.25,
-          "text_tok_throughput_reported": 45.5,
-          "text_tokens_total": 9209,
-          "text_tokens_avg": 184.2
+            "mean": 0.09233333333333334
+          }
         },
-        "completed": 50,
-        "num_requests": 50
+        "source": "recheck (3 reps, n=175)",
+        "completed": 175,
+        "num_requests": 175
       },
       "mstar_old": {
         "recomputed": {
-          "n": 12,
-          "n_with_audio": 12,
-          "rtf_mean": 0.08807796071316562,
-          "rtf_p50": 0.08619158643748642,
-          "rtf_p95": 0.09884580262812255,
-          "rtf_p99": 0.10508401070508519,
-          "rtf_std": 0.006525249114123855,
-          "audio_dur_mean": 43.52401041666667,
-          "audio_dur_p50": 44.514375,
-          "jct_mean_s": 3.7554512567391307,
-          "audio_throughput": 11.588453542603768,
-          "request_throughput": 0.2662542681996555,
-          "wall_time_s": 45.06970003200695,
-          "text_token_throughput": 46.48355765652319
+          "n": 60,
+          "n_with_audio": 60,
+          "rtf_p50": 0.08650472104003429,
+          "rtf_mean": 0.08880209665004199,
+          "rtf_p95": 0.1085330512655569,
+          "audio_throughput": 11.535894838932343,
+          "request_throughput": 0.2500000936027963,
+          "text_token_throughput": null
         },
         "harness": {
           "ttft_audio": {
-            "mean": 0.558,
-            "p50": 0.576,
-            "p95": 0.631,
-            "p99": 0.641
+            "p50": 0.5715
           },
           "itl_audio": {
-            "mean": 0.149,
-            "p50": 0.145,
-            "p95": 0.179,
-            "p99": 0.183
-          },
-          "ttft_text": {
-            "mean": 0.354,
-            "p50": 0.376,
-            "p95": 0.418,
-            "p99": 0.436
-          },
-          "itl_text": {
-            "mean": 0.007,
-            "p50": 0.007,
-            "p95": 0.009,
-            "p99": 0.01
-          },
-          "rtf_reported": {
-            "mean": 0.088,
-            "p50": 0.086,
-            "p95": 0.099,
-            "p99": 0.105
-          },
-          "audio_dur_reported": 43.524,
-          "audio_throughput_reported": 11.59,
-          "req_throughput_reported": 0.27,
-          "text_tok_throughput_reported": 46.48,
-          "text_tokens_total": 2095,
-          "text_tokens_avg": 174.6
+            "mean": 0.1505
+          }
         },
-        "completed": 12,
-        "num_requests": 12
+        "source": "recheck (2 reps, n=60)",
+        "completed": 60,
+        "num_requests": 60
       },
       "vllm": {
         "recomputed": {
@@ -18269,61 +18199,26 @@
     "B2": {
       "mstar_new": {
         "recomputed": {
-          "n": 50,
-          "n_with_audio": 50,
-          "rtf_mean": 0.10919666950023255,
-          "rtf_p50": 0.10642484841429273,
-          "rtf_p95": 0.12733635891524403,
-          "rtf_p99": 0.1418249348399973,
-          "rtf_std": 0.01018661581984952,
-          "audio_dur_mean": 44.2534,
-          "audio_dur_p50": 45.7328125,
-          "jct_mean_s": 4.69046505656559,
-          "audio_throughput": 18.655912908781968,
-          "request_throughput": 0.4215701597794061,
-          "wall_time_s": 118.60422005713917,
-          "text_token_throughput": 72.82202940029461
+          "n": 200,
+          "n_with_audio": 200,
+          "rtf_p50": 0.10586392076810025,
+          "rtf_mean": 0.10864348743247071,
+          "rtf_p95": 0.1311481319998266,
+          "audio_throughput": 18.715348424787543,
+          "request_throughput": 0.40403962085340017,
+          "text_token_throughput": null
         },
         "harness": {
           "ttft_audio": {
-            "mean": 0.5,
-            "p50": 0.487,
-            "p95": 0.566,
-            "p99": 0.694
+            "p50": 0.4705
           },
           "itl_audio": {
-            "mean": 0.113,
-            "p50": 0.115,
-            "p95": 0.136,
-            "p99": 0.274
-          },
-          "ttft_text": {
-            "mean": 0.339,
-            "p50": 0.322,
-            "p95": 0.437,
-            "p99": 0.519
-          },
-          "itl_text": {
-            "mean": 0.008,
-            "p50": 0.008,
-            "p95": 0.01,
-            "p99": 0.013
-          },
-          "rtf_reported": {
-            "mean": 0.109,
-            "p50": 0.106,
-            "p95": 0.127,
-            "p99": 0.142
-          },
-          "audio_dur_reported": 44.253,
-          "audio_throughput_reported": 18.66,
-          "req_throughput_reported": 0.42,
-          "text_tok_throughput_reported": 72.82,
-          "text_tokens_total": 8637,
-          "text_tokens_avg": 172.7
+            "mean": 0.1145
+          }
         },
-        "completed": 50,
-        "num_requests": 50
+        "source": "recheck (2 reps, n=200)",
+        "completed": 200,
+        "num_requests": 200
       },
       "vllm": {
         "recomputed": {
@@ -18367,6 +18262,29 @@
         },
         "completed": 50,
         "num_requests": 50
+      },
+      "mstar_old": {
+        "recomputed": {
+          "n": 80,
+          "n_with_audio": 80,
+          "rtf_p50": 0.10552665493359337,
+          "rtf_mean": 0.10773089262626873,
+          "rtf_p95": 0.12122638672396165,
+          "audio_throughput": 18.691069525533475,
+          "request_throughput": 0.4031241793587751,
+          "text_token_throughput": null
+        },
+        "harness": {
+          "ttft_audio": {
+            "p50": 0.656
+          },
+          "itl_audio": {
+            "mean": 0.1855
+          }
+        },
+        "source": "recheck (2 reps, n=80)",
+        "completed": 80,
+        "num_requests": 80
       }
     },
     "B4": {

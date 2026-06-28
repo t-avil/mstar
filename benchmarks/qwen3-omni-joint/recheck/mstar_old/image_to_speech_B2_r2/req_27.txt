@@ -1,0 +1,3 @@
+Based on the visual information in the photo, the dish is **donuts**.
+
+This is a classic baked good that is a staple of **American** and **Western** cuisine. The donuts in the image appear to be a type of ring-shaped cake donut, commonly known as a **"cake donut"** or **"plain donut"**. They are characterized by their light, slightly crumbly texture, which is different from the softer, more doughy texture of yeast-raised donuts. The donuts are coated in a light dusting of powdered sugar, a very common topping for this style of donut.<|im_end|>

@@ -1,0 +1,8 @@
+Based on the dishes presented in the image, this is a meal from **Cantonese cuisine**, a style of Chinese cooking originating from the Guangdong province.
+
+The specific dishes visible are:
+
+*   **Roast Duck (烤���, Kǎo yā):** The most prominent dish in the foreground features a beautifully cooked duck with a glossy, deep-red, crispy skin and tender, pinkish meat. This is a classic Cantonese dish, often served with thin pancakes, hoisin sauce, and scallions.
+*   **Braised or Steamed Duck (���肉, yāròu):** On the plate in the background, there is a different preparation of duck, which appears to be braised or steamed. This is served in slices with a lighter-colored skin and accompanied by a garnish of green onions.
+
+The meal is complemented by small bowls of dipping sauces and garnishes, which is typical for this style of dining.<|im_end|>

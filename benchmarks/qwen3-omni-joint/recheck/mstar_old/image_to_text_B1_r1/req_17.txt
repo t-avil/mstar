@@ -1,0 +1,5 @@
+Based on the visual information in the image, here is an identification of the cuisine and dish:
+
+*   **Dish:** The dish is **raw oysters on the half shell**. They are served cold on a bed of crushed ice to keep them fresh and chilled. Each oyster is garnished with a wedge of lemon, which is typically squeezed over the oyster before eating to add acidity and enhance the flavor.
+
+*   **Cuisine:** This is a classic dish in **French cuisine**. It is known as *huîtres* in French and is a staple of seafood restaurants and bistros. The presentation, with the oysters on ice and garnished with lemon and parsley, is very typical of how they are served in France.<|im_end|>

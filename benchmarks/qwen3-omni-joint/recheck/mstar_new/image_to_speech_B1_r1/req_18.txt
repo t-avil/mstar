@@ -1,0 +1,12 @@
+Based on the ingredients and presentation in the image, this dish is a **Spanish Paella**.
+
+Here are the key characteristics that lead to this identification:
+
+*   **The Pan:** The food is served in a wide, shallow, round pan with two handles, which is known as a *paellera*. This is the traditional vessel for cooking and serving paella.
+*   **The Ingredients:** The dish contains a mix of seafood, including:
+    *   **Mussels:** The large, dark-shelled bivalves are clearly visible.
+    *   **Shrimp/Prawns:** Several pink and white shrimp are mixed in with the rice.
+    *   **Saffron Rice:** The rice has a distinct golden-orange color, which is characteristic of paella due to the use of saffron.
+*   **The Garnish:** The presence of lemon wedges as a garnish is very common for paella, as the juice is typically squeezed over the dish just before eating to add brightness and cut through the richness.
+
+This specific combination of seafood, saffron rice, and presentation in a *paellera* strongly indicates that the dish is Spanish Paella.<|im_end|>

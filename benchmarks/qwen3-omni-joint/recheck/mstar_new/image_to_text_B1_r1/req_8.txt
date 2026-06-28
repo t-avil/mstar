@@ -1,0 +1,11 @@
+Based on the visual information, this food is called **spring rolls**.
+
+More specifically, they appear to be **fresh spring rolls** (also known as **summer rolls**). This is indicated by the translucent rice paper wrapper and the visible fresh ingredients inside, such as:
+
+*   Lettuce
+*   Shredded carrots
+*   Cucumber
+*   Herbs (like mint or cilantro)
+*   Possibly vermicelli noodles
+
+These rolls are typically served cold and are often accompanied by a dipping sauce, like the one visible in the small white bowl.<|im_end|>

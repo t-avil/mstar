@@ -1,0 +1,10 @@
+Based on the visual information in the image, this dish is commonly known as **escargots**.
+
+More specifically, these are **snails in garlic butter**, a classic French dish. The key elements that lead to this identification are:
+
+*   **The Snails:** The dish features several large, cooked snails, which are the primary ingredient. The shells have a distinct spiral pattern and are often light brown or cream-colored with darker brown stripes.
+*   **The Preparation:** The snails are typically cooked in their shells, which is a traditional method for this dish.
+*   **The Garlic Butter:** The greenish sauce visible inside the shells and coating the snails is characteristic of the rich garlic butter sauce that is the hallmark of escargots. The dark spots inside the shells are the snail meat itself.
+*   **The Garnish:** The dish is served with a slice of lemon and a sprig of fresh parsley, which are common accompaniments for escargots, adding a fresh, citrusy note to cut through the richness of the butter.
+
+Therefore, the name of this food is **escargots**.<|im_end|>
