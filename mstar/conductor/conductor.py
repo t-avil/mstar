@@ -40,6 +40,7 @@ from mstar.utils.ipc_format import (
     WorkerMessageType,
 )
 from mstar.utils.logging_config import quiet_noisy_loggers
+from mstar.utils.parity import parity_mode_enabled, parity_seed
 from mstar.utils.profiler import range_pop, range_push
 from mstar.utils.sampling import SamplingConfig
 
@@ -598,7 +599,15 @@ class Conductor:
         # Honor an explicit per-request seed (e.g. OpenAI ``seed``) when given;
         # otherwise derive a stable seed from the request id.
         explicit_seed = model_kwargs.get("seed")
-        seed = int(explicit_seed) if explicit_seed is not None else _req_id_to_seed(body.request_id)
+        if explicit_seed is not None:
+            seed = int(explicit_seed)
+        elif parity_mode_enabled():
+            # Parity mode: pin a fixed seed so two engines (M*-new and M*-old)
+            # draw identical sampling noise without the client having to set one.
+            # An explicit per-request seed still wins above.
+            seed = parity_seed()
+        else:
+            seed = _req_id_to_seed(body.request_id)
 
         partitions = self.model.get_partitions()
         topology = self.model.get_partition_topology()

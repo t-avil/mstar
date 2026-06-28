@@ -394,10 +394,40 @@ class Qwen3OmniModelConfig:
                 return current
             return raw.strip().lower() in ("1", "true", "yes", "on")
 
+        # PARITY MODE: a single opt-in switch (MSTAR_PARITY_MODE=1) that reverts
+        # every unconditional default change M*-new made relative to M*-old, so
+        # M*-new reproduces M*-old byte-for-byte on S2S. It sets the *base*
+        # defaults back to the old values here; the per-flag env overrides below
+        # still win, so a single native encoder can be re-enabled for bisection
+        # without leaving parity mode. See mstar/utils/parity.py and
+        # docs/PARITY_MODE.md.
+        from mstar.utils.parity import parity_mode_enabled, parity_seed
+
+        _parity = parity_mode_enabled()
+        if _parity:
+            # Old engine used the HF-wrapper encoders, not the native ones.
+            self.native_audio_encoder = False
+            self.native_vision_encoder = False
+
         self.native_audio_encoder = _envflag(
             "MSTAR_QWEN3_NATIVE_AUDIO_ENCODER", self.native_audio_encoder)
         self.native_vision_encoder = _envflag(
             "MSTAR_QWEN3_NATIVE_VISION_ENCODER", self.native_vision_encoder)
+
+        if _parity:
+            # Old Code2Wav streaming chunk geometry was 25/25 (new is 15/15).
+            self.code2wav.codec_chunk_frames = 25
+            self.code2wav.codec_left_context_frames = 25
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "MSTAR_PARITY_MODE active: reproducing M*-old defaults "
+                "(native_audio_encoder=%s, native_vision_encoder=%s, "
+                "codec_chunk_frames=%d, codec_left_context_frames=%d, "
+                "fixed seed=%d). Optimizations are reverted; this is a "
+                "correctness-parity run, not a perf run.",
+                self.native_audio_encoder, self.native_vision_encoder,
+                self.code2wav.codec_chunk_frames,
+                self.code2wav.codec_left_context_frames, parity_seed())
 
         # Sanity check: all codec special token IDs must be < the Talker's
         # codec_embedding vocab size (talker_text.vocab_size, typically 3072).
