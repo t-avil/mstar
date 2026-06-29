@@ -24,9 +24,11 @@
 set -uo pipefail
 
 WORKTREE="/home/tim/exp_encchunk"
-GPUS="1,2"
-NUMA=0
-PORT=8172
+GPUS="${GPUS:-1,2}"
+FIRST_GPU="${GPUS%%,*}"
+if [[ "$FIRST_GPU" -lt 4 ]]; then NUMA=0; else NUMA=1; fi
+PORT="${PORT:-8172}"
+export PATH="/home/tim/mstar-encoders/.venv/bin:$PATH"
 B=8
 N_BASE=30
 N_WARMUP=5
@@ -36,7 +38,7 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-/home/tim/tmp/mvp_encoder_chunk_coalesce_$(date -u +
 GLOBAL_TIMEOUT="${GLOBAL_TIMEOUT:-1200}"  # 20 min
 SERVER_TIMEOUT=900
 BENCH_TIMEOUT=600
-SERVER_READY_TIMEOUT=240
+SERVER_READY_TIMEOUT=420
 
 # Same baseline opts as the M*-new label (LEARNINGS §2). The only delta the
 # A/B can attribute its result to is MSTAR_ENCODER_CHUNK_COALESCE.
@@ -152,6 +154,7 @@ launch_server() {
                 --gpus $GPUS \
                 --port $PORT \
                 --tensor-comm-protocol SHM \
+                --socket-path-prefix /home/tim/tmp/sk_encchunk_${PORT} \
             > $log 2>&1" </dev/null &
     SERVER_PID=$!
 
@@ -211,6 +214,8 @@ run_bench() {
     # cd to the worktree — PYTHONPATH trap.
     timeout "$BENCH_TIMEOUT" bash -c "cd $WORKTREE && \
         PYTHONPATH=$WORKTREE \
+        HF_HOME=$HF_HOME_DIR \
+        HF_DATASETS_CACHE=$HF_DATASETS \
         $BENCHMARK_PYTHON -m benchmark.runner \
             --url http://127.0.0.1:$PORT \
             --model qwen3omni \
