@@ -180,18 +180,18 @@ for reqtype in "${RESOLVED_PATHS[@]}"; do
 
         echo -n "[$(date -u +%H:%M:%S)] $short B=$b N=$n ... "
 
-        timeout "$BENCH_TIMEOUT" "$BENCHMARK_PYTHON" -m benchmark.runner \
-            --url "http://127.0.0.1:$PORT" \
+        timeout "$BENCH_TIMEOUT" bash -c "cd $BENCHMARK_CODE && $BENCHMARK_PYTHON -m benchmark.runner \
+            --url http://127.0.0.1:$PORT \
             --model qwen3omni \
-            --request-type "$reqtype" \
-            --dataset "$dataset" \
+            --request-type $reqtype \
+            --dataset $dataset \
             --profiling-type closed_loop \
-            --max-concurrency "$b" \
-            --num-requests "$n" \
-            --num-warmup "$WARMUP" \
+            --max-concurrency $b \
+            --num-requests $n \
+            --num-warmup $WARMUP \
             --inference-system vllm_omni \
-            --local-cache "$cache" \
-            --output-dir "$odir" \
+            --local-cache $cache \
+            --output-dir $odir" \
             > "$odir/run.log" 2>&1
         rc=$?
 

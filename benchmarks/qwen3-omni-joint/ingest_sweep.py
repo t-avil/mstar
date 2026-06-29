@@ -30,6 +30,30 @@ def load_or_init(fp):
             "datapoints": [], "aggregates": {}}
 
 
+PCM_BYTES_PER_SEC = 48000  # 16-bit 24 kHz mono
+
+
+def _derive_audio_from_per_request(res):
+    """Compute audio_throughput and RTF from per_request when top-level aggregates are absent."""
+    per_req = res.get("per_request", [])
+    wall = res.get("wall_time_s", 0)
+    if not per_req or wall <= 0:
+        return None, None
+    durations, rtfs = [], []
+    for p in per_req:
+        ab = p.get("output_bytes", {}).get("audio", 0)
+        if ab <= 0:
+            continue
+        dur = ab / PCM_BYTES_PER_SEC
+        durations.append(dur)
+        jct_s = p.get("jct_ms", 0) / 1000.0
+        if jct_s > 0 and dur > 0:
+            rtfs.append(jct_s / dur)
+    audio_tp = sum(durations) / wall if durations else None
+    rtf_p50 = sorted(rtfs)[len(rtfs) // 2] if rtfs else None
+    return audio_tp, rtf_p50
+
+
 def build_aggregates(res):
     """Build the recomputed + harness aggregate dicts from a results.json."""
     rec = {}
@@ -39,6 +63,13 @@ def build_aggregates(res):
     rec["text_token_throughput"] = res.get("text_token_throughput")
     rec["audio_throughput"] = res.get("audio_seconds_throughput")
     rec["rtf_p50"] = res.get("rtf", {}).get("p50") if isinstance(res.get("rtf"), dict) else None
+
+    if rec["audio_throughput"] is None or rec["rtf_p50"] is None:
+        derived_tp, derived_rtf = _derive_audio_from_per_request(res)
+        if rec["audio_throughput"] is None:
+            rec["audio_throughput"] = derived_tp
+        if rec["rtf_p50"] is None:
+            rec["rtf_p50"] = derived_rtf
 
     for domain in ["text", "audio"]:
         ttft_src = res.get("ttft", {}).get(domain)
