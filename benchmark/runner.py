@@ -250,9 +250,20 @@ class Benchmark:
 
         per_request = []
         for m in ok_metrics:
+            # Per-token ITL: chunk_gaps gives raw inter-chunk gaps;
+            # itl_per_token_text normalises by tokens (falls back to gaps if
+            # no tokenizer).  chunk_arrivals_text is the raw monotonic
+            # timestamp list for offline re-analysis.
+            text_itl = m.itl_per_token_text()          # list[float] | None
+            text_gaps = m.chunk_gaps.get("text")       # list[float] | None
+            text_arrivals = m.chunk_arrivals.get("text")  # list[float] | None
             per_request.append({
                 "request_id": m.request_id,
+                "phase": "measure",
                 "jct_ms": (m.e2e_latency or 0.0) * 1000.0,
+                "ttft_text": m.ttft.get("text"),
+                "itl_text_per_token": text_itl if text_itl else text_gaps,
+                "chunk_arrivals_text": text_arrivals,
                 "type": m.type.value if hasattr(m.type, "value") else str(m.type),
                 "output_bytes": dict(m.output_bytes),
             })

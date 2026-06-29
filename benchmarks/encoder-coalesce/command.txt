@@ -1,0 +1,25 @@
+# A/B encoder-coalesce benchmark
+# Control (coalescing OFF): GPUs 0,1, NUMA0, port 8103
+# Experiment (coalescing ON): GPUs 4,5, NUMA1, port 8104
+#   Extra env: MSTAR_ENCODER_COALESCE=1 MSTAR_ENCODER_COALESCE_WAIT_MS=10 MSTAR_ENCODER_COALESCE_MAX_BATCH=16
+# Both use config: configs/qwen3omni_2gpu.yaml
+# Both use worktree: /home/tim/exp/coalesce-wt
+
+# Server launch (control):
+/home/tim/launch_mstar_wt.sh /home/tim/exp/coalesce-wt 0,1 0 8103 coal_control_sock /home/tim/logs/coal_control.log \
+  HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+# Server launch (experiment):
+/home/tim/launch_mstar_wt.sh /home/tim/exp/coalesce-wt 4,5 1 8104 coal_exp_sock /home/tim/logs/coal_exp.log \
+  MSTAR_ENCODER_COALESCE=1 MSTAR_ENCODER_COALESCE_WAIT_MS=10 MSTAR_ENCODER_COALESCE_MAX_BATCH=16 \
+  HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+# Benchmark runs (for each B in 1, 4, 8; sequential: control then exp):
+cd /home/tim/bench-coalesce-wt && source /home/tim/mstar/.venv/bin/activate
+export HF_HOME=/m-coriander/coriander/hf HF_DATASETS_CACHE=/home/tim/hf_datasets
+
+numactl --cpunodebind=<0|1> --membind=<0|1> timeout 1800 python -m benchmark.runner \
+  --url http://127.0.0.1:<8103|8104> --model qwen3omni --request-type audio_to_text --dataset libri \
+  --profiling-type closed_loop --max-concurrency <1|4|8> --num-requests 40 --num-warmup 5 \
+  --inference-system ours --local-cache /home/tim/tmp/libri_wavs \
+  --output-dir /home/tim/bench-coalesce-wt/benchmarks/encoder-coalesce/raw_<control|exp>_s2t_b<1|4|8>
