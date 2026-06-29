@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -12,6 +13,20 @@ from mstar.worker.engine_manager import EngineManager
 from mstar.worker.node_manager_utils import WorkerGraphsManager
 
 logger = logging.getLogger(__name__)
+
+# Thinker prefill walks eligible for resumable chunked prefill. Kept local to
+# the scheduler so it does not import the (heavy) Qwen3-Omni model module just
+# to read the env flag.
+_THINKER_PREFILL_WALKS = frozenset(
+    {"prefill_text", "encode_audio", "prefill_audio", "prefill_vision"}
+)
+
+
+def _chunked_prefill_enabled() -> bool:
+    """Mirror of ``qwen3_omni_model.chunked_prefill_enabled`` without importing
+    the model module (avoids a worker->model import cycle). Default OFF."""
+    raw = os.environ.get("MSTAR_CHUNKED_PREFILL")
+    return raw is not None and raw.strip().lower() in ("1", "true", "yes", "on")
 
 
 @dataclass
@@ -368,12 +383,77 @@ class MicroScheduler:
             best_node_name, graph_walk
         )] = self.batch_number
 
+        # Resumable chunked prefill (MSTAR_CHUNKED_PREFILL): the re-enqueue is
+        # CONDUCTOR-DRIVEN (qwen3_omni_model._get_thinker_forward re-emits the
+        # same prefill_text walk with an advanced prefill_chunk_offset until the
+        # span is consumed), so the scheduler does not re-enqueue here. This hook
+        # remains as a tolerant no-op / sanity guard. See the method docstring
+        # and DESIGN_chunked_prefill.md.
+        if _chunked_prefill_enabled() and graph_walk in _THINKER_PREFILL_WALKS:
+            self._maybe_reenqueue_prefill_remainder(
+                worker_graphs_manager, graph_walk, node_objects,
+            )
+
         return ScheduledBatch(
             node_name=best_node_name,
             graph_walk=graph_walk,
             node_objects=node_objects,
             request_to_worker_graph=request_to_worker_graph,
         )
+
+    def _maybe_reenqueue_prefill_remainder(
+        self,
+        worker_graphs_manager: WorkerGraphsManager,
+        graph_walk: str,
+        node_objects: dict[str, GraphNode],
+    ) -> None:
+        """Tolerant no-op hook for resumable chunked prefill.
+
+        The actual re-enqueue is CONDUCTOR-DRIVEN, not scheduler-driven. In this
+        engine a prefill walk's input edges are owned by the conductor: the
+        scheduler only schedules nodes the conductor has emitted inputs for. So
+        "run the same prefill node again next step" is implemented by the
+        conductor re-emitting the SAME walk with an advanced
+        ``prefill_chunk_offset`` until the span is consumed
+        (``qwen3_omni_model._get_thinker_forward`` /
+        ``_get_thinker_initial_args`` / ``_chunk_bounds`` and the pure planners
+        ``plan_text_prefill_chunk`` / ``plan_audio_prefill_chunk``). The model
+        side then slices the full-span prefill to
+        ``[prefill_chunk_offset : +prefill_chunk_len]`` in
+        ``ThinkerSubmodule._maybe_chunk_prefill``, and the FlashInfer KV append
+        is already resumable (``cache_manager._plan_attention_impl`` writes
+        ``sl`` new tokens at offset ``state.seq_len``), so chunks append KV
+        correctly and each chunk attends causally over prior chunks' KV.
+
+        Scope of the conductor-driven implementation:
+          * prefill_text with ``audio_output=False`` (text-output requests:
+            S2T / I2T / T2T) is chunked. Its token count is known up-front from
+            the input tensor ``dims`` and no Talker thinker_states accounting is
+            involved, so chunking is exact.
+          * prefill_audio with ``audio_output=False`` is chunked. The audio
+            encoder has been split into its own ``encode_audio`` conductor step
+            that persists ``audio_embeds`` with known ``dims[0]`` (audio token
+            count). The subsequent ``prefill_audio`` Thinker walk is then
+            chunked identically to text.
+          * prefill_vision is NOT chunked yet: needs per-chunk
+            ``deepstack_<i>`` slicing. ``_maybe_chunk_prefill`` still raises
+            for a vision chunk window if one is ever requested.
+
+        This hook stays as a sanity guard: if a future change marks a node with
+        ``requires_prefill_chunking`` (scheduler-side chunking), surface it
+        rather than silently ignore it.
+        """
+        needs_chunking = any(
+            getattr(n, "requires_prefill_chunking", False)
+            for n in node_objects.values()
+        )
+        if needs_chunking:
+            logger.warning(
+                "Node marked requires_prefill_chunking=True, but chunked "
+                "prefill is conductor-driven; scheduler re-enqueue is a no-op. "
+                "See MicroScheduler._maybe_reenqueue_prefill_remainder."
+            )
+        return
 
     def has_ready_excluding(
         self,

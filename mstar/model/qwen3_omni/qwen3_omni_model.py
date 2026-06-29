@@ -124,6 +124,113 @@ def batch_vision_prefill_enabled() -> bool:
     return _envflag("MSTAR_BATCH_VISION_PREFILL")
 
 
+def chunked_prefill_enabled() -> bool:
+    """When ON, the Thinker prefill of a long audio/vision/text span is split
+    into token-budgeted chunks across scheduler steps (resumable chunked
+    prefill) so a single long prefill does not monopolize a scheduler step and
+    stall other requests' first tokens (TTFT at batch).
+
+    Default OFF -> the existing single-shot prefill is used and is byte-identical.
+    When ON, a prefill whose span is <= the chunk threshold is processed in a
+    single chunk and is byte-identical to the single-shot path.
+
+    See ``DESIGN_chunked_prefill.md`` for the full design and the partial
+    (model-side implemented, scheduler re-enqueue stubbed) state.
+    """
+    return _envflag("MSTAR_CHUNKED_PREFILL")
+
+
+# Default chunk size (max new prefill tokens admitted per scheduler step for a
+# single request) when MSTAR_CHUNKED_PREFILL is ON. Chosen to match the
+# mid-range PREFILL_TOKEN_BUCKETS entry so a fixed chunk maps onto an existing
+# CUDA-graph capture shape (num_tokens=chunk) with no new captures.
+DEFAULT_LONG_PREFILL_TOKEN_THRESHOLD = 512
+
+
+def long_prefill_token_threshold() -> int:
+    """Chunk size for resumable chunked prefill (max new prefill tokens per
+    request per scheduler step). Read from ``MSTAR_LONG_PREFILL_TOKEN_THRESHOLD``;
+    defaults to ``DEFAULT_LONG_PREFILL_TOKEN_THRESHOLD`` (512).
+
+    Keep this aligned with one of ``ThinkerSubmodule.PREFILL_TOKEN_BUCKETS`` so
+    every full chunk replays an existing capture; the final (ragged) chunk falls
+    back to the smallest bucket >= its size exactly like a short single-shot
+    prefill does today.
+    """
+    import os as _os
+
+    raw = _os.environ.get("MSTAR_LONG_PREFILL_TOKEN_THRESHOLD")
+    if raw is None:
+        return DEFAULT_LONG_PREFILL_TOKEN_THRESHOLD
+    try:
+        val = int(raw.strip())
+    except (TypeError, ValueError):
+        return DEFAULT_LONG_PREFILL_TOKEN_THRESHOLD
+    return val if val > 0 else DEFAULT_LONG_PREFILL_TOKEN_THRESHOLD
+
+
+def plan_text_prefill_chunk(
+    total_len: int | None, offset: int, threshold: int,
+) -> tuple[int, bool] | None:
+    """Pure chunk planner for resumable chunked **text** prefill.
+
+    Given the full text span length ``total_len``, the number of tokens already
+    committed by earlier chunks of this walk (``offset``), and the per-step
+    ``threshold``, return ``(chunk_len, walk_done)`` for the chunk to emit this
+    step -- or ``None`` when chunking is not needed (whole span fits in one
+    chunk, so the single-shot path stays byte-identical).
+
+    ``walk_done`` is True only when this chunk consumes the final token of the
+    span; the conductor uses it to set ``is_last_prefill`` (logits sampled /
+    thinker_states emitted once) and to advance the prefill schedule.
+
+    Kept as a free function (no model state) so the chunk-loop arithmetic is
+    unit-testable on CPU without instantiating the model. See
+    DESIGN_chunked_prefill.md.
+    """
+    if total_len is None or total_len <= 0 or total_len <= threshold:
+        return None
+    offset = max(0, int(offset))
+    chunk_len = min(threshold, total_len - offset)
+    if chunk_len <= 0:
+        return None
+    walk_done = (offset + chunk_len) >= total_len
+    return chunk_len, walk_done
+
+
+def plan_audio_prefill_chunk(
+    total_len: int | None, offset: int, threshold: int,
+) -> tuple[int, bool] | None:
+    """Pure chunk planner for resumable chunked **audio** Thinker prefill.
+
+    Identical arithmetic to ``plan_text_prefill_chunk`` (the chunk planner is
+    modality-agnostic), but separated so call sites are self-documenting and
+    unit tests can pin audio-specific edge cases.
+
+    The audio token count (``total_len``) is only known after the encoder runs.
+    With the encoder split into its own ``encode_audio`` conductor step, the
+    conductor reads ``total_len`` from the encoder's ``audio_embeds`` persist
+    signal (``dims[0]``) and passes it here.  See ``_audio_chunk_bounds``.
+
+    Returns ``(chunk_len, walk_done)`` or ``None`` when chunking is not needed.
+    """
+    if total_len is None or total_len <= 0:
+        return None
+    # Audio embeds include the start/end sentinel tokens prepended/appended by
+    # ThinkerSubmodule._wrap_audio_input.  The full Thinker prefill span is
+    # ``audio_token_count + 2``.  Chunking operates on the full span (same
+    # as text: the threshold applies to the token count the Thinker sees).
+    span = total_len + 2  # +2 for audio_start + audio_end sentinels
+    if span <= threshold:
+        return None
+    offset = max(0, int(offset))
+    chunk_len = min(threshold, span - offset)
+    if chunk_len <= 0:
+        return None
+    walk_done = (offset + chunk_len) >= span
+    return chunk_len, walk_done
+
+
 def _tensor_dump_dir() -> str | None:
     """Directory for env-gated intermediate-tensor / token dumps, or None."""
     import os as _os
@@ -496,38 +603,49 @@ class Qwen3OmniModel(Model):
             ],
         )
 
-        prefill_audio = Sequential([
-            GraphNode(
-                name="audio_encoder",
-                # audio_seqlens carries the original (pre-padding) length of
-                # each audio clip, used by the encoder to compute attention
-                # masks and output position IDs.
-                input_names=["audio_features", "audio_seqlens"],
-                outputs=[GraphEdge(next_node="Thinker", name="audio_embeds")],
-            ),
-            GraphNode(
-                name="Thinker",
-                input_names=["audio_embeds"],
-                outputs=[
-                    GraphEdge(
-                        next_node=EMIT_TO_CLIENT,
-                        name="new_token",
-                        output_modality="text",
-                        persist=True,
-                    ),
-                    StreamingGraphEdge(
-                        next_node="Talker",
-                        name="thinker_states",
-                        target_partition="Talker",
-                    ),
-                    StreamingGraphEdge(
-                        next_node="Talker",
-                        name="thinker_mask",
-                        target_partition="Talker",
-                    ),
-                ],
-            ),
-        ])
+        # Audio encoder: standalone walk so the conductor gets control between
+        # the encoder and the Thinker.  The encoder output (audio_embeds)
+        # persists and its dims[0] (audio token count) is readable by the
+        # conductor, enabling chunked prefill of the subsequent Thinker walk.
+        encode_audio = GraphNode(
+            name="audio_encoder",
+            # audio_seqlens carries the original (pre-padding) length of
+            # each audio clip, used by the encoder to compute attention
+            # masks and output position IDs.
+            input_names=["audio_features", "audio_seqlens"],
+            outputs=[GraphEdge(
+                next_node=EMPTY_DESTINATION,
+                name="audio_embeds",
+                persist=True,
+            )],
+        )
+
+        # Audio Thinker prefill: consumes the persisted audio_embeds from
+        # the encode_audio step.  Now a standalone GraphNode (no longer a
+        # Sequential), so the conductor can chunk it the same way it chunks
+        # prefill_text.
+        prefill_audio = GraphNode(
+            name="Thinker",
+            input_names=["audio_embeds"],
+            outputs=[
+                GraphEdge(
+                    next_node=EMIT_TO_CLIENT,
+                    name="new_token",
+                    output_modality="text",
+                    persist=True,
+                ),
+                StreamingGraphEdge(
+                    next_node="Talker",
+                    name="thinker_states",
+                    target_partition="Talker",
+                ),
+                StreamingGraphEdge(
+                    next_node="Talker",
+                    name="thinker_mask",
+                    target_partition="Talker",
+                ),
+            ],
+        )
 
         prefill_vision = Sequential([
             GraphNode(
@@ -671,6 +789,7 @@ class Qwen3OmniModel(Model):
 
         return {
             "prefill_text": prefill_text,
+            "encode_audio": encode_audio,
             "prefill_audio": prefill_audio,
             "prefill_vision": prefill_vision,
             "thinker_decode": thinker_decode,
@@ -689,7 +808,7 @@ class Qwen3OmniModel(Model):
             PartitionDefinition(
                 name="Thinker",
                 graph_walks={
-                    "prefill_text", "prefill_audio",
+                    "prefill_text", "encode_audio", "prefill_audio",
                     "prefill_vision", "thinker_decode",
                 },
                 initial_walk="prefill_text",
@@ -807,16 +926,17 @@ class Qwen3OmniModel(Model):
                     "audio_output": audio_output,
                     "talker_prefill_done": False,
                     # The Talker consumes one thinker_states chunk per Thinker
-                    # prefill walk, so this MUST equal the actual number of
-                    # Thinker prefill walks -- not len(input_modalities).  The
-                    # vLLM-layout path (MSTAR_VLLM_PROMPT_LAYOUT=1) splits text
-                    # into prefix+suffix around the audio, producing an extra
-                    # prefill_text walk; deriving the count from the real
-                    # schedule keeps the Talker's last-prefill detection aligned.
-                    "num_thinker_prefill_steps": len(
-                        self._build_thinker_prefill_schedule(
+                    # prefill walk, so this MUST equal the number of walks that
+                    # produce thinker_states -- NOT len(schedule).  Encoder-only
+                    # walks (encode_audio) do not produce thinker_states and
+                    # must be excluded.  The vLLM-layout path splits text into
+                    # prefix+suffix, producing an extra prefill_text walk;
+                    # deriving the count from the real schedule keeps the
+                    # Talker's last-prefill detection aligned.
+                    "num_thinker_prefill_steps": sum(
+                        1 for walk, _ in self._build_thinker_prefill_schedule(
                             input_modalities, input_signals,
-                        )
+                        ) if walk != "encode_audio"
                     ),
                     "prefill_chunks_processed": 0,
                     "voice": model_kwargs.get("voice", "Ethan"),
@@ -860,7 +980,8 @@ class Qwen3OmniModel(Model):
         """Build initial ForwardPassArgs for the Thinker partition.
 
         Constructs a prefill schedule from the input modalities, then
-        begins the first walk in that schedule (always prefill_text).
+        begins the first walk in that schedule (typically prefill_text, but
+        may be encode_audio if the request starts with audio input).
         """
         audio_output = "audio" in output_modalities
 
@@ -870,7 +991,7 @@ class Qwen3OmniModel(Model):
         )
 
         first_walk = schedule[0][0] if schedule else "thinker_decode"
-        is_last_prefill = (schedule and len(schedule) == 1)
+        is_last_prefill = bool(schedule and len(schedule) == 1)
 
         full_metadata = CurrentForwardConductorMetadata(
             input_modalities=input_modalities,
@@ -881,14 +1002,37 @@ class Qwen3OmniModel(Model):
                 "prefill_schedule": schedule,
                 "prefill_step": 0,
                 "audio_output": audio_output,
+                # Per-walk committed-token counter for resumable chunked prefill.
+                "prefill_chunk_offset": 0,
             },
         )
 
         # First walk inputs
         inputs = self._get_thinker_prefill_inputs(full_metadata, input_signals)
-        unpersist_tensors = sum(
-            [inp.tensor_info for inp in inputs], start=[]
-        )
+
+        # Resumable chunked prefill: if the first walk is a long prefill_text
+        # span and chunking applies, emit chunk 0 here and keep the input
+        # tensor alive until the walk's final chunk.  (encode_audio /
+        # prefill_audio chunking happens later in _get_thinker_forward once
+        # the encoder has run and the token count is known.)
+        chunk_step_metadata: dict = {}
+        walk_done = True
+        if schedule:
+            bounds = self._text_chunk_bounds(full_metadata, schedule, 0)
+            if bounds is not None:
+                offset, chunk_len, walk_done = bounds
+                chunk_step_metadata = {
+                    "prefill_chunk_offset": offset,
+                    "prefill_chunk_len": chunk_len,
+                }
+                is_last_prefill = is_last_prefill and walk_done
+
+        if walk_done:
+            unpersist_tensors = sum(
+                [inp.tensor_info for inp in inputs], start=[]
+            )
+        else:
+            unpersist_tensors = []
 
         return ForwardPassArgs(
             full_metadata=full_metadata,
@@ -899,7 +1043,8 @@ class Qwen3OmniModel(Model):
                 # Tell the Thinker whether to emit thinker_states.  Text only
                 # requests skip it to save cross-partition bandwidth.
                 "audio_output": audio_output,
-                "is_last_prefill": is_last_prefill
+                "is_last_prefill": is_last_prefill,
+                **chunk_step_metadata,
             },
         )
 
@@ -947,7 +1092,8 @@ class Qwen3OmniModel(Model):
             if len(audio_seqlens) >= 1:
                 audio_entry["audio_seqlens"] = audio_seqlens[0]
             schedule.append(("prefill_text", {"text_inputs": texts[0]}))
-            schedule.append(("prefill_audio", audio_entry))
+            schedule.append(("encode_audio", audio_entry))
+            schedule.append(("prefill_audio", {}))
             schedule.append(("prefill_text", {"text_inputs": texts[1]}))
             return schedule
 
@@ -967,7 +1113,10 @@ class Qwen3OmniModel(Model):
                     }
                     if audio_idx < len(audio_seqlens):
                         entry["audio_seqlens"] = audio_seqlens[audio_idx]
-                    schedule.append(("prefill_audio", entry))
+                    # Split: encoder step (has the feature tensors) followed by
+                    # Thinker prefill step (gets audio_embeds from persist).
+                    schedule.append(("encode_audio", entry))
+                    schedule.append(("prefill_audio", {}))
                     audio_idx += 1
             elif mod == "image":
                 if vision_idx < len(pixel_values):
@@ -1023,29 +1172,50 @@ class Qwen3OmniModel(Model):
         We emit one GraphEdge per input so that auxiliary tensors like
         ``audio_seqlens`` and ``image_grid_thw`` reach the encoder node
         alongside the primary feature tensor.
+
+        Walk routing:
+          - ``encode_audio`` -> targets ``audio_encoder`` node (encoder inputs
+            from the schedule's tensor_dict)
+          - ``prefill_audio`` -> targets ``Thinker`` node (``audio_embeds``
+            from persist_signals, populated by the preceding encode_audio step)
+          - ``prefill_text`` -> targets ``Thinker`` node
+          - ``prefill_vision`` -> targets ``vision_encoder`` node (Sequential,
+            vision encoder + Thinker still in one walk for now)
         """
         schedule = metadata.kwargs["prefill_schedule"]
         step = metadata.kwargs["prefill_step"]
         walk_name, tensor_dict = schedule[step]
 
-        # Determine the target node — for audio/vision, the first node in
-        # the Sequential walk is the encoder (not the Thinker).
+        # Determine the target node.
         if walk_name == "prefill_text":
             target_node = "Thinker"
-        elif walk_name == "prefill_audio":
+        elif walk_name == "encode_audio":
             target_node = "audio_encoder"
+        elif walk_name == "prefill_audio":
+            # After the encoder-split, prefill_audio goes directly to the
+            # Thinker.  The audio_embeds tensor comes from persist_signals
+            # (set by the encode_audio step's persist output).
+            target_node = "Thinker"
         elif walk_name == "prefill_vision":
             target_node = "vision_encoder"
         else:
             raise ValueError(f"Unrecognized prefill walk: {walk_name}")
 
         edges: list[GraphEdge] = []
-        for input_name, tensor_info in tensor_dict.items():
-            if input_name == "video_second_per_grid":
-                continue # goes directly to Thinker
-            edge = GraphEdge(next_node=target_node, name=input_name)
-            edge.tensor_info = [tensor_info]
+
+        if walk_name == "prefill_audio":
+            # audio_embeds comes from persist_signals (encoder output).
+            audio_embeds_infos = input_signals.get("audio_embeds", [])
+            edge = GraphEdge(next_node="Thinker", name="audio_embeds")
+            edge.tensor_info = list(audio_embeds_infos)
             edges.append(edge)
+        else:
+            for input_name, tensor_info in tensor_dict.items():
+                if input_name == "video_second_per_grid":
+                    continue  # goes directly to Thinker
+                edge = GraphEdge(next_node=target_node, name=input_name)
+                edge.tensor_info = [tensor_info]
+                edges.append(edge)
 
         if walk_name == "prefill_vision":
             for key in ["image_grid_thw", "video_second_per_grid"]:
@@ -1084,6 +1254,124 @@ class Qwen3OmniModel(Model):
 
     # -- Thinker state machine ---------------------------------------------
 
+    def _text_chunk_bounds(
+        self,
+        metadata: "CurrentForwardConductorMetadata",
+        schedule: list,
+        step: int,
+    ) -> tuple[int, int, bool] | None:
+        """Resolve this step's chunk window for resumable chunked TEXT prefill.
+
+        Returns ``(offset, chunk_len, walk_done)`` when the current prefill walk
+        is a long ``prefill_text`` span that should be streamed in chunks, or
+        ``None`` to fall back to the single-shot (byte-identical) path.
+
+        Chunking is applied ONLY when:
+          * ``MSTAR_CHUNKED_PREFILL`` is ON, and
+          * the walk is ``prefill_text`` (its token count is known up-front from
+            the input tensor's ``dims``; audio/vision lengths are only known
+            after the encoder runs -- see DESIGN_chunked_prefill.md "audio"), and
+          * ``audio_output`` is False, i.e. the Talker is NOT conditioned on this
+            request. When the Talker runs it consumes one ``thinker_states`` chunk
+            per WALK; chunking a walk would emit one per token-chunk and drift the
+            Talker's ``num_thinker_prefill_steps`` accounting. Text-output
+            requests (S2T / I2T / T2T) skip thinker_states entirely, so chunking
+            them is safe and exact.
+
+        ``offset`` is the per-walk committed-token counter carried across steps
+        in ``metadata.kwargs['prefill_chunk_offset']``.
+        """
+        if not chunked_prefill_enabled():
+            return None
+        if metadata.kwargs.get("audio_output", True):
+            return None
+        walk, tensor_dict = schedule[step]
+        if walk != "prefill_text":
+            return None
+        ti = tensor_dict.get("text_inputs")
+        dims = getattr(ti, "dims", None)
+        if not dims:
+            return None
+        total_len = int(dims[0])
+        offset = int(metadata.kwargs.get("prefill_chunk_offset", 0))
+        plan = plan_text_prefill_chunk(
+            total_len, offset, long_prefill_token_threshold(),
+        )
+        if plan is None:
+            return None
+        chunk_len, walk_done = plan
+        return offset, chunk_len, walk_done
+
+    def _audio_chunk_bounds(
+        self,
+        metadata: "CurrentForwardConductorMetadata",
+        schedule: list,
+        step: int,
+        persist_signals: dict[str, list["TensorPointerInfo"]],
+    ) -> tuple[int, int, bool] | None:
+        """Resolve this step's chunk window for resumable chunked AUDIO prefill.
+
+        Returns ``(offset, chunk_len, walk_done)`` when the current walk is
+        ``prefill_audio`` and the audio Thinker span is long enough to chunk,
+        or ``None`` to fall back to single-shot.
+
+        The audio token count is NOT available from the schedule's tensor_dict
+        (it carries encoder inputs, not encoder outputs).  Instead, the
+        preceding ``encode_audio`` step persists ``audio_embeds`` whose
+        ``dims[0]`` is the raw audio token count (before start/end sentinels).
+        ``plan_audio_prefill_chunk`` adds the +2 sentinel overhead internally.
+
+        Same gating as ``_text_chunk_bounds``:
+          * ``MSTAR_CHUNKED_PREFILL`` ON
+          * ``audio_output`` False (Talker not conditioned)
+          * walk is ``prefill_audio``
+        """
+        if not chunked_prefill_enabled():
+            return None
+        if metadata.kwargs.get("audio_output", True):
+            return None
+        walk = schedule[step][0]
+        if walk != "prefill_audio":
+            return None
+        # Read audio token count from the encoder's persisted output.
+        audio_embeds_infos = persist_signals.get("audio_embeds", [])
+        if not audio_embeds_infos:
+            return None
+        dims = getattr(audio_embeds_infos[0], "dims", None)
+        if not dims:
+            return None
+        audio_token_count = int(dims[0])  # raw count, without sentinels
+        offset = int(metadata.kwargs.get("prefill_chunk_offset", 0))
+        plan = plan_audio_prefill_chunk(
+            audio_token_count, offset, long_prefill_token_threshold(),
+        )
+        if plan is None:
+            return None
+        chunk_len, walk_done = plan
+        return offset, chunk_len, walk_done
+
+    def _chunk_bounds(
+        self,
+        metadata: "CurrentForwardConductorMetadata",
+        schedule: list,
+        step: int,
+        persist_signals: dict[str, list["TensorPointerInfo"]] | None = None,
+    ) -> tuple[int, int, bool] | None:
+        """Unified chunk-bounds resolver: tries text, then audio.
+
+        Returns ``(offset, chunk_len, walk_done)`` or ``None``.
+        """
+        bounds = self._text_chunk_bounds(metadata, schedule, step)
+        if bounds is not None:
+            return bounds
+        if persist_signals is not None:
+            bounds = self._audio_chunk_bounds(
+                metadata, schedule, step, persist_signals,
+            )
+            if bounds is not None:
+                return bounds
+        return None
+
     def _get_thinker_forward(
         self,
         metadata: CurrentForwardConductorMetadata,
@@ -1099,18 +1387,39 @@ class Qwen3OmniModel(Model):
         """
 
         if metadata.is_prefill:
-            # Advance prefill schedule
-            step = metadata.kwargs["prefill_step"] + 1
             schedule = metadata.kwargs["prefill_schedule"]
+            cur_step = metadata.kwargs["prefill_step"]
 
-            if step < len(schedule):
-                # More prefill steps remaining
-                metadata.kwargs["prefill_step"] = step
-                metadata.graph_walk = schedule[step][0]
-            else:
-                # All prefill done -- transition to thinker_decode
-                metadata.is_prefill = False
-                metadata.graph_walk = "thinker_decode"
+            # Resumable chunked prefill: if the chunk that just completed did
+            # NOT consume the final token of the current walk's span, re-emit
+            # the SAME walk next step with an advanced offset (do not advance
+            # the schedule). Only once the walk's span is fully consumed do we
+            # fall through to the normal schedule advance. See
+            # DESIGN_chunked_prefill.md / _chunk_bounds.
+            rechunk = False
+            bounds = self._chunk_bounds(
+                metadata, schedule, cur_step, persist_signals,
+            )
+            if bounds is not None:
+                offset, chunk_len, walk_done = bounds
+                if not walk_done:
+                    metadata.kwargs["prefill_chunk_offset"] = offset + chunk_len
+                    metadata.graph_walk = schedule[cur_step][0]
+                    rechunk = True
+
+            if not rechunk:
+                # Leaving the current walk -> reset the per-walk chunk counter
+                # and advance the schedule.
+                metadata.kwargs["prefill_chunk_offset"] = 0
+                step = cur_step + 1
+                if step < len(schedule):
+                    # More prefill steps remaining
+                    metadata.kwargs["prefill_step"] = step
+                    metadata.graph_walk = schedule[step][0]
+                else:
+                    # All prefill done -- transition to thinker_decode
+                    metadata.is_prefill = False
+                    metadata.graph_walk = "thinker_decode"
 
         elif metadata.graph_walk == "thinker_decode":
             # if the decode loop returns to conductor, the thinker is fully done
@@ -1131,17 +1440,43 @@ class Qwen3OmniModel(Model):
             schedule = metadata.kwargs["prefill_schedule"]
             step = metadata.kwargs["prefill_step"]
             is_last_prefill = (step == len(schedule) - 1)
+            walk_done = True
+            chunk_step_metadata: dict = {}
             inputs = self._get_thinker_prefill_inputs(metadata, persist_signals)
+
+            # Resumable chunked prefill window for this step (text + audio).
+            bounds = self._chunk_bounds(
+                metadata, schedule, step, persist_signals,
+            )
+            if bounds is not None:
+                offset, chunk_len, walk_done = bounds
+                chunk_step_metadata = {
+                    "prefill_chunk_offset": offset,
+                    "prefill_chunk_len": chunk_len,
+                }
+                # Only the FINAL chunk of the FINAL walk is the true last
+                # prefill (samples first-token logits once).
+                is_last_prefill = is_last_prefill and walk_done
         else:
             # Decode: previous token feeds back as text_inputs
             is_last_prefill = False
+            walk_done = True
+            chunk_step_metadata = {}
             edge = GraphEdge(next_node="Thinker", name="text_inputs")
             edge.tensor_info = persist_signals.get("new_token", [])
             inputs = [edge]
 
-        unpersist_tensors = sum(
-            [inp.tensor_info for inp in inputs], start=[]
-        )
+        # Hold the prefill input tensor alive across chunks: release it only on
+        # the chunk that finishes the walk (``walk_done``) or on non-chunked
+        # steps. Re-sending the same persisted pointer each chunk accumulates
+        # the conductor ref-count, drained by the single unpersist on the final
+        # chunk. ``walk_done`` is True for every non-chunked / decode step.
+        if not walk_done:
+            unpersist_tensors = []
+        else:
+            unpersist_tensors = sum(
+                [inp.tensor_info for inp in inputs], start=[]
+            )
 
         step_metadata = {
             "is_prefill": metadata.is_prefill,
@@ -1150,6 +1485,11 @@ class Qwen3OmniModel(Model):
             # the submodule can gate thinker_states emission.  Default True
             # for backwards compatibility with callers that never set it.
             "audio_output": metadata.kwargs.get("audio_output", True),
+            # prefill_chunk_offset / prefill_chunk_len for resumable chunked
+            # prefill (absent unless this is a chunked text/audio walk ->
+            # submodule treats absence as a single full-span chunk,
+            # byte-identical).
+            **chunk_step_metadata,
         }
 
         return ForwardPassArgs(

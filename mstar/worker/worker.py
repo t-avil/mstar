@@ -1813,13 +1813,18 @@ class Worker:
 
         # CHUNK_BOUNDARY_HOOK (MSTAR_ENCODER_CHUNK_COALESCE):
         # The Thinker just finished a prefill or decode step on the worker. In
-        # the chunked-prefill build, a "prefill_*" graph walk that yields back
-        # to the scheduler is exactly the chunk-boundary the encoder coalescer
-        # wants to ride: flush pending encoders now so their embeds are ready
-        # for the next Thinker step. We also fire on ``thinker_decode`` (the
-        # Thinker is between steps anyway, so latching the flush here is free
-        # and keeps the encoder queue from sitting through a long decode burst).
-        # No-op when the coalescer is None (flag OFF).
+        # the merged chunked-prefill build (MSTAR_CHUNKED_PREFILL=1), the
+        # conductor (_get_thinker_forward in qwen3_omni_model.py ~L1394-1420)
+        # yields back to the scheduler at EVERY chunk boundary -- both
+        # intra-walk (offset advancing within prefill_text/prefill_audio) and
+        # walk-final (walk_done=True). Each yield triggers a new scheduler
+        # iteration which lands here as a fresh Thinker ``_postprocess_batch``.
+        # Firing on_chunk_boundary() on every Thinker post therefore catches
+        # both single-shot and intra-walk chunk events with no conductor->worker
+        # plumbing required. We also fire on ``thinker_decode`` (the Thinker is
+        # between steps anyway, so latching the flush here is free and keeps
+        # the encoder queue from sitting through a long decode burst).
+        # No-op when the coalescer is None (flag OFF, both flags default OFF).
         if self._encoder_coalescer is not None and batch_N.partition == "Thinker":
             self._encoder_coalescer.on_chunk_boundary()
 

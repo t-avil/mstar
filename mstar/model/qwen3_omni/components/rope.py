@@ -215,6 +215,90 @@ def _rotate_half(x: torch.Tensor) -> torch.Tensor:
 # remain monotonic along the full sequence.
 
 
+# -----------------------------------------------------------------------
+# Resumable chunked prefill: precompute-once / slice-per-chunk M-RoPE
+# -----------------------------------------------------------------------
+#
+# vLLM's recipe for chunked prefill under M-RoPE (gpu_model_runner.py
+# ``_calc_mrope_positions`` / ``_init_mrope_positions``): PRECOMPUTE the full
+# 3D position tensor for a request ONCE at admit time, plus a scalar
+# ``position_delta`` (how much the request's running 1-D position must advance
+# after the WHOLE span). Each prefill chunk then just indexes
+# ``positions[:, computed:computed + chunk]`` -- NO per-chunk grid math, so the
+# audio temporal ramp / vision 3D grid is never recomputed at a chunk boundary
+# and chunk boundaries that fall mid-span are exact by construction.
+#
+# In M* the per-request running 1-D position is ``KVRequestState.position_id_start``,
+# advanced post-forward by ``BatchedCacheManager.advance_seq_lens``. For
+# single-shot prefill that advance is ``seq_len`` (text / audio) or the
+# out-of-band ``mrope_pos_advance`` (vision). ``prefill_mrope_pos_advance``
+# below is the unified value -- ``max(pos_ids) + 1 - start_pos`` -- that equals
+# both of those for the existing walks and is the analog of vLLM's
+# ``position_delta`` for the resumable path: applied ONCE after the final chunk
+# regardless of how the span was chunked, so the first decode token continues
+# the sequence linearly.
+
+
+def slice_mrope_positions(
+    full_pos_ids: torch.Tensor,
+    computed: int,
+    chunk_len: int,
+) -> torch.Tensor:
+    """Return the chunk slice ``full_pos_ids[:, computed:computed + chunk_len]``.
+
+    ``full_pos_ids`` is the ``(3, seq_len)`` 3D M-RoPE position tensor for the
+    *whole* prefill span, precomputed once. Slicing is a view (no copy) and is
+    bit-exact for any chunking, which is the core correctness property the
+    parity test asserts: ``cat([slice(0,k), slice(k,S)], dim=1) == full``.
+
+    Parameters
+    ----------
+    full_pos_ids : torch.Tensor
+        Shape ``(3, seq_len)``, ``dtype=torch.float`` -- the full precomputed
+        3D position grid (temporal, height, width).
+    computed : int
+        Number of prefill tokens already processed for this request.
+    chunk_len : int
+        Number of new tokens in this chunk.
+
+    Returns
+    -------
+    torch.Tensor
+        Shape ``(3, chunk_len)``.
+    """
+    if full_pos_ids.dim() != 2 or full_pos_ids.shape[0] != 3:
+        raise ValueError(
+            f"full_pos_ids must be (3, seq_len); got {tuple(full_pos_ids.shape)}"
+        )
+    seq_len = full_pos_ids.shape[1]
+    if computed < 0 or chunk_len < 0 or computed + chunk_len > seq_len:
+        raise ValueError(
+            f"chunk [{computed}:{computed + chunk_len}] out of range for "
+            f"seq_len={seq_len}"
+        )
+    return full_pos_ids[:, computed:computed + chunk_len]
+
+
+def prefill_mrope_pos_advance(
+    full_pos_ids: torch.Tensor,
+    start_pos: float,
+) -> int:
+    """Total 1-D ``position_id_start`` advance for a whole prefill span.
+
+    Defined as ``max(full_pos_ids) + 1 - start_pos`` -- the vLLM
+    ``position_delta`` analog. Applied ONCE after the final chunk so decode
+    continues linearly. This unifies the existing single-shot advances:
+
+      * text  : max = start_pos + seq_len - 1  ->  advance = seq_len
+      * audio : max = start_pos + 1 + audio_len (the EOS sentinel)
+                ->  advance = audio_len + 2 = seq_len
+      * vision: max = end_pos_base (= vision grid max + 1)
+                ->  advance = end_pos_base + 1 - start_pos  (== the existing
+                    ``mrope_pos_advance`` computed in ThinkerSubmodule)
+    """
+    return int(full_pos_ids.max().item() + 1 - start_pos)
+
+
 def get_rope_index_text(
     seq_len: int,
     start_pos: float,
