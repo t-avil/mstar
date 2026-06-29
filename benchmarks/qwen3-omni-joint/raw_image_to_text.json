@@ -15939,6 +15939,39 @@
             "p10": null
           }
         }
+      },
+      "mstar_new_v2": {
+        "recomputed": {
+          "request_throughput": 0.7272452745943762,
+          "text_token_throughput": 119.73366200921808,
+          "audio_throughput": null,
+          "rtf_p50": null
+        },
+        "harness": {
+          "ttft_text": {
+            "mean": 0.2561990804784,
+            "p50": 0.2615117004606873,
+            "p95": 0.2995985644985922,
+            "p99": 0.30708938003517683
+          },
+          "itl_text": {
+            "mean": 0.00682283472161639,
+            "p50": 0.00661573454272002,
+            "p95": 0.007811651041265577,
+            "p99": 0.01018389115110038
+          },
+          "req_throughput_reported": 0.7272452745943762,
+          "text_tok_throughput_reported": 119.73366200921808,
+          "audio_throughput_reported": null,
+          "audio_dur_mean_reported": null
+        },
+        "completed": 50,
+        "num_requests": 50,
+        "provenance": {
+          "git_commit": "04a8cc6",
+          "build": "mstar_new_v2",
+          "flags": "combined-vision-opts + MSTAR_ENCODER_ASYNC=1"
+        }
       }
     },
     "B2": {
@@ -16089,6 +16122,39 @@
             "p05": null,
             "p10": null
           }
+        }
+      },
+      "mstar_new_v2": {
+        "recomputed": {
+          "request_throughput": 1.1150732357424442,
+          "text_token_throughput": 185.23596592153484,
+          "audio_throughput": null,
+          "rtf_p50": null
+        },
+        "harness": {
+          "ttft_text": {
+            "mean": 0.3179508762294427,
+            "p50": 0.30783477146178484,
+            "p95": 0.4017406611936166,
+            "p99": 0.44014680373482395
+          },
+          "itl_text": {
+            "mean": 0.008833146772994668,
+            "p50": 0.007880994933657348,
+            "p95": 0.010069581505376846,
+            "p99": 0.03402645225869492
+          },
+          "req_throughput_reported": 1.1150732357424442,
+          "text_tok_throughput_reported": 185.23596592153484,
+          "audio_throughput_reported": null,
+          "audio_dur_mean_reported": null
+        },
+        "completed": 50,
+        "num_requests": 50,
+        "provenance": {
+          "git_commit": "04a8cc6",
+          "build": "mstar_new_v2",
+          "flags": "combined-vision-opts + MSTAR_ENCODER_ASYNC=1"
         }
       }
     },
@@ -16241,6 +16307,39 @@
             "p10": null
           }
         }
+      },
+      "mstar_new_v2": {
+        "recomputed": {
+          "request_throughput": 1.7601509363855732,
+          "text_token_throughput": 290.1432803537979,
+          "audio_throughput": null,
+          "rtf_p50": null
+        },
+        "harness": {
+          "ttft_text": {
+            "mean": 0.39763583834283056,
+            "p50": 0.3484323109732941,
+            "p95": 0.7146783098462037,
+            "p99": 0.7743349197553469
+          },
+          "itl_text": {
+            "mean": 0.011306332250853757,
+            "p50": 0.009065955877304077,
+            "p95": 0.027798487700056284,
+            "p99": 0.19313060207059607
+          },
+          "req_throughput_reported": 1.7601509363855732,
+          "text_tok_throughput_reported": 290.1432803537979,
+          "audio_throughput_reported": null,
+          "audio_dur_mean_reported": null
+        },
+        "completed": 50,
+        "num_requests": 50,
+        "provenance": {
+          "git_commit": "04a8cc6",
+          "build": "mstar_new_v2",
+          "flags": "combined-vision-opts + MSTAR_ENCODER_ASYNC=1"
+        }
       }
     },
     "B8": {
@@ -16391,6 +16490,39 @@
             "p05": null,
             "p10": null
           }
+        }
+      },
+      "mstar_new_v2": {
+        "recomputed": {
+          "request_throughput": 2.3593815124592785,
+          "text_token_throughput": 424.364257284707,
+          "audio_throughput": null,
+          "rtf_p50": null
+        },
+        "harness": {
+          "ttft_text": {
+            "mean": 0.518380624713609,
+            "p50": 0.37344980554189533,
+            "p95": 1.3729285861481912,
+            "p99": 1.4043585362657895
+          },
+          "itl_text": {
+            "mean": 0.015647281177703948,
+            "p50": 0.011209934018552303,
+            "p95": 0.040356412902474395,
+            "p99": 0.21052527695894244
+          },
+          "req_throughput_reported": 2.3593815124592785,
+          "text_tok_throughput_reported": 424.364257284707,
+          "audio_throughput_reported": null,
+          "audio_dur_mean_reported": null
+        },
+        "completed": 80,
+        "num_requests": 80,
+        "provenance": {
+          "git_commit": "04a8cc6",
+          "build": "mstar_new_v2",
+          "flags": "combined-vision-opts + MSTAR_ENCODER_ASYNC=1"
         }
       }
     },
@@ -16543,6 +16675,39 @@
             "p10": null
           }
         }
+      },
+      "mstar_new_v2": {
+        "recomputed": {
+          "request_throughput": 3.2264813371292917,
+          "text_token_throughput": 570.7645485381717,
+          "audio_throughput": null,
+          "rtf_p50": null
+        },
+        "harness": {
+          "ttft_text": {
+            "mean": 0.7276865046369494,
+            "p50": 0.4734460620675236,
+            "p95": 2.6325813250266945,
+            "p99": 2.639199273113627
+          },
+          "itl_text": {
+            "mean": 0.023303767645373123,
+            "p50": 0.00800874107517302,
+            "p95": 0.183657184895128,
+            "p99": 0.3161026239464988
+          },
+          "req_throughput_reported": 3.2264813371292917,
+          "text_tok_throughput_reported": 570.7645485381717,
+          "audio_throughput_reported": null,
+          "audio_dur_mean_reported": null
+        },
+        "completed": 160,
+        "num_requests": 160,
+        "provenance": {
+          "git_commit": "04a8cc6",
+          "build": "mstar_new_v2",
+          "flags": "combined-vision-opts + MSTAR_ENCODER_ASYNC=1"
+        }
       }
     },
     "B32": {
@@ -16693,6 +16858,39 @@
             "p05": null,
             "p10": null
           }
+        }
+      },
+      "mstar_new_v2": {
+        "recomputed": {
+          "request_throughput": 4.0690557455657705,
+          "text_token_throughput": 712.6951138358446,
+          "audio_throughput": null,
+          "rtf_p50": null
+        },
+        "harness": {
+          "ttft_text": {
+            "mean": 1.2154477915006283,
+            "p50": 0.7068535919534042,
+            "p95": 5.4873261117842045,
+            "p99": 5.505754188033752
+          },
+          "itl_text": {
+            "mean": 0.03730603939223786,
+            "p50": 3.869738429784775e-05,
+            "p95": 0.24057497024768945,
+            "p99": 0.6033788779051954
+          },
+          "req_throughput_reported": 4.0690557455657705,
+          "text_tok_throughput_reported": 712.6951138358446,
+          "audio_throughput_reported": null,
+          "audio_dur_mean_reported": null
+        },
+        "completed": 320,
+        "num_requests": 320,
+        "provenance": {
+          "git_commit": "04a8cc6",
+          "build": "mstar_new_v2",
+          "flags": "combined-vision-opts + MSTAR_ENCODER_ASYNC=1"
         }
       }
     }

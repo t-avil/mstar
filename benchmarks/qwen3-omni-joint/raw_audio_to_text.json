@@ -15939,6 +15939,40 @@
             "p10": null
           }
         }
+      },
+      "mstar_new_v2": {
+        "recomputed": {
+          "n": 50,
+          "request_throughput": 5.060249539725346,
+          "text_token_throughput": 71.6531334825109,
+          "audio_throughput": null,
+          "rtf_mean": null,
+          "rtf_p50": null
+        },
+        "harness": {
+          "ttft_text": {
+            "mean": 0.10283754416741431,
+            "p50": 0.1005506394430995,
+            "higher_is_better": false,
+            "p95": 0.12415346908383071,
+            "p99": 0.13137955357553435,
+            "p05": null,
+            "p10": null
+          },
+          "itl_text": {
+            "mean": 0.00703701493931838,
+            "p50": 0.006618038984015584,
+            "higher_is_better": false,
+            "p95": 0.010735938162542879,
+            "p99": 0.01195121435681358,
+            "p05": null,
+            "p10": null
+          }
+        },
+        "provenance": {
+          "build": "mstar_new_v2",
+          "flags": "combined-vision-opts (async OFF for non-vision paths)"
+        }
       }
     },
     "B2": {
@@ -16089,6 +16123,40 @@
             "p05": null,
             "p10": null
           }
+        }
+      },
+      "mstar_new_v2": {
+        "recomputed": {
+          "n": 50,
+          "request_throughput": 6.925327993182306,
+          "text_token_throughput": 97.23160502427957,
+          "audio_throughput": null,
+          "rtf_mean": null,
+          "rtf_p50": null
+        },
+        "harness": {
+          "ttft_text": {
+            "mean": 0.14135682922787965,
+            "p50": 0.14336923346854746,
+            "higher_is_better": false,
+            "p95": 0.1614834730513394,
+            "p99": 0.1701611460931599,
+            "p05": null,
+            "p10": null
+          },
+          "itl_text": {
+            "mean": 0.0109326607451997,
+            "p50": 0.00873007404152304,
+            "higher_is_better": false,
+            "p95": 0.03107460166793311,
+            "p99": 0.036048354525119064,
+            "p05": null,
+            "p10": null
+          }
+        },
+        "provenance": {
+          "build": "mstar_new_v2",
+          "flags": "combined-vision-opts (async OFF for non-vision paths)"
         }
       }
     },
@@ -16241,6 +16309,40 @@
             "p10": null
           }
         }
+      },
+      "mstar_new_v2": {
+        "recomputed": {
+          "n": 50,
+          "request_throughput": 8.919994045256558,
+          "text_token_throughput": 126.12871579992775,
+          "audio_throughput": null,
+          "rtf_mean": null,
+          "rtf_p50": null
+        },
+        "harness": {
+          "ttft_text": {
+            "mean": 0.19366118701174856,
+            "p50": 0.1855362339410931,
+            "higher_is_better": false,
+            "p95": 0.24074263608781618,
+            "p99": 0.2529453403898515,
+            "p05": null,
+            "p10": null
+          },
+          "itl_text": {
+            "mean": 0.01858026159450956,
+            "p50": 0.010250719962641597,
+            "higher_is_better": false,
+            "p95": 0.0521411758381873,
+            "p99": 0.07120174583978886,
+            "p05": null,
+            "p10": null
+          }
+        },
+        "provenance": {
+          "build": "mstar_new_v2",
+          "flags": "combined-vision-opts (async OFF for non-vision paths)"
+        }
       }
     },
     "B8": {
@@ -16391,6 +16493,40 @@
             "p05": null,
             "p10": null
           }
+        }
+      },
+      "mstar_new_v2": {
+        "recomputed": {
+          "n": 80,
+          "request_throughput": 12.163276603800544,
+          "text_token_throughput": 176.6715926702029,
+          "audio_throughput": null,
+          "rtf_mean": null,
+          "rtf_p50": null
+        },
+        "harness": {
+          "ttft_text": {
+            "mean": 0.2461935525527224,
+            "p50": 0.24801212747115642,
+            "higher_is_better": false,
+            "p95": 0.3179112317273393,
+            "p99": 0.3487904049619101,
+            "p05": null,
+            "p10": null
+          },
+          "itl_text": {
+            "mean": 0.029642531453105043,
+            "p50": 0.020682954462245107,
+            "higher_is_better": false,
+            "p95": 0.08114158472744748,
+            "p99": 0.0888245487655513,
+            "p05": null,
+            "p10": null
+          }
+        },
+        "provenance": {
+          "build": "mstar_new_v2",
+          "flags": "combined-vision-opts (async OFF for non-vision paths)"
         }
       }
     },
@@ -16543,6 +16679,40 @@
             "p10": null
           }
         }
+      },
+      "mstar_new_v2": {
+        "recomputed": {
+          "n": 160,
+          "request_throughput": 17.900206631228084,
+          "text_token_throughput": 255.52544966078088,
+          "audio_throughput": null,
+          "rtf_mean": null,
+          "rtf_p50": null
+        },
+        "harness": {
+          "ttft_text": {
+            "mean": 0.3074307641989435,
+            "p50": 0.2882871045731008,
+            "higher_is_better": false,
+            "p95": 0.46209495067596434,
+            "p99": 0.5837514243554324,
+            "p05": null,
+            "p10": null
+          },
+          "itl_text": {
+            "mean": 0.04304724323956591,
+            "p50": 0.035605394979938865,
+            "higher_is_better": false,
+            "p95": 0.09619557018158957,
+            "p99": 0.11296873413724824,
+            "p05": null,
+            "p10": null
+          }
+        },
+        "provenance": {
+          "build": "mstar_new_v2",
+          "flags": "combined-vision-opts (async OFF for non-vision paths)"
+        }
       }
     },
     "B32": {
@@ -16693,6 +16863,40 @@
             "p05": null,
             "p10": null
           }
+        }
+      },
+      "mstar_new_v2": {
+        "recomputed": {
+          "n": 320,
+          "request_throughput": 23.53158273636498,
+          "text_token_throughput": 337.0163865023772,
+          "audio_throughput": null,
+          "rtf_mean": null,
+          "rtf_p50": null
+        },
+        "harness": {
+          "ttft_text": {
+            "mean": 0.47493769370121297,
+            "p50": 0.42016172350849956,
+            "higher_is_better": false,
+            "p95": 0.9212967624072916,
+            "p99": 1.398573376419954,
+            "p05": null,
+            "p10": null
+          },
+          "itl_text": {
+            "mean": 0.06471483588246871,
+            "p50": 0.053351338021457195,
+            "higher_is_better": false,
+            "p95": 0.1407641781726851,
+            "p99": 0.1733632656093689,
+            "p05": null,
+            "p10": null
+          }
+        },
+        "provenance": {
+          "build": "mstar_new_v2",
+          "flags": "combined-vision-opts (async OFF for non-vision paths)"
         }
       }
     }
