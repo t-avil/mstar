@@ -525,3 +525,107 @@ Based on Round 2, the ideal deployed M\*-new should be `opt/combined-vision-opts
 A future code change should make this gating automatic (e.g. enable async when the
 encoder is the heavy one for the dispatched request), so operators don't need per-deployment
 env tuning.
+
+### 9.6 Round-2 follow-up experiments (Exp 4, D5, E2)
+
+After the first three Round-2 experiments, three additional ones were spawned to test
+specific hypotheses. **All three came back NEGATIVE** in clean serial conditions on I2T
+(GPUs 4,7, N=15 warmup=3, no concurrent sweeps).
+
+#### Exp 4 — chunked-prefill + chunk-boundary coalescer combined
+
+**Branch**: `exp/encoder-chunk-coalesce-with-prefill` @ `6457f7e`. Merges
+`exp/chunked-prefill` (intra-walk Thinker chunking, aee505f) with the chunk-boundary
+encoder coalescer from Exp 3. Theory: now the coalescer's chunk-boundary hook fires
+at intra-prefill yields, building larger batches than before.
+
+**I2T verdict** (N=15 per batch):
+| B | base | ours | Δreq/s | ΔTTFT |
+|---|---|---|---|---|
+| 1 | 0.693 | 0.731 | +5.5% | **-34.6%** |
+| 4 | 1.727 | 1.556 | -9.9% | -4.9% |
+| 8 | 2.438 | 1.923 | **-21.1%** | +212% |
+| 32 | 4.209 | 2.597 | **-38.3%** | +303% |
+
+The B=1 win is real (TTFT -34%) but throughput collapses at B≥8. Chunked-prefill yields
+the scheduler more often, which helps single-request TTFT but **starves the decode loop
+under concurrency**. Combined with the coalescer's extra bookkeeping, throughput tanks.
+
+**Conclusion**: Chunked-prefill is a latency-vs-throughput tradeoff knob, not a free win.
+At low N our chunking overhead-per-step exceeds the queueing benefit. Park unless you have
+a latency-only deployment where TTFT-at-B=1 is what matters.
+
+#### D5 — Spatial merge as separate GraphNode
+
+**Branch**: `exp/spatial-merge-node` @ `67c9e37`. Behind `MSTAR_SPATIAL_MERGE_NODE=1`.
+Splits the vision encoder's 4→1 patch reduction MLP into its own GraphNode so it can be
+placed on a different GPU from the encoder. Same-rank placement should be a no-op; the
+4× transfer saving would only materialize if encoder and Thinker landed on different
+ranks.
+
+**I2T verdict** (same-rank placement, serial N=15):
+| B | base | ours | Δreq/s | ΔTTFT |
+|---|---|---|---|---|
+| 4 | 1.727 | 1.549 | -10.3% | +2.9% |
+| 8 | 2.438 | 2.008 | -17.6% | +175% |
+| 16 | 3.299 | 2.531 | **-23.3%** | +397% |
+| 32 | 4.209 | 2.481 | **-41%** | +365% |
+
+The extra GraphNode boundary costs **10-40% throughput and 200-400% TTFT** at higher
+batch sizes — even when both nodes live on the same GPU. The scheduling/edge serialization
+cost is real, not just contention. This optimization only pays off if you actually move
+spatial_merge to the Thinker's rank in a config where the encoder runs on a different rank
+— then the 4× cross-rank transfer saving must exceed the GraphNode overhead.
+
+**Conclusion**: Park for current 2-GPU config (encoder + Thinker both on Rank 1). Revisit
+only if a future placement puts the encoder on Rank 0 alone, where the unmerged-patches
+transfer would become a real bottleneck.
+
+#### E2 — Encoder output caching by content hash
+
+**Branch**: `exp/encoder-cache` @ `811d65d`. Behind `MSTAR_ENCODER_CACHE=1`. SHA-256 of
+input bytes → cached encoded tokens, LRU eviction at 512 MiB.
+
+**I2T verdict** (serial N=15, hit rate measured in server log):
+| B | base | ours | Δreq/s | ΔTTFT | hit_rate |
+|---|---|---|---|---|---|
+| 1 | 0.693 | 0.693 | +0.0% | -9.9% | 0% |
+| 4 | 1.727 | 1.572 | -9.0% | -0.3% | 70% |
+| 8 | 2.438 | 1.997 | -18.1% | **+258%** | 85% |
+| 32 | 4.209 | 3.079 | **-26.8%** | +140% | **94%** |
+
+The cache works as designed — food101 has natural repeats at higher batch and the hit
+rate climbs to 94%. **But throughput drops anyway** because:
+1. Vision encoder is only 3-10% of e2e (per Exp 1). Caching that small slice can't
+   move overall throughput much.
+2. Cache lookup (SHA-256 of image bytes + dict lookup) adds latency on the hot path
+   for EVERY request, hit or miss.
+3. At B≥8, the lookup contention serializes through the cache mutex, blowing up TTFT.
+
+**Conclusion**: The encoder is the wrong layer to cache. The cache only pays off where
+the encoder dominates e2e — e.g. very large images, or workloads where encoder cost is
+unhidable (no decode to overlap with). For our standard workloads, encoder caching is
+strictly negative. Park.
+
+### 9.7 Round-2 ship/park decision matrix
+
+| Experiment | Throughput | TTFT | Ship? |
+|---|---|---|---|
+| **GPU mel, GPU image preproc, vision graph align, batch vision prefill** (combined-vision-opts) | +2-5% | small | **SHIPPED** (in mstar_new) |
+| Exp 2 — async encoder | NEUTRAL throughput, mixed TTFT (path-dependent) | -5 to -10% I2T low-mid B | Opt-in only |
+| Exp 3 — chunk-boundary coalesce | NEUTRAL | small TTFT improvement at B=1 | Park (no intra-prefill chunking on base) |
+| Exp 4 — chunked-prefill + coalesce | -21 to -38% at B≥8 | -34% B=1, +200-400% B≥8 | Park (latency-only deploys could opt in) |
+| D5 — spatial-merge GraphNode | -10 to -41% (same-rank) | +200-400% | Park (only worth in cross-rank configs) |
+| E2 — encoder cache | -9 to -27% despite 94% hit rate | +140-260% at B≥8 | Park (wrong layer to cache) |
+
+### 9.8 Where to go next
+
+Confirmed by Exp 1 and verified by all Round-2 negatives: **the encoder is not the bottleneck.**
+The Thinker is. Future experiments should target:
+1. **FP8 KV cache + weights** for the Thinker (memory bandwidth)
+2. **Speculative decoding** for the Thinker (decode parallelism — needs MTP head training)
+3. **True continuous batching** (mixed prefill+decode in one forward) — already scaffolded
+   in `exp/mixed-walk-piggyback`, never benchmarked
+4. **Talker / Code2Wav optimization** for speech paths — confirmed bottleneck for I2S/S2S
+
+Stop investing in encoder-side optimizations. They've returned everything they can.
