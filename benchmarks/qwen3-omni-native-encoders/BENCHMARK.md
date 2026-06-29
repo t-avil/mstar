@@ -20,12 +20,18 @@ Each system ran sequentially on the same GPU pair.
 
 **PASS** — M\*-new throughput >= 0.97x of M\*-old on all 24 test points (4 paths x 6 batches).
 
-Highlights:
+vs M\*-old (upstream main):
 - **S2T**: 2.4x-10.4x throughput, 4.0x-32.5x TTFT improvement
 - **S2S**: 1.4x-3.4x throughput, 2.0x-4.2x TTFT improvement
 - **I2T**: 1.1x-1.4x throughput, 1.6x-1.9x TTFT improvement
 - **I2S**: 1.0x-1.1x throughput, 1.6x-1.9x TTFT improvement
 - B=1 ITL (no batching): equal or better on all paths
+
+vs vLLM-Omni (req/s):
+- **S2T**: 2.0x-2.2x
+- **S2S**: 3.2x-3.8x
+- **I2T**: 1.7x-2.6x
+- **I2S**: 2.7x-3.3x
 
 ## Files
 
