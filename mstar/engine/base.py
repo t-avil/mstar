@@ -275,6 +275,32 @@ class BaseEngine(ABC):
         """
         return
 
+    def reserve_packed_slot(
+        self,
+        node_name: str,
+        graph_walk: str,
+        request_ids: list[str],
+        num_tokens: int,
+    ) -> int | None:
+        """CHANGE C: reserve a slot for an upcoming FLASH_INFER_PACKED prefill
+        replay (encoder->prefill pre-plan trigger). Default: no captured graph
+        surface — returns ``None`` so the caller skips pre-planning.
+        """
+        return None
+
+    def pre_plan_packed_for(
+        self,
+        node_name: str,
+        graph_walk: str,
+        request_ids: list[str],
+        num_tokens: int,
+        slot: int | None,
+    ) -> bool:
+        """CHANGE C: off-thread plan for a FLASH_INFER_PACKED prefill replay.
+        Default no-op: returns ``False`` so the GPU thread plans inline.
+        """
+        return False
+
     # ── Capabilities + optional surfaces ────────────────────────────────
     #
     # ``capabilities`` is a class-level declaration of which optional

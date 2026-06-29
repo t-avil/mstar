@@ -645,6 +645,10 @@ class KVCacheEngine(BaseEngine):
             slot=batch.metadata.get("cuda_graph_slot"),
             advance_event=batch.metadata.get("advance_event"),
             launch_started_event=batch.metadata.get("launch_started_event"),
+            # CHANGE A: producer (encoder) completion event, if the worker
+            # stashed one for this prefill consumer. Ignored by the basic-batched
+            # (AR-decode) path; only the packed prefill path gates on it.
+            producer_completion_event=batch.metadata.get("producer_completion_event"),
         )
 
         return NodeOutput(per_request_output_tensors=batched_output)
@@ -1025,6 +1029,68 @@ class KVCacheEngine(BaseEngine):
             prev_completion_event=prev_completion_event,
             slot=slot,
         )
+
+    def reserve_packed_slot(
+        self,
+        node_name: str,
+        graph_walk: str,
+        request_ids: list[str],
+        num_tokens: int,
+    ) -> int | None:
+        """CHANGE C: reserve a double-buffer slot for an upcoming
+        FLASH_INFER_PACKED prefill replay, keyed by (graph_walk, bs, num_tokens).
+
+        Used by the encoder->prefill_audio pre-plan trigger so the pre-plan and
+        the later replay target the same slot. Returns the slot index, or
+        ``None`` when no captured graph matches (caller skips pre-plan; the GPU
+        thread plans inline as today). Best-effort: never raises.
+        """
+        try:
+            mgmt = self.submodule_management.get(node_name)
+            if mgmt is None or mgmt.cuda_graph_runner is None:
+                return None
+            runner = mgmt.cuda_graph_runner
+            if not runner.graphs:
+                return None
+            return runner.reserve_slot(
+                graph_walk=graph_walk,
+                requires_cfg=False,
+                batch_size=len(request_ids),
+                num_tokens=num_tokens,
+            )
+        except Exception:
+            return None
+
+    def pre_plan_packed_for(
+        self,
+        node_name: str,
+        graph_walk: str,
+        request_ids: list[str],
+        num_tokens: int,
+        slot: int | None,
+    ) -> bool:
+        """CHANGE C: off-thread FlashInfer plan for a FLASH_INFER_PACKED prefill
+        replay (the prefill_audio walk), so the GPU thread's inline plan is a
+        no-op. Best-effort: returns False (caller's GPU thread plans inline) on
+        any miss or error. Never raises.
+        """
+        try:
+            mgmt = self.submodule_management.get(node_name)
+            if mgmt is None or mgmt.cuda_graph_runner is None:
+                return False
+            runner = mgmt.cuda_graph_runner
+            if not runner.graphs:
+                return False
+            return runner.pre_plan_for_batch(
+                graph_walk=graph_walk,
+                requires_cfg=False,
+                request_ids=list(request_ids),
+                num_tokens=num_tokens,
+                slot=slot,
+            )
+        except Exception:
+            logger.exception("pre_plan_packed_for failed; falling back to inline plan")
+            return False
 
     def add_request(
         self, request_id: str, cache_labels: list[str] | None = None,

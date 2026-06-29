@@ -507,7 +507,15 @@ class Qwen3OmniModel(Model):
             ),
             GraphNode(
                 name="Thinker",
-                input_names=["audio_embeds"],
+                # CHANGE B: audio_seqlens (a CPU long tensor) is also routed to
+                # the Thinker node so prepare_inputs can compute the audio token
+                # count without the encoder GPU output (see
+                # ThinkerSubmodule._audio_len_from_inputs). The edge is emitted
+                # unconditionally by _get_thinker_prefill_inputs (mirroring the
+                # vision image_grid_thw->Thinker edge); when the source tensor is
+                # absent the edge carries empty tensor_info and the consumer
+                # falls back to audio_embeds.shape[0].
+                input_names=["audio_embeds", "audio_seqlens"],
                 outputs=[
                     GraphEdge(
                         next_node=EMIT_TO_CLIENT,
@@ -1053,6 +1061,19 @@ class Qwen3OmniModel(Model):
                 if key in tensor_dict:
                     edge.tensor_info = [tensor_dict[key]]
                 edges.append(edge)
+
+        # CHANGE B: also deliver audio_seqlens to the Thinker prefill_audio node
+        # (in addition to the audio_encoder edge emitted by the loop above) so
+        # prepare_inputs can derive the audio token count on CPU. Emitted
+        # unconditionally — with empty tensor_info when the source tensor is
+        # absent — exactly like the vision image_grid_thw->Thinker edge, so the
+        # node's ready condition is always satisfiable (never hangs) and the
+        # consumer falls back to audio_embeds.shape[0] on an empty edge.
+        if walk_name == "prefill_audio":
+            edge = GraphEdge(next_node="Thinker", name="audio_seqlens")
+            if "audio_seqlens" in tensor_dict:
+                edge.tensor_info = [tensor_dict["audio_seqlens"]]
+            edges.append(edge)
         return edges
 
     # -----------------------------------------------------------------------

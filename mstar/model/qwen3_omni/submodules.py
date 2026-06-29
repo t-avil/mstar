@@ -511,6 +511,38 @@ class ThinkerSubmodule(ARNodeSubmodule):
             self._vision_eos_embed
         ], dim=0)
 
+    @staticmethod
+    def _audio_len_from_inputs(
+        inputs: NameToTensorList, audio_embeds: torch.Tensor
+    ) -> int:
+        """Output-token count for an audio prefill span.
+
+        CHANGE B: prefer the CPU-precomputed count derived from
+        ``audio_seqlens`` (pure integer arithmetic via
+        ``_feat_extract_output_lengths`` — no GPU output needed, so the count
+        is knowable at batch-assembly time, before the encoder forward
+        finishes). This is what the encoder->prefill pre-plan trigger needs.
+
+        Conservative fallback: when ``audio_seqlens`` is not routed to this
+        node (wiring gap / test path) or anything goes wrong, fall back to the
+        encoder output's row count — the existing behavior. The two are
+        guaranteed equal: ``forward_batched`` splits the packed encoder output
+        by exactly these per-request counts (see ``_req_token_count``).
+        """
+        seqlens_list = inputs.get("audio_seqlens", [])
+        audio_seqlens = seqlens_list[0] if seqlens_list else None
+        if audio_seqlens is not None:
+            try:
+                from mstar.model.qwen3_omni.components.audio_encoder import (
+                    _feat_extract_output_lengths,
+                )
+                return int(
+                    _feat_extract_output_lengths(audio_seqlens.reshape(-1)).sum()
+                )
+            except Exception:
+                return audio_embeds.shape[0]
+        return audio_embeds.shape[0]
+
     def prepare_inputs(
         self,
         graph_walk: str,
@@ -578,7 +610,7 @@ class ThinkerSubmodule(ARNodeSubmodule):
 
         if graph_walk == "prefill_audio":
             audio_embeds = inputs["audio_embeds"][0].to(device)  # (audio_tokens, hidden)
-            audio_len = audio_embeds.shape[0]
+            audio_len = self._audio_len_from_inputs(inputs, audio_embeds)
 
             # Env-gated dump of the audio-encoder last_hidden_state for the
             # cross-system tensor comparison (no-op unless MSTAR_DUMP_DIR set).

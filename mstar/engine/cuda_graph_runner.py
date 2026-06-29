@@ -970,6 +970,7 @@ class CudaGraphRunner:
         per_request_info: dict[str, CurrentForwardPassInfo] | None = None,
         prev_completion_event: "torch.cuda.Event | None" = None,
         slot: int | None = None,
+        num_tokens: int | None = None,
     ) -> bool:
         """Pre-plan FlashInfer attention into the inactive double-buffer slot.
 
@@ -995,15 +996,27 @@ class CudaGraphRunner:
         from mstar.utils.profiler import range_pop, range_push
 
         real_bs = len(request_ids)
-        # num_tokens is derivable from the captured BASIC_BATCHED config —
-        # don't hardcode it from real_bs (works today only because AR decode
-        # has input_seq_len=1; would silently mismatch for any future
-        # multi-token-per-request decode/spec capture).
-        key = self._get_basic_batched_key_for(
-            graph_walk=graph_walk,
-            requires_cfg=requires_cfg,
-            batch_size=real_bs,
-        )
+        # CHANGE C: when an explicit num_tokens is supplied (FLASH_INFER_PACKED
+        # prefill pre-plan), resolve the captured key via _get_key_for, which
+        # pads num_tokens up to the nearest bucket — the SAME lookup the replay
+        # path (``run``) uses, so pre-plan and replay select the same graph/slot
+        # (spec task 5; a mismatch here would plan one bucket and replay another).
+        # Without num_tokens we keep the BASIC_BATCHED-only derivation: num_tokens
+        # is derivable from the captured config's input_seq_len (don't hardcode
+        # from real_bs — works today only because AR decode has input_seq_len=1).
+        if num_tokens is None:
+            key = self._get_basic_batched_key_for(
+                graph_walk=graph_walk,
+                requires_cfg=requires_cfg,
+                batch_size=real_bs,
+            )
+        else:
+            key = self._get_key_for(
+                batch_size=real_bs,
+                num_tokens=num_tokens,
+                graph_walk=graph_walk,
+                requires_cfg=requires_cfg,
+            )
         if key is None:
             return False
 
@@ -1044,22 +1057,42 @@ class CudaGraphRunner:
         # respect natural FIFO ordering, so a single plan_done_event after
         # the last call covers every label's writes.
         config_labels = config.labels
-        # Per-request token count comes from the captured config — the same
-        # ``input_seq_len`` that ``_capture_one_basic_batched`` used to size
-        # ``total_tokens = bs * input_seq_len``. Don't hardcode 1; today AR
-        # decode happens to be 1, but multi-token-per-request decode/spec
-        # captures (e.g. tree-spec) would silently mis-plan with [1]*bs.
-        per_req_seq_len = config.single_request_inputs.input_seq_len
+        # CHANGE C: per-config seq_lens + plan params.
+        #  - BASIC_BATCHED: per-request token count comes from the captured
+        #    config's ``input_seq_len`` (don't hardcode 1; AR decode happens to
+        #    be 1 today but multi-token spec captures would mis-plan with [1]*bs).
+        #  - FLASH_INFER_PACKED (prefill_audio/text/vision): the real slot(s)
+        #    carry ``num_tokens`` and the padded slots carry zero-length inputs,
+        #    mirroring how ``_run_flashinfer_packed`` pads with
+        #    ``zero_padding_input``. qo_indptr then sums to the REAL token count
+        #    (not the padded bucket), matching the inline ``preprocess`` plan so
+        #    the plan_attention SKIP at replay records identical state. We let
+        #    dtype default to the KV-cache dtype and take is_causal from the
+        #    config (the inline packed plan uses is_causal=True) instead of the
+        #    BASIC path's autocast_dtype / default-causal.
+        is_packed = (
+            config.get_config_type() == CudaGraphConfigType.FLASH_INFER_PACKED
+        )
         try:
             static_cm.request_ids = list(request_ids) + saved_request_ids[len(request_ids):]
-            seq_lens = [per_req_seq_len] * len(saved_request_ids)
+            if is_packed:
+                pad_n = max(len(saved_request_ids) - real_bs, 0)
+                seq_lens = [num_tokens] * real_bs + [0] * pad_n
+                plan_dtype = None  # -> kv_cache.dtype, matching inline preprocess
+                plan_is_causal = getattr(config, "causal_attention", True)
+            else:
+                per_req_seq_len = config.single_request_inputs.input_seq_len
+                seq_lens = [per_req_seq_len] * len(saved_request_ids)
+                plan_dtype = self.autocast_dtype
+                plan_is_causal = True
             if plan_stream is not None:
                 with torch.cuda.stream(plan_stream):
                     for label_name in config_labels:
                         static_cm.active_labels = {rid: label_name for rid in request_ids}
                         static_cm.plan_attention(
                             seq_lens=seq_lens,
-                            dtype=self.autocast_dtype,
+                            dtype=plan_dtype,
+                            is_causal=plan_is_causal,
                             label=label_name,
                         )
                 plan_done_event = torch.cuda.Event()
@@ -1069,7 +1102,8 @@ class CudaGraphRunner:
                     static_cm.active_labels = {rid: label_name for rid in request_ids}
                     static_cm.plan_attention(
                         seq_lens=seq_lens,
-                        dtype=self.autocast_dtype,
+                        dtype=plan_dtype,
+                        is_causal=plan_is_causal,
                         label=label_name,
                     )
             static_cm._pre_planned_labels = set(config_labels)
@@ -1140,6 +1174,7 @@ class CudaGraphRunner:
         slot: int | None = None,
         advance_event: "object | None" = None,
         launch_started_event: "object | None" = None,
+        producer_completion_event: "object | None" = None,
     ) -> dict:
         """Look up the matching captured graph and dispatch on config type.
 
@@ -1201,6 +1236,7 @@ class CudaGraphRunner:
                 request_ids, inputs, per_request_info, submodule,
                 advance_event=advance_event,
                 launch_started_event=launch_started_event,
+                producer_completion_event=producer_completion_event,
             )
         raise ValueError(f"Unknown CudaGraphConfigType: {cfg_type}")
 
@@ -1431,6 +1467,7 @@ class CudaGraphRunner:
         submodule: ARNodeSubmodule,
         advance_event: "object | None" = None,
         launch_started_event: "object | None" = None,
+        producer_completion_event: "object | None" = None,
     ) -> dict:
         """Prefill-style replay (vox-serve pattern).
 
@@ -1560,6 +1597,25 @@ class CudaGraphRunner:
                 mark("gpu_thread.preprocess_end")
 
             # --- Step 4: Replay ---
+            # CHANGE A: if a producer (encoder) node stashed its completion
+            # event for this prefill, gate the default-stream replay on it
+            # GPU-side. This is supplementary: the default stream already
+            # wait_stream(side_stream) at encoder dispatch, so when the event is
+            # absent (the common case / wiring gap) ordering is still correct.
+            if producer_completion_event is not None:
+                torch.cuda.default_stream(self.device).wait_event(
+                    producer_completion_event
+                )
+            # CHANGE C: if pre-plan ran for this iter, its FlashInfer plan wrote
+            # this slot's wrapper static buffers on plan_stream. Make the default
+            # stream wait on plan_done_event before replay reads them. No-op when
+            # no pre-plan ran (plan_done_event is None) — the inline preprocess
+            # plan above already ran on the default stream in that case. Mirrors
+            # the identical block in _run_basic_batched.
+            plan_done_event = getattr(static_cm, "_plan_done_event", None)
+            if plan_done_event is not None:
+                torch.cuda.default_stream(self.device).wait_event(plan_done_event)
+                static_cm._plan_done_event = None
             if self.enable_nvtx:
                 mark("gpu_thread.cuda_graph_start")
                 range_push("gpu_thread.cuda_graph", synchronize=False)

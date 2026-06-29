@@ -286,6 +286,25 @@ class Worker:
             tuple[str, torch.dtype, tuple[int, ...]], list[torch.Tensor]
         ] = defaultdict(list)
 
+        # CHANGE A: per-request CUDA completion events stashed by producer
+        # (encoder) nodes instead of host-syncing on the encoder forward. The
+        # downstream prefill consumer (built a later iter) picks the event up
+        # and gates its CUDA-graph replay on it GPU-side. Purely supplementary
+        # to the default_stream.wait_stream(side_stream) ordering already
+        # recorded at encoder dispatch — if the map is empty the consumer just
+        # behaves as today.
+        self._pending_producer_events: dict[str, "torch.cuda.Event"] = {}
+
+        # CHANGE C (default-OFF): per-request carried pre-plan handoff for the
+        # encoder->prefill_audio trigger. Maps rid -> (slot, plan_future) so the
+        # later prefill_audio batch reuses the reserved slot and awaits the
+        # off-thread plan. Empty unless MSTAR_PREFILL_PREPLAN is enabled, so the
+        # default dispatch path is unchanged.
+        self._pending_prefill_preplan: dict[str, tuple] = {}
+        self._prefill_preplan_enabled = os.environ.get(
+            "MSTAR_PREFILL_PREPLAN", "0"
+        ) in ("1", "true", "True")
+
         # MSTAR_ENCODER_ASYNC: low-priority side stream for speculative encoder
         # forwards. Lazy-init via ``_get_encoder_async_stream`` (so the flag
         # can be flipped between init and run() without a restart for tests,
@@ -488,6 +507,24 @@ class Worker:
         self.worker_graphs_manager.remove_request(body.request_id)
         self.tensor_manager.cleanup_request(body.request_id)
         self.streaming_buffers.pop(body.request_id, None)
+
+        # CHANGE A/C: drop any stashed producer event / carried pre-plan for a
+        # removed request so they don't leak. We drain the plan future (it runs
+        # on the single-worker plan_executor; abandoning it could wedge a later
+        # submit) but otherwise discard the handoff. NOTE: the pre-planned slot's
+        # _pre_planned_labels stays set until its next replay consumes/clears it;
+        # for the default-OFF prefill pre-plan this drop path is rare — see
+        # RISK_NOTES for the stale-slot caveat.
+        self._pending_producer_events.pop(body.request_id, None)
+        carried = self._pending_prefill_preplan.pop(body.request_id, None)
+        if carried is not None and carried[1] is not None:
+            try:
+                carried[1].result()
+            except Exception:
+                logger.exception(
+                    "Worker %s: failed draining dropped prefill pre-plan",
+                    self.worker_id,
+                )
 
         for node_name in self.engine_manager.lru_tracked_nodes():
             self._last_active.pop((body.request_id, node_name), None)
@@ -1170,6 +1207,127 @@ class Worker:
         engine = self.engine_manager.get_engine(spec_node_batch.node_name)
         engine.reset_pre_plan_for_batch(spec_node_batch)
 
+    @staticmethod
+    def _is_producer_node(node_name: str) -> bool:
+        """True for encoder/producer nodes whose forward only feeds a
+        downstream prefill consumer (never an AR-decode loop).
+
+        Used to gate CHANGE A's no-host-sync: these nodes' outputs are routed
+        as graph edges (refs only, skip_cuda_sync) and never read on the CPU in
+        postprocess (their ``check_stop`` is the no-op default), so the host
+        ``completion_event.synchronize()`` can be replaced with a GPU-side
+        ordering carried to the consumer. AR-decode nodes are deliberately
+        excluded so their existing barrier (page-reclamation safety) is
+        untouched.
+        """
+        return node_name in ("audio_encoder", "vision_encoder")
+
+    def _attach_producer_event(self, node_batch: NodeBatch) -> None:
+        """CHANGE A: move a stashed producer (encoder) completion event onto this
+        consumer batch's metadata so its CUDA-graph replay can gate on it.
+
+        Pops the per-rid entries. If several rids carry distinct events we keep
+        one — correctness does not depend on which, because each encoder already
+        recorded ``default_stream.wait_stream(side_stream)`` at dispatch, so the
+        default-stream replay is ordered after every producer regardless. The
+        event wait is purely supplementary.
+        """
+        if not self._pending_producer_events:
+            return
+        event = None
+        for rid in node_batch.request_ids:
+            ev = self._pending_producer_events.pop(rid, None)
+            if ev is not None:
+                event = ev
+        if event is not None:
+            node_batch.metadata["producer_completion_event"] = event
+
+    def _consume_prefill_preplan(self, node_batch: NodeBatch):
+        """CHANGE C: if a pre-plan was dispatched for this prefill batch, stash
+        the reserved slot on the batch metadata and return the plan future for
+        the GPU thread to await. Returns ``None`` when nothing was carried (the
+        default path — reserve + inline plan run as today).
+        """
+        if not self._pending_prefill_preplan:
+            return None
+        carried = None
+        for rid in node_batch.request_ids:
+            entry = self._pending_prefill_preplan.pop(rid, None)
+            if entry is not None:
+                carried = entry
+        if carried is None:
+            return None
+        slot, future = carried
+        if slot is not None:
+            node_batch.metadata["cuda_graph_slot"] = slot
+        return future
+
+    def _encoder_audio_len(self, node_batch: NodeBatch, rid: str) -> int | None:
+        """CHANGE B/C: CPU token count for the audio prefill that follows this
+        encoder batch, derived from the encoder's ``audio_seqlens`` input
+        (knowable before the encoder forward completes). Returns ``None`` if the
+        seqlens aren't available, so the caller skips pre-planning.
+        """
+        try:
+            tensors = node_batch.per_request_input_tensors.get(rid, {})
+            seqlens_list = tensors.get("audio_seqlens", [])
+            audio_seqlens = seqlens_list[0] if seqlens_list else None
+            if audio_seqlens is None:
+                return None
+            from mstar.model.qwen3_omni.components.audio_encoder import (
+                _feat_extract_output_lengths,
+            )
+            return int(
+                _feat_extract_output_lengths(audio_seqlens.reshape(-1)).sum()
+            )
+        except Exception:
+            return None
+
+    def _maybe_trigger_prefill_preplan(
+        self, batch, node_batch: NodeBatch, plan_executor,
+    ) -> None:
+        """CHANGE C (default-OFF, best-effort): dispatch the prefill_audio
+        FlashInfer plan on plan_executor while the encoder forward runs, so the
+        GPU thread's inline plan becomes a no-op.
+
+        Any miss/exception leaves ``_pending_prefill_preplan`` untouched for the
+        affected rid, so the later prefill_audio batch reserves its slot and
+        plans inline exactly as today. Only the bs==1 audio case is handled (the
+        common A2T/A2S path); larger encoder batches fall through to inline plan.
+        """
+        try:
+            request_ids = list(node_batch.request_ids)
+            if len(request_ids) != 1:
+                return
+            rid = request_ids[0]
+            audio_len = self._encoder_audio_len(node_batch, rid)
+            if audio_len is None:
+                return
+            num_tokens = audio_len + 2  # audio_start + audio span + audio_end
+            engine = self.engine_manager.get_engine("Thinker")
+            slot = engine.reserve_packed_slot(
+                node_name="Thinker",
+                graph_walk="prefill_audio",
+                request_ids=request_ids,
+                num_tokens=num_tokens,
+            )
+            if slot is None:
+                return  # no captured prefill graph for this bucket — plan inline
+            future = plan_executor.submit(
+                engine.pre_plan_packed_for,
+                "Thinker",
+                "prefill_audio",
+                request_ids,
+                num_tokens,
+                slot,
+            )
+            self._pending_prefill_preplan[rid] = (slot, future)
+        except Exception:
+            logger.exception(
+                "Worker %s: prefill pre-plan trigger failed; inline plan will run",
+                self.worker_id,
+            )
+
     def _get_encoder_async_stream(self) -> "torch.cuda.Stream | None":
         """Lazily allocate the low-priority CUDA stream used for the encoder
         forward when ``MSTAR_ENCODER_ASYNC=1``.
@@ -1739,14 +1897,27 @@ class Worker:
 
         # Wait for batch N's completion event before proceeding
         # TODO: may need to refine this based on how it affects performance?
+        # CHANGE A: producer/encoder nodes do NOT host-sync here. Their output
+        # is routed as graph edges (skip_cuda_sync — refs only, never read on
+        # CPU) and their check_stop is the no-op default, so blocking the CPU on
+        # the encoder forward is pure overhead. GPU ordering is already
+        # guaranteed by default_stream.wait_stream(side_stream) recorded at
+        # encoder dispatch (and same-stream ordering when not using the side
+        # stream). We stash the completion event so the downstream prefill
+        # consumer can additionally gate its graph replay on it (belt and
+        # suspenders). AR-decode / non-producer nodes keep the host sync.
+        is_producer = self._is_producer_node(batch_N.node_name)
         if torch.cuda.is_available() and batch_N.batch.node_objects:
-            if output.completion_event is not None:
+            if is_producer and output.completion_event is not None:
+                for rid in batch_N.node_batch.request_ids:
+                    self._pending_producer_events[rid] = output.completion_event
+            elif output.completion_event is not None:
                 if self.enable_nvtx:
                     range_push("worker.postprocess.completion_event_sync", synchronize=False)
                 output.completion_event.synchronize()
                 if self.enable_nvtx:
                     range_pop(synchronize=False)
-            else:
+            elif not is_producer:
                 torch.cuda.default_stream().synchronize()
 
         if self.enable_nvtx:
@@ -1761,7 +1932,18 @@ class Worker:
 
         # Check for stops
         engine = self.engine_manager.get_engine(batch_N.node_name)
-        cpu_output = self._prematerialize_for_check_stop(output)
+        # CHANGE A: skip the D->H pre-materialize for producer/encoder nodes.
+        # _prematerialize_for_check_stop does ``side.wait_event(completion_event)``
+        # + ``side.synchronize()`` over per_request_output_tensors — for an
+        # encoder that populates large audio/vision embeds, that host sync would
+        # re-introduce exactly the encoder-forward block CHANGE A removes (and
+        # copy the whole embed tensor D->H needlessly). Encoder check_stop is the
+        # no-op default and never reads tensor values, so passing the raw GPU
+        # output is safe.
+        if is_producer:
+            cpu_output = output
+        else:
+            cpu_output = self._prematerialize_for_check_stop(output)
         new_stops = engine.check_stop_for_batch(batch_N.node_batch, cpu_output)
 
         if self.enable_nvtx:
@@ -2474,13 +2656,28 @@ class Worker:
                 if self.enable_nvtx:
                     range_pop(synchronize=False)
 
+                # CHANGE A: hand any stashed producer (encoder) completion event
+                # to this consumer batch so its CUDA-graph replay gates on it
+                # GPU-side. No-op when none was stashed.
+                self._attach_producer_event(node_batch)
+
+                # CHANGE C (default-OFF): if a pre-plan was dispatched for this
+                # prefill batch at encoder time, reuse the slot it reserved and
+                # await its plan on the GPU thread. ``preplan_future`` is None
+                # (and the map is empty) unless MSTAR_PREFILL_PREPLAN is enabled,
+                # so the default reserve/submit path below is unchanged.
+                preplan_future = self._consume_prefill_preplan(node_batch)
+
                 # Reserve the double-buffer slot on the main thread before
                 # submission so the per-key counter advances in main-thread
                 # order. Without this, the GPU thread would advance the
                 # counter at run time and races with main-thread reservations
-                # from later iters.
+                # from later iters. When a pre-plan already reserved a slot for
+                # this batch we MUST NOT reserve again (it would advance past the
+                # pre-planned slot); the carried slot is already in metadata.
                 fallthrough_engine = self.engine_manager.get_engine(batch.node_name)
-                fallthrough_engine.reserve_replay_slot(node_batch)
+                if preplan_future is None:
+                    fallthrough_engine.reserve_replay_slot(node_batch)
 
                 # send messages to follower ranks if relevant
                 self.maybe_send_zmq_to_tp_followers(node_batch)
@@ -2492,10 +2689,23 @@ class Worker:
                 node_batch.metadata["advance_event"] = fallthrough_advance_event
                 future = gpu_executor.submit(
                     self._execute_on_gpu_thread, batch, node_batch,
-                    None, fallthrough_advance_event,
+                    preplan_future, fallthrough_advance_event,
                 )
                 self.wakeup_event.register_future(future)
                 logger.debug(f"Scheduling: {batch.node_name} {node_batch.request_ids}")
+
+                # CHANGE C (default-OFF): once an encoder batch is in flight,
+                # kick off the prefill_audio FlashInfer plan on plan_executor so
+                # its small kernels overlap the encoder forward. Best-effort.
+                if (
+                    self._prefill_preplan_enabled
+                    and plan_executor is not None
+                    and batch.node_name == "audio_encoder"
+                ):
+                    self._maybe_trigger_prefill_preplan(
+                        batch, node_batch, plan_executor
+                    )
+
                 _set_pending(PendingBatch(
                     batch=batch,
                     node_batch=node_batch,
