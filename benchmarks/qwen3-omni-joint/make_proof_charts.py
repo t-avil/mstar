@@ -23,10 +23,9 @@ if os.path.exists(STYLE):
 os.makedirs(OUT, exist_ok=True)
 
 BATCHES = [1, 2, 4, 8, 16, 32]
-SYS = [("mstar_new_combined", "M*-new + vision opts", "#d62728", "D", "-"),
-       ("mstar_new", "M*-new (chunked only)", "#1f77b4", "o", "-"),
-       ("mstar_old", "M*-old (HF)",           "#7f7f7f", "s", "--"),
-       ("vllm",      "vLLM-Omni",             "#2ca02c", "^", "-.")]
+SYS = [("mstar_new", "M*-new (integrated)", "#1f77b4", "o", "-"),
+       ("mstar_old", "M*-old (HF)",         "#7f7f7f", "s", "--"),
+       ("vllm",      "vLLM-Omni",           "#2ca02c", "^", "-.")]
 PATHS = {
  "audio_to_text":   ("S2T  (audio -> text)",   "text"),
  "image_to_text":   ("I2T  (image -> text)",   "text"),
@@ -96,7 +95,7 @@ for path, (title, modality) in PATHS.items():
         print("skip (no data):", path); continue
     agg = json.load(open(fp))["aggregates"]
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
-    fig.suptitle(f"Qwen3-Omni {title} -- M*-new+vision-opts vs M*-new vs M*-old vs vLLM, B=1..32",
+    fig.suptitle(f"Qwen3-Omni {title} -- M*-new vs M*-old vs vLLM, B=1..32",
                  fontsize=13, fontweight="bold")
     if modality == "text":
         panel(axes[0, 0], agg, modality, "tok",  "Throughput (text tokens/s, self-counted) -- higher better", "tok/s")
