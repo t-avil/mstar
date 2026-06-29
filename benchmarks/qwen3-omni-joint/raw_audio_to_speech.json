@@ -16349,78 +16349,6 @@
       "sample_rate": 24000
     },
     {
-      "system": "mstar_new",
-      "batch": 1,
-      "phase": "measure",
-      "request_throughput": 2.726013672684831,
-      "completed": 50,
-      "failed": 0,
-      "ttft_audio_mean": 0.22575765764806419,
-      "ttft_audio_p50": 0.22435876145027578,
-      "ttft_audio_p99": 0.25583587667671964,
-      "itl_audio_mean": 0.0668322525430435
-    },
-    {
-      "system": "mstar_new",
-      "batch": 2,
-      "phase": "measure",
-      "request_throughput": 4.284883391114549,
-      "completed": 50,
-      "failed": 0,
-      "ttft_audio_mean": 0.2987225968204439,
-      "ttft_audio_p50": 0.30233038251753896,
-      "ttft_audio_p99": 0.3462242888985202,
-      "itl_audio_mean": 0.08347345090509613
-    },
-    {
-      "system": "mstar_new",
-      "batch": 4,
-      "phase": "measure",
-      "request_throughput": 5.914813246318953,
-      "completed": 50,
-      "failed": 0,
-      "ttft_audio_mean": 0.43248967609368266,
-      "ttft_audio_p50": 0.4251091295154765,
-      "ttft_audio_p99": 0.7012185421073809,
-      "itl_audio_mean": 0.10217923245259694
-    },
-    {
-      "system": "mstar_new",
-      "batch": 8,
-      "phase": "measure",
-      "request_throughput": 8.80050927197376,
-      "completed": 80,
-      "failed": 0,
-      "ttft_audio_mean": 0.6049187958502443,
-      "ttft_audio_p50": 0.608013135031797,
-      "ttft_audio_p99": 0.8026451508910395,
-      "itl_audio_mean": 0.12380619813172546
-    },
-    {
-      "system": "mstar_new",
-      "batch": 16,
-      "phase": "measure",
-      "request_throughput": 12.730843462303204,
-      "completed": 160,
-      "failed": 0,
-      "ttft_audio_mean": 0.9081516286154511,
-      "ttft_audio_p50": 0.832239274517633,
-      "ttft_audio_p99": 1.6112551909848116,
-      "itl_audio_mean": 0.15276069565676154
-    },
-    {
-      "system": "mstar_new",
-      "batch": 32,
-      "phase": "measure",
-      "request_throughput": 18.48266552519993,
-      "completed": 320,
-      "failed": 0,
-      "ttft_audio_mean": 1.2528805713060138,
-      "ttft_audio_p50": 1.3000942145008594,
-      "ttft_audio_p99": 1.5726552800624631,
-      "itl_audio_mean": 0.21832121412510114
-    },
-    {
       "system": "mstar_old",
       "batch": 1,
       "phase": "measure",
@@ -16515,6 +16443,102 @@
       "ttft_audio_p50": 6.570232266909443,
       "ttft_audio_p99": 13.50131607075222,
       "itl_audio_mean": 0.17022421849625452
+    },
+    {
+      "system": "mstar_new",
+      "batch": 1,
+      "phase": "measure",
+      "request_throughput": 2.6981784878680988,
+      "completed": 50,
+      "failed": 0,
+      "ttft_text_mean": 0.10183323769364507,
+      "ttft_text_p50": 0.09996165195479989,
+      "ttft_text_p99": 0.1272540107113309,
+      "itl_text_mean": 0.007471819319782624,
+      "ttft_audio_mean": 0.22860180207993835,
+      "ttft_audio_p50": 0.22630833892617375,
+      "ttft_audio_p99": 0.2761518433550372,
+      "itl_audio_mean": 0.06604902660649903
+    },
+    {
+      "system": "mstar_new",
+      "batch": 1,
+      "phase": "measure",
+      "request_throughput": 4.389953832642867,
+      "completed": 50,
+      "failed": 0,
+      "ttft_text_mean": 0.12620164440013468,
+      "ttft_text_p50": 0.1272428196389228,
+      "ttft_text_p99": 0.19664760951651256,
+      "itl_text_mean": 0.009825687890974578,
+      "ttft_audio_mean": 0.29332001427654175,
+      "ttft_audio_p50": 0.3027485274942592,
+      "ttft_audio_p99": 0.3598833050089888,
+      "itl_audio_mean": 0.08178463526137326
+    },
+    {
+      "system": "mstar_new",
+      "batch": 1,
+      "phase": "measure",
+      "request_throughput": 6.199218658658369,
+      "completed": 50,
+      "failed": 0,
+      "ttft_text_mean": 0.1769405149994418,
+      "ttft_text_p50": 0.1723775629652664,
+      "ttft_text_p99": 0.26761027263943105,
+      "itl_text_mean": 0.014222230204582033,
+      "ttft_audio_mean": 0.413259055824019,
+      "ttft_audio_p50": 0.4219194268807769,
+      "ttft_audio_p99": 0.52431568083819,
+      "itl_audio_mean": 0.10486772737355146
+    },
+    {
+      "system": "mstar_new",
+      "batch": 1,
+      "phase": "measure",
+      "request_throughput": 9.592792562868256,
+      "completed": 80,
+      "failed": 0,
+      "ttft_text_mean": 0.2182558954897104,
+      "ttft_text_p50": 0.22597386199049652,
+      "ttft_text_p99": 0.341339352496434,
+      "itl_text_mean": 0.021129928070804386,
+      "ttft_audio_mean": 0.5514506932493533,
+      "ttft_audio_p50": 0.5623744480544701,
+      "ttft_audio_p99": 0.7026746792439369,
+      "itl_audio_mean": 0.13018225499377387
+    },
+    {
+      "system": "mstar_new",
+      "batch": 1,
+      "phase": "measure",
+      "request_throughput": 12.714325054666576,
+      "completed": 160,
+      "failed": 0,
+      "ttft_text_mean": 0.31718803292897063,
+      "ttft_text_p50": 0.2984680144581944,
+      "ttft_text_p99": 0.6243557349243202,
+      "itl_text_mean": 0.03203871675492528,
+      "ttft_audio_mean": 0.8958565134496894,
+      "ttft_audio_p50": 0.8310809625545517,
+      "ttft_audio_p99": 1.721075460414868,
+      "itl_audio_mean": 0.15106048823864812
+    },
+    {
+      "system": "mstar_new",
+      "batch": 1,
+      "phase": "measure",
+      "request_throughput": 16.942911015419043,
+      "completed": 320,
+      "failed": 0,
+      "ttft_text_mean": 0.5018298482005775,
+      "ttft_text_p50": 0.4915362875908613,
+      "ttft_text_p99": 0.9660362693737261,
+      "itl_text_mean": 0.049630947375083424,
+      "ttft_audio_mean": 1.335384964109835,
+      "ttft_audio_p50": 1.3655842314474285,
+      "ttft_audio_p99": 1.6768934241728857,
+      "itl_audio_mean": 0.260763519143571
     }
   ],
   "aggregates": {
@@ -16671,32 +16695,47 @@
       },
       "mstar_new": {
         "recomputed": {
-          "n": 50,
-          "request_throughput": 2.726013672684831,
-          "text_token_throughput": null,
-          "audio_throughput": 8.602140595182435,
-          "rtf_mean": 0.12251663034105305,
-          "rtf_p50": 0.12235836766851668
+          "request_throughput": 2.6981784878680988,
+          "text_token_throughput": 39.77115091117578,
+          "audio_throughput": 8.608032557076694,
+          "rtf_p50": 0.11866406242341224
         },
         "harness": {
+          "ttft_text": {
+            "mean": 0.10183323769364507,
+            "p50": 0.09996165195479989,
+            "p95": 0.11829776840750128,
+            "p99": 0.1272540107113309
+          },
+          "itl_text": {
+            "mean": 0.007471819319782624,
+            "p50": 0.0066590690985322,
+            "p95": 0.010887064994312821,
+            "p99": 0.012965219435282052
+          },
           "ttft_audio": {
-            "mean": 0.22575765764806419,
-            "p50": 0.22435876145027578,
-            "higher_is_better": false,
-            "p95": 0.2481098595424555,
-            "p99": 0.25583587667671964,
-            "p05": null,
-            "p10": null
+            "mean": 0.22860180207993835,
+            "p50": 0.22630833892617375,
+            "p95": 0.2516835412825458,
+            "p99": 0.2761518433550372
           },
           "itl_audio": {
-            "mean": 0.0668322525430435,
-            "p50": 0.07611310796346515,
-            "higher_is_better": false,
-            "p95": 0.08748219537083059,
-            "p99": 0.1070850052498281,
-            "p05": null,
-            "p10": null
-          }
+            "mean": 0.06604902660649903,
+            "p50": 0.07506441394798458,
+            "p95": 0.0866807356942445,
+            "p99": 0.10512650164309895
+          },
+          "req_throughput_reported": 2.6981784878680988,
+          "text_tok_throughput_reported": 39.77115091117578,
+          "audio_throughput_reported": 8.608032557076694,
+          "audio_dur_mean_reported": 3.1903125
+        },
+        "completed": 50,
+        "num_requests": 50,
+        "provenance": {
+          "git_commit": "e943d72",
+          "build": "mstar_new",
+          "flags": "MSTAR_GPU_MEL=1 MSTAR_GPU_IMAGE_PREPROCESS=1 MSTAR_CHUNKED_PREFILL=1 MSTAR_VISION_GRAPH_ALIGN=1 MSTAR_BATCH_VISION_PREFILL=1"
         }
       }
     },
@@ -16853,32 +16892,47 @@
       },
       "mstar_new": {
         "recomputed": {
-          "n": 50,
-          "request_throughput": 4.284883391114549,
-          "text_token_throughput": null,
-          "audio_throughput": 12.782985498627257,
-          "rtf_mean": 0.16134303816341608,
-          "rtf_p50": 0.1575911795620181
+          "request_throughput": 4.389953832642867,
+          "text_token_throughput": 61.98614811691728,
+          "audio_throughput": 12.871673883846332,
+          "rtf_p50": 0.15686862676274488
         },
         "harness": {
+          "ttft_text": {
+            "mean": 0.12620164440013468,
+            "p50": 0.1272428196389228,
+            "p95": 0.1625788545235991,
+            "p99": 0.19664760951651256
+          },
+          "itl_text": {
+            "mean": 0.009825687890974578,
+            "p50": 0.007803386077284813,
+            "p95": 0.02735201525501907,
+            "p99": 0.03345936962869022
+          },
           "ttft_audio": {
-            "mean": 0.2987225968204439,
-            "p50": 0.30233038251753896,
-            "higher_is_better": false,
-            "p95": 0.34020921227056533,
-            "p99": 0.3462242888985202,
-            "p05": null,
-            "p10": null
+            "mean": 0.29332001427654175,
+            "p50": 0.3027485274942592,
+            "p95": 0.33827096668537704,
+            "p99": 0.3598833050089888
           },
           "itl_audio": {
-            "mean": 0.08347345090509613,
-            "p50": 0.08979706303216517,
-            "higher_is_better": false,
-            "p95": 0.1173794177826494,
-            "p99": 0.12721790676005174,
-            "p05": null,
-            "p10": null
-          }
+            "mean": 0.08178463526137326,
+            "p50": 0.09045521402731538,
+            "p95": 0.12241435972973698,
+            "p99": 0.14009611424058657
+          },
+          "req_throughput_reported": 4.389953832642867,
+          "text_tok_throughput_reported": 61.98614811691728,
+          "audio_throughput_reported": 12.871673883846332,
+          "audio_dur_mean_reported": 2.932075
+        },
+        "completed": 50,
+        "num_requests": 50,
+        "provenance": {
+          "git_commit": "e943d72",
+          "build": "mstar_new",
+          "flags": "MSTAR_GPU_MEL=1 MSTAR_GPU_IMAGE_PREPROCESS=1 MSTAR_CHUNKED_PREFILL=1 MSTAR_VISION_GRAPH_ALIGN=1 MSTAR_BATCH_VISION_PREFILL=1"
         }
       }
     },
@@ -17035,32 +17089,47 @@
       },
       "mstar_new": {
         "recomputed": {
-          "n": 50,
-          "request_throughput": 5.914813246318953,
-          "text_token_throughput": null,
-          "audio_throughput": 17.960330422447505,
-          "rtf_mean": 0.22624229183385175,
-          "rtf_p50": 0.2135629364839282
+          "request_throughput": 6.199218658658369,
+          "text_token_throughput": 87.7809362066025,
+          "audio_throughput": 18.720555485883008,
+          "rtf_p50": 0.21250031210217893
         },
         "harness": {
+          "ttft_text": {
+            "mean": 0.1769405149994418,
+            "p50": 0.1723775629652664,
+            "p95": 0.2540870586875826,
+            "p99": 0.26761027263943105
+          },
+          "itl_text": {
+            "mean": 0.014222230204582033,
+            "p50": 0.010054597398266196,
+            "p95": 0.04329956660512834,
+            "p99": 0.062278556644450866
+          },
           "ttft_audio": {
-            "mean": 0.43248967609368266,
-            "p50": 0.4251091295154765,
-            "higher_is_better": false,
-            "p95": 0.6073546284344047,
-            "p99": 0.7012185421073809,
-            "p05": null,
-            "p10": null
+            "mean": 0.413259055824019,
+            "p50": 0.4219194268807769,
+            "p95": 0.49750980159733443,
+            "p99": 0.52431568083819
           },
           "itl_audio": {
-            "mean": 0.10217923245259694,
-            "p50": 0.11573656601831317,
-            "higher_is_better": false,
-            "p95": 0.14373386655934156,
-            "p99": 0.21799375669099344,
-            "p05": null,
-            "p10": null
-          }
+            "mean": 0.10486772737355146,
+            "p50": 0.11844148021191359,
+            "p95": 0.14830780122429132,
+            "p99": 0.17061938997358084
+          },
+          "req_throughput_reported": 6.199218658658369,
+          "text_tok_throughput_reported": 87.7809362066025,
+          "audio_throughput_reported": 18.720555485883008,
+          "audio_dur_mean_reported": 3.019825
+        },
+        "completed": 50,
+        "num_requests": 50,
+        "provenance": {
+          "git_commit": "e943d72",
+          "build": "mstar_new",
+          "flags": "MSTAR_GPU_MEL=1 MSTAR_GPU_IMAGE_PREPROCESS=1 MSTAR_CHUNKED_PREFILL=1 MSTAR_VISION_GRAPH_ALIGN=1 MSTAR_BATCH_VISION_PREFILL=1"
         }
       }
     },
@@ -17217,32 +17286,47 @@
       },
       "mstar_new": {
         "recomputed": {
-          "n": 80,
-          "request_throughput": 8.80050927197376,
-          "text_token_throughput": null,
-          "audio_throughput": 27.493822275326337,
-          "rtf_mean": 0.2932092024644188,
-          "rtf_p50": 0.280842811477461
+          "request_throughput": 9.592792562868256,
+          "text_token_throughput": 141.37378039527093,
+          "audio_throughput": 29.788243936922346,
+          "rtf_p50": 0.27776086991661286
         },
         "harness": {
+          "ttft_text": {
+            "mean": 0.2182558954897104,
+            "p50": 0.22597386199049652,
+            "p95": 0.30970020646927876,
+            "p99": 0.341339352496434
+          },
+          "itl_text": {
+            "mean": 0.021129928070804386,
+            "p50": 0.012864154065027833,
+            "p95": 0.06608311785385007,
+            "p99": 0.0916393181448802
+          },
           "ttft_audio": {
-            "mean": 0.6049187958502443,
-            "p50": 0.608013135031797,
-            "higher_is_better": false,
-            "p95": 0.7455323640373535,
-            "p99": 0.8026451508910395,
-            "p05": null,
-            "p10": null
+            "mean": 0.5514506932493533,
+            "p50": 0.5623744480544701,
+            "p95": 0.6577869763947092,
+            "p99": 0.7026746792439369
           },
           "itl_audio": {
-            "mean": 0.12380619813172546,
-            "p50": 0.14024461794178933,
-            "higher_is_better": false,
-            "p95": 0.17558487331261857,
-            "p99": 0.19174105241894746,
-            "p05": null,
-            "p10": null
-          }
+            "mean": 0.13018225499377387,
+            "p50": 0.14047298207879066,
+            "p95": 0.17649768171831967,
+            "p99": 0.27018106759991495
+          },
+          "req_throughput_reported": 9.592792562868256,
+          "text_tok_throughput_reported": 141.37378039527093,
+          "audio_throughput_reported": 29.788243936922346,
+          "audio_dur_mean_reported": 3.1052734375
+        },
+        "completed": 80,
+        "num_requests": 80,
+        "provenance": {
+          "git_commit": "e943d72",
+          "build": "mstar_new",
+          "flags": "MSTAR_GPU_MEL=1 MSTAR_GPU_IMAGE_PREPROCESS=1 MSTAR_CHUNKED_PREFILL=1 MSTAR_VISION_GRAPH_ALIGN=1 MSTAR_BATCH_VISION_PREFILL=1"
         }
       }
     },
@@ -17399,32 +17483,47 @@
       },
       "mstar_new": {
         "recomputed": {
-          "n": 160,
-          "request_throughput": 12.730843462303204,
-          "text_token_throughput": null,
-          "audio_throughput": 39.12635764681246,
-          "rtf_mean": 0.4149639011393653,
-          "rtf_p50": 0.3868668877872584
+          "request_throughput": 12.714325054666576,
+          "text_token_throughput": 184.19878422948202,
+          "audio_throughput": 39.025577783321914,
+          "rtf_p50": 0.3851840621988122
         },
         "harness": {
+          "ttft_text": {
+            "mean": 0.31718803292897063,
+            "p50": 0.2984680144581944,
+            "p95": 0.4889822601224294,
+            "p99": 0.6243557349243202
+          },
+          "itl_text": {
+            "mean": 0.03203871675492528,
+            "p50": 0.0185265620239079,
+            "p95": 0.09689175206003711,
+            "p99": 0.13976009506732223
+          },
           "ttft_audio": {
-            "mean": 0.9081516286154511,
-            "p50": 0.832239274517633,
-            "higher_is_better": false,
-            "p95": 1.567165833688341,
-            "p99": 1.6112551909848116,
-            "p05": null,
-            "p10": null
+            "mean": 0.8958565134496894,
+            "p50": 0.8310809625545517,
+            "p95": 1.6634299706784077,
+            "p99": 1.721075460414868
           },
           "itl_audio": {
-            "mean": 0.15276069565676154,
-            "p50": 0.16986120399087667,
-            "higher_is_better": false,
-            "p95": 0.22151602474041282,
-            "p99": 0.2402909705135971,
-            "p05": null,
-            "p10": null
-          }
+            "mean": 0.15106048823864812,
+            "p50": 0.16849120589904487,
+            "p95": 0.2508503122255201,
+            "p99": 0.33349402649328075
+          },
+          "req_throughput_reported": 12.714325054666576,
+          "text_tok_throughput_reported": 184.19878422948202,
+          "audio_throughput_reported": 39.025577783321914,
+          "audio_dur_mean_reported": 3.06941796875
+        },
+        "completed": 160,
+        "num_requests": 160,
+        "provenance": {
+          "git_commit": "e943d72",
+          "build": "mstar_new",
+          "flags": "MSTAR_GPU_MEL=1 MSTAR_GPU_IMAGE_PREPROCESS=1 MSTAR_CHUNKED_PREFILL=1 MSTAR_VISION_GRAPH_ALIGN=1 MSTAR_BATCH_VISION_PREFILL=1"
         }
       }
     },
@@ -17581,32 +17680,47 @@
       },
       "mstar_new": {
         "recomputed": {
-          "n": 320,
-          "request_throughput": 18.48266552519993,
-          "text_token_throughput": null,
-          "audio_throughput": 54.630499615670736,
-          "rtf_mean": 0.5943124716399164,
-          "rtf_p50": 0.6010131043100309
+          "request_throughput": 16.942911015419043,
+          "text_token_throughput": 240.69522961279677,
+          "audio_throughput": 50.64447888896444,
+          "rtf_p50": 0.6380169079116413
         },
         "harness": {
+          "ttft_text": {
+            "mean": 0.5018298482005775,
+            "p50": 0.4915362875908613,
+            "p95": 0.8380111421109178,
+            "p99": 0.9660362693737261
+          },
+          "itl_text": {
+            "mean": 0.049630947375083424,
+            "p50": 0.030819051899015903,
+            "p95": 0.1660240909550339,
+            "p99": 0.2150292037986219
+          },
           "ttft_audio": {
-            "mean": 1.2528805713060138,
-            "p50": 1.3000942145008594,
-            "higher_is_better": false,
-            "p95": 1.525876402191352,
-            "p99": 1.5726552800624631,
-            "p05": null,
-            "p10": null
+            "mean": 1.335384964109835,
+            "p50": 1.3655842314474285,
+            "p95": 1.6320782053866425,
+            "p99": 1.6768934241728857
           },
           "itl_audio": {
-            "mean": 0.21832121412510114,
-            "p50": 0.23357834853231907,
-            "higher_is_better": false,
-            "p95": 0.34065015795640624,
-            "p99": 0.40838349297642684,
-            "p05": null,
-            "p10": null
-          }
+            "mean": 0.260763519143571,
+            "p50": 0.2621650949586183,
+            "p95": 0.4051819914020594,
+            "p99": 1.1448349406570197
+          },
+          "req_throughput_reported": 16.942911015419043,
+          "text_tok_throughput_reported": 240.69522961279677,
+          "audio_throughput_reported": 50.64447888896444,
+          "audio_dur_mean_reported": 2.989125
+        },
+        "completed": 320,
+        "num_requests": 320,
+        "provenance": {
+          "git_commit": "e943d72",
+          "build": "mstar_new",
+          "flags": "MSTAR_GPU_MEL=1 MSTAR_GPU_IMAGE_PREPROCESS=1 MSTAR_CHUNKED_PREFILL=1 MSTAR_VISION_GRAPH_ALIGN=1 MSTAR_BATCH_VISION_PREFILL=1"
         }
       }
     }
