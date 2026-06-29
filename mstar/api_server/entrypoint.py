@@ -24,6 +24,7 @@ from mstar.api_server.data_worker import PreprocessWorker
 from mstar.api_server.request_types import APIServerMessage, PreprocessInput, ResultChunk
 from mstar.communication.communicator import CommProtocol, ZMQCommunicator
 from mstar.model.registry import HF_MODELS
+from mstar.utils import encoder_placement_profile as _epp
 from mstar.utils.logging_config import quiet_noisy_loggers
 
 logger = logging.getLogger(__name__)
@@ -240,6 +241,16 @@ class APIServer:
         if request_id is None:
             request_id = str(uuid.uuid4())
 
+        # Stamp arrival as early as possible for image-input requests so the
+        # encoder-placement profile captures end-to-end TTFT components.  We
+        # mark before any further validation so the "image arrives" event is
+        # purely the API surface boundary.
+        if "image" in input_modalities:
+            _epp.record_arrived(
+                request_id,
+                path="image_to_speech" if "audio" in output_modalities else "image_to_text",
+            )
+
         for m in input_modalities + output_modalities:
             if m not in SUPPORTED_MODALITIES:
                 raise ValueError(f"Unsupported modality: {m!r}")
@@ -323,6 +334,12 @@ class APIServer:
                                 self.recently_completed[rid] = time.time()
                                 self.pending_requests[rid]["final_outputs"] = \
                                     message.body.final_outputs
+                                # Flush the api_server-side encoder-placement
+                                # record (ts_arrived_ns / ts_preprocess_*_ns).
+                                # The conductor + worker flush their own
+                                # process-local stamps; merging happens at
+                                # analysis time by request_id.
+                                _epp.flush(rid, proc="api_server")
                         elif rid in self.recently_completed:
                             logger.debug("Late message for completed %s: %s", rid, message.message_type)
                             if message.message_type == "result_tensors":

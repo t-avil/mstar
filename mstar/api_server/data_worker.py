@@ -19,6 +19,7 @@ from mstar.api_server.request_types import PreprocessInput, ResultChunk, ResultT
 from mstar.communication.communicator import CommProtocol, ZMQCommunicator
 from mstar.communication.tensors import NameToTensorList, create_tensor_communication_manager
 from mstar.model.base import Model
+from mstar.utils import encoder_placement_profile as _epp
 from mstar.utils.ipc_format import (
     AbortRequest,
     ConductorMessage,
@@ -238,14 +239,25 @@ class PreprocessWorkerThread:
         # loaded above).  process_prompt receives the raw multimodal tensors
         # and returns any additional tensors to merge into the final dict.
         if self.model is not None:
-            prompt_tensors = self.model.process_prompt(
-                input.text,
-                input.input_modalities,
-                input.output_modalities,
-                tensors=tensors,
-                input_metadata=input_metadata,
-                **(input.model_kwargs or {}),
-            )
+            # Encoder-placement profiler: image preprocess happens inside
+            # process_prompt (CPU HF processor or GPU _gpu_image_preprocess).
+            # Wrap the call so the timing covers both variants uniformly.
+            _has_image = "image" in (input.input_modalities or [])
+            if _has_image:
+                _epp.record_preprocess_start(input.request_id)
+            try:
+                prompt_tensors = self.model.process_prompt(
+                    input.text,
+                    input.input_modalities,
+                    input.output_modalities,
+                    tensors=tensors,
+                    input_metadata=input_metadata,
+                    request_id=input.request_id,
+                    **(input.model_kwargs or {}),
+                )
+            finally:
+                if _has_image:
+                    _epp.record_preprocess_end(input.request_id)
             if prompt_tensors:
                 tensors.update(prompt_tensors)
         elif input.text is not None:

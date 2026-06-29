@@ -37,6 +37,7 @@ from mstar.model.qwen3_omni.components.rope import (
 from mstar.model.qwen3_omni.components.talker import Qwen3OmniCodePredictor, Qwen3OmniTalkerModel
 from mstar.model.qwen3_omni.config import Qwen3OmniModelConfig
 from mstar.model.submodule_base import ARNodeInputs, ARNodeSubmodule, ModelInputsFromEngine, NodeInputs, NodeSubmodule
+from mstar.utils import encoder_placement_profile as _epp
 from mstar.utils.sampling import CudaGraphableSampler, SeenTokenMask
 
 logger = logging.getLogger(__name__)
@@ -262,6 +263,12 @@ class VisionEncoderSubmodule(NodeSubmodule):
             "Running VisionEncoder with pixel_values shape=%s, grid_thw shape=%s",
             pixel_values.shape, grid_thw.shape,
         )
+        # Encoder-placement profile: stamp CPU start before launching the
+        # vision tower (kernels enqueue asynchronously).
+        _rids = engine_inputs.request_ids
+        _bs = len(_rids)
+        for _rid in _rids:
+            _epp.record_vision_fwd_start(_rid, batch_size=_bs)
         # HF vision encoder returns (hidden_states, deepstack_features)
         # depending on the model variant; handle both cases
         encoder_output = self.vision_encoder(
@@ -277,6 +284,10 @@ class VisionEncoderSubmodule(NodeSubmodule):
 
         if isinstance(deepstack, torch.Tensor):
             deepstack = [deepstack]
+
+        for _rid in _rids:
+            _epp.record_vision_fwd_end(_rid)
+            _epp.record_vision_delivered(_rid)
 
         return {
             "vision_embeds": [vision_embeds],
@@ -339,7 +350,16 @@ class NativeVisionEncoderSubmodule(NodeSubmodule):
 
     def forward_batched(self, graph_walk, engine_inputs, pixel_values, grid_thw,
                         req_token_counts=None, **kwargs):
+        # Encoder-placement profile: per-rid vision_fwd_start, then the
+        # single batched encoder call, then per-rid vision_fwd_end +
+        # vision_delivered (deepstack slice happens immediately below).
+        _rids = engine_inputs.request_ids
+        _bs = len(_rids)
+        for _rid in _rids:
+            _epp.record_vision_fwd_start(_rid, batch_size=_bs)
         embeds, deepstack = self._run(pixel_values, grid_thw)
+        for _rid in _rids:
+            _epp.record_vision_fwd_end(_rid)
         request_ids = engine_inputs.request_ids
         if req_token_counts is None:  # one-image-per-request fallback
             g = grid_thw if grid_thw.dim() == 2 else grid_thw.unsqueeze(0)
@@ -351,11 +371,19 @@ class NativeVisionEncoderSubmodule(NodeSubmodule):
                 "vision_embeds": [embeds[off:off + c]],
                 "deepstack": [d[off:off + c] for d in deepstack],
             }
+            _epp.record_vision_delivered(rid)
             off += c
         return results
 
     def forward(self, graph_walk, engine_inputs, pixel_values, grid_thw, **kwargs):
+        _rids = engine_inputs.request_ids
+        _bs = len(_rids)
+        for _rid in _rids:
+            _epp.record_vision_fwd_start(_rid, batch_size=_bs)
         embeds, deepstack = self._run(pixel_values, grid_thw)
+        for _rid in _rids:
+            _epp.record_vision_fwd_end(_rid)
+            _epp.record_vision_delivered(_rid)
         return {
             "vision_embeds": [embeds],
             "deepstack": deepstack if deepstack else [torch.tensor([])],
@@ -842,6 +870,18 @@ class ThinkerSubmodule(ARNodeSubmodule):
 
         cos_sin_3d = (cos_3d, sin_3d) if cos_3d is not None else None
 
+        # Encoder-placement profile: stamp prefill_text start / decode-first
+        # before the kernel launches.  We mark per-rid even though this is
+        # the eager path that asserts single-request: stamping is cheap and
+        # uniform with the batched path.
+        _rids = engine_inputs.request_ids
+        if graph_walk == "prefill_text":
+            for _rid in _rids:
+                _epp.record_prefill_text_start(_rid)
+        elif graph_walk == "thinker_decode":
+            for _rid in _rids:
+                _epp.record_first_decode(_rid)
+
         hidden, layer_0_embed, layer_n_hidden = self.model(
             input_embeds=input_embeds,
             cache_handle=engine_inputs.cache_manager,
@@ -850,6 +890,10 @@ class ThinkerSubmodule(ARNodeSubmodule):
             mrope_pos_advance=mrope_pos_advance,
             deepstack_visual_embeds=deepstack,
         )
+
+        if graph_walk == "prefill_text":
+            for _rid in _rids:
+                _epp.record_prefill_text_end(_rid)
 
         result: NameToTensorList = {}
 
@@ -1204,6 +1248,17 @@ class ThinkerSubmodule(ARNodeSubmodule):
 
         cos_sin_3d = (cos_3d, sin_3d) if cos_3d is not None else None
         cache_manager = engine_inputs.cache_manager
+
+        # Encoder-placement profile: stamp prefill_text start / decode-first
+        # for each request in the batch (sync-free CPU timestamps).
+        _rids = engine_inputs.request_ids
+        if graph_walk == "prefill_text":
+            for _rid in _rids:
+                _epp.record_prefill_text_start(_rid)
+        elif graph_walk == "thinker_decode":
+            for _rid in _rids:
+                _epp.record_first_decode(_rid)
+
         hidden, layer_0_embed, layer_n_hidden = self.model(
             input_embeds=input_embeds,
             cache_handle=cache_manager,
@@ -1212,6 +1267,10 @@ class ThinkerSubmodule(ARNodeSubmodule):
             mrope_pos_advance=mrope_pos_advance,
             deepstack_visual_embeds=deepstack,
         )
+
+        if graph_walk == "prefill_text":
+            for _rid in _rids:
+                _epp.record_prefill_text_end(_rid)
 
         if is_prefill:
             qo_indptr_buf = cache_manager.get_qo_indptr_buf("main")

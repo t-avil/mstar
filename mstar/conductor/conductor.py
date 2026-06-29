@@ -28,6 +28,7 @@ from mstar.engine.kv_store import KVCacheConfig
 from mstar.graph.base import GraphEdge, NodeAndGraphWalk, TensorPointerInfo
 from mstar.graph.loop_indices import NestedLoopIndices
 from mstar.model.base import ForwardPassArgs, Model, WorkerGraph
+from mstar.utils import encoder_placement_profile as _epp
 from mstar.utils.ipc_format import (
     ConductorMessageType,
     InputSignals,
@@ -774,6 +775,11 @@ class Conductor:
     ):
         """Called when all partitions are done."""
         logger.info("Request %s done", request_id)
+        # Conductor-side flush of the encoder-placement profile.  We stamp
+        # complete here (single conductor process owns this event) so the
+        # JSONL line has the end-of-request boundary for ttft / latency
+        # decomposition.
+        _epp.record_complete(request_id)
         request_data = self.requests[request_id]
         for worker_ids in request_data.worker_graph_to_workers.values():
             for worker_id in worker_ids:

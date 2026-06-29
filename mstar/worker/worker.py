@@ -25,6 +25,7 @@ from mstar.graph.graph_io import format_graph_edge_list
 from mstar.graph.loop_indices import NestedLoopIndices
 from mstar.model.base import Model, WorkerGraph
 from mstar.streaming.stream_buffer import StreamBuffer
+from mstar.utils import encoder_placement_profile as _epp
 from mstar.utils.ipc_format import (
     ConductorMessage,
     ConductorMessageType,
@@ -484,6 +485,15 @@ class Worker:
 
         for node_name in self.engine_manager.lru_tracked_nodes():
             self._last_active.pop((body.request_id, node_name), None)
+
+        # Encoder-placement profile: flush this worker's per-request stamps
+        # only on the leader rank (TP followers do not produce useful stage
+        # timestamps for I2T; the leader runs vision_encoder + Thinker).
+        # The ``sync_cuda=True`` here is the single drain we accept per
+        # request -- it makes recorded GPU-shadowed events reflect work
+        # that actually finished.
+        if not self.is_tp_follower:
+            _epp.record_request_done(body.request_id, sync_cuda=True)
 
     def _handle_tensor_received(self, body: TensorReceived) -> None:
         """Sender-side cleanup: receiver confirmed RDMA read, free source buffers."""
