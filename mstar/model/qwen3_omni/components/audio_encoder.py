@@ -225,9 +225,11 @@ def _flashinfer_varlen(q, k, v, cu_seqlens, scale):
     return out[..., :D].contiguous()
 
 
-# Backend selectable via env for A/B benchmarking. Default = adaptive (no-flash
-# SDPA). MSTAR_VARLEN_BACKEND in {adaptive, per_segment, dense, padded, flashinfer}.
-_VARLEN_BACKEND = os.environ.get("MSTAR_VARLEN_BACKEND", "adaptive")
+# Backend selectable via env for A/B benchmarking. Default = flashinfer: it is the
+# only capture-legal varlen backend, so the encoder CUDA graph (default on, see
+# _cuda_graph_enabled) needs it. Falls back gracefully if flashinfer is missing.
+# MSTAR_VARLEN_BACKEND in {adaptive, per_segment, dense, padded, flashinfer}.
+_VARLEN_BACKEND = os.environ.get("MSTAR_VARLEN_BACKEND", "flashinfer")
 _VARLEN_FALLBACKS = {"adaptive": _sdpa_varlen_adaptive,
                      "per_segment": _sdpa_varlen_per_segment, "dense": _sdpa_varlen_dense,
                      "padded": _sdpa_varlen_padded, "flashinfer": _flashinfer_varlen}
@@ -417,7 +419,7 @@ class NativeQwen3OmniAudioEncoder(nn.Module):
         if self._cg_warmed:
             return
         self._cg_warmed = True
-        spec = os.environ.get("MSTAR_ENCODER_CG_WARMUP", "")
+        spec = os.environ.get("MSTAR_ENCODER_CG_WARMUP", "1,2,4,8")
         if not spec or not self._cuda_graph_enabled() or feature_lens is None:
             return
         try:
@@ -439,7 +441,7 @@ class NativeQwen3OmniAudioEncoder(nn.Module):
                 logger.warning("audio CG warmup failed for bs=%d", k, exc_info=True)
 
     def _cuda_graph_enabled(self) -> bool:
-        if os.environ.get("MSTAR_ENCODER_CUDA_GRAPH", "0") not in ("1", "true", "True"):
+        if os.environ.get("MSTAR_ENCODER_CUDA_GRAPH", "1") not in ("1", "true", "True"):
             return False
         return _FLASHINFER_AVAILABLE and _VARLEN_BACKEND == "flashinfer"
 

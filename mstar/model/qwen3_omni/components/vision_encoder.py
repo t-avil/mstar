@@ -203,7 +203,7 @@ class NativeQwen3OmniVisionEncoder(nn.Module):
         self._cg_warmed = False
 
     def _cuda_graph_enabled(self) -> bool:
-        if os.environ.get("MSTAR_ENCODER_CUDA_GRAPH", "0") not in ("1", "true", "True"):
+        if os.environ.get("MSTAR_ENCODER_CUDA_GRAPH", "1") not in ("1", "true", "True"):
             return False
         import mstar.model.qwen3_omni.components.audio_encoder as AE
         return AE._FLASHINFER_AVAILABLE and AE._VARLEN_BACKEND == "flashinfer"
@@ -280,7 +280,7 @@ class NativeQwen3OmniVisionEncoder(nn.Module):
         if self._cg_warmed:
             return
         self._cg_warmed = True
-        spec = os.environ.get("MSTAR_ENCODER_CG_WARMUP", "")
+        spec = os.environ.get("MSTAR_ENCODER_CG_WARMUP", "1,2,4,8")
         if not spec or not self._cuda_graph_enabled():
             return
         try:
