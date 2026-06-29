@@ -182,11 +182,28 @@ I2S audio throughput is essentially tied with M\*-old — the bottleneck is the 
 **Result**: **Not benchmarked.** Config-only change but would require re-profiling the entire pipeline.
 **Lesson**: Placement changes affect the communication pattern between ranks. In SHM mode the cross-rank cost is low, but it's still a full pipeline change.
 
-#### Mixed prefill+decode walk (`exp/mixed-walk-piggyback`)
-**Branch**: `exp/mixed-walk-piggyback`
-**What**: Allow the Thinker to run a mixed step: prefill for new request + decode for existing requests in the same forward pass. This is true continuous batching.
-**Result**: **Scaffolding.** Complex to implement correctly with CUDA graphs because prefill and decode have different input shapes.
-**Lesson**: This is the "right" long-term solution for batch scheduling but requires significant CUDA graph rework. Chunked prefill is a good 80% solution.
+#### Mixed prefill+decode walk (`exp/mixed-walk-piggyback`) — UPDATED 2026-06-29
+
+**Branch**: `exp/mixed-walk-piggyback` @ `6bdcb90`
+**Behind**: `MSTAR_MIXED_WALK=1`
+
+**What**: Allow the Thinker to run a mixed step — prefill for a new request + decode for existing requests in the same FlashInfer varlen forward pass. This is the explicit M\* equivalent of vLLM-Omni's default mixed-position continuous batching.
+
+**Status (corrected)**: NOT "scaffolding only" — the **eager forward path is fully implemented**. ~1000 LOC across `mstar/engine/mixed_walk.py`, `mstar/worker/micro_scheduler.py`, `mstar/engine/kv_cache_engine.py`, `mstar/engine/cuda_graph_runner.py`, with 6 CPU unit tests passing. Scheduler emits mixed batches, worker builds NodeBatch with decode-first ordering, engine routes through FlashInfer's prefill wrapper with `qo_indptr`-based ragged layout. The **CUDA graph capture for the mixed step is the explicitly deferred part** — `CudaGraphRunner.run_mixed` returns None → eager fallback.
+
+**Result (I2T full sweep on GPUs 6,7, vs lowrisk mstar_new)**:
+| B | base req/s | ours | Δ | base TTFT | ours TTFT | ΔTTFT |
+|---|---|---|---|---|---|---|
+| 1 | 0.755 | 0.736 | -2.5% | 215 | 255 | +18.7% |
+| 2 | 1.165 | 1.122 | -3.6% | 276 | 313 | +13.4% |
+| 4 | 1.835 | 1.722 | -6.2% | 298 | 345 | +15.9% |
+| 8 | 2.520 | 2.316 | -8.1% | 344 | 386 | +12.4% |
+| 16 | 3.471 | 3.260 | -6.1% | 405 | 434 | +7.0% |
+| 32 | 4.460 | **0.922** | **-79.3%** | 576 | 604 | +5.0% |
+
+NEGATIVE on every batch and metric, **catastrophic at B=32**. The eager-mode dispatch overhead per mixed step exceeds the per-request piggyback savings; at B=32 the cost balloons nonlinearly because FlashInfer's varlen prefill on a 32-decode-position + 4096-prefill-position mixed input is fundamentally slower without graph capture than the captured decode-only kernel.
+
+**Lesson**: Theory was correct (matches vLLM-Omni's TTFT mechanism) but unusable without CUDA graph capture for the mixed shape. The deferred work is captured in §9.8b — bucketed `(decode_count, prefill_len)` graph registry, ~36 graphs, 2-4 GB extra VRAM, 30-60s extra warmup. Until that lands, **ship default-OFF** (which it does). The piggyback TTFT savings the design promised are real, but eager-mode dispatch cost dwarfs them by ~5-10×.
 
 #### Config knobs (`exp/config-knobs`)
 **Branch**: `exp/config-knobs`
