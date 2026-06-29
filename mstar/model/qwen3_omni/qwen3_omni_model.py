@@ -60,6 +60,15 @@ logger = logging.getLogger(__name__)
 # WhisperFeatureExtractor, moving that work off the TTFT-critical host CPU path.
 _GPU_MEL = os.environ.get("MSTAR_GPU_MEL", "0") in ("1", "true", "True")
 
+# Opt-in encode-prefill overlap (default OFF = byte-identical Sequential path).
+# When ON, the audio (and vision) encoder runs as a separate graph walk from
+# the Thinker prefill, connected via a StreamingGraphEdge.  This frees the
+# encoder's GPU (rank 0 in the default 3-GPU config) the instant the encoder
+# finishes, so the next request's encoder can start while the current
+# request's Thinker prefill is still running on rank 1 — cross-request
+# pipelining of the encode→prefill prologue.
+_ENCODE_PREFILL_OVERLAP = os.environ.get("MSTAR_ENCODE_PREFILL_OVERLAP", "0") in ("1", "true", "True")
+
 
 def gpu_log_mel(waveform, mel_filters, window, n_fft, hop):
     """GPU log-mel matching HF ``WhisperFeatureExtractor._np_extract_fbank_features``.
@@ -482,16 +491,25 @@ class Qwen3OmniModel(Model):
             ],
         )
 
-        prefill_audio = Sequential([
-            GraphNode(
+        if _ENCODE_PREFILL_OVERLAP:
+            # -- Encode-prefill overlap mode --
+            # Split into two walks so the encoder (rank 0) and Thinker (rank 1)
+            # are independently schedulable.  The encoder outputs audio_embeds
+            # via a StreamingGraphEdge; the Thinker self-triggers via
+            # StreamBuffer when the data arrives.  This frees rank 0 the instant
+            # the encoder finishes, enabling cross-request pipelining.
+            prefill_audio_encode = GraphNode(
                 name="audio_encoder",
-                # audio_seqlens carries the original (pre-padding) length of
-                # each audio clip, used by the encoder to compute attention
-                # masks and output position IDs.
                 input_names=["audio_features", "audio_seqlens"],
-                outputs=[GraphEdge(next_node="Thinker", name="audio_embeds")],
-            ),
-            GraphNode(
+                outputs=[
+                    StreamingGraphEdge(
+                        next_node="Thinker",
+                        name="audio_embeds",
+                        target_partition="Thinker",
+                    ),
+                ],
+            )
+            prefill_audio = GraphNode(
                 name="Thinker",
                 input_names=["audio_embeds"],
                 outputs=[
@@ -512,22 +530,61 @@ class Qwen3OmniModel(Model):
                         target_partition="Talker",
                     ),
                 ],
-            ),
-        ])
+            )
+        else:
+            prefill_audio_encode = None
+            prefill_audio = Sequential([
+                GraphNode(
+                    name="audio_encoder",
+                    # audio_seqlens carries the original (pre-padding) length of
+                    # each audio clip, used by the encoder to compute attention
+                    # masks and output position IDs.
+                    input_names=["audio_features", "audio_seqlens"],
+                    outputs=[GraphEdge(next_node="Thinker", name="audio_embeds")],
+                ),
+                GraphNode(
+                    name="Thinker",
+                    input_names=["audio_embeds"],
+                    outputs=[
+                        GraphEdge(
+                            next_node=EMIT_TO_CLIENT,
+                            name="new_token",
+                            output_modality="text",
+                            persist=True,
+                        ),
+                        StreamingGraphEdge(
+                            next_node="Talker",
+                            name="thinker_states",
+                            target_partition="Talker",
+                        ),
+                        StreamingGraphEdge(
+                            next_node="Talker",
+                            name="thinker_mask",
+                            target_partition="Talker",
+                        ),
+                    ],
+                ),
+            ])
 
-        prefill_vision = Sequential([
-            GraphNode(
+        if _ENCODE_PREFILL_OVERLAP:
+            # -- Vision encode-prefill overlap (same pattern as audio) --
+            prefill_vision_encode = GraphNode(
                 name="vision_encoder",
-                # image_grid_thw / video_grid_thw carries the (T, H, W) grid
-                # dimensions per image/video, used by the encoder to compute
-                # spatial position IDs and patch counts.
                 input_names=["pixel_values", "image_grid_thw"],
                 outputs=[
-                    GraphEdge(next_node="Thinker", name="vision_embeds"),
-                    GraphEdge(next_node="Thinker", name="deepstack")
+                    StreamingGraphEdge(
+                        next_node="Thinker",
+                        name="vision_embeds",
+                        target_partition="Thinker",
+                    ),
+                    StreamingGraphEdge(
+                        next_node="Thinker",
+                        name="deepstack",
+                        target_partition="Thinker",
+                    ),
                 ],
-            ),
-            GraphNode(
+            )
+            prefill_vision = GraphNode(
                 name="Thinker",
                 input_names=["vision_embeds", "deepstack", "video_second_per_grid", "image_grid_thw"],
                 outputs=[
@@ -548,8 +605,44 @@ class Qwen3OmniModel(Model):
                         target_partition="Talker",
                     ),
                 ],
-            ),
-        ])
+            )
+        else:
+            prefill_vision_encode = None
+            prefill_vision = Sequential([
+                GraphNode(
+                    name="vision_encoder",
+                    # image_grid_thw / video_grid_thw carries the (T, H, W) grid
+                    # dimensions per image/video, used by the encoder to compute
+                    # spatial position IDs and patch counts.
+                    input_names=["pixel_values", "image_grid_thw"],
+                    outputs=[
+                        GraphEdge(next_node="Thinker", name="vision_embeds"),
+                        GraphEdge(next_node="Thinker", name="deepstack")
+                    ],
+                ),
+                GraphNode(
+                    name="Thinker",
+                    input_names=["vision_embeds", "deepstack", "video_second_per_grid", "image_grid_thw"],
+                    outputs=[
+                        GraphEdge(
+                            next_node=EMIT_TO_CLIENT,
+                            name="new_token",
+                            output_modality="text",
+                            persist=True,
+                        ),
+                        StreamingGraphEdge(
+                            next_node="Talker",
+                            name="thinker_states",
+                            target_partition="Talker",
+                        ),
+                        StreamingGraphEdge(
+                            next_node="Talker",
+                            name="thinker_mask",
+                            target_partition="Talker",
+                        ),
+                    ],
+                ),
+            ])
 
         # -- Thinker decode: produces new_token (persist) + thinker_states
         #    (streaming to Talker) --
@@ -655,7 +748,7 @@ class Qwen3OmniModel(Model):
             ],
         )
 
-        return {
+        walks = {
             "prefill_text": prefill_text,
             "prefill_audio": prefill_audio,
             "prefill_vision": prefill_vision,
@@ -665,19 +758,26 @@ class Qwen3OmniModel(Model):
             "talker_decode": talker_decode,
             "code2wav_chunk": code2wav_chunk,
         }
+        if _ENCODE_PREFILL_OVERLAP:
+            walks["prefill_audio_encode"] = prefill_audio_encode
+            walks["prefill_vision_encode"] = prefill_vision_encode
+        return walks
 
     # -----------------------------------------------------------------------
     # Partition API: 3-partition streaming topology
     # -----------------------------------------------------------------------
 
     def get_partitions(self) -> list[PartitionDefinition]:
+        thinker_walks = {
+            "prefill_text", "prefill_audio",
+            "prefill_vision", "thinker_decode",
+        }
+        if _ENCODE_PREFILL_OVERLAP:
+            thinker_walks |= {"prefill_audio_encode", "prefill_vision_encode"}
         return [
             PartitionDefinition(
                 name="Thinker",
-                graph_walks={
-                    "prefill_text", "prefill_audio",
-                    "prefill_vision", "thinker_decode",
-                },
+                graph_walks=thinker_walks,
                 initial_walk="prefill_text",
                 producer_partitions=[],
             ),
@@ -696,31 +796,56 @@ class Qwen3OmniModel(Model):
         ]
 
     def get_partition_topology(self) -> PartitionTopology:
+        connections = [
+            Connection(
+                from_partition="Thinker",
+                to_partition="Talker",
+                edge_name="thinker_states",
+                chunk_policy_factory=lambda: FixedChunkPolicy(chunk_size=1, continue_after_done=True),
+            ),
+            Connection(
+                from_partition="Thinker",
+                to_partition="Talker",
+                edge_name="thinker_mask",
+                chunk_policy_factory=lambda: FixedChunkPolicy(chunk_size=1, continue_after_done=True),
+            ),
+            Connection(
+                from_partition="Talker",
+                to_partition="Code2Wav",
+                edge_name="codec_tokens",
+                chunk_policy_factory=lambda: LeftContextChunkPolicy(
+                    chunk=self.config.code2wav.codec_chunk_frames,
+                    left_context=self.config.code2wav.codec_left_context_frames,
+                ),
+            ),
+        ]
+        if _ENCODE_PREFILL_OVERLAP:
+            # Intra-partition streaming: encoder (rank 0) → Thinker (rank 1).
+            # chunk_size=1 means emit all audio_embeds at once (no within-request
+            # chunking); the overlap comes from cross-request pipelining.
+            connections.extend([
+                Connection(
+                    from_partition="Thinker",
+                    to_partition="Thinker",
+                    edge_name="audio_embeds",
+                    chunk_policy_factory=lambda: FixedChunkPolicy(chunk_size=1),
+                ),
+                Connection(
+                    from_partition="Thinker",
+                    to_partition="Thinker",
+                    edge_name="vision_embeds",
+                    chunk_policy_factory=lambda: FixedChunkPolicy(chunk_size=1),
+                ),
+                Connection(
+                    from_partition="Thinker",
+                    to_partition="Thinker",
+                    edge_name="deepstack",
+                    chunk_policy_factory=lambda: FixedChunkPolicy(chunk_size=1),
+                ),
+            ])
         return PartitionTopology(
             partitions=["Thinker", "Talker", "Code2Wav"],
-            connections=[
-                Connection(
-                    from_partition="Thinker",
-                    to_partition="Talker",
-                    edge_name="thinker_states",
-                    chunk_policy_factory=lambda: FixedChunkPolicy(chunk_size=1, continue_after_done=True),
-                ),
-                Connection(
-                    from_partition="Thinker",
-                    to_partition="Talker",
-                    edge_name="thinker_mask",
-                    chunk_policy_factory=lambda: FixedChunkPolicy(chunk_size=1, continue_after_done=True),
-                ),
-                Connection(
-                    from_partition="Talker",
-                    to_partition="Code2Wav",
-                    edge_name="codec_tokens",
-                    chunk_policy_factory=lambda: LeftContextChunkPolicy(
-                        chunk=self.config.code2wav.codec_chunk_frames,
-                        left_context=self.config.code2wav.codec_left_context_frames,
-                    ),
-                ),
-            ],
+            connections=connections,
         )
 
     # -----------------------------------------------------------------------
@@ -799,10 +924,14 @@ class Qwen3OmniModel(Model):
                     # into prefix+suffix around the audio, producing an extra
                     # prefill_text walk; deriving the count from the real
                     # schedule keeps the Talker's last-prefill detection aligned.
-                    "num_thinker_prefill_steps": len(
-                        self._build_thinker_prefill_schedule(
+                    # With ENCODE_PREFILL_OVERLAP, the schedule includes encoder-
+                    # only walks (prefill_audio_encode, prefill_vision_encode)
+                    # that do NOT produce thinker_states; exclude them.
+                    "num_thinker_prefill_steps": sum(
+                        1 for walk_name, _ in self._build_thinker_prefill_schedule(
                             input_modalities, input_signals,
                         )
+                        if not walk_name.endswith("_encode")
                     ),
                     "prefill_chunks_processed": 0,
                     "voice": model_kwargs.get("voice", "Ethan"),
@@ -933,7 +1062,13 @@ class Qwen3OmniModel(Model):
             if len(audio_seqlens) >= 1:
                 audio_entry["audio_seqlens"] = audio_seqlens[0]
             schedule.append(("prefill_text", {"text_inputs": texts[0]}))
-            schedule.append(("prefill_audio", audio_entry))
+            if _ENCODE_PREFILL_OVERLAP:
+                # Split: encoder walk (conductor-driven) then Thinker walk
+                # (self-triggered via StreamBuffer when audio_embeds arrives).
+                schedule.append(("prefill_audio_encode", audio_entry))
+                schedule.append(("prefill_audio", {}))
+            else:
+                schedule.append(("prefill_audio", audio_entry))
             schedule.append(("prefill_text", {"text_inputs": texts[1]}))
             return schedule
 
@@ -953,14 +1088,28 @@ class Qwen3OmniModel(Model):
                     }
                     if audio_idx < len(audio_seqlens):
                         entry["audio_seqlens"] = audio_seqlens[audio_idx]
-                    schedule.append(("prefill_audio", entry))
+                    if _ENCODE_PREFILL_OVERLAP:
+                        schedule.append(("prefill_audio_encode", entry))
+                        schedule.append(("prefill_audio", {}))
+                    else:
+                        schedule.append(("prefill_audio", entry))
                     audio_idx += 1
             elif mod == "image":
                 if vision_idx < len(pixel_values):
                     entry = {"pixel_values": pixel_values[vision_idx]}
                     if vision_idx < len(image_grid_thws):
                         entry["image_grid_thw"] = image_grid_thws[vision_idx]
-                    schedule.append(("prefill_vision", entry))
+                    if _ENCODE_PREFILL_OVERLAP:
+                        schedule.append(("prefill_vision_encode", entry))
+                        # Thinker still needs auxiliary tensors (image_grid_thw,
+                        # video_second_per_grid) as conductor-driven inputs;
+                        # vision_embeds + deepstack arrive via StreamBuffer.
+                        thinker_aux: dict[str, TensorPointerInfo] = {}
+                        if vision_idx < len(image_grid_thws):
+                            thinker_aux["image_grid_thw"] = image_grid_thws[vision_idx]
+                        schedule.append(("prefill_vision", thinker_aux))
+                    else:
+                        schedule.append(("prefill_vision", entry))
                     vision_idx += 1
             elif mod == "video":
                 # Video uses pixel_values_videos + video_grid_thw, but the
@@ -972,7 +1121,16 @@ class Qwen3OmniModel(Model):
                         entry["image_grid_thw"] = video_grid_thws[video_idx]
                     if video_idx < len(video_second_per_grid):
                         entry["video_second_per_grid"] = video_second_per_grid[video_idx]
-                    schedule.append(("prefill_vision", entry))
+                    if _ENCODE_PREFILL_OVERLAP:
+                        schedule.append(("prefill_vision_encode", entry))
+                        thinker_aux = {}
+                        if video_idx < len(video_grid_thws):
+                            thinker_aux["image_grid_thw"] = video_grid_thws[video_idx]
+                        if video_idx < len(video_second_per_grid):
+                            thinker_aux["video_second_per_grid"] = video_second_per_grid[video_idx]
+                        schedule.append(("prefill_vision", thinker_aux))
+                    else:
+                        schedule.append(("prefill_vision", entry))
                     video_idx += 1
 
         return schedule
@@ -988,6 +1146,12 @@ class Qwen3OmniModel(Model):
         We emit one GraphEdge per input so that auxiliary tensors like
         ``audio_seqlens`` and ``image_grid_thw`` reach the encoder node
         alongside the primary feature tensor.
+
+        When ``_ENCODE_PREFILL_OVERLAP`` is on, the schedule contains
+        explicit ``prefill_audio_encode`` / ``prefill_vision_encode`` walks
+        (conductor-driven, inputs sent to the encoder) followed by
+        ``prefill_audio`` / ``prefill_vision`` walks (self-triggered via
+        StreamBuffer, no conductor inputs needed).
         """
         schedule = metadata.kwargs["prefill_schedule"]
         step = metadata.kwargs["prefill_step"]
@@ -997,12 +1161,36 @@ class Qwen3OmniModel(Model):
         # the Sequential walk is the encoder (not the Thinker).
         if walk_name == "prefill_text":
             target_node = "Thinker"
-        elif walk_name == "prefill_audio":
+        elif walk_name == "prefill_audio_encode":
             target_node = "audio_encoder"
-        elif walk_name == "prefill_vision":
+        elif walk_name == "prefill_audio":
+            # With overlap flag: Thinker self-triggers via StreamBuffer
+            # (audio_embeds arrives from the encoder's streaming edge).
+            # Without overlap flag: Sequential walk — encoder is first node.
+            target_node = "audio_encoder" if not _ENCODE_PREFILL_OVERLAP else "Thinker"
+        elif walk_name == "prefill_vision_encode":
             target_node = "vision_encoder"
+        elif walk_name == "prefill_vision":
+            target_node = "vision_encoder" if not _ENCODE_PREFILL_OVERLAP else "Thinker"
         else:
             raise ValueError(f"Unrecognized prefill walk: {walk_name}")
+
+        # Self-triggered audio walk (overlap mode): audio_embeds arrives via
+        # StreamBuffer and the Thinker node has no other inputs.
+        if _ENCODE_PREFILL_OVERLAP and walk_name == "prefill_audio":
+            return []
+
+        # Self-triggered vision walk (overlap mode): vision_embeds + deepstack
+        # arrive via StreamBuffer, but auxiliary tensors (image_grid_thw,
+        # video_second_per_grid) are sent as conductor-driven inputs.
+        if _ENCODE_PREFILL_OVERLAP and walk_name == "prefill_vision":
+            edges: list[GraphEdge] = []
+            for key in ["image_grid_thw", "video_second_per_grid"]:
+                edge = GraphEdge(next_node="Thinker", name=key)
+                if key in tensor_dict:
+                    edge.tensor_info = [tensor_dict[key]]
+                edges.append(edge)
+            return edges
 
         edges: list[GraphEdge] = []
         for input_name, tensor_info in tensor_dict.items():
@@ -1012,7 +1200,13 @@ class Qwen3OmniModel(Model):
             edge.tensor_info = [tensor_info]
             edges.append(edge)
 
-        if walk_name == "prefill_vision":
+        if walk_name == "prefill_vision_encode":
+            # Encoder walk: pixel_values + image_grid_thw already sent above.
+            # video_second_per_grid is a Thinker-only input (skipped above),
+            # and the encoder doesn't need it.  No extra edges.
+            pass
+        elif walk_name == "prefill_vision":
+            # Sequential (no overlap): add Thinker's auxiliary inputs.
             for key in ["image_grid_thw", "video_second_per_grid"]:
                 edge = GraphEdge(next_node="Thinker", name=key)
                 if key in tensor_dict:

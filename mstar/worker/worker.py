@@ -301,9 +301,18 @@ class Worker:
             for wg in my_worker_graphs:
                 my_node_names.update(wg.section.get_nodes())
             for conn in self.partition_topology.connections:
-                # Check if any graph walk graph node for the consumer partition is on this worker
-                # by checking if the streaming edge's next_node is in my nodes
-                if any(n in my_node_names for n in self._get_node_names_for_partition(conn.to_partition, model)):
+                # For self-loop connections (from_partition == to_partition),
+                # the partition's node set includes both the producer and
+                # consumer nodes.  We must check whether the actual CONSUMING
+                # node (the one whose input_names lists the edge) is on this
+                # worker, not just any node from the partition.
+                if conn.from_partition == conn.to_partition:
+                    consumer_node = self._find_consuming_node(
+                        conn.edge_name, conn.to_partition, model
+                    )
+                    if consumer_node and consumer_node in my_node_names:
+                        self._my_consumer_connections.append(conn)
+                elif any(n in my_node_names for n in self._get_node_names_for_partition(conn.to_partition, model)):
                     self._my_consumer_connections.append(conn)
 
         # Set of edge names that arrive via streaming (used to distinguish
@@ -335,6 +344,31 @@ class Worker:
                         nodes.add(section.name)
                 return list(nodes)
         return []
+
+    @staticmethod
+    def _find_consuming_node(
+        edge_name: str, partition_name: str, model: Model,
+    ) -> str | None:
+        """Find the node that CONSUMES a given streaming edge within a partition.
+
+        Searches all graph walk sections belonging to *partition_name* for a
+        GraphNode whose ``input_names`` includes *edge_name*.  Used by self-loop
+        connection detection so we can distinguish the consumer node from the
+        producer node (both live in the same partition).
+        """
+        walks = model.get_graph_walk_graphs()
+        partitions = model.get_partitions()
+        for pdef in partitions:
+            if pdef.name != partition_name:
+                continue
+            for walk_name in pdef.graph_walks:
+                section = walks.get(walk_name)
+                if section is None:
+                    continue
+                for node in section.get_nodes().values():
+                    if hasattr(node, "input_names") and edge_name in node.input_names:
+                        return node.name
+        return None
 
     def _compute_store_write_policy(
         self,

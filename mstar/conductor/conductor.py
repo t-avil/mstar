@@ -888,7 +888,18 @@ class Conductor:
 
         # For partitions that self-trigger via StreamBuffer (have incoming
         # connections with topology), worker signals partition_done directly.
-        if incoming_connections and partition_done_from_worker:
+        # Exception: partitions with intra-partition streaming (self-loop
+        # connections, e.g. encoder→Thinker overlap) manage their own
+        # completion via their state machine; stream-done should NOT
+        # short-circuit them.  We detect this by checking whether the
+        # partition has *cross-partition* producer dependencies
+        # (producer_partitions is non-empty).
+        pdef = request_data.partition_definitions.get(partition_name)
+        has_cross_partition_producers = bool(
+            pdef and pdef.producer_partitions
+        )
+        if (incoming_connections and partition_done_from_worker
+                and has_cross_partition_producers):
             pstate.is_done = True
 
         prev_walk =  pstate.metadata.graph_walk

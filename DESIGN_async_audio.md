@@ -261,6 +261,133 @@ better. Use the existing parity tests (`test/`) to confirm byte-identical audio.
 | Cross-partition pipeline (Talker∥Code2Wav) | Already present (separate-worker topology) |
 | Cross-request vocoder batching | Already present |
 | Stateful streaming detok (left-context carry) | Already present |
-| A: encode→prefill overlap | **Designed / scaffolded** (this doc) |
+| A: encode→prefill overlap | **Implemented** (see PROGRESS below) |
 | C: VoxServe streaming scheduler | **Designed / scaffolded** (this doc) |
 | B: colocated vocoder interleave | Designed (low priority) |
+
+---
+
+## 7. PROGRESS: Sub-lever A — Encode-Prefill Overlap (IMPLEMENTED)
+
+### Summary
+
+Implemented cross-request pipelining of the encode→prefill prologue, gated
+behind `MSTAR_ENCODE_PREFILL_OVERLAP=1` (default OFF = byte-identical
+Sequential path). Applies to both audio and vision encoders.
+
+### What changed
+
+**3 files, ~295 lines added:**
+
+1. **`mstar/model/qwen3_omni/qwen3_omni_model.py`** (~240 lines):
+   - New env flag `_ENCODE_PREFILL_OVERLAP` (module-level, read once at import).
+   - **Graph structure** (flag ON): `prefill_audio` Sequential split into two
+     independent walks:
+     - `prefill_audio_encode`: standalone `GraphNode("audio_encoder")`, outputs
+       `audio_embeds` via `StreamingGraphEdge(target_partition="Thinker")`.
+     - `prefill_audio`: standalone `GraphNode("Thinker")`, consumes
+       `audio_embeds` as a streaming input (self-triggered via StreamBuffer).
+   - Same split for vision: `prefill_vision_encode` + `prefill_vision`.
+     Vision's auxiliary tensors (`image_grid_thw`, `video_second_per_grid`)
+     are sent as conductor-driven inputs alongside the streaming data.
+   - `get_partitions()`: Thinker partition gains `prefill_audio_encode` /
+     `prefill_vision_encode` walks.
+   - `get_partition_topology()`: three new intra-partition (Thinker→Thinker)
+     `Connection`s for `audio_embeds`, `vision_embeds`, `deepstack`, each
+     with `FixedChunkPolicy(chunk_size=1)`.
+   - `_build_thinker_prefill_schedule()`: when ON, inserts the encode walk
+     before the Thinker walk in the schedule. Audio: `[...,
+     prefill_audio_encode, prefill_audio, ...]`. Vision: `[...,
+     prefill_vision_encode, prefill_vision, ...]`.
+   - `_get_thinker_prefill_inputs()`: handles the new walk names. Encode
+     walks get conductor-driven encoder inputs. Audio Thinker walk returns
+     `[]` (self-triggered). Vision Thinker walk returns auxiliary tensors
+     only (streaming data arrives via StreamBuffer).
+   - `num_thinker_prefill_steps` (Talker alignment): excludes `*_encode`
+     walks from the count since they don't produce `thinker_states`.
+
+2. **`mstar/conductor/conductor.py`** (~13 lines):
+   - `_process_done_forward()`: the `partition_done_from_worker` check now
+     gates on `has_cross_partition_producers`. Partitions with only
+     intra-partition streaming (self-loop connections, like the Thinker with
+     encode→prefill overlap) manage their own completion via their state
+     machine and are not short-circuited by the stream-done flag.
+
+3. **`mstar/worker/worker.py`** (~40 lines):
+   - Consumer connection detection: self-loop connections
+     (`from_partition == to_partition`) now resolve the actual consuming
+     node via `_find_consuming_node()` and check whether THAT node is on
+     this worker. This prevents the encoder's worker (rank 0) from
+     incorrectly creating a StreamBuffer for an edge it produces.
+   - New static method `_find_consuming_node(edge_name, partition_name,
+     model)` — searches graph walk sections for the node whose
+     `input_names` includes the edge.
+
+### How cross-request overlap actually happens
+
+In the default 3-GPU config (`configs/qwen3omni.yaml`):
+- Rank 0: `audio_encoder`, `vision_encoder`, `Code2Wav`
+- Rank 1: `Thinker`
+- Rank 2: `Talker`
+
+**Without flag (current Sequential)**:
+`prefill_audio` is one walk with two WorkerGraphs (encoder on rank 0 +
+Thinker on rank 1). The conductor waits for BOTH to complete before
+advancing. Rank 0 is logically "busy" for the entire walk duration, even
+though the encoder finishes much earlier than the Thinker prefill.
+
+**With flag ON**:
+`prefill_audio_encode` (encoder only, rank 0) and `prefill_audio` (Thinker
+only, rank 1) are separate walks. The encoder walk completes first — rank 0
+is freed. The conductor advances to the Thinker walk, which self-triggers
+via StreamBuffer. While rank 1 is busy with the Thinker prefill, rank 0
+can accept the NEXT request's encoder walk. This is the overlap: Request
+N's Thinker prefill runs concurrently with Request N+1's encoder.
+
+```
+Request N:   [encode(rank0)] -----> [Thinker prefill(rank1)] ---> [decode] ...
+Request N+1:           idle   [encode(rank0)] --> [Thinker prefill(rank1)] ...
+                                   ^^ overlap ^^
+```
+
+### Preserved instrumentation
+
+`MSTAR_AUDIO_LATENCY_SPLIT` and `MSTAR_PHASE_TIMING` are unaffected — they
+instrument the worker-level forward pass timing, which is orthogonal to the
+graph walk structure. Both still work with the flag ON or OFF.
+
+### GPU A/B test command
+
+```bash
+# Baseline (flag OFF — byte-identical default path)
+<serve-cmd> ...
+# -> Run workload, capture TTFA / TTFT / RTF / throughput
+
+# Encode-prefill overlap ON
+MSTAR_ENCODE_PREFILL_OVERLAP=1 <serve-cmd> ...
+# -> Same workload, compare metrics
+
+# Full comparison with instrumentation
+MSTAR_ENCODE_PREFILL_OVERLAP=0 MSTAR_PHASE_TIMING=200 <serve-cmd> ...   # baseline
+MSTAR_ENCODE_PREFILL_OVERLAP=1 MSTAR_PHASE_TIMING=200 <serve-cmd> ...   # overlap
+
+# Parity check: output tokens/audio must be identical between ON and OFF
+diff <(curl ... | jq .text) <(curl ... | jq .text)
+```
+
+Acceptance criteria:
+- **Parity**: flag-ON produces identical output tokens and audio as flag-OFF.
+  The overlap changes scheduling, not computation.
+- **TTFT/TTFA improvement**: visible under concurrent requests (the overlap is
+  cross-request; single-request latency is unchanged).
+- **RTF unchanged or better**: no regression in steady-state throughput.
+
+### What remains
+
+- **GPU validation**: the implementation is structurally complete and
+  py_compile clean, but has not been run on GPU. Needs a 3-GPU test run
+  with the flag ON to confirm end-to-end correctness and parity.
+- **Sub-lever C (VoxServe scheduler)**: designed but not implemented.
+- **Colocated topology**: the overlap assumes separate ranks for encoder and
+  Thinker. In colocated configs (same rank), the Sequential is preserved
+  (same WorkerGraph) and the flag has no effect. No harm, no benefit.
