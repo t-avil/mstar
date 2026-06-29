@@ -841,29 +841,31 @@ class Worker:
     # ------------------------------------------------------------------
 
     def _build_node_batch(self, batch: ScheduledBatch) -> NodeBatch:
-        """Gather input tensors from tensor_manager for all requests in the batch."""
-        # MSTAR_MIXED_WALK replay stub. The scheduler (micro_scheduler.py) can
-        # now emit a mixed prefill+decode batch under MSTAR_MIXED_WALK, but the
-        # mixed varlen forward + CUDA-graph replay are NOT yet wired (the build
-        # helper in mstar/engine/mixed_walk.py is implemented and tested, the
-        # replay in CudaGraphRunner.run_mixed is a stub). Fail loudly rather
-        # than silently mis-executing prefill tokens as decode. To run flag ON
-        # for the TTFT A/B, complete the TODO in CudaGraphRunner.run_mixed and
-        # build the mixed NodeBatch here. See DESIGN_mixed_walk.md.
-        # ``mixed_plan`` is None on every default-path batch, so flag OFF never
-        # touches this branch.
-        if getattr(batch, "mixed_plan", None) is not None:
-            raise NotImplementedError(
-                "MSTAR_MIXED_WALK produced a mixed prefill+decode batch but the "
-                "mixed varlen forward/replay path is not yet wired. "
-                "See DESIGN_mixed_walk.md and CudaGraphRunner.run_mixed."
-            )
+        """Gather input tensors from tensor_manager for all requests in the batch.
+
+        When ``batch.mixed_plan`` is set (MSTAR_MIXED_WALK), the batch contains
+        both decode AND prefill requests on the same node. We build a single
+        NodeBatch with ALL requests (decode first, then prefill — matching the
+        layout convention in ``build_mixed_varlen_layout``) and stash the
+        ``mixed_plan`` in ``metadata["mixed_plan"]`` so the engine can route to
+        the mixed varlen forward path.
+        """
         per_request_inputs: dict[str, NameToTensorList] = {}
         per_request_info: dict[CurrentForwardPassInfo] = {}
         final_stream_rids: set[str] = set()
         batch_partition = self.worker_graphs_manager.get_partition_for_node(batch.node_name)
 
-        for request_id, node in batch.node_objects.items():
+        mixed_plan = getattr(batch, "mixed_plan", None)
+
+        # When mixed, order request_ids as decode first, then prefill — this
+        # matches build_mixed_varlen_layout's token ordering convention.
+        if mixed_plan is not None:
+            ordered_rids = list(mixed_plan.decode_rids) + list(mixed_plan.prefill_rids)
+        else:
+            ordered_rids = list(batch.node_objects.keys())
+
+        for request_id in ordered_rids:
+            node = batch.node_objects[request_id]
             tensors = {}
             ready_inputs = node.ready_signals.ready_inputs
             for input_name, edge in ready_inputs.items():
@@ -877,13 +879,18 @@ class Worker:
             per_request_inputs[request_id] = tensors
             per_request_info[request_id] = self.worker_graphs_manager.get_fwd_info(request_id, batch_partition)
 
+        metadata = {}
+        if mixed_plan is not None:
+            metadata["mixed_plan"] = mixed_plan
+
         return NodeBatch(
             node_name=batch.node_name,
             graph_walk=batch.graph_walk,
-            request_ids=list(batch.node_objects.keys()),
+            request_ids=ordered_rids,
             per_request_input_tensors=per_request_inputs,
             per_request_info=per_request_info,
             final_stream_rids=final_stream_rids,
+            metadata=metadata,
         )
 
     def maybe_send_zmq_to_tp_followers(

@@ -474,6 +474,188 @@ class KVCacheEngine(BaseEngine):
             )
         return output
 
+    def _execute_mixed_eager(
+        self, batch: NodeBatch, submodule: ARNodeSubmodule,
+        inputs: list[ARNodeInputs], sampler: Sampler,
+        mixed_plan,
+    ) -> NodeOutput:
+        """Execute a mixed prefill+decode batch via one eager varlen forward.
+
+        Architecture:
+          Both decode (1-token) and prefill (multi-token) requests run through
+          a single ``submodule.preprocess`` + ``forward_batched`` call using
+          the PREFILL code path in forward_batched. This is architecturally
+          correct because:
+
+          1. FlashInfer's BatchPrefillWithPagedKVCacheWrapper handles variable
+             query lengths via ``qo_indptr`` — decode tokens are just length-1
+             queries (no special wrapper needed).
+          2. The prefill path in ``forward_batched`` uses ``qo_indptr_buf`` to
+             extract last-token-per-request logits, which works perfectly for
+             both decode (last = only token) and prefill (last of the chunk).
+          3. The decode path in ``forward_batched`` assumes
+             ``hidden.shape == (bs, hidden)`` (exactly one token per request),
+             which is WRONG for a mixed batch with multi-token prefill.
+
+          So: we pass ``graph_walk=prefill_walk`` to ``forward_batched`` to
+          ensure the prefill (varlen) code path is taken. ``preprocess`` gets
+          the decode walk (it's walk-agnostic for concat; only
+          ``prefill_vision`` has walk-specific logic which mixed batches don't
+          hit because vision prefill is not piggybacked in the minimal slice).
+
+        Output routing:
+          The prefill path's ``__batched_logits__`` is already
+          ``(batch_size, V)`` — one logit row per request, extracted via
+          ``qo_indptr_buf[1:] - 1`` (the last token of each request's query
+          span). For decode requests this is the single decode token; for
+          prefill requests this is the chunk's last token (the one that becomes
+          the request's first decode input). We can sample directly.
+
+        This is the EAGER (non-CUDA-graph) path.
+        """
+        decode_rids = list(mixed_plan.decode_rids)
+        prefill_rids = list(mixed_plan.prefill_rids)
+        num_decode = len(decode_rids)
+
+        cache_manager = self._create_cache_manager(
+            batch.request_ids, batch.node_name
+        )
+        engine_inputs = ModelInputsFromEngine(
+            request_ids=batch.request_ids,
+            per_request_info=batch.per_request_info,
+            cache_manager=cache_manager,
+            sampler=sampler,
+        )
+
+        if self.enable_nvtx:
+            range_push("ar.mixed.preprocess", synchronize=False)
+        # preprocess concatenates per-request inputs (embeds, positions) and
+        # plans FlashInfer attention via plan_attention(seq_lens=[1,1,...,N]).
+        # Walk-agnostic for text/audio (only prefill_vision has walk-specific
+        # deepstack logic, but vision prefill is not piggybacked).
+        preprocessed = submodule.preprocess(
+            graph_walk=mixed_plan.decode_walk,
+            engine_inputs=engine_inputs,
+            inputs=inputs,
+        )
+        if self.enable_nvtx:
+            range_pop(synchronize=False)
+
+        if self.enable_nvtx:
+            range_push("ar.mixed.forward")
+        launch_started_event = batch.metadata.get("launch_started_event")
+        if launch_started_event is not None:
+            launch_started_event.set()
+
+        # Use the PREFILL walk for forward_batched so it takes the varlen code
+        # path (qo_indptr-based last-token extraction) instead of the decode
+        # path (which assumes exactly 1 token per request).
+        # Use prefill_walk if available; fall back to "prefill_text" (the most
+        # common text prefill walk) which triggers the is_prefill branch.
+        fwd_walk = mixed_plan.prefill_walk or "prefill_text"
+        batched_output = submodule.forward_batched(
+            graph_walk=fwd_walk,
+            engine_inputs=engine_inputs,
+            **preprocessed,
+        )
+        if self.enable_nvtx:
+            range_pop()
+
+        cache_manager.flush_to_store()
+
+        # --- Output routing ---
+        # The prefill path returns:
+        #   __batched_logits__: (batch_size, V) — one logit per request
+        #                       (last token of each request's query span)
+        #   __batched_thinker_states__: (total_tokens, 2*hidden) — packed
+        #
+        # This is exactly what we need: decode requests' single token logit
+        # and prefill requests' last-token logit (for first decode token).
+        batched_logits = batched_output.pop("__batched_logits__", None)
+
+        if self.enable_nvtx:
+            range_push("ar.mixed.sample", synchronize=False)
+
+        if batched_logits is not None:
+            # batched_logits is already (batch_size, V) — one row per request
+            # in the correct order (decode first, then prefill).
+            stacked_logits = batched_logits[:len(batch.request_ids)]
+            sampled = sampler.sample(batch.request_ids, stacked_logits).clone()
+            sampled_views = sampled.split(1)
+
+            output_tensors = {}
+            for rid, view in zip(batch.request_ids, sampled_views, strict=True):
+                output_tensors[rid] = {"new_token": [view]}
+
+            # Collect non-logit per-rid outputs (thinker_states etc.)
+            for rid in batch.request_ids:
+                rid_out = batched_output.get(rid)
+                if rid_out is None:
+                    continue
+                filtered = submodule.filter_batched_output(
+                    batch.per_request_info.get(rid), rid_out,
+                )
+                for out_key, val in filtered.items():
+                    if out_key == "logits":
+                        continue
+                    if isinstance(val, list):
+                        output_tensors[rid][out_key] = [t.clone() for t in val]
+                    elif isinstance(val, torch.Tensor):
+                        output_tensors[rid][out_key] = [val.clone()]
+                    else:
+                        output_tensors[rid][out_key] = val
+
+            output = NodeOutput(per_request_output_tensors=output_tensors)
+        else:
+            # Fallback: per-rid logits already produced by submodule.
+            output_tensors = {}
+            for rid in batch.request_ids:
+                rid_out = batched_output.get(rid, {})
+                if "logits" in rid_out:
+                    logits_val = rid_out["logits"]
+                    logits_t = logits_val[0] if isinstance(logits_val, list) else logits_val
+                    if rid in set(prefill_rids):
+                        logits_t = logits_t[-1:] if logits_t.dim() > 1 else logits_t
+                    sampled = sampler.sample([rid], logits_t).clone()
+                    output_tensors[rid] = {"new_token": [sampled[0:1]]}
+                    for k, v in rid_out.items():
+                        if k == "logits":
+                            continue
+                        output_tensors[rid][k] = v
+                else:
+                    output_tensors[rid] = rid_out
+
+            output = NodeOutput(per_request_output_tensors=output_tensors)
+        if self.enable_nvtx:
+            range_pop(synchronize=False)
+
+        # Apply per-rid output filter
+        for rid in batch.request_ids:
+            rid_out = output.per_request_output_tensors.get(rid)
+            if not isinstance(rid_out, dict):
+                continue
+            output.per_request_output_tensors[rid] = submodule.filter_batched_output(
+                batch.per_request_info.get(rid), rid_out,
+            )
+
+        # Invoke unpack_packed_outputs to handle packed sentinels like
+        # __batched_thinker_states__ (Thinker slices per real seq_len and
+        # reattaches per-request talker masks).
+        unpacked = submodule.unpack_packed_outputs(
+            static_output=batched_output,
+            request_ids=batch.request_ids,
+            real_seq_lens=[inp.input_seq_len for inp in inputs],
+            inputs=inputs,
+            per_request_info=batch.per_request_info,
+        )
+        if unpacked:
+            for rid, rid_out in unpacked.items():
+                output.per_request_output_tensors.setdefault(rid, {})
+                for k, v in rid_out.items():
+                    output.per_request_output_tensors[rid][k] = v
+
+        return output
+
     def _execute_sequential(
         self, batch: NodeBatch,
         submodule: ARNodeSubmodule,
@@ -734,11 +916,20 @@ class KVCacheEngine(BaseEngine):
 
         Stashes ``submod_mgmt`` in metadata so ``execute_forward`` and the
         cleanup envelope can reach it without re-looking-up.
+
+        Mixed batches (MSTAR_MIXED_WALK): when ``batch.metadata["mixed_plan"]``
+        is set, decode requests are prepared with the decode walk and prefill
+        requests are prepared with their own prefill walk. The per-request
+        ``graph_walk`` must match what the submodule expects for that request
+        type so ``prepare_inputs`` produces the correct input shapes
+        (``input_seq_len=1`` for decode, full prompt length for prefill).
         """
         submod_mgmt = self.submodule_management[batch.node_name]
         cache_mgmt = submod_mgmt.kv_management
         kv_cache_string = cache_mgmt.kv_cache_config.get_node_str()
         submodule = submod_mgmt.submodule
+
+        mixed_plan = batch.metadata.get("mixed_plan")
 
         needed_labels = self._get_needed_labels(
             batch.node_name, batch.graph_walk, batch.per_request_info
@@ -776,6 +967,14 @@ class KVCacheEngine(BaseEngine):
         if self.enable_nvtx:
             range_pop(synchronize=False)
 
+        # For mixed batches, build a set of prefill rids so we can use the
+        # correct graph_walk per request during prepare_inputs.
+        prefill_rids: set[str] = set()
+        prefill_walk: str | None = None
+        if mixed_plan is not None:
+            prefill_rids = set(mixed_plan.prefill_rids)
+            prefill_walk = mixed_plan.prefill_walk
+
         node_inputs: list[ARNodeInputs] = []
         if self.enable_nvtx:
             range_push("kv_cache.prepare_inputs")
@@ -786,9 +985,13 @@ class KVCacheEngine(BaseEngine):
                     rid, label
                 ).get_pos_info() for label in labels
             }
+            # Mixed batch: prefill requests use their own graph_walk so
+            # prepare_inputs produces prefill-shaped inputs (full prompt)
+            # rather than decode-shaped (single token).
+            rid_walk = prefill_walk if rid in prefill_rids else batch.graph_walk
             node_inputs.append(
                 submodule.prepare_inputs(
-                    graph_walk=batch.graph_walk,
+                    graph_walk=rid_walk,
                     fwd_info=batch.per_request_info[rid],
                     inputs=batch.per_request_input_tensors[rid],
                     pos_info=pos_info,
@@ -808,8 +1011,9 @@ class KVCacheEngine(BaseEngine):
     def execute_forward(self, planned: PlannedBatch) -> NodeOutput:
         """Dispatch CUDA-graph / batched / sequential.
 
-        Priority: CUDA graph (largest single launch) > batched (single
-        FlashInfer plan + forward) > sequential (per-rid fallback).
+        Priority: mixed (if mixed_plan present) > CUDA graph (largest single
+        launch) > batched (single FlashInfer plan + forward) > sequential
+        (per-rid fallback).
         """
         batch = planned.batch
         submodule = planned.submodule
@@ -818,7 +1022,20 @@ class KVCacheEngine(BaseEngine):
         sampler = submod_mgmt.sampler
         submod_mgmt.tp_group.barrier()
 
-        if self._can_use_cuda_graph(batch, node_inputs):
+        mixed_plan = batch.metadata.get("mixed_plan")
+        if mixed_plan is not None:
+            # MSTAR_MIXED_WALK: mixed prefill+decode in one varlen forward.
+            if self.enable_nvtx:
+                range_push("kv_cache.mixed_eager_path", synchronize=False)
+            try:
+                output = self._execute_mixed_eager(
+                    batch, submodule, node_inputs, sampler=sampler,
+                    mixed_plan=mixed_plan,
+                )
+            finally:
+                if self.enable_nvtx:
+                    range_pop(synchronize=False)
+        elif self._can_use_cuda_graph(batch, node_inputs):
             if self.enable_nvtx:
                 range_push("kv_cache.cuda_graph_path", synchronize=False)
             try:
