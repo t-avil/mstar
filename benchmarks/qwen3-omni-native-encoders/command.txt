@@ -1,0 +1,31 @@
+# How to reproduce the benchmark data (raw_<path>.json, NUMBERS.md, charts/).
+#
+# The raw_<path>.json files contain per-request datapoints from sweep.sh runs
+# plus aggregates computed from those datapoints. Re-running the same sweeps
+# on the same hardware should reproduce within ~1-5%.
+#
+PY=/home/tim/mstar-encoders/.venv/bin/python
+
+# ─── M*-new (opt/combined-lowrisk, 1f66ce6) ───────────────────────────
+# GPUs 6,7, all 4 paths.
+
+benchmark/sweep.sh --system mstar_new --gpus 6,7 --port 8182 --paths s2t,i2t,s2s,i2s \
+  --batches 1,2,4,8,16,32 \
+  --output /home/tim/tmp/sweep_lowrisk \
+  --worktree /home/tim/mstar-encoders
+
+# ─── M*-old (upstream main, ae7d173) ──────────────────────────────────
+# Same GPUs 6,7, worktree checked out at upstream/main.
+
+benchmark/sweep.sh --system mstar_old --gpus 6,7 --port 8182 --paths s2t,i2t,s2s,i2s \
+  --batches 1,2,4,8,16,32 \
+  --output /home/tim/tmp/sweep_old \
+  --worktree /home/tim/tmp/mstar-old
+
+# ─── Ingest + regenerate ──────────────────────────────────────────────
+# After sweeps complete, ingest into raw_<path>.json and regenerate:
+
+$PY scripts/ingest_sweep.py --sweep-dir /home/tim/tmp/sweep_lowrisk --system mstar_new --paths s2t,i2t,s2s,i2s
+$PY scripts/ingest_sweep.py --sweep-dir /home/tim/tmp/sweep_old --system mstar_old --paths s2t,i2t,s2s,i2s
+$PY scripts/make_numbers.py
+$PY scripts/make_proof_charts.py
