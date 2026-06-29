@@ -13,7 +13,8 @@ Serving benchmark: M\*-new (`1f66ce6`, `opt/combined-lowrisk`) vs M\*-old
 
 ## Hardware
 
-8x NVIDIA H200 (143 GB), per-system 2-GPU pairs with device isolation.
+8x NVIDIA H200 (143 GB HBM3). All benchmarks run on GPUs 6,7 (2-GPU tensor-parallel).
+Each system ran sequentially on the same GPU pair.
 
 ## Verdict
 
