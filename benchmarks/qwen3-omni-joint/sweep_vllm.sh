@@ -115,6 +115,7 @@ echo "[$(date -u +%H:%M:%S)] GPUs idle. Launching vLLM-Omni server..."
 export CUDA_VISIBLE_DEVICES="$GPUS"
 export HF_HOME="$HF_HOME_DIR"
 export HF_DATASETS_CACHE="$HF_DATASETS"
+export PATH="$VLLM_DIR/.venv/bin:$PATH"
 
 SERVER_LOG="$OUTPUT/server.log"
 setsid bash -c "cd $VLLM_DIR && \
