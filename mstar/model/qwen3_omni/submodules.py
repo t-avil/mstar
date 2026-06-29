@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Optional
 
 import torch
@@ -904,8 +905,25 @@ class ThinkerSubmodule(ARNodeSubmodule):
     # (``preprocess`` line in this file), and V2T runs at concurrency 1
     # today. Costs ~4 captures × persistent FlashInfer wrappers + static
     # buffers for the 30B Thinker; revisit if memory becomes a constraint.
-    PREFILL_VISION_TOKEN_BUCKETS = [128, 256, 512, 1024, 2048, 4096, 8192, 16384]
+    _PREFILL_VISION_TOKEN_BUCKETS_BASE = [128, 256, 512, 1024, 2048, 4096, 8192, 16384]
+    # The runner pads a request's vision-token count up to the smallest captured
+    # bucket >= it (cuda_graph_runner._get_padded_num_tokens). With the power-of-2
+    # base set, a single 512x512 image (post spatial-merge: 256 tokens + 2
+    # sentinels = 258) pads all the way to the 512 bucket — the Thinker then runs
+    # ~2x the attention/MLP work it needs for vision prefill. MSTAR_VISION_GRAPH_ALIGN=1
+    # inserts intermediate buckets in the dense low range so common image token
+    # counts pad to a tightly-fitting graph instead. 258 -> 320 (~24% slack)
+    # instead of 258 -> 512 (~99% slack). Costs a few extra bs=1 captures.
+    _PREFILL_VISION_TOKEN_BUCKETS_ALIGNED = [
+        128, 192, 256, 320, 384, 512, 768, 1024, 1536, 2048, 4096, 8192, 16384,
+    ]
     PREFILL_VISION_CAPTURE_BATCH_SIZES = [1]
+
+    @property
+    def PREFILL_VISION_TOKEN_BUCKETS(self) -> list[int]:
+        if os.environ.get("MSTAR_VISION_GRAPH_ALIGN", "0") in ("1", "true", "True"):
+            return self._PREFILL_VISION_TOKEN_BUCKETS_ALIGNED
+        return self._PREFILL_VISION_TOKEN_BUCKETS_BASE
 
     def _build_prefill_text_packed(
         self, num_tokens: int, device: torch.device,

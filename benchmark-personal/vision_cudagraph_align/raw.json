@@ -1,0 +1,988 @@
+{
+  "benchmark": "vision_cudagraph_align",
+  "timestamp_utc": "20260629T091219Z",
+  "git_commit": "f58a805ca7e273351780dea1b5862d06efe926d7",
+  "device": {
+    "cuda_visible_devices": "0,1",
+    "gpu_name": "NVIDIA H200",
+    "count": 2
+  },
+  "model": "Qwen3-Omni-30B-A3B-Instruct",
+  "dataset": "food101 (validation, seed42, first 10)",
+  "request_type": "image_to_text",
+  "flag": "MSTAR_VISION_GRAPH_ALIGN (aligned=1, baseline=unset)",
+  "vision_buckets": {
+    "baseline": [
+      128,
+      256,
+      512,
+      1024,
+      2048,
+      4096,
+      8192,
+      16384
+    ],
+    "aligned": [
+      128,
+      192,
+      256,
+      320,
+      384,
+      512,
+      768,
+      1024,
+      1536,
+      2048,
+      4096,
+      8192,
+      16384
+    ]
+  },
+  "notes": "Post-merge vision tokens for 512x512 food101 image = 256 (+2 sentinels = 258). Baseline pads 258->512 bucket; aligned pads 258->320. No eager fallbacks in either (0 cuda-graph misses). num_requests=10, num_warmup=5, closed_loop.",
+  "units": {
+    "ttft": "s",
+    "itl": "s",
+    "e2e": "s",
+    "throughput": "text_tok_per_s"
+  },
+  "warmup_iters": 5,
+  "status": "complete",
+  "datapoints": [
+    {
+      "variant": "baseline",
+      "batch_size": 1,
+      "run": 0,
+      "metric": "ttft",
+      "stat": "mean",
+      "value": 0.13396192137151958,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 1,
+      "run": 0,
+      "metric": "ttft",
+      "stat": "p50",
+      "value": 0.12746540643274784,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 1,
+      "run": 0,
+      "metric": "ttft",
+      "stat": "p95",
+      "value": 0.17325661308132106,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 1,
+      "run": 0,
+      "metric": "ttft",
+      "stat": "p99",
+      "value": 0.193135674437508,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 1,
+      "run": 0,
+      "metric": "itl",
+      "stat": "mean",
+      "value": 0.007265147203549599,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 1,
+      "run": 0,
+      "metric": "itl",
+      "stat": "p50",
+      "value": 0.006676215911284089,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 1,
+      "run": 0,
+      "metric": "itl",
+      "stat": "p95",
+      "value": 0.008965181361418217,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 1,
+      "run": 0,
+      "metric": "itl",
+      "stat": "p99",
+      "value": 0.021425038797315166,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 1,
+      "run": 0,
+      "metric": "e2e",
+      "stat": "mean",
+      "value": 1.4919170153792947,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 1,
+      "run": 0,
+      "metric": "e2e",
+      "stat": "p50",
+      "value": 1.5648199839051813,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 1,
+      "run": 0,
+      "metric": "e2e",
+      "stat": "p95",
+      "value": 1.943861857894808,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 1,
+      "run": 0,
+      "metric": "e2e",
+      "stat": "p99",
+      "value": 1.985208846796304,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 1,
+      "run": 0,
+      "metric": "throughput",
+      "stat": "tok_per_s",
+      "value": 125.72118122679684,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 8,
+      "run": 0,
+      "metric": "ttft",
+      "stat": "mean",
+      "value": 0.49448834990616886,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 8,
+      "run": 0,
+      "metric": "ttft",
+      "stat": "p50",
+      "value": 0.5563920005224645,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 8,
+      "run": 0,
+      "metric": "ttft",
+      "stat": "p95",
+      "value": 0.6668414636747911,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 8,
+      "run": 0,
+      "metric": "ttft",
+      "stat": "p99",
+      "value": 0.6672974159056321,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 8,
+      "run": 0,
+      "metric": "itl",
+      "stat": "mean",
+      "value": 0.01273636020024166,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 8,
+      "run": 0,
+      "metric": "itl",
+      "stat": "p50",
+      "value": 0.011440209113061428,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 8,
+      "run": 0,
+      "metric": "itl",
+      "stat": "p95",
+      "value": 0.021838783263228554,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 8,
+      "run": 0,
+      "metric": "itl",
+      "stat": "p99",
+      "value": 0.05604701130185276,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 8,
+      "run": 0,
+      "metric": "e2e",
+      "stat": "mean",
+      "value": 2.8475647600600498,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 8,
+      "run": 0,
+      "metric": "e2e",
+      "stat": "p50",
+      "value": 2.923567739664577,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 8,
+      "run": 0,
+      "metric": "e2e",
+      "stat": "p95",
+      "value": 3.7931546642212193,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 8,
+      "run": 0,
+      "metric": "e2e",
+      "stat": "p99",
+      "value": 3.903142437688075,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 8,
+      "run": 0,
+      "metric": "throughput",
+      "stat": "tok_per_s",
+      "value": 417.0691247787001,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 8,
+      "run": 1,
+      "metric": "ttft",
+      "stat": "mean",
+      "value": 0.5012096276273951,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 8,
+      "run": 1,
+      "metric": "ttft",
+      "stat": "p50",
+      "value": 0.587193023529835,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 8,
+      "run": 1,
+      "metric": "ttft",
+      "stat": "p95",
+      "value": 0.6871650894521736,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 8,
+      "run": 1,
+      "metric": "ttft",
+      "stat": "p99",
+      "value": 0.68742865948705,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 8,
+      "run": 1,
+      "metric": "itl",
+      "stat": "mean",
+      "value": 0.012577679384913144,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 8,
+      "run": 1,
+      "metric": "itl",
+      "stat": "p50",
+      "value": 0.011659439420327544,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 8,
+      "run": 1,
+      "metric": "itl",
+      "stat": "p95",
+      "value": 0.026218931528273964,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 8,
+      "run": 1,
+      "metric": "itl",
+      "stat": "p99",
+      "value": 0.05102126515470461,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 8,
+      "run": 1,
+      "metric": "e2e",
+      "stat": "mean",
+      "value": 2.8100848710164428,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 8,
+      "run": 1,
+      "metric": "e2e",
+      "stat": "p50",
+      "value": 2.9166704944800586,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 8,
+      "run": 1,
+      "metric": "e2e",
+      "stat": "p95",
+      "value": 3.7296252092462963,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 8,
+      "run": 1,
+      "metric": "e2e",
+      "stat": "p99",
+      "value": 3.805624181034509,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 8,
+      "run": 1,
+      "metric": "throughput",
+      "stat": "tok_per_s",
+      "value": 433.541503821567,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 8,
+      "run": 2,
+      "metric": "ttft",
+      "stat": "mean",
+      "value": 0.6288008635863662,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 8,
+      "run": 2,
+      "metric": "ttft",
+      "stat": "p50",
+      "value": 0.7137036829954013,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 8,
+      "run": 2,
+      "metric": "ttft",
+      "stat": "p95",
+      "value": 0.8526439581415616,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 8,
+      "run": 2,
+      "metric": "ttft",
+      "stat": "p99",
+      "value": 0.8534150795708411,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 8,
+      "run": 2,
+      "metric": "itl",
+      "stat": "mean",
+      "value": 0.01248985685554502,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 8,
+      "run": 2,
+      "metric": "itl",
+      "stat": "p50",
+      "value": 0.011362361954525113,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 8,
+      "run": 2,
+      "metric": "itl",
+      "stat": "p95",
+      "value": 0.014565283199772239,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 8,
+      "run": 2,
+      "metric": "itl",
+      "stat": "p99",
+      "value": 0.043363172383978965,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 8,
+      "run": 2,
+      "metric": "e2e",
+      "stat": "mean",
+      "value": 2.935320662986487,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 8,
+      "run": 2,
+      "metric": "e2e",
+      "stat": "p50",
+      "value": 3.091751485946588,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 8,
+      "run": 2,
+      "metric": "e2e",
+      "stat": "p95",
+      "value": 3.8723474631668067,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 8,
+      "run": 2,
+      "metric": "e2e",
+      "stat": "p99",
+      "value": 3.937246089477558,
+      "phase": "measure"
+    },
+    {
+      "variant": "baseline",
+      "batch_size": 8,
+      "run": 2,
+      "metric": "throughput",
+      "stat": "tok_per_s",
+      "value": 417.1154985974421,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 1,
+      "run": 0,
+      "metric": "ttft",
+      "stat": "mean",
+      "value": 0.1259237600490451,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 1,
+      "run": 0,
+      "metric": "ttft",
+      "stat": "p50",
+      "value": 0.11833012208808213,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 1,
+      "run": 0,
+      "metric": "ttft",
+      "stat": "p95",
+      "value": 0.16034956175135445,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 1,
+      "run": 0,
+      "metric": "ttft",
+      "stat": "p99",
+      "value": 0.17038454914698378,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 1,
+      "run": 0,
+      "metric": "itl",
+      "stat": "mean",
+      "value": 0.006830839136094767,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 1,
+      "run": 0,
+      "metric": "itl",
+      "stat": "p50",
+      "value": 0.006639416911639273,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 1,
+      "run": 0,
+      "metric": "itl",
+      "stat": "p95",
+      "value": 0.008773176348768175,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 1,
+      "run": 0,
+      "metric": "itl",
+      "stat": "p99",
+      "value": 0.019028585508931384,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 1,
+      "run": 0,
+      "metric": "e2e",
+      "stat": "mean",
+      "value": 1.3572077778168024,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 1,
+      "run": 0,
+      "metric": "e2e",
+      "stat": "p50",
+      "value": 1.464494991931133,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 1,
+      "run": 0,
+      "metric": "e2e",
+      "stat": "p95",
+      "value": 1.8199767670826985,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 1,
+      "run": 0,
+      "metric": "e2e",
+      "stat": "p99",
+      "value": 1.864229137361981,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 1,
+      "run": 0,
+      "metric": "throughput",
+      "stat": "tok_per_s",
+      "value": 133.02808627065212,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 8,
+      "run": 0,
+      "metric": "ttft",
+      "stat": "mean",
+      "value": 0.38645171562675384,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 8,
+      "run": 0,
+      "metric": "ttft",
+      "stat": "p50",
+      "value": 0.4319312605075538,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 8,
+      "run": 0,
+      "metric": "ttft",
+      "stat": "p95",
+      "value": 0.5395189932431095,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 8,
+      "run": 0,
+      "metric": "ttft",
+      "stat": "p99",
+      "value": 0.5396751666232013,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 8,
+      "run": 0,
+      "metric": "itl",
+      "stat": "mean",
+      "value": 0.012438893736267435,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 8,
+      "run": 0,
+      "metric": "itl",
+      "stat": "p50",
+      "value": 0.011613486567512155,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 8,
+      "run": 0,
+      "metric": "itl",
+      "stat": "p95",
+      "value": 0.01438618842512369,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 8,
+      "run": 0,
+      "metric": "itl",
+      "stat": "p99",
+      "value": 0.04489301392575726,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 8,
+      "run": 0,
+      "metric": "e2e",
+      "stat": "mean",
+      "value": 2.8113524072803555,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 8,
+      "run": 0,
+      "metric": "e2e",
+      "stat": "p50",
+      "value": 3.051804212969728,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 8,
+      "run": 0,
+      "metric": "e2e",
+      "stat": "p95",
+      "value": 3.667481523694005,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 8,
+      "run": 0,
+      "metric": "e2e",
+      "stat": "p99",
+      "value": 3.6784528120863254,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 8,
+      "run": 0,
+      "metric": "throughput",
+      "stat": "tok_per_s",
+      "value": 454.79504079914267,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 8,
+      "run": 1,
+      "metric": "ttft",
+      "stat": "mean",
+      "value": 0.43300791759975255,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 8,
+      "run": 1,
+      "metric": "ttft",
+      "stat": "p50",
+      "value": 0.4670363690238446,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 8,
+      "run": 1,
+      "metric": "ttft",
+      "stat": "p95",
+      "value": 0.6031965963426046,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 8,
+      "run": 1,
+      "metric": "ttft",
+      "stat": "p99",
+      "value": 0.603326036145445,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 8,
+      "run": 1,
+      "metric": "itl",
+      "stat": "mean",
+      "value": 0.01271180034995458,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 8,
+      "run": 1,
+      "metric": "itl",
+      "stat": "p50",
+      "value": 0.011788937030360103,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 8,
+      "run": 1,
+      "metric": "itl",
+      "stat": "p95",
+      "value": 0.015307835652492939,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 8,
+      "run": 1,
+      "metric": "itl",
+      "stat": "p99",
+      "value": 0.045951764490455405,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 8,
+      "run": 1,
+      "metric": "e2e",
+      "stat": "mean",
+      "value": 2.8846456793835387,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 8,
+      "run": 1,
+      "metric": "e2e",
+      "stat": "p50",
+      "value": 3.117919786949642,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 8,
+      "run": 1,
+      "metric": "e2e",
+      "stat": "p95",
+      "value": 3.7165383177110924,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 8,
+      "run": 1,
+      "metric": "e2e",
+      "stat": "p99",
+      "value": 3.7858551714988424,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 8,
+      "run": 1,
+      "metric": "throughput",
+      "stat": "tok_per_s",
+      "value": 438.03657813126773,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 8,
+      "run": 2,
+      "metric": "ttft",
+      "stat": "mean",
+      "value": 0.3747370139695704,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 8,
+      "run": 2,
+      "metric": "ttft",
+      "stat": "p50",
+      "value": 0.41510396590456367,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 8,
+      "run": 2,
+      "metric": "ttft",
+      "stat": "p95",
+      "value": 0.5219697893597186,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 8,
+      "run": 2,
+      "metric": "ttft",
+      "stat": "p99",
+      "value": 0.5221076009236276,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 8,
+      "run": 2,
+      "metric": "itl",
+      "stat": "mean",
+      "value": 0.012589086467467564,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 8,
+      "run": 2,
+      "metric": "itl",
+      "stat": "p50",
+      "value": 0.011696810834109783,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 8,
+      "run": 2,
+      "metric": "itl",
+      "stat": "p95",
+      "value": 0.014483207371085879,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 8,
+      "run": 2,
+      "metric": "itl",
+      "stat": "p99",
+      "value": 0.048710753354243935,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 8,
+      "run": 2,
+      "metric": "e2e",
+      "stat": "mean",
+      "value": 2.848210890381597,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 8,
+      "run": 2,
+      "metric": "e2e",
+      "stat": "p50",
+      "value": 3.0788519914494827,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 8,
+      "run": 2,
+      "metric": "e2e",
+      "stat": "p95",
+      "value": 3.7018371591926553,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 8,
+      "run": 2,
+      "metric": "e2e",
+      "stat": "p99",
+      "value": 3.7136741773155517,
+      "phase": "measure"
+    },
+    {
+      "variant": "aligned",
+      "batch_size": 8,
+      "run": 2,
+      "metric": "throughput",
+      "stat": "tok_per_s",
+      "value": 443.32944039993794,
+      "phase": "measure"
+    }
+  ]
+}

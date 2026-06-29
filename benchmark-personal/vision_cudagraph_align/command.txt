@@ -1,0 +1,26 @@
+Vision encoder / Thinker prefill_vision CUDA-graph bucket alignment A/B.
+
+Server launch (baseline = no flag; aligned = MSTAR_VISION_GRAPH_ALIGN=1):
+
+  PATH=/home/tim/mstar-encoders/.venv/bin:$PATH \
+  PYTHONPATH=/home/tim/tmp/exp_vision_cudagraph \
+  TMPDIR=/dev/shm HF_HOME=/m-coriander/coriander/hf CUDA_VISIBLE_DEVICES=0,1 \
+  MSTAR_GPU_MEL=1 MSTAR_GPU_IMAGE_PREPROCESS=1 MSTAR_CHUNKED_PREFILL=1 \
+  [MSTAR_VISION_GRAPH_ALIGN=1] \
+  setsid timeout 900 .venv/bin/python -m mstar.api_server.entrypoint \
+  --config configs/qwen3omni_2gpu.yaml --port 8170 \
+  --socket-path-prefix /tmp/mstar_viscg_8170 --tensor-comm-protocol SHM
+
+Benchmark (B in {1,8}):
+
+  PATH=/home/tim/mstar-encoders/.venv/bin:$PATH PYTHONPATH=/home/tim/tmp/exp_vision_cudagraph \
+  HF_HOME=/m-coriander/coriander/hf HF_DATASETS_CACHE=/home/tim/hf_datasets \
+  .venv/bin/python -m benchmark.runner \
+  --url http://127.0.0.1:8170 --model qwen3omni \
+  --request-type image_to_text --dataset food101 \
+  --profiling-type closed_loop --max-concurrency <B> \
+  --num-requests 10 --num-warmup 5 \
+  --inference-system ours --local-cache /home/tim/hf_datasets \
+  --output-dir <dir>
+
+GPUs: 0,1 (H200). Port: 8170. food101 validation, seed-42 shuffle, first 10 images.
