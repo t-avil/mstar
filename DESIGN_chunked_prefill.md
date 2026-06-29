@@ -79,7 +79,75 @@ Implemented in:
 (1)-(2) are pinned by `test/modular/test_qwen3_omni_chunked_prefill_parity.py`
 on CPU; (3)-(4) are GPU-only.
 
-## What is STUBBED: scheduler / conductor re-enqueue
+## PROGRESS (2026-06 — conductor-driven re-enqueue IMPLEMENTED for text)
+
+Status update: the previously-stubbed cross-step re-enqueue is now implemented
+for the **text** prefill path, driven by the CONDUCTOR (not the scheduler).
+
+Why the conductor and not the micro-scheduler: in this engine a prefill walk's
+input edges are owned by the conductor. The scheduler only schedules nodes the
+conductor has already emitted inputs for; it cannot independently "re-run" a
+prefill node. So "run the same prefill node again next step" is realized by the
+conductor re-emitting the SAME `prefill_text` walk with an advanced offset until
+the span is consumed. `MicroScheduler._maybe_reenqueue_prefill_remainder` is now
+a tolerant no-op/sanity guard (no longer raises) and documents this.
+
+What was implemented:
+
+- `qwen3_omni_model.plan_text_prefill_chunk(total, offset, threshold)` — pure,
+  unit-tested chunk planner returning `(chunk_len, walk_done)` or `None`.
+- `Qwen3OmniModel._text_chunk_bounds(...)` — gates chunking to:
+  `prefill_text` walks, flag ON, span > threshold, AND `audio_output is False`.
+- `Qwen3OmniModel._get_thinker_initial_args` / `_get_thinker_forward` —
+  per-walk committed-token cursor `metadata.kwargs['prefill_chunk_offset']`; on a
+  non-final chunk the SAME walk is re-emitted (schedule `prefill_step` NOT
+  advanced) with `step_metadata['prefill_chunk_offset' / 'prefill_chunk_len']`;
+  `is_last_prefill` is set only on the final chunk of the final walk; the input
+  tensor is held alive across chunks (unpersist deferred to the final chunk).
+- `ThinkerSubmodule._maybe_chunk_prefill` (already present) slices the precomputed
+  full-span embeds + 3D M-RoPE + talker masks to the window. Per-chunk
+  `advance_seq_lens(seq_len)` makes the summed position advance equal single-shot
+  (text/audio). KV append is already resumable in the cache manager.
+
+What is deliberately NAIVE / still single-shot (documented limitations):
+
+- **audio_output=True (Talker active) is NOT chunked.** The Talker consumes one
+  `thinker_states` chunk per WALK; the submodule emits `thinker_states` on every
+  prefill step, so chunking a walk would emit N per walk and drift the Talker's
+  `num_thinker_prefill_steps`. Correct fix needs accumulating thinker_states
+  across chunks and emitting once on the final chunk (encoder/state persistence).
+- **prefill_audio / prefill_vision are NOT chunked.** Their post-encoder token
+  count is unknown to the conductor BEFORE the walk runs, so the conductor cannot
+  set `is_last_prefill` for chunk 0. Finishing audio needs the audio_encoder
+  split into its own conductor step that publishes the span length (e.g. on
+  `step_metadata['prefill_total_len']`); vision additionally needs per-chunk
+  `deepstack_<i>` slicing. `_maybe_chunk_prefill` still raises for a vision chunk
+  window, so vision can never be silently chunked.
+- **No cross-chunk encoder reuse needed for text** (text has no encoder). For
+  audio, the encoder-split above is the prerequisite, not encoder-output caching.
+
+Net effect: long **text-output** prefills (T2T, and the text portion of S2T/I2T)
+are streamed in <= `threshold`-token chunks; everything else runs exactly as
+before. Flag OFF ⇒ byte-identical.
+
+CPU tests:
+- `test/modular/test_qwen3_omni_chunked_prefill_parity.py` (model-side M-RoPE).
+- `test/modular/test_qwen3_omni_chunked_prefill_scheduler.py` (NEW: conductor
+  re-enqueue loop — chunk boundaries, is_last_prefill only on final chunk,
+  unpersist deferral, audio/flag-off bypass).
+
+GPU A/B (flag ON vs OFF), long text-output prompt at batch:
+
+```
+/home/tim/launch_mstar_wt.sh /home/tim/exp/chunk-wt <gpus> <numa> <port> \
+  chunk_sock <log> MSTAR_CHUNKED_PREFILL=1 MSTAR_LONG_PREFILL_TOKEN_THRESHOLD=512
+```
+
+(threshold 512 == a `ThinkerSubmodule.PREFILL_TOKEN_BUCKETS` entry, so full
+chunks replay an existing CUDA-graph capture; the ragged final chunk uses the
+smallest bucket >= its size, like a short single-shot prefill — no new captures.)
+
+## What WAS STUBBED: scheduler / conductor re-enqueue (historical)
 
 The piece that cannot be validated without a GPU is the cross-step re-enqueue of
 a prefill remainder. It is guarded behind the flag and raises a clear

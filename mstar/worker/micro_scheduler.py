@@ -314,11 +314,12 @@ class MicroScheduler:
             best_node_name, graph_walk
         )] = self.batch_number
 
-        # Resumable chunked prefill (MSTAR_CHUNKED_PREFILL): cap new prefill
-        # tokens per step and re-enqueue the remainder. STUBBED -- see the
-        # method docstring for exactly what remains. Dormant by default and
-        # when the flag is OFF; only fires once the conductor marks a request
-        # as needing chunking, which it does not yet.
+        # Resumable chunked prefill (MSTAR_CHUNKED_PREFILL): the re-enqueue is
+        # CONDUCTOR-DRIVEN (qwen3_omni_model._get_thinker_forward re-emits the
+        # same prefill_text walk with an advanced prefill_chunk_offset until the
+        # span is consumed), so the scheduler does not re-enqueue here. This hook
+        # remains as a tolerant no-op / sanity guard. See the method docstring
+        # and DESIGN_chunked_prefill.md.
         if _chunked_prefill_enabled() and graph_walk in _THINKER_PREFILL_WALKS:
             self._maybe_reenqueue_prefill_remainder(
                 worker_graphs_manager, graph_walk, node_objects,
@@ -337,75 +338,51 @@ class MicroScheduler:
         graph_walk: str,
         node_objects: dict[str, GraphNode],
     ) -> None:
-        """STUB: cap each request's prefill to the token threshold and put the
-        remainder back on its queue for the next scheduler cycle.
+        """Tolerant no-op hook for resumable chunked prefill.
 
-        This is the one piece of resumable chunked prefill that is NOT yet
-        implemented (it cannot be validated without a GPU). The model side is
-        complete: ``ThinkerSubmodule._maybe_chunk_prefill`` slices a precomputed
-        full-span prefill (embeds + 3D M-RoPE + talker masks) to the window
-        ``[prefill_chunk_offset : prefill_chunk_offset + prefill_chunk_len]``
-        read from ``fwd_info.step_metadata``, and the FlashInfer KV append is
-        already resumable (``cache_manager._plan_attention_impl`` writes ``sl``
-        new tokens at offset ``state.seq_len`` and grows pages to
-        ``state.seq_len + sl``), so feeding chunks across steps appends KV
-        correctly and the next chunk's queries attend causally over the KV the
-        previous chunks wrote.
+        The actual re-enqueue is CONDUCTOR-DRIVEN, not scheduler-driven. In this
+        engine a prefill walk's input edges are owned by the conductor: the
+        scheduler only schedules nodes the conductor has emitted inputs for. So
+        "run the same prefill node again next step" is implemented by the
+        conductor re-emitting the SAME ``prefill_text`` walk with an advanced
+        ``prefill_chunk_offset`` until the span is consumed
+        (``qwen3_omni_model._get_thinker_forward`` /
+        ``_get_thinker_initial_args`` / ``_text_chunk_bounds`` and the pure
+        planner ``plan_text_prefill_chunk``). The model side then slices the
+        full-span prefill to ``[prefill_chunk_offset : +prefill_chunk_len]`` in
+        ``ThinkerSubmodule._maybe_chunk_prefill``, and the FlashInfer KV append
+        is already resumable (``cache_manager._plan_attention_impl`` writes
+        ``sl`` new tokens at offset ``state.seq_len``), so chunks append KV
+        correctly and each chunk attends causally over prior chunks' KV.
 
-        TODO -- to finish, in priority order:
-          1. Per-request computed-tokens counter. Track new prefill tokens
-             admitted so far for each (request_id, prefill walk). The total
-             span length is known to the conductor (text token count;
-             audio/vision token count after the encoder node runs), not to the
-             scheduler -- so the conductor must publish it (e.g. on
-             ``CurrentForwardPassInfo.step_metadata['prefill_total_len']``).
-          2. Cap + re-enqueue. When ``computed + threshold < total``, set
-             ``step_metadata['prefill_chunk_offset'] = computed`` and
-             ``['prefill_chunk_len'] = min(threshold, total - computed)`` for
-             THIS step, advance the counter, and re-push the SAME prefill node
-             onto the request's per-request queue (``queue.push_ready_node`` /
-             the WorkerGraphsManager re-enqueue API) so it is ready again next
-             cycle. Only the FINAL chunk sets ``is_last_prefill=True`` (so
-             logits are sampled once -- see ThinkerSubmodule.forward ~L868 and
-             the conductor ~L1098).
-          3. Conductor coordination (qwen3_omni_model.py). The Thinker state
-             machine (``_get_thinker_forward``) must NOT advance
-             ``prefill_step`` until the current walk's span is fully consumed,
-             and the Talker's ``num_thinker_prefill_steps`` must keep counting
-             one streamed thinker_states chunk per WALK, not per token-chunk
-             (or the Talker last-prefill detection drifts). Simplest: stream
-             thinker_states only on the final token-chunk of each walk.
-          4. Encoder-output persistence for audio/vision. The encoder node runs
-             once and its output (audio_embeds / vision_embeds + deepstack) must
-             persist across the walk's chunk steps; today it is consumed by the
-             single Thinker step. prefill_vision additionally needs per-chunk
-             deepstack_<i> slicing (ThinkerSubmodule._maybe_chunk_prefill raises
-             NotImplementedError for vision until then).
-          5. seen_token_mask: add_tokens must run once per token (currently per
-             walk step on the full span); move it to slice on the chunk window.
-          6. CUDA graphs: a fixed chunk size == one PREFILL_TOKEN_BUCKETS entry,
-             so full chunks replay an existing capture; the ragged final chunk
-             uses the smallest bucket >= its size, exactly like a short
-             single-shot prefill today. No new captures required.
+        Scope of the conductor-driven implementation:
+          * prefill_text with ``audio_output=False`` (text-output requests:
+            S2T / I2T / T2T) is chunked. Its token count is known up-front from
+            the input tensor ``dims`` and no Talker thinker_states accounting is
+            involved, so chunking is exact.
+          * prefill_audio / prefill_vision are NOT chunked yet: the post-encoder
+            token count is unknown to the conductor before the walk runs, so it
+            cannot set ``is_last_prefill`` for chunk 0. Finishing them needs the
+            encoder split into its own conductor step (publishing the span
+            length) -- see DESIGN_chunked_prefill.md. They run single-shot
+            (unchanged), and ``_maybe_chunk_prefill`` still raises for a vision
+            chunk window if one is ever requested.
 
-        Validation is GPU-only: assert 2-chunk prefill KV + first-token logits
-        match single-shot (test/modular/test_qwen3_omni_chunked_prefill_parity.py).
+        This hook stays as a sanity guard: if a future change marks a node with
+        ``requires_prefill_chunking`` (scheduler-side chunking), surface it
+        rather than silently ignore it.
         """
         needs_chunking = any(
             getattr(n, "requires_prefill_chunking", False)
             for n in node_objects.values()
         )
-        if not needs_chunking:
-            # No conductor-marked request needs chunking -> dormant. Short
-            # prefills (<= threshold) and the flag-ON single-chunk path reach
-            # here and proceed unchanged.
-            return
-        raise NotImplementedError(
-            "Resumable chunked-prefill re-enqueue is not implemented; see "
-            "MicroScheduler._maybe_reenqueue_prefill_remainder for the full "
-            "TODO and DESIGN_chunked_prefill.md. Unset MSTAR_CHUNKED_PREFILL "
-            "to use single-shot prefill."
-        )
+        if needs_chunking:
+            logger.warning(
+                "Node marked requires_prefill_chunking=True, but chunked "
+                "prefill is conductor-driven; scheduler re-enqueue is a no-op. "
+                "See MicroScheduler._maybe_reenqueue_prefill_remainder."
+            )
+        return
 
     def has_ready_excluding(
         self,
