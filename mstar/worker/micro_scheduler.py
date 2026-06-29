@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 # the scheduler so it does not import the (heavy) Qwen3-Omni model module just
 # to read the env flag.
 _THINKER_PREFILL_WALKS = frozenset(
-    {"prefill_text", "prefill_audio", "prefill_vision"}
+    {"prefill_text", "encode_audio", "prefill_audio", "prefill_vision"}
 )
 
 
@@ -344,12 +344,13 @@ class MicroScheduler:
         engine a prefill walk's input edges are owned by the conductor: the
         scheduler only schedules nodes the conductor has emitted inputs for. So
         "run the same prefill node again next step" is implemented by the
-        conductor re-emitting the SAME ``prefill_text`` walk with an advanced
+        conductor re-emitting the SAME walk with an advanced
         ``prefill_chunk_offset`` until the span is consumed
         (``qwen3_omni_model._get_thinker_forward`` /
-        ``_get_thinker_initial_args`` / ``_text_chunk_bounds`` and the pure
-        planner ``plan_text_prefill_chunk``). The model side then slices the
-        full-span prefill to ``[prefill_chunk_offset : +prefill_chunk_len]`` in
+        ``_get_thinker_initial_args`` / ``_chunk_bounds`` and the pure planners
+        ``plan_text_prefill_chunk`` / ``plan_audio_prefill_chunk``). The model
+        side then slices the full-span prefill to
+        ``[prefill_chunk_offset : +prefill_chunk_len]`` in
         ``ThinkerSubmodule._maybe_chunk_prefill``, and the FlashInfer KV append
         is already resumable (``cache_manager._plan_attention_impl`` writes
         ``sl`` new tokens at offset ``state.seq_len``), so chunks append KV
@@ -360,13 +361,14 @@ class MicroScheduler:
             S2T / I2T / T2T) is chunked. Its token count is known up-front from
             the input tensor ``dims`` and no Talker thinker_states accounting is
             involved, so chunking is exact.
-          * prefill_audio / prefill_vision are NOT chunked yet: the post-encoder
-            token count is unknown to the conductor before the walk runs, so it
-            cannot set ``is_last_prefill`` for chunk 0. Finishing them needs the
-            encoder split into its own conductor step (publishing the span
-            length) -- see DESIGN_chunked_prefill.md. They run single-shot
-            (unchanged), and ``_maybe_chunk_prefill`` still raises for a vision
-            chunk window if one is ever requested.
+          * prefill_audio with ``audio_output=False`` is chunked. The audio
+            encoder has been split into its own ``encode_audio`` conductor step
+            that persists ``audio_embeds`` with known ``dims[0]`` (audio token
+            count). The subsequent ``prefill_audio`` Thinker walk is then
+            chunked identically to text.
+          * prefill_vision is NOT chunked yet: needs per-chunk
+            ``deepstack_<i>`` slicing. ``_maybe_chunk_prefill`` still raises
+            for a vision chunk window if one is ever requested.
 
         This hook stays as a sanity guard: if a future change marks a node with
         ``requires_prefill_chunking`` (scheduler-side chunking), surface it
