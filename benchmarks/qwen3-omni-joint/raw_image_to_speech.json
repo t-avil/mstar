@@ -15743,8 +15743,8 @@
         "recomputed": {
           "request_throughput": 0.10191453349458914,
           "text_token_throughput": null,
-          "audio_throughput": null,
-          "rtf_p50": null
+          "audio_throughput": 6.366829620605901,
+          "rtf_p50": 0.15694199810223267
         },
         "harness": {
           "req_throughput_reported": 0.10191453349458914,
@@ -15910,8 +15910,8 @@
         "recomputed": {
           "request_throughput": 0.15689091754758433,
           "text_token_throughput": null,
-          "audio_throughput": null,
-          "rtf_p50": null
+          "audio_throughput": 9.929251333036106,
+          "rtf_p50": 0.19981802287371028
         },
         "harness": {
           "req_throughput_reported": 0.15689091754758433,
@@ -16077,8 +16077,8 @@
         "recomputed": {
           "request_throughput": 0.25094495264738376,
           "text_token_throughput": null,
-          "audio_throughput": null,
-          "rtf_p50": null
+          "audio_throughput": 15.762131024679611,
+          "rtf_p50": 0.24859484396295536
         },
         "harness": {
           "req_throughput_reported": 0.25094495264738376,
@@ -16244,8 +16244,8 @@
         "recomputed": {
           "request_throughput": 0.38723530891953717,
           "text_token_throughput": null,
-          "audio_throughput": null,
-          "rtf_p50": null
+          "audio_throughput": 23.674862906492518,
+          "rtf_p50": 0.33102316884973326
         },
         "harness": {
           "req_throughput_reported": 0.38723530891953717,
@@ -16411,8 +16411,8 @@
         "recomputed": {
           "request_throughput": 0.5545649008098326,
           "text_token_throughput": null,
-          "audio_throughput": null,
-          "rtf_p50": null
+          "audio_throughput": 34.64227225441044,
+          "rtf_p50": 0.45034647541974526
         },
         "harness": {
           "req_throughput_reported": 0.5545649008098326,
@@ -16578,8 +16578,8 @@
         "recomputed": {
           "request_throughput": 0.7580054664815244,
           "text_token_throughput": null,
-          "audio_throughput": null,
-          "rtf_p50": null
+          "audio_throughput": 47.55474555983364,
+          "rtf_p50": 0.6632677985107132
         },
         "harness": {
           "req_throughput_reported": 0.7580054664815244,
