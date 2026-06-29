@@ -110,6 +110,20 @@ def vllm_audio_sentinels_enabled() -> bool:
     return _envflag("MSTAR_VLLM_AUDIO_SENTINELS")
 
 
+def batch_vision_prefill_enabled() -> bool:
+    """When ON, allow the Thinker ``prefill_vision`` walk to batch more than
+    one request per step (like ``prefill_audio`` / ``prefill_text`` already
+    do): the vision tower runs once over the concatenated multi-image batch
+    and all requests are prefilled together, cutting Image-to-Text TTFT.
+
+    Default OFF -> ``preprocess`` keeps the single-request assert and the
+    eager single-request side-channels, so behavior is byte-identical to the
+    pre-batching path. See ``ThinkerSubmodule.preprocess`` /
+    ``get_cuda_graph_configs`` in ``submodules.py``.
+    """
+    return _envflag("MSTAR_BATCH_VISION_PREFILL")
+
+
 def _tensor_dump_dir() -> str | None:
     """Directory for env-gated intermediate-tensor / token dumps, or None."""
     import os as _os
