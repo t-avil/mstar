@@ -1230,43 +1230,35 @@ class CudaGraphRunner:
         submodule: ARNodeSubmodule,
         slot: int | None = None,
     ) -> dict:
-        """STUB — mixed prefill+decode varlen replay (MSTAR_MIXED_WALK).
+        """Mixed prefill+decode varlen replay (MSTAR_MIXED_WALK).
 
-        This is the eventual replay site for a continuous-batching step: one
-        flat varlen forward serving ``decode_request_ids`` (1 query token each)
-        plus ``prefill_request_ids`` (a capped prefill chunk each), keyed by a
-        mixed ``CudaGraphKey`` (``mixed=True``, ``num_decode``,
-        ``num_prefill_tokens``).
+        Serves one flat varlen forward containing ``decode_request_ids``
+        (1 query token each) plus ``prefill_request_ids`` (a capped prefill
+        chunk each). The flat-tensor layout is built by
+        ``build_mixed_varlen_layout``; FlashInfer's prefill wrapper handles
+        the mixed qo_indptr natively (1-token decode rows are just length-1
+        queries).
 
-        The flat-tensor layout (token order, qo_indptr, per-request kv seq_lens,
-        M-RoPE positions, KV append offsets) is already computed, CPU-tested,
-        and ready to consume from ``mstar.engine.mixed_walk.build_mixed_varlen_layout``.
-        What remains (the GPU-only part, NOT landable without a device):
+        Current implementation: **eager fallback** — returns ``None`` to signal
+        the caller (KVCacheEngine) to use the eager mixed path
+        (``_execute_mixed_eager``). This is correct and validates the mixed
+        layout end-to-end; CUDA graph capture/replay on top is future work
+        that requires GPU testing.
 
-          TODO(mixed-walk):
-          1. Capture: add a MIXED CudaGraphConfig variant whose
-             ``get_total_tokens``/capture loop enumerates the FIXED
-             (num_decode, num_prefill_tokens) bucket grid (see DESIGN
-             capture-shape mitigation), reusing _capture_one_flashinfer_packed's
-             persistent FlashInfer *prefill* wrapper (varlen handles the 1-token
-             decode rows for free via qo_indptr).
-          2. Replay: pad (decode_bs, prefill_tokens) to the captured bucket,
-             pack the flat token tensor + mrope positions into the slot's static
-             buffers via ``build_mixed_varlen_layout``, plan the prefill wrapper
-             with the mixed qo_indptr/kv_indptr, copy, replay.
-          3. Sample ONLY the decode rows + the final prefill row per prefill
-             request (the token that becomes the request's first decode input).
-
-        Until that lands, enabling MSTAR_MIXED_WALK is rejected at the
-        Worker._build_node_batch boundary; this method exists so the contract is
-        explicit and the future wiring has a typed entry point.
+        TODO(mixed-walk-graph): add MIXED CudaGraphConfig + capture loop +
+        graph replay. See DESIGN_mixed_walk.md section 9 and the bucketing
+        in ``pad_prefill_tokens_to_bucket``.
         """
-        raise NotImplementedError(
-            "CudaGraphRunner.run_mixed: mixed prefill+decode replay is not yet "
-            "implemented (GPU-only work). The varlen layout builder "
-            "(mstar.engine.mixed_walk.build_mixed_varlen_layout) is complete and "
-            "tested; see the TODO in this method and DESIGN_mixed_walk.md."
+        # Eager fallback: return None. The engine detects this and uses
+        # _execute_mixed_eager instead of the CUDA graph path. This is
+        # functionally correct and validates the mixed layout end-to-end.
+        # CUDA graph capture for mixed batches is future work.
+        logger.debug(
+            "run_mixed: eager fallback for %d decode + %d prefill requests "
+            "(graph capture not yet implemented for mixed batches)",
+            len(decode_request_ids), len(prefill_request_ids),
         )
+        return None
 
     def _run_basic_batched(
         self,

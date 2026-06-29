@@ -169,18 +169,56 @@ unbounded, so capture count and warmup time/memory would blow up.
    (`_capture_one_flashinfer_packed`): varlen already covers the 1-token decode
    rows, so no separate decode wrapper is needed in the mixed graph.
 
-## 9. Remaining work (TODO in `CudaGraphRunner.run_mixed`)
+## 9. Implementation progress
 
-1. **Capture**: a MIXED `CudaGraphConfig` whose `get_total_tokens` enumerates the
-   `(num_decode_bucket, num_prefill_bucket)` grid; capture via the existing
-   FlashInfer-packed path with mixed `qo_indptr`/`kv_indptr`.
-2. **Replay** (`run_mixed`): pad `(decode_bs, prefill_tokens)` to the captured
-   bucket, pack the flat token tensor + M-RoPE positions from
-   `build_mixed_varlen_layout` into the slot's static buffers, plan the prefill
-   wrapper, copy, replay.
-3. **Sample**: only the decode rows + each prefill's final row.
-4. **Worker**: build the mixed `NodeBatch` in `_build_node_batch` (replace the
-   guard), route decode vs prefill outputs by `request_token_spans`.
+### Done (eager mixed forward — no CUDA graphs)
+
+1. **Worker `_build_node_batch`** (`mstar/worker/worker.py`): replaced the
+   `NotImplementedError` stub. When `batch.mixed_plan` is set, the worker
+   builds a single `NodeBatch` with request IDs ordered decode-first then
+   prefill (matching `build_mixed_varlen_layout`'s convention) and stashes the
+   `mixed_plan` in `NodeBatch.metadata["mixed_plan"]`.
+
+2. **KVCacheEngine `prepare_batch`** (`mstar/engine/kv_cache_engine.py`):
+   mixed-aware. Prefill requests are prepared with their own `graph_walk`
+   (e.g. `prefill_text`) while decode requests use the batch's primary walk
+   (e.g. `thinker_decode`). This ensures `prepare_inputs` produces the correct
+   input shapes per request type.
+
+3. **KVCacheEngine `execute_forward`** (`mstar/engine/kv_cache_engine.py`):
+   checks for `mixed_plan` in batch metadata first and routes to
+   `_execute_mixed_eager` — a new method that runs one eager varlen forward
+   with all requests (decode + prefill).
+
+4. **KVCacheEngine `_execute_mixed_eager`** (new): the core mixed execution.
+   Uses the submodule's existing `preprocess` + `forward_batched` with the
+   combined batch (FlashInfer's prefill wrapper handles mixed qo_indptr
+   natively — 1-token decode rows are length-1 queries). Output routing:
+   - Decode requests: sample row `i` (their single query token)
+   - Prefill requests: sample the LAST row of each prefill chunk (this becomes
+     the request's first decode token)
+   Uses the `__batched_logits__` fast path when available; falls back to
+   per-rid logits otherwise.
+
+5. **CudaGraphRunner `run_mixed`** (`mstar/engine/cuda_graph_runner.py`):
+   replaced `NotImplementedError` with an eager fallback that returns `None`.
+   The engine detects this and uses `_execute_mixed_eager`.
+
+6. **Tests** (`test/modular/test_qwen3_omni_mixed_walk.py`): 6 new CPU tests
+   covering worker mixed-batch ordering, metadata stashing, logit row selection
+   (single/multi prefill, with tensors), and CudaGraphRunner method signature.
+
+### Remaining (GPU-only, requires device testing)
+
+1. **CUDA graph capture for mixed batches**: a `MixedCudaGraphConfig` whose
+   `get_total_tokens` enumerates the `(num_decode_bucket, num_prefill_bucket)`
+   grid; capture via the existing FlashInfer-packed path with mixed
+   `qo_indptr`/`kv_indptr`.
+2. **CUDA graph replay** in `run_mixed`: pad `(decode_bs, prefill_tokens)` to
+   the captured bucket, pack the flat token tensor + M-RoPE positions into the
+   slot's static buffers, plan the prefill wrapper, copy, replay.
+3. **GPU parity test**: end-to-end mixed step vs separate steps with a real
+   model + KV cache.
 
 ## 10. GPU validation
 
