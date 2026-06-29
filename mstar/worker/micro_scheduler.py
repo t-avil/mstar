@@ -32,7 +32,10 @@ logger = logging.getLogger(__name__)
 # GPU under heavy admission and is the K=4 ceiling from the experiment spec.
 # ---------------------------------------------------------------------------
 def _encoder_async_enabled() -> bool:
-    return os.environ.get("MSTAR_ENCODER_ASYNC", "0") in ("1", "true", "True")
+    # Default ON in integration-mnew-v2. The full sweep showed PROMISING on I2T
+    # at B>=16 and we restrict pipelining to the vision encoder only (audio is
+    # too cheap to amortize the speculation cost; see LEARNINGS §9.2/§9.5).
+    return os.environ.get("MSTAR_ENCODER_ASYNC", "1") in ("1", "true", "True")
 
 
 def _encoder_async_depth() -> int:
@@ -44,8 +47,32 @@ def _encoder_async_depth() -> int:
         return 4
 
 
+def _encoder_async_node_names() -> frozenset[str]:
+    """Which encoder nodes are eligible for async pipelining.
+
+    Default: vision only. Audio encoder is too cheap (~10-20ms vs vision
+    ~160ms) for speculation to pay off and the S2T full sweep showed -18%
+    req/s at B=16+ when audio was included.
+
+    Override with MSTAR_ENCODER_ASYNC_PATHS=vision,audio to opt audio back
+    in (or =none to disable both even when MSTAR_ENCODER_ASYNC=1).
+    """
+    raw = os.environ.get("MSTAR_ENCODER_ASYNC_PATHS", "vision").strip().lower()
+    if raw in ("", "none", "off"):
+        return frozenset()
+    parts = {p.strip() for p in raw.split(",") if p.strip()}
+    out = set()
+    if "vision" in parts:
+        out.add("vision_encoder")
+    if "audio" in parts:
+        out.add("audio_encoder")
+    return frozenset(out)
+
+
 # Node names the encoder-async path treats as "encoder" walks.
-_ENCODER_NODE_NAMES = frozenset({"vision_encoder", "audio_encoder"})
+# Resolved at module-load; processes inheriting env vars from the server
+# launcher get the right set without restart-juggling per request.
+_ENCODER_NODE_NAMES = _encoder_async_node_names()
 # Graph walks whose first node consumes an encoder output on the Thinker.
 _ENCODER_CONSUMING_WALKS = frozenset({"prefill_vision", "prefill_audio"})
 
