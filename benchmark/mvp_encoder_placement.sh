@@ -44,6 +44,7 @@ BENCH_TIMEOUT="${BENCH_TIMEOUT:-300}"     # per-batch
 HF_DATASETS="${HF_DATASETS:-/home/tim/hf_datasets}"
 HF_HOME_DIR="${HF_HOME:-/m-coriander/coriander/hf}"
 PYTHON="${PYTHON:-/home/tim/mstar-encoders/.venv/bin/python}"
+export PATH="/home/tim/mstar-encoders/.venv/bin:$PATH"  # ninja for FlashInfer JIT
 
 # Output dir for this MVP run.
 OUTPUT="${OUTPUT:-/home/tim/tmp/mvp_encoder_placement_$(date -u +%Y%m%dT%H%M%S)}"
