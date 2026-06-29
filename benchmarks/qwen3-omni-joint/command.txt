@@ -19,3 +19,22 @@ $PY make_proof_charts.py
 
 # --- legacy: original source-root aggregation (does NOT reproduce committed raw; kept for reference) ---
 # aggregate.py --roots exp_audioenc exp_imageenc exp_throughput exp_rebench (audio-first = canonical isolated 4-way)
+
+# Combined vision opts sweep (2026-06-29)
+# Commit: e943d72 (opt/combined-vision-opts = vision-cudagraph-align + batch-vision-prefill)
+# Flags: MSTAR_GPU_MEL=1 MSTAR_GPU_IMAGE_PREPROCESS=1 MSTAR_CHUNKED_PREFILL=1 MSTAR_VISION_GRAPH_ALIGN=1 MSTAR_BATCH_VISION_PREFILL=1
+
+# S2T sweep (GPUs 1,2, port 8180):
+benchmark/sweep.sh --system mstar_new --gpus 1,2 --port 8180 --paths s2t --batches 1,2,4,8,16,32 \
+  --flags "MSTAR_GPU_MEL=1 MSTAR_GPU_IMAGE_PREPROCESS=1 MSTAR_CHUNKED_PREFILL=1 MSTAR_VISION_GRAPH_ALIGN=1 MSTAR_BATCH_VISION_PREFILL=1" \
+  --output /home/tim/tmp/sweep_combined_s2t --worktree /home/tim/tmp/sweep_combined_12
+
+# I2T sweep (GPUs 1,2, port 8180):
+benchmark/sweep.sh --system mstar_new --gpus 1,2 --port 8180 --paths i2t --batches 1,2,4,8,16,32 \
+  --flags "MSTAR_GPU_MEL=1 MSTAR_GPU_IMAGE_PREPROCESS=1 MSTAR_CHUNKED_PREFILL=1 MSTAR_VISION_GRAPH_ALIGN=1 MSTAR_BATCH_VISION_PREFILL=1" \
+  --output /home/tim/tmp/sweep_combined_i2t --worktree /home/tim/tmp/sweep_combined_12
+
+# S2S + I2S sweep (GPUs 6,7, port 8182):
+benchmark/sweep.sh --system mstar_new --gpus 6,7 --port 8182 --paths s2s,i2s --batches 1,2,4,8,16,32 \
+  --flags "MSTAR_GPU_MEL=1 MSTAR_GPU_IMAGE_PREPROCESS=1 MSTAR_CHUNKED_PREFILL=1 MSTAR_VISION_GRAPH_ALIGN=1 MSTAR_BATCH_VISION_PREFILL=1" \
+  --output /home/tim/tmp/sweep_combined_speech --worktree /home/tim/tmp/sweep_combined_67
