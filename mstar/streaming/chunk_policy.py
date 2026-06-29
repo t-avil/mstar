@@ -150,3 +150,70 @@ class FixedChunkPolicy(ChunkPolicy):
 
     def continue_after_producer_done(self) -> bool:
         return self._continue_after_done
+
+
+class AdaptiveChunkPolicy(ChunkPolicy):
+    """Left-context chunk policy whose chunk size adapts to batch level.
+
+    Behaves identically to ``LeftContextChunkPolicy`` but dynamically
+    scales the chunk size based on how many requests the worker is
+    currently serving.  At low batch (B=1-3) the chunk stays at
+    ``min_chunk`` to preserve pipeline overlap and low latency.  At
+    higher batch the chunk grows (fewer, larger vocoder launches →
+    better GPU utilization) up to ``max_chunk``.
+
+    Scaling rule::
+
+        effective_chunk = min(min_chunk * max(1, batch_level // 2), max_chunk)
+
+        B=1-3  → chunk = min_chunk          (25)
+        B=4-5  → chunk = min_chunk * 2      (50)
+        B=6-7  → chunk = min_chunk * 3      (75)
+        B≥8    → chunk = max_chunk          (100)
+
+    ``left_context`` stays fixed: the vocoder's receptive field doesn't
+    change with batch size.
+
+    Thread safety: ``set_batch_level`` is called from the worker's poll
+    loop on the same thread that calls ``is_ready``/``next_chunk_size``,
+    so no lock is needed.
+    """
+
+    def __init__(
+        self,
+        min_chunk: int = 25,
+        max_chunk: int = 100,
+        left_context: int = 25,
+    ):
+        super().__init__()
+        self._min_chunk = min_chunk
+        self._max_chunk = max_chunk
+        self._left_context = left_context
+        # Start at the minimum (conservative for B=1)
+        self._chunk = min_chunk
+        self._window = min_chunk + left_context
+
+    # -- batch-level knob ---------------------------------------------------
+
+    def set_batch_level(self, n: int) -> None:
+        """Update the effective chunk size based on current batch count *n*."""
+        effective = min(self._min_chunk * max(1, n // 2), self._max_chunk)
+        self._chunk = effective
+        self._window = effective + self._left_context
+
+    # -- ChunkPolicy interface (mirrors LeftContextChunkPolicy) -------------
+
+    def is_ready(self, buffer_len: int) -> bool:
+        if not self.first_chunk_read:
+            return buffer_len >= self._chunk
+        return buffer_len >= self._window
+
+    def next_chunk_size(self, buffer_len: int) -> int:
+        if not self.first_chunk_read:
+            return self._chunk - self._left_context
+        return self._chunk
+
+    def window_size(self) -> int:
+        if not self.first_chunk_read:
+            return self._chunk
+        return self._window

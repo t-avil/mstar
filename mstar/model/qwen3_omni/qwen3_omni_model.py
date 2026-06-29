@@ -29,6 +29,7 @@ Text-only mode:
 """
 
 import logging
+import os
 from pathlib import Path
 
 import torch
@@ -48,7 +49,11 @@ from mstar.model.base import MAX_OUTPUT_TOKENS, ForwardPassArgs, Model, TensorAn
 from mstar.model.qwen3_omni.components.talker import Qwen3OmniCodePredictor
 from mstar.model.submodule_base import NodeSubmodule
 from mstar.model.utils import Operation, WeightConverter
-from mstar.streaming.chunk_policy import FixedChunkPolicy, LeftContextChunkPolicy
+from mstar.streaming.chunk_policy import (
+    AdaptiveChunkPolicy,
+    FixedChunkPolicy,
+    LeftContextChunkPolicy,
+)
 from mstar.streaming.topology import Connection, PartitionTopology, StreamingGraphEdge
 from mstar.utils.sampling import SamplingConfig
 
@@ -445,6 +450,20 @@ class Qwen3OmniModel(Model):
         ]
 
     def get_partition_topology(self) -> PartitionTopology:
+        adaptive_chunk = os.environ.get("MSTAR_VOCODER_ADAPTIVE_CHUNK", "").lower() in ("1", "true", "yes")
+
+        if adaptive_chunk:
+            codec_policy_factory = lambda: AdaptiveChunkPolicy(
+                min_chunk=self.config.code2wav.codec_chunk_frames,
+                max_chunk=int(os.environ.get("MSTAR_VOCODER_ADAPTIVE_MAX_CHUNK", "100")),
+                left_context=self.config.code2wav.codec_left_context_frames,
+            )
+        else:
+            codec_policy_factory = lambda: LeftContextChunkPolicy(
+                chunk=self.config.code2wav.codec_chunk_frames,
+                left_context=self.config.code2wav.codec_left_context_frames,
+            )
+
         return PartitionTopology(
             partitions=["Thinker", "Talker", "Code2Wav"],
             connections=[
@@ -464,10 +483,7 @@ class Qwen3OmniModel(Model):
                     from_partition="Talker",
                     to_partition="Code2Wav",
                     edge_name="codec_tokens",
-                    chunk_policy_factory=lambda: LeftContextChunkPolicy(
-                        chunk=self.config.code2wav.codec_chunk_frames,
-                        left_context=self.config.code2wav.codec_left_context_frames,
-                    ),
+                    chunk_policy_factory=codec_policy_factory,
                 ),
             ],
         )

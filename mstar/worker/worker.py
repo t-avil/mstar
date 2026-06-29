@@ -718,6 +718,21 @@ class Worker:
 
     def _poll_stream_buffers(self) -> None:
         """Check all active StreamBuffers; when a chunk is ready, feed it as a normal input."""
+        # Update adaptive chunk policies with the current batch level.
+        # Count active requests per streaming edge so each AdaptiveChunkPolicy
+        # sees the batch level for its partition, not the global request count.
+        if self._my_consumer_connections:
+            all_req_info = self.worker_graphs_manager.per_request_info
+            for conn in self._my_consumer_connections:
+                ename = conn.edge_name
+                batch_level = sum(
+                    1 for ri in all_req_info.values() if ename in ri.stream_buffers
+                )
+                for ri in all_req_info.values():
+                    sbuf = ri.stream_buffers.get(ename)
+                    if sbuf is not None and hasattr(sbuf.policy, "set_batch_level"):
+                        sbuf.policy.set_batch_level(batch_level)
+
         for request_id, req_info in list(self.worker_graphs_manager.per_request_info.items()):
             for edge_name, sbuf in req_info.stream_buffers.items():
                 synthetic_edge = self._pop_streaming_edge(sbuf, edge_name, request_id)
