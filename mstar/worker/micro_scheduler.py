@@ -32,10 +32,12 @@ logger = logging.getLogger(__name__)
 # GPU under heavy admission and is the K=4 ceiling from the experiment spec.
 # ---------------------------------------------------------------------------
 def _encoder_async_enabled() -> bool:
-    # Default ON in integration-mnew-v2. The full sweep showed PROMISING on I2T
-    # at B>=16 and we restrict pipelining to the vision encoder only (audio is
-    # too cheap to amortize the speculation cost; see LEARNINGS §9.2/§9.5).
-    return os.environ.get("MSTAR_ENCODER_ASYNC", "1") in ("1", "true", "True")
+    # Default OFF. The full I2T sweep showed PROMISING at B>=16, but the feature
+    # has been flaky in integration testing, so it is opt-in via
+    # MSTAR_ENCODER_ASYNC=1. When enabled, pipelining is still restricted to the
+    # vision encoder only (audio is too cheap to amortize the speculation cost;
+    # see LEARNINGS §9.2/§9.5).
+    return os.environ.get("MSTAR_ENCODER_ASYNC", "0") in ("1", "true", "True")
 
 
 def _encoder_async_depth() -> int:
