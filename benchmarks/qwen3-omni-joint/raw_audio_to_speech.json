@@ -8022,67 +8022,103 @@
     },
     {
       "system": "vllm",
-      "batch": null,
+      "batch": 1,
       "phase": "measure",
-      "request_throughput": 0.792269628711967,
+      "request_throughput": 0.7926790860701002,
       "completed": 50,
-      "failed": 0
+      "failed": 0,
+      "ttft_audio_mean": 0.5327114915242419,
+      "ttft_audio_p50": 0.5305433809990063,
+      "ttft_audio_p99": 0.5855617189151234,
+      "itl_audio_mean": 0.2380092557416194
     },
     {
       "system": "vllm",
-      "batch": null,
+      "batch": 1,
       "phase": "measure",
-      "request_throughput": 1.2641415116428654,
+      "request_throughput": 1.2165109672867467,
       "completed": 50,
-      "failed": 0
+      "failed": 0,
+      "ttft_audio_mean": 0.7138596486626193,
+      "ttft_audio_p50": 0.7008108869194984,
+      "ttft_audio_p99": 0.8953440506244078,
+      "itl_audio_mean": 0.2798956065311689
     },
     {
       "system": "vllm",
-      "batch": null,
+      "batch": 1,
       "phase": "measure",
-      "request_throughput": 2.009857303109748,
+      "request_throughput": 2.0482727754866,
       "completed": 50,
-      "failed": 0
+      "failed": 0,
+      "ttft_audio_mean": 0.9257565054344014,
+      "ttft_audio_p50": 0.9092038380913436,
+      "ttft_audio_p99": 1.1436665219347923,
+      "itl_audio_mean": 0.3381347118631458
     },
     {
       "system": "vllm",
-      "batch": null,
+      "batch": 1,
       "phase": "measure",
-      "request_throughput": 2.948811740160799,
+      "request_throughput": 2.7117297728898446,
       "completed": 80,
-      "failed": 0
+      "failed": 0,
+      "ttft_audio_mean": 1.235981125017861,
+      "ttft_audio_p50": 1.226806323044002,
+      "ttft_audio_p99": 1.5900750616425643,
+      "itl_audio_mean": 0.4298886297448418
     },
     {
       "system": "vllm",
-      "batch": null,
+      "batch": 1,
       "phase": "measure",
-      "request_throughput": 3.7176270027650813,
+      "request_throughput": 3.4890323808255137,
       "completed": 160,
-      "failed": 0
+      "failed": 0,
+      "ttft_audio_mean": 1.7130056203401183,
+      "ttft_audio_p50": 1.703489358536899,
+      "ttft_audio_p99": 2.148473153389059,
+      "itl_audio_mean": 0.5560094859428589
     },
     {
       "system": "vllm",
-      "batch": null,
+      "batch": 1,
       "phase": "measure",
-      "request_throughput": 4.943082397404848,
+      "request_throughput": 5.105230705608659,
       "completed": 320,
-      "failed": 0
+      "failed": 0,
+      "ttft_audio_mean": 2.3324923923348253,
+      "ttft_audio_p50": 2.3287597304442897,
+      "ttft_audio_p99": 2.8366338888043536,
+      "itl_audio_mean": 0.8522853047851706
     }
   ],
   "aggregates": {
     "B1": {
       "vllm": {
         "recomputed": {
-          "request_throughput": 0.792269628711967,
+          "request_throughput": 0.7926790860701002,
           "text_token_throughput": null,
-          "audio_throughput": 5.5766050149383135,
-          "rtf_p50": 0.19126557371783492
+          "audio_throughput": 5.579487091789449,
+          "rtf_p50": 0.19156296861611427
         },
         "harness": {
-          "req_throughput_reported": 0.792269628711967,
+          "ttft_audio": {
+            "mean": 0.5327114915242419,
+            "p50": 0.5305433809990063,
+            "p95": 0.580130529543385,
+            "p99": 0.5855617189151234
+          },
+          "itl_audio": {
+            "mean": 0.2380092557416194,
+            "p50": 0.27496339986100793,
+            "p95": 0.38121761940419674,
+            "p99": 0.38665601773187513
+          },
+          "req_throughput_reported": 0.7926790860701002,
           "text_tok_throughput_reported": null,
-          "audio_throughput_reported": null,
-          "audio_dur_mean_reported": null
+          "audio_throughput_reported": 5.579487091789449,
+          "audio_dur_mean_reported": 7.038771666666666
         },
         "completed": 50,
         "num_requests": 50,
@@ -8243,16 +8279,28 @@
     "B2": {
       "vllm": {
         "recomputed": {
-          "request_throughput": 1.2641415116428654,
+          "request_throughput": 1.2165109672867467,
           "text_token_throughput": null,
-          "audio_throughput": 8.792150565331555,
-          "rtf_p50": 0.2407361266798155
+          "audio_throughput": 9.142389115697421,
+          "rtf_p50": 0.23872338338029478
         },
         "harness": {
-          "req_throughput_reported": 1.2641415116428654,
+          "ttft_audio": {
+            "mean": 0.7138596486626193,
+            "p50": 0.7008108869194984,
+            "p95": 0.8606523079448379,
+            "p99": 0.8953440506244078
+          },
+          "itl_audio": {
+            "mean": 0.2798956065311689,
+            "p50": 0.3088871368672699,
+            "p95": 0.43832452618516965,
+            "p99": 0.6083864420838653
+          },
+          "req_throughput_reported": 1.2165109672867467,
           "text_tok_throughput_reported": null,
-          "audio_throughput_reported": null,
-          "audio_dur_mean_reported": null
+          "audio_throughput_reported": 9.142389115697421,
+          "audio_dur_mean_reported": 7.515254166666667
         },
         "completed": 50,
         "num_requests": 50,
@@ -8413,16 +8461,28 @@
     "B4": {
       "vllm": {
         "recomputed": {
-          "request_throughput": 2.009857303109748,
+          "request_throughput": 2.0482727754866,
           "text_token_throughput": null,
-          "audio_throughput": 13.827062874025314,
-          "rtf_p50": 0.3050481444687692
+          "audio_throughput": 13.891473014943081,
+          "rtf_p50": 0.3050725515427421
         },
         "harness": {
-          "req_throughput_reported": 2.009857303109748,
+          "ttft_audio": {
+            "mean": 0.9257565054344014,
+            "p50": 0.9092038380913436,
+            "p95": 1.1273673058487474,
+            "p99": 1.1436665219347923
+          },
+          "itl_audio": {
+            "mean": 0.3381347118631458,
+            "p50": 0.37256963457912207,
+            "p95": 0.6136760342982598,
+            "p99": 0.7628222233825364
+          },
+          "req_throughput_reported": 2.0482727754866,
           "text_tok_throughput_reported": null,
-          "audio_throughput_reported": null,
-          "audio_dur_mean_reported": null
+          "audio_throughput_reported": 13.891473014943081,
+          "audio_dur_mean_reported": 6.7820425
         },
         "completed": 50,
         "num_requests": 50,
@@ -8583,16 +8643,28 @@
     "B8": {
       "vllm": {
         "recomputed": {
-          "request_throughput": 2.948811740160799,
+          "request_throughput": 2.7117297728898446,
           "text_token_throughput": null,
-          "audio_throughput": 19.764771610698034,
-          "rtf_p50": 0.408035442561415
+          "audio_throughput": 19.018119334197333,
+          "rtf_p50": 0.3872691421234886
         },
         "harness": {
-          "req_throughput_reported": 2.948811740160799,
+          "ttft_audio": {
+            "mean": 1.235981125017861,
+            "p50": 1.226806323044002,
+            "p95": 1.5020213331794365,
+            "p99": 1.5900750616425643
+          },
+          "itl_audio": {
+            "mean": 0.4298886297448418,
+            "p50": 0.47597512300126255,
+            "p95": 0.8045251970179379,
+            "p99": 1.0089769308920946
+          },
+          "req_throughput_reported": 2.7117297728898446,
           "text_tok_throughput_reported": null,
-          "audio_throughput_reported": null,
-          "audio_dur_mean_reported": null
+          "audio_throughput_reported": 19.018119334197333,
+          "audio_dur_mean_reported": 7.0132796875
         },
         "completed": 80,
         "num_requests": 80,
@@ -8753,16 +8825,28 @@
     "B16": {
       "vllm": {
         "recomputed": {
-          "request_throughput": 3.7176270027650813,
+          "request_throughput": 3.4890323808255137,
           "text_token_throughput": null,
-          "audio_throughput": 24.610815647336963,
-          "rtf_p50": 0.547374155946649
+          "audio_throughput": 23.413076377548464,
+          "rtf_p50": 0.5364120958286407
         },
         "harness": {
-          "req_throughput_reported": 3.7176270027650813,
+          "ttft_audio": {
+            "mean": 1.7130056203401183,
+            "p50": 1.703489358536899,
+            "p95": 2.116153375233989,
+            "p99": 2.148473153389059
+          },
+          "itl_audio": {
+            "mean": 0.5560094859428589,
+            "p50": 0.6050414220662788,
+            "p95": 1.1301691178814508,
+            "p99": 1.6329832665738648
+          },
+          "req_throughput_reported": 3.4890323808255137,
           "text_tok_throughput_reported": null,
-          "audio_throughput_reported": null,
-          "audio_dur_mean_reported": null
+          "audio_throughput_reported": 23.413076377548464,
+          "audio_dur_mean_reported": 6.710478385416667
         },
         "completed": 160,
         "num_requests": 160,
@@ -8923,16 +9007,28 @@
     "B32": {
       "vllm": {
         "recomputed": {
-          "request_throughput": 4.943082397404848,
+          "request_throughput": 5.105230705608659,
           "text_token_throughput": null,
-          "audio_throughput": 33.10540936465329,
-          "rtf_p50": 0.775811009480622
+          "audio_throughput": 34.44597805021651,
+          "rtf_p50": 0.7782007746305267
         },
         "harness": {
-          "req_throughput_reported": 4.943082397404848,
+          "ttft_audio": {
+            "mean": 2.3324923923348253,
+            "p50": 2.3287597304442897,
+            "p95": 2.7151176961371677,
+            "p99": 2.8366338888043536
+          },
+          "itl_audio": {
+            "mean": 0.8522853047851706,
+            "p50": 0.9936352309305221,
+            "p95": 1.5828629296971477,
+            "p99": 2.1640731836482883
+          },
+          "req_throughput_reported": 5.105230705608659,
           "text_tok_throughput_reported": null,
-          "audio_throughput_reported": null,
-          "audio_dur_mean_reported": null
+          "audio_throughput_reported": 34.44597805021651,
+          "audio_dur_mean_reported": 6.747193229166666
         },
         "completed": 320,
         "num_requests": 320,
