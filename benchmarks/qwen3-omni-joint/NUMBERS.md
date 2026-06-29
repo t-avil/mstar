@@ -1,118 +1,119 @@
-# NUMBERS.md -- headline numbers (auto-generated from clean sweep data 2026-06-29)
+# NUMBERS.md -- headline numbers (auto-generated 2026-06-29)
 
-Single source of truth. M*-new data: integration-mnew build f58a805, flags MSTAR_GPU_MEL=1 MSTAR_GPU_IMAGE_PREPROCESS=1 MSTAR_CHUNKED_PREFILL=1.
-M*-new-combined: same + MSTAR_VISION_GRAPH_ALIGN=1 MSTAR_BATCH_VISION_PREFILL=1 (commit e943d72).
-M*-old data: upstream main ae7d173, no optimization flags.
-Ratios: combined/vLLM and combined/old; for lower-is-better metrics the ratio is inverted so **>1.00x always means M*-new is faster**.
+Single source of truth.
+M*-new: integration-mnew e943d72, all flags: MSTAR_GPU_MEL=1 MSTAR_GPU_IMAGE_PREPROCESS=1 MSTAR_CHUNKED_PREFILL=1 MSTAR_VISION_GRAPH_ALIGN=1 MSTAR_BATCH_VISION_PREFILL=1.
+M*-old: upstream main ae7d173, no optimization flags.
+Ratios: new/vLLM and new/old; for lower-is-better metrics the ratio is inverted so **>1.00x always means M*-new is faster**.
 
 ## S2T -- audio_to_text
 
 throughput unit = **tok/s**; req/s / TTFT(text) p50 / ITL(text) mean
 
-| B | metric | M*-combined | M*-new | M*-old | vLLM | comb/new | comb/vLLM | comb/old |
-|---|---|---|---|---|---|---|---|---|
-| 1 | throughput | 71.6531 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 1 | req_per_s | 5.0602 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 1 | TTFT_text_p50 | 0.1006 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 1 | ITL_text_mean | 0.0070 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 2 | throughput | 97.2316 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 2 | req_per_s | 6.9253 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 2 | TTFT_text_p50 | 0.1434 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 2 | ITL_text_mean | 0.0109 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 4 | throughput | 126.1287 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 4 | req_per_s | 8.9200 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 4 | TTFT_text_p50 | 0.1855 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 4 | ITL_text_mean | 0.0186 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 8 | throughput | 176.6716 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 8 | req_per_s | 12.1633 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 8 | TTFT_text_p50 | 0.2480 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 8 | ITL_text_mean | 0.0296 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 16 | throughput | 255.5254 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 16 | req_per_s | 17.9002 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 16 | TTFT_text_p50 | 0.2883 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 16 | ITL_text_mean | 0.0430 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 32 | throughput | 337.0164 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 32 | req_per_s | 23.5316 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 32 | TTFT_text_p50 | 0.4202 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 32 | ITL_text_mean | 0.0647 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
+| B | metric | M*-new | M*-old | vLLM | new/vLLM | new/old |
+|---|---|---|---|---|---|---|
+| 1 | throughput | 71.6531 | 27.6892 | 56.9672 | 1.26x | 2.59x |
+| 1 | req_per_s | 5.0602 | 1.9122 | 2.3008 | 2.20x | 2.65x |
+| 1 | TTFT_p50 | 0.1006 | 0.3910 | 0.1400 | 1.39x | 3.89x |
+| 1 | ITL_mean | 0.0070 | 0.0074 | 0.0120 | 1.71x | 1.06x |
+| 2 | throughput | 97.2316 | 42.1342 | 80.0659 | 1.21x | 2.31x |
+| 2 | req_per_s | 6.9253 | 2.9098 | 3.2337 | 2.14x | 2.38x |
+| 2 | TTFT_p50 | 0.1434 | 0.7245 | 0.1320 | 0.92x | 5.05x |
+| 2 | ITL_mean | 0.0109 | 0.0007 | 0.0200 | 1.83x | 0.06x |
+| 4 | throughput | 126.1287 | 39.2264 | 105.4143 | 1.20x | 3.22x |
+| 4 | req_per_s | 8.9200 | 2.7090 | 4.2574 | 2.10x | 3.29x |
+| 4 | TTFT_p50 | 0.1855 | 1.2417 | 0.1500 | 0.81x | 6.69x |
+| 4 | ITL_mean | 0.0186 | 0.0030 | 0.0320 | 1.72x | 0.16x |
+| 8 | throughput | 176.6716 | 36.5444 | 132.6499 | 1.33x | 4.83x |
+| 8 | req_per_s | 12.1633 | 2.5225 | 5.5041 | 2.21x | 4.82x |
+| 8 | TTFT_p50 | 0.2480 | 2.8495 | 0.2300 | 0.93x | 11.49x |
+| 8 | ITL_mean | 0.0296 | 0.0005 | 0.0500 | 1.69x | 0.02x |
+| 16 | throughput | 255.5254 | 35.1537 | 189.2391 | 1.35x | 7.27x |
+| 16 | req_per_s | 17.9002 | 2.4497 | 7.9554 | 2.25x | 7.31x |
+| 16 | TTFT_p50 | 0.2883 | 6.2252 | 0.2360 | 0.82x | 21.59x |
+| 16 | ITL_mean | 0.0430 | 0.0002 | 0.0670 | 1.56x | 0.00x |
+| 32 | throughput | 337.0164 | 35.2157 | 305.0155 | 1.10x | 9.57x |
+| 32 | req_per_s | 23.5316 | 2.4477 | 12.6677 | 1.86x | 9.61x |
+| 32 | TTFT_p50 | 0.4202 | 12.9031 | 0.2830 | 0.67x | 30.71x |
+| 32 | ITL_mean | 0.0647 | 0.0091 | 0.0770 | 1.19x | 0.14x |
 
 ## I2T -- image_to_text
 
 throughput unit = **tok/s**; req/s / TTFT(text) p50 / ITL(text) mean
 
-| B | metric | M*-combined | M*-new | M*-old | vLLM | comb/new | comb/vLLM | comb/old |
-|---|---|---|---|---|---|---|---|---|
-| 1 | throughput | 120.0733 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 1 | req_per_s | 0.6934 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 1 | TTFT_text_p50 | 0.2825 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 1 | ITL_text_mean | 0.0068 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 2 | throughput | 186.1150 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 2 | req_per_s | 1.0952 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 2 | TTFT_text_p50 | 0.3246 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 2 | ITL_text_mean | 0.0088 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 4 | throughput | 292.1021 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 4 | req_per_s | 1.7272 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 4 | TTFT_text_p50 | 0.3487 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 4 | ITL_text_mean | 0.0113 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 8 | throughput | 423.7843 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 8 | req_per_s | 2.4376 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 8 | TTFT_text_p50 | 0.4171 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 8 | ITL_text_mean | 0.0157 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 16 | throughput | 571.6056 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 16 | req_per_s | 3.2994 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 16 | TTFT_text_p50 | 0.4999 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 16 | ITL_text_mean | 0.0237 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 32 | throughput | 740.7304 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 32 | req_per_s | 4.2092 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 32 | TTFT_text_p50 | 0.5846 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 32 | ITL_text_mean | 0.0377 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
+| B | metric | M*-new | M*-old | vLLM | new/vLLM | new/old |
+|---|---|---|---|---|---|---|
+| 1 | throughput | 120.0733 | 109.5898 | 77.2192 | 1.55x | 1.10x |
+| 1 | req_per_s | 0.6934 | 0.6349 | 0.3727 | 1.86x | 1.09x |
+| 1 | TTFT_p50 | 0.2825 | 0.4010 | 0.1510 | 0.53x | 1.42x |
+| 1 | ITL_mean | 0.0068 | 0.0070 | 0.0120 | 1.76x | 1.02x |
+| 2 | throughput | 186.1150 | 167.3596 | 110.1704 | 1.69x | 1.11x |
+| 2 | req_per_s | 1.0952 | 0.9690 | 0.5301 | 2.07x | 1.13x |
+| 2 | TTFT_p50 | 0.3246 | 0.4480 | 0.1350 | 0.42x | 1.38x |
+| 2 | ITL_mean | 0.0088 | 0.0092 | 0.0170 | 1.92x | 1.04x |
+| 4 | throughput | 292.1021 | 253.1901 | 149.9655 | 1.95x | 1.15x |
+| 4 | req_per_s | 1.7272 | 1.4765 | 0.7122 | 2.43x | 1.17x |
+| 4 | TTFT_p50 | 0.3487 | 0.5197 | 0.1510 | 0.43x | 1.49x |
+| 4 | ITL_mean | 0.0113 | 0.0123 | 0.0260 | 2.29x | 1.09x |
+| 8 | throughput | 423.7843 | 348.5283 | 211.9746 | 2.00x | 1.22x |
+| 8 | req_per_s | 2.4376 | 2.0361 | 1.0080 | 2.42x | 1.20x |
+| 8 | TTFT_p50 | 0.4171 | 0.5401 | 0.1870 | 0.45x | 1.30x |
+| 8 | ITL_mean | 0.0157 | 0.0185 | 0.0360 | 2.30x | 1.18x |
+| 16 | throughput | 571.6056 | 466.4692 | 320.6194 | 1.78x | 1.23x |
+| 16 | req_per_s | 3.2994 | 2.7368 | 1.5154 | 2.18x | 1.21x |
+| 16 | TTFT_p50 | 0.4999 | 0.6884 | 0.1910 | 0.38x | 1.38x |
+| 16 | ITL_mean | 0.0237 | 0.0276 | 0.0470 | 1.99x | 1.17x |
+| 32 | throughput | 740.7304 | 565.9690 | 531.0198 | 1.39x | 1.31x |
+| 32 | req_per_s | 4.2092 | 3.2168 | 2.5379 | 1.66x | 1.31x |
+| 32 | TTFT_p50 | 0.5846 | 1.0291 | 0.2050 | 0.35x | 1.76x |
+| 32 | ITL_mean | 0.0377 | 0.0453 | 0.0570 | 1.51x | 1.20x |
 
 ## I2S -- image_to_speech
 
-throughput unit = **audio sec/s**; TTFT(audio) p50 / ITL(audio) mean
+throughput unit = **req/s**; TTFT(audio) p50 / ITL(audio) mean
 
-| B | metric | M*-combined | M*-new | M*-old | vLLM | comb/new | comb/vLLM | comb/old |
-|---|---|---|---|---|---|---|---|---|
-| 1 | req_per_s | 0.2767 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 1 | TTFT_audio_p50 | 0.4012 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 1 | ITL_audio_mean | 0.0914 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 2 | req_per_s | 0.4577 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 2 | TTFT_audio_p50 | 0.4710 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 2 | ITL_audio_mean | 0.1136 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 4 | req_per_s | 0.7348 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 4 | TTFT_audio_p50 | 0.5494 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 4 | ITL_audio_mean | 0.1364 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 8 | req_per_s | 1.1465 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 8 | TTFT_audio_p50 | 0.6560 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 8 | ITL_audio_mean | 0.1624 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 16 | req_per_s | 1.7234 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 16 | TTFT_audio_p50 | 0.7974 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 16 | ITL_audio_mean | 0.2168 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 32 | req_per_s | 2.2184 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 32 | TTFT_audio_p50 | 1.0741 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 32 | ITL_audio_mean | 0.3416 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
+| B | metric | M*-new | M*-old | vLLM | new/vLLM | new/old |
+|---|---|---|---|---|---|---|
+| 1 | req_per_s | 0.2767 | 0.2354 | 0.1029 | 2.69x | 1.18x |
+| 1 | TTFT_p50 | 0.4012 | 0.6255 | 0.5580 | 1.39x | 1.56x |
+| 1 | ITL_mean | 0.0914 | 0.1547 | 0.2970 | 3.25x | 1.69x |
+| 2 | req_per_s | 0.4577 | 0.3933 | 0.1583 | 2.89x | 1.16x |
+| 2 | TTFT_p50 | 0.4710 | 0.7701 | 0.8510 | 1.81x | 1.63x |
+| 2 | ITL_mean | 0.1136 | 0.1918 | 0.3760 | 3.31x | 1.69x |
+| 4 | req_per_s | 0.7348 | 0.6438 | 0.2516 | 2.92x | 1.14x |
+| 4 | TTFT_p50 | 0.5494 | 0.9008 | 1.0520 | 1.91x | 1.64x |
+| 4 | ITL_mean | 0.1364 | 0.2309 | 0.4640 | 3.40x | 1.69x |
+| 8 | req_per_s | 1.1465 | 1.1077 | 0.3796 | 3.02x | 1.03x |
+| 8 | TTFT_p50 | 0.6560 | 0.9272 | 1.3200 | 2.01x | 1.41x |
+| 8 | ITL_mean | 0.1624 | 0.2643 | 0.6130 | 3.77x | 1.63x |
+| 16 | req_per_s | 1.7234 | 1.6011 | 0.5578 | 3.09x | 1.08x |
+| 16 | TTFT_p50 | 0.7974 | 1.2577 | 1.7680 | 2.22x | 1.58x |
+| 16 | ITL_mean | 0.2168 | 0.3575 | 0.8390 | 3.87x | 1.65x |
+| 32 | req_per_s | 2.2184 | 2.0164 | 0.7597 | 2.92x | 1.10x |
+| 32 | TTFT_p50 | 1.0741 | 1.8056 | 2.4940 | 2.32x | 1.68x |
+| 32 | ITL_mean | 0.3416 | 0.5724 | 1.2270 | 3.59x | 1.68x |
 
 ## S2S -- audio_to_speech
 
-throughput unit = **audio sec/s**; TTFT(audio) p50 / ITL(audio) mean
+throughput unit = **req/s**; TTFT(audio) p50 / ITL(audio) mean
 
-| B | metric | M*-combined | M*-new | M*-old | vLLM | comb/new | comb/vLLM | comb/old |
-|---|---|---|---|---|---|---|---|---|
-| 1 | req_per_s | 2.7260 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 1 | TTFT_audio_p50 | 0.2244 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 1 | ITL_audio_mean | 0.0668 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 2 | req_per_s | 4.2849 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 2 | TTFT_audio_p50 | 0.3023 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 2 | ITL_audio_mean | 0.0835 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 4 | req_per_s | 5.9148 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 4 | TTFT_audio_p50 | 0.4251 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 4 | ITL_audio_mean | 0.1022 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 8 | req_per_s | 8.8005 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 8 | TTFT_audio_p50 | 0.6080 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 8 | ITL_audio_mean | 0.1238 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 16 | req_per_s | 12.7308 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 16 | TTFT_audio_p50 | 0.8322 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 16 | ITL_audio_mean | 0.1528 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 32 | req_per_s | 18.4827 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 32 | TTFT_audio_p50 | 1.3001 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
-| 32 | ITL_audio_mean | 0.2183 | 0.0000 | 0.0000 | 0.0000 | n/a | n/a | n/a |
+| B | metric | M*-new | M*-old | vLLM | new/vLLM | new/old |
+|---|---|---|---|---|---|---|
+| 1 | req_per_s | 2.7260 | 1.3325 | 0.7935 | 3.44x | 2.05x |
+| 1 | TTFT_p50 | 0.2244 | 0.5988 | 0.5340 | 2.38x | 2.67x |
+| 1 | ITL_mean | 0.0668 | 0.0851 | 0.2390 | 3.58x | 1.27x |
+| 2 | req_per_s | 4.2849 | 2.2903 | 1.2890 | 3.32x | 1.87x |
+| 2 | TTFT_p50 | 0.3023 | 0.8374 | 0.7100 | 2.35x | 2.77x |
+| 2 | ITL_mean | 0.0835 | 0.0382 | 0.2730 | 3.27x | 0.46x |
+| 4 | req_per_s | 5.9148 | 2.3825 | 2.0117 | 2.94x | 2.48x |
+| 4 | TTFT_p50 | 0.4251 | 1.2781 | 0.9110 | 2.14x | 3.01x |
+| 4 | ITL_mean | 0.1022 | 0.1826 | 0.3430 | 3.36x | 1.79x |
+| 8 | req_per_s | 8.8005 | 2.4048 | 2.8928 | 3.04x | 3.66x |
+| 8 | TTFT_p50 | 0.6080 | 2.9416 | 1.2470 | 2.05x | 4.84x |
+| 8 | ITL_mean | 0.1238 | 0.0865 | 0.4340 | 3.51x | 0.70x |
+| 16 | req_per_s | 12.7308 | 2.3957 | 3.6151 | 3.52x | 5.31x |
+| 16 | TTFT_p50 | 0.8322 | 6.2094 | 1.6740 | 2.01x | 7.46x |
+| 16 | ITL_mean | 0.1528 | 0.1428 | 0.5560 | 3.64x | 0.93x |
+| 32 | req_per_s | 18.4827 | 2.4140 | 4.9191 | 3.76x | 7.66x |
+| 32 | TTFT_p50 | 1.3001 | 12.8144 | 2.3160 | 1.78x | 9.86x |
+| 32 | ITL_mean | 0.2183 | 0.1454 | 0.8520 | 3.90x | 0.67x |
+
