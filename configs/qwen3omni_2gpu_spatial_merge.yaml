@@ -1,0 +1,25 @@
+model: "qwen3_omni"
+max_seq_len: 32768
+# D5: spatial-merge GraphNode placement. Same physical layout as
+# qwen3omni_2gpu.yaml (encoder + Thinker on Rank 1, Talker + Code2Wav on
+# Rank 0) but with the spatial_merge node split out of the encoder. Pinned to
+# Rank 1 so the encoder -> spatial_merge -> Thinker chain stays on one GPU
+# (no-op vs the unsplit baseline; benchmark must show no regression).
+#
+# Future placements: move spatial_merge to Rank 0 only if encoder also moves
+# to Rank 0; otherwise the cross-rank edge would carry the 4x-larger
+# unmerged tensor and burn bandwidth. The point of this experiment is to
+# prove the boundary exists, not to exercise the cross-rank case.
+node_groups:
+  - node_names: [audio_encoder, vision_encoder]
+    ranks: [1]
+  - node_names: [spatial_merge]
+    ranks: [1]
+  - node_names: [Thinker]
+    ranks: [1]
+
+  - node_names: [Talker]
+    ranks: [0]
+
+  - node_names: [Code2Wav]
+    ranks: [0]

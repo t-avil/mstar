@@ -303,10 +303,22 @@ class NativeVisionEncoderSubmodule(NodeSubmodule):
         # mstar config) so the per-request token split can never diverge from
         # what the encoder actually produces.
         self.merge_sq = vision_encoder.spatial_merge_size ** 2
+        # When the encoder was built with ``split_spatial_merge=True`` (set by
+        # ``MSTAR_SPATIAL_MERGE_NODE=1``), its forward returns the *unmerged*
+        # post-block-loop tokens (one row per patch), and the per-request
+        # token-count math must skip the 4->1 reduction. The trailing merger
+        # is then run by ``SpatialMergeSubmodule`` as a separate GraphNode.
+        self._split_spatial_merge = bool(
+            getattr(vision_encoder, "split_spatial_merge", False)
+        )
 
     def _merged_tokens(self, grid_thw: torch.Tensor) -> int:
         g = grid_thw if grid_thw.dim() == 2 else grid_thw.unsqueeze(0)
-        return int((g[:, 0] * g[:, 1] * g[:, 2]).sum() // self.merge_sq)
+        total = int((g[:, 0] * g[:, 1] * g[:, 2]).sum())
+        # When the spatial merger is split out, the encoder emits one row per
+        # patch (pre-merge); the spatial_merge node will do the 4->1 reduction
+        # on its side.
+        return total if self._split_spatial_merge else total // self.merge_sq
 
     def prepare_inputs(self, graph_walk, fwd_info, inputs, **kwargs) -> NodeInputs:
         pixel_values = inputs["pixel_values"][0]
@@ -344,24 +356,138 @@ class NativeVisionEncoderSubmodule(NodeSubmodule):
         if req_token_counts is None:  # one-image-per-request fallback
             g = grid_thw if grid_thw.dim() == 2 else grid_thw.unsqueeze(0)
             req_token_counts = [self._merged_tokens(g[i:i + 1]) for i in range(len(request_ids))]
+        # In split-merger mode the encoder returns unmerged tokens, so the
+        # per-request slice runs at the pre-merge row count; the downstream
+        # ``spatial_merge`` node consumes ``vision_unmerged`` and produces the
+        # merged ``vision_embeds`` the Thinker expects. The deepstack outputs
+        # are always at the merged-token granularity (the deepstack mergers
+        # stay inside the encoder block loop regardless), so we still need
+        # the merged count to slice them per request.
+        deepstack_counts = (
+            [c // self.merge_sq for c in req_token_counts]
+            if self._split_spatial_merge else req_token_counts
+        )
+        out_key = "vision_unmerged" if self._split_spatial_merge else "vision_embeds"
         results: dict[str, NameToTensorList] = {}
         off = 0
-        for rid, c in zip(request_ids, req_token_counts, strict=False):
+        off_ds = 0
+        for rid, c, dc in zip(request_ids, req_token_counts, deepstack_counts,
+                              strict=False):
             results[rid] = {
-                "vision_embeds": [embeds[off:off + c]],
-                "deepstack": [d[off:off + c] for d in deepstack],
+                out_key: [embeds[off:off + c]],
+                "deepstack": [d[off_ds:off_ds + dc] for d in deepstack],
             }
             off += c
+            off_ds += dc
         return results
 
     def forward(self, graph_walk, engine_inputs, pixel_values, grid_thw, **kwargs):
         embeds, deepstack = self._run(pixel_values, grid_thw)
+        out_key = "vision_unmerged" if self._split_spatial_merge else "vision_embeds"
         return {
-            "vision_embeds": [embeds],
+            out_key: [embeds],
             "deepstack": deepstack if deepstack else [torch.tensor([])],
         }
 
     def can_batch(self, batch: NodeBatch, model_inputs: list[NodeInputs]) -> bool:
+        return True
+
+
+# ===================================================================
+# 2b. SpatialMergeSubmodule (enc_dec engine, MSTAR_SPATIAL_MERGE_NODE=1)
+# ===================================================================
+
+
+class SpatialMergeSubmodule(NodeSubmodule):
+    """Standalone GraphNode owning the final 4->1 spatial-merge MLP.
+
+    Splits the vision encoder's trailing patch-merger out into its own node so
+    it can be placed on a different GPU than the encoder. The encoder forward
+    (with ``split_spatial_merge=True``) emits the *unmerged* post-block-loop
+    tokens; this node applies the 4->1 merger and forwards the merged tokens
+    plus the (encoder-side) deepstack list to the Thinker.
+
+    Placement note: for the current 2-GPU config (encoder + spatial_merge +
+    Thinker on Rank 1) this is a no-op in compute and adds only graph-edge
+    overhead. The win is structural: when the encoder lives on a non-Thinker
+    rank the cross-rank ``vision_embeds`` edge is 4x smaller than
+    ``vision_unmerged`` would be. See
+    ``qwen3_omni_model.spatial_merge_node_enabled``.
+    """
+
+    def __init__(self, spatial_merger: nn.Module, config):
+        super().__init__()
+        # ``spatial_merger`` is a ``VisionPatchMerger(use_postshuffle_norm=False)``
+        # owning the same weights HF stores under ``thinker.visual.merger.*``.
+        self.spatial_merger = spatial_merger
+        self.config = config
+
+    def prepare_inputs(self, graph_walk, fwd_info, inputs, **kwargs) -> NodeInputs:
+        # ``vision_unmerged`` is the encoder's pre-merger output. ``deepstack``
+        # is passed through unchanged (the deepstack mergers stay on the
+        # encoder side); we accept it here only so the runner forwards it to
+        # the Thinker via this node's output edge.
+        unmerged = inputs["vision_unmerged"][0]
+        deepstack = inputs.get("deepstack", [])
+        return NodeInputs(tensor_inputs={
+            "vision_unmerged": unmerged,
+            "deepstack": deepstack,
+        })
+
+    def preprocess(self, graph_walk, engine_inputs, inputs: list[NodeInputs]):
+        # Cross-request batching: concatenate the per-request unmerged-token
+        # tensors along dim 0 (4x the count of pre-spatial-merge patches per
+        # request), record per-request counts so we can split the merger's
+        # output back per rid post-forward. Deepstack stays as a per-request
+        # list (it's already at the merged-token granularity since the
+        # deepstack mergers run inside the encoder block loop).
+        unmerged = [i.tensor_inputs["vision_unmerged"] for i in inputs]
+        deepstack = [i.tensor_inputs["deepstack"] for i in inputs]
+        return {
+            "vision_unmerged": torch.cat(unmerged, dim=0),
+            "req_unmerged_counts": [int(u.shape[0]) for u in unmerged],
+            "deepstack_per_req": deepstack,
+        }
+
+    def _merged_counts(self, unmerged_counts: list[int]) -> list[int]:
+        # 4 patches in -> 1 merged token out for spatial_merge_size=2.
+        sms_sq = self.config.vision.spatial_merge_size ** 2
+        return [c // sms_sq for c in unmerged_counts]
+
+    def forward_batched(self, graph_walk, engine_inputs, vision_unmerged,
+                        req_unmerged_counts=None, deepstack_per_req=None,
+                        **kwargs):
+        # One MLP call over the packed batch; output is (sum_merged, out_hidden).
+        merged = self.spatial_merger(vision_unmerged)
+        request_ids = engine_inputs.request_ids
+        if req_unmerged_counts is None:
+            # Single-request fallback (forward_batched called with one rid).
+            req_unmerged_counts = [vision_unmerged.shape[0]]
+        merged_counts = self._merged_counts(req_unmerged_counts)
+        if deepstack_per_req is None:
+            deepstack_per_req = [[] for _ in request_ids]
+        results: dict[str, NameToTensorList] = {}
+        off = 0
+        for rid, mc, ds in zip(request_ids, merged_counts, deepstack_per_req,
+                               strict=False):
+            results[rid] = {
+                "vision_embeds": [merged[off:off + mc]],
+                "deepstack": list(ds) if ds else [torch.tensor([])],
+            }
+            off += mc
+        return results
+
+    def forward(self, graph_walk, engine_inputs, vision_unmerged, deepstack,
+                **kwargs):
+        merged = self.spatial_merger(vision_unmerged)
+        return {
+            "vision_embeds": [merged],
+            "deepstack": list(deepstack) if deepstack else [torch.tensor([])],
+        }
+
+    def can_batch(self, batch: NodeBatch, model_inputs: list[NodeInputs]) -> bool:
+        # Same batching contract as NativeVisionEncoderSubmodule (varlen along
+        # dim 0): always safe to concatenate.
         return True
 
 

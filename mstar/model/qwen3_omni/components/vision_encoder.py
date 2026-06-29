@@ -175,9 +175,26 @@ class VisionBlock(nn.Module):
 
 
 class NativeQwen3OmniVisionEncoder(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, split_spatial_merge: bool = False):
+        """SigLIP2-style ViT + DeepStack mergers + (optional) final spatial merge.
+
+        ``split_spatial_merge`` (default False): when True, the final 4->1
+        ``self.merger`` MLP is omitted from this module so the encoder forward
+        emits the *unmerged* post-block-loop tokens, and the matching weights
+        (``thinker.visual.merger.*``) move to a separate ``SpatialMergeSubmodule``
+        that owns the merge step as its own GraphNode. Used by experiment D5
+        (``MSTAR_SPATIAL_MERGE_NODE=1``); see
+        ``mstar/model/qwen3_omni/qwen3_omni_model.py:spatial_merge_node_enabled``.
+
+        DeepStack mergers (``self.merger_list``) stay on the encoder side
+        regardless: they are interleaved INSIDE the block loop (one per
+        ``deepstack_visual_indexes`` entry), so they cannot be peeled off
+        without rewriting the block loop's control flow. Only the final
+        ``self.merger`` is moveable.
+        """
         super().__init__()
         self.config = config
+        self.split_spatial_merge = split_spatial_merge
         self.spatial_merge_size = config.spatial_merge_size
         self.num_grid_per_side = int(config.num_position_embeddings ** 0.5)
         self.deepstack_visual_indexes = config.deepstack_visual_indexes
@@ -187,7 +204,15 @@ class NativeQwen3OmniVisionEncoder(nn.Module):
         head_dim = config.hidden_size // config.num_heads
         self.rotary_pos_emb = VisionRotaryEmbedding(head_dim // 2)
         self.blocks = nn.ModuleList([VisionBlock(config) for _ in range(config.depth)])
-        self.merger = VisionPatchMerger(config, use_postshuffle_norm=False)
+        if split_spatial_merge:
+            # Final merger is owned by ``SpatialMergeSubmodule``. Skip it here
+            # so ``load_weights_from_hf_shards`` does not look up its weights
+            # in this module's state_dict (which would either pull them onto
+            # this device or fail). ``thinker.visual.merger.*`` keys are
+            # consumed by the spatial-merge node's own load_weights call.
+            self.merger = None
+        else:
+            self.merger = VisionPatchMerger(config, use_postshuffle_norm=False)
         self.merger_list = nn.ModuleList([
             VisionPatchMerger(config, use_postshuffle_norm=True)
             for _ in range(len(config.deepstack_visual_indexes))
@@ -212,13 +237,21 @@ class NativeQwen3OmniVisionEncoder(nn.Module):
         """The expensive, capture-legal region: block loop + DeepStack mergers +
         final merger. ``cu_seqlens``/``max_seqlen``/``position_embeddings`` depend
         only on ``grid_thw`` (the spatial layout), so for a fixed layout they are
-        constants and this whole region is replayable as one CUDA graph."""
+        constants and this whole region is replayable as one CUDA graph.
+
+        When ``split_spatial_merge`` is True the final 4->1 merger is moved
+        out of this module (into ``SpatialMergeSubmodule``); we return the
+        post-block-loop unmerged tokens instead, and the captured graph keys
+        on the same (seq_len, cu_seqlens) tuple (the layout is unchanged;
+        only the trailing 4->1 reduction is dropped)."""
         deepstack_features = []
         for i, blk in enumerate(self.blocks):
             hidden_states = blk(hidden_states, cu_seqlens, max_seqlen, position_embeddings)
             if i in self.deepstack_visual_indexes:
                 k = self.deepstack_visual_indexes.index(i)
                 deepstack_features.append(self.merger_list[k](hidden_states))
+        if self.split_spatial_merge:
+            return hidden_states, deepstack_features
         merged = self.merger(hidden_states)
         return merged, deepstack_features
 

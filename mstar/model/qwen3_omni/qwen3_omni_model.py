@@ -124,6 +124,29 @@ def batch_vision_prefill_enabled() -> bool:
     return _envflag("MSTAR_BATCH_VISION_PREFILL")
 
 
+def spatial_merge_node_enabled() -> bool:
+    """When ON, split the vision encoder's final 4->1 spatial-merge MLP out
+    into its own ``spatial_merge`` GraphNode (placed in its own node_group, so
+    it can live on a different GPU than the encoder).
+
+    Why this matters for placement: the encoder typically runs on the
+    Thinker's rank, so today's prefill_vision is encoder -> Thinker (same
+    GPU, no transfer). If a future config moves the encoder onto the Talker's
+    rank instead, the unmerged patch tensor is 4x larger than the merged
+    one, so transferring it cross-rank costs 4x bandwidth. With this flag,
+    the spatial merge can be assigned to the Thinker's rank independently of
+    the encoder, so the cross-rank edge only ever carries the merged tokens.
+
+    For the current 2-GPU config (encoder + spatial_merge + Thinker all on
+    Rank 1) this should be a no-op: the same MLP runs in the same place; only
+    the GraphNode boundary moves. Default OFF -> byte-identical to the
+    current code path. See ``components/vision_encoder.py``
+    (``NativeQwen3OmniVisionEncoder._spatial_merge_split``) and
+    ``submodules.SpatialMergeSubmodule``.
+    """
+    return _envflag("MSTAR_SPATIAL_MERGE_NODE")
+
+
 def _tensor_dump_dir() -> str | None:
     """Directory for env-gated intermediate-tensor / token dumps, or None."""
     import os as _os
@@ -437,13 +460,20 @@ class Qwen3OmniModel(Model):
     # -----------------------------------------------------------------------
 
     def get_node_engine_types(self) -> dict[str, EngineType]:
-        return {
+        types = {
             "audio_encoder": EngineType.STATELESS,
             "vision_encoder": EngineType.STATELESS,
             "Thinker": EngineType.KV_CACHE,
             "Talker": EngineType.KV_CACHE,
             "Code2Wav": EngineType.STATELESS,
         }
+        # MSTAR_SPATIAL_MERGE_NODE=1: surface the spatial-merge node so the
+        # conductor can build a worker graph for it; without this entry the
+        # graph walk would route to an unknown node. Default OFF keeps the
+        # node list byte-identical.
+        if spatial_merge_node_enabled():
+            types["spatial_merge"] = EngineType.STATELESS
+        return types
 
     def get_max_talker_output_tokens(self, **model_kwargs):
         return model_kwargs.get("talker_max_output_tokens", MAX_OUTPUT_TOKENS)
@@ -529,41 +559,92 @@ class Qwen3OmniModel(Model):
             ),
         ])
 
-        prefill_vision = Sequential([
-            GraphNode(
-                name="vision_encoder",
-                # image_grid_thw / video_grid_thw carries the (T, H, W) grid
-                # dimensions per image/video, used by the encoder to compute
-                # spatial position IDs and patch counts.
-                input_names=["pixel_values", "image_grid_thw"],
-                outputs=[
-                    GraphEdge(next_node="Thinker", name="vision_embeds"),
-                    GraphEdge(next_node="Thinker", name="deepstack")
-                ],
-            ),
-            GraphNode(
-                name="Thinker",
-                input_names=["vision_embeds", "deepstack", "video_second_per_grid", "image_grid_thw"],
-                outputs=[
-                    GraphEdge(
-                        next_node=EMIT_TO_CLIENT,
-                        name="new_token",
-                        output_modality="text",
-                        persist=True,
-                    ),
-                    StreamingGraphEdge(
-                        next_node="Talker",
-                        name="thinker_states",
-                        target_partition="Talker",
-                    ),
-                    StreamingGraphEdge(
-                        next_node="Talker",
-                        name="thinker_mask",
-                        target_partition="Talker",
-                    ),
-                ],
-            ),
-        ])
+        # MSTAR_SPATIAL_MERGE_NODE=1 inserts an intermediate ``spatial_merge``
+        # node between the vision encoder and the Thinker. The encoder then
+        # emits ``vision_unmerged`` (the pre-merger tokens, 4x more rows than
+        # ``vision_embeds``) plus ``deepstack`` going to two destinations: the
+        # merger handles the 4->1 reduction; the deepstack list bypasses it
+        # since the deepstack mergers stay inside the encoder block loop.
+        if spatial_merge_node_enabled():
+            prefill_vision = Sequential([
+                GraphNode(
+                    name="vision_encoder",
+                    input_names=["pixel_values", "image_grid_thw"],
+                    outputs=[
+                        GraphEdge(next_node="spatial_merge", name="vision_unmerged"),
+                        # deepstack goes straight to the Thinker (post-merger
+                        # reductions interleaved inside the block loop already
+                        # produced merged-shape tensors).
+                        GraphEdge(next_node="spatial_merge", name="deepstack"),
+                    ],
+                ),
+                GraphNode(
+                    name="spatial_merge",
+                    input_names=["vision_unmerged", "deepstack"],
+                    outputs=[
+                        GraphEdge(next_node="Thinker", name="vision_embeds"),
+                        GraphEdge(next_node="Thinker", name="deepstack"),
+                    ],
+                ),
+                GraphNode(
+                    name="Thinker",
+                    input_names=["vision_embeds", "deepstack", "video_second_per_grid", "image_grid_thw"],
+                    outputs=[
+                        GraphEdge(
+                            next_node=EMIT_TO_CLIENT,
+                            name="new_token",
+                            output_modality="text",
+                            persist=True,
+                        ),
+                        StreamingGraphEdge(
+                            next_node="Talker",
+                            name="thinker_states",
+                            target_partition="Talker",
+                        ),
+                        StreamingGraphEdge(
+                            next_node="Talker",
+                            name="thinker_mask",
+                            target_partition="Talker",
+                        ),
+                    ],
+                ),
+            ])
+        else:
+            prefill_vision = Sequential([
+                GraphNode(
+                    name="vision_encoder",
+                    # image_grid_thw / video_grid_thw carries the (T, H, W) grid
+                    # dimensions per image/video, used by the encoder to compute
+                    # spatial position IDs and patch counts.
+                    input_names=["pixel_values", "image_grid_thw"],
+                    outputs=[
+                        GraphEdge(next_node="Thinker", name="vision_embeds"),
+                        GraphEdge(next_node="Thinker", name="deepstack")
+                    ],
+                ),
+                GraphNode(
+                    name="Thinker",
+                    input_names=["vision_embeds", "deepstack", "video_second_per_grid", "image_grid_thw"],
+                    outputs=[
+                        GraphEdge(
+                            next_node=EMIT_TO_CLIENT,
+                            name="new_token",
+                            output_modality="text",
+                            persist=True,
+                        ),
+                        StreamingGraphEdge(
+                            next_node="Talker",
+                            name="thinker_states",
+                            target_partition="Talker",
+                        ),
+                        StreamingGraphEdge(
+                            next_node="Talker",
+                            name="thinker_mask",
+                            target_partition="Talker",
+                        ),
+                    ],
+                ),
+            ])
 
         # -- Thinker decode: produces new_token (persist) + thinker_states
         #    (streaming to Talker) --
@@ -1724,6 +1805,8 @@ class Qwen3OmniModel(Model):
             return self._create_audio_encoder_submodule(device)
         elif node_name == "vision_encoder":
             return self._create_vision_encoder_submodule(device)
+        elif node_name == "spatial_merge":
+            return self._create_spatial_merge_submodule(device)
         return None
 
     @staticmethod
@@ -2035,7 +2118,14 @@ class Qwen3OmniModel(Model):
                 NativeQwen3OmniVisionEncoder,
             )
             from mstar.model.qwen3_omni.submodules import NativeVisionEncoderSubmodule
-            vision_encoder = NativeQwen3OmniVisionEncoder(vision_config).to(device)
+            # MSTAR_SPATIAL_MERGE_NODE=1: build the encoder WITHOUT its trailing
+            # 4->1 merger so the matching ``thinker.visual.merger.*`` weights
+            # are not consumed here — they live on the ``spatial_merge`` node's
+            # own module (loaded in ``_create_spatial_merge_submodule``).
+            split = spatial_merge_node_enabled()
+            vision_encoder = NativeQwen3OmniVisionEncoder(
+                vision_config, split_spatial_merge=split,
+            ).to(device)
             load_weights_from_hf_shards(
                 repo_dir=self.local_dir,
                 modules=[ModuleAndPrefix(vision_encoder, prefix="thinker.visual")],
@@ -2072,3 +2162,31 @@ class Qwen3OmniModel(Model):
 
         from mstar.model.qwen3_omni.submodules import VisionEncoderSubmodule
         return VisionEncoderSubmodule(vision_encoder=vision_encoder, config=self.config)
+
+    def _create_spatial_merge_submodule(self, device: str) -> NodeSubmodule:
+        """Build the standalone spatial-merge node (MSTAR_SPATIAL_MERGE_NODE=1).
+
+        Owns only the final ``thinker.visual.merger.*`` weights — the
+        post-block-loop 4->1 reduction MLP that the native encoder used to
+        execute as its last step. Lives in its own node_group so the YAML
+        config can place it on whichever rank the Thinker uses (today: same
+        rank as the encoder, no-op; future: encoder on Talker's rank still
+        keeps the merged-token edge to Thinker 4x smaller than carrying the
+        unmerged tensor would).
+        """
+        from mstar.model.qwen3_omni.components.vision_encoder import (
+            VisionPatchMerger,
+        )
+        from mstar.model.qwen3_omni.submodules import SpatialMergeSubmodule
+        from mstar.model.utils import ModuleAndPrefix, load_weights_from_hf_shards
+
+        spatial_merger = VisionPatchMerger(
+            self.config.vision, use_postshuffle_norm=False,
+        ).to(device)
+        load_weights_from_hf_shards(
+            repo_dir=self.local_dir,
+            modules=[ModuleAndPrefix(spatial_merger, prefix="thinker.visual.merger")],
+            device=device,
+        )
+        spatial_merger.eval()
+        return SpatialMergeSubmodule(spatial_merger=spatial_merger, config=self.config)
