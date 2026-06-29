@@ -657,8 +657,11 @@ class ThinkerSubmodule(ARNodeSubmodule):
             grid_thw = inputs.get("image_grid_thw", [None])[0]
             seconds_per_grid = inputs.get("video_second_per_grid", [])
             seconds_per_grid = seconds_per_grid[0].item() if seconds_per_grid else None
+            # Keep grid_thw on CPU: get_rope_index_vision only reads scalar grid
+            # values (now CPU no-ops) and builds every tensor with device=device,
+            # so the .to(device) here only induced GPU->CPU .item() syncs in rope.
             vision_pos_ids = get_rope_index_vision(
-                grid_thw.to(device),
+                grid_thw,
                 start_pos + 1,  # leave room for the BOS token
                 position_id_per_seconds=self.config.thinker.position_id_per_seconds,
                 device=device,
@@ -668,7 +671,27 @@ class ThinkerSubmodule(ARNodeSubmodule):
 
             # Sentinel token positions (text-like).
             start_pos_ids = get_rope_index_text(1, start_pos, device)
-            end_pos_base = float(vision_pos_ids.max().item()) + 1
+            # Derive end_pos_base from the spatial grid on CPU instead of a GPU
+            # max-reduction over vision_pos_ids (which forces a device sync).
+            # Mirrors get_rope_index_vision: spatial max = max(llm_h-1, llm_w-1)
+            # + vstart; temporal max = vstart (still image) or
+            # (grid_t-1) * seconds_per_grid * position_id_per_seconds (video).
+            vstart = start_pos + 1
+            sms = self.config.vision.spatial_merge_size
+            _grid = grid_thw if grid_thw.dim() == 2 else grid_thw.unsqueeze(0)
+            _max_pos = float("-inf")
+            for _row in _grid:
+                gt, gh, gw = int(_row[0]), int(_row[1]), int(_row[2])
+                spatial_max = max(gh // sms, gw // sms) - 1 + vstart
+                if seconds_per_grid is None:
+                    temporal_max = vstart
+                else:
+                    temporal_max = (
+                        (gt - 1) * seconds_per_grid
+                        * self.config.thinker.position_id_per_seconds
+                    )
+                _max_pos = max(_max_pos, spatial_max, temporal_max)
+            end_pos_base = float(_max_pos) + 1
             end_pos_ids = get_rope_index_text(1, end_pos_base, device)
 
             pos_ids = torch.cat(
