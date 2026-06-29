@@ -96,6 +96,12 @@ class MicroScheduler:
             )
         except ValueError:
             self._coalesce_max_batch = 32
+        # Coalescing window stats — lightweight counters logged periodically so
+        # operators can observe effectiveness and tune the window parameters.
+        self._coalesce_invocations = 0
+        self._coalesce_total_batched = 0
+        self._coalesce_preempted = 0      # aborted early due to higher-prio node
+        self._coalesce_log_interval = 200  # log every N invocations
         if self._coalesce_enabled:
             logger.info(
                 "MicroScheduler: encoder coalescing ON (wait=%.1fms max_batch=%d nodes=%s)",
@@ -328,6 +334,9 @@ class MicroScheduler:
 
         entries = initial_entries
         if len(entries) >= cap:
+            # Fast path: already at cap, no need to wait. Still track stats.
+            self._coalesce_invocations += 1
+            self._coalesce_total_batched += len(entries)
             return entries
 
         deadline = time.monotonic() + self._coalesce_wait_s
@@ -351,12 +360,26 @@ class MicroScheduler:
             # Don't starve latency-critical decode: if a higher-priority node
             # became ready during the wait, stop accumulating and dispatch now.
             if self._has_higher_priority_ready(node_name_to_requests, node_name):
+                self._coalesce_preempted += 1
                 break
 
+        # Track stats
+        final_count = len(entries)
+        self._coalesce_invocations += 1
+        self._coalesce_total_batched += final_count
         if entries:
             logger.debug(
                 "MicroScheduler coalesced %d encoder requests for node %s walk %s",
-                len(entries), node_name, graph_walk,
+                final_count, node_name, graph_walk,
+            )
+        if self._coalesce_invocations % self._coalesce_log_interval == 0:
+            avg = (
+                self._coalesce_total_batched / self._coalesce_invocations
+                if self._coalesce_invocations > 0 else 0.0
+            )
+            logger.info(
+                "MicroScheduler coalesce stats: invocations=%d avg_batch=%.1f preempted=%d",
+                self._coalesce_invocations, avg, self._coalesce_preempted,
             )
         return entries
 
