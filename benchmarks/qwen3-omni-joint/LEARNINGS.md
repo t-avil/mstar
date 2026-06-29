@@ -407,3 +407,121 @@ benchmark/sweep.sh --system mstar_new --gpus 0,1 --port 8160 \
     --worktree /path/to/integration-mnew \
     --output /tmp/sweep_mnew
 ```
+
+---
+
+## 9. Round 2 experiments (2026-06-29)
+
+After the M\*-new combined vision opts shipped, three new experiments were tried,
+branched off `opt/combined-vision-opts` @ `e943d72`. Branches: `exp/encoder-placement-profiling`,
+`exp/encoder-async-schedule`, `exp/encoder-chunk-coalesce`. Each has its own RESULTS.md.
+
+### 9.1 Encoder placement profiling — `exp/encoder-placement-profiling`
+
+**Behind**: `MSTAR_PROFILE_ENCODER_PLACEMENT=1`.
+
+**What**: Per-stage timestamps for I2T (preprocess / vision_fwd / handoff / e2e), dumped
+to JSONL. Not an optimization, a measurement. Goal was to find out where time actually
+went after the GPU image preprocess opt landed.
+
+**Result** (I2T B=1..32, 1025 requests):
+| Stage | Median time |
+|---|---|
+| preprocess (GPU resize+patchify) | **130 ms** |
+| vision_fwd (ViT) | 30 ms |
+| handoff (encoder → Thinker) | 0.03 ms |
+| total e2e at B=1 | 4812 ms |
+| **encoder share of e2e** | **3-10%** |
+
+**Lesson**: The encoder is **not** the bottleneck — the Thinker is. Preprocess is 5× the
+vision encoder itself, and even both together are <10% of total request time at any
+batch. Future optimizations should target the Thinker, not the encoder.
+
+### 9.2 Async encoder scheduling — `exp/encoder-async-schedule`
+
+**Behind**: `MSTAR_ENCODER_ASYNC=1` (default OFF), `MSTAR_ENCODER_ASYNC_DEPTH=4`.
+
+**What**: Pipeline the encoder. Start request N+1's encoder forward while request N is
+still in Thinker decode, on a low-priority CUDA stream. Cap at K in-flight encoded
+buffers.
+
+**Result — path-dependent**:
+| Path | Verdict | B=32 result |
+|---|---|---|
+| I2T | **PROMISING** | +7.4% req/s, **-30% text TTFT** |
+| S2T | NEGATIVE | -18% req/s, +8% TTFT |
+| I2S | NEUTRAL | req/s flat, audio TTFT flat |
+
+**Why path-dependent**: async helps when the encoder is slow enough that hiding it
+behind decode is worth the speculation overhead.
+- Vision: preprocess + ViT ≈ 160 ms → worth hiding behind ~700 ms decode at B=32.
+- Audio: mel + audio encoder ≈ 10-20 ms (already GPU) → speculation overhead exceeds
+  hidden work, causes scheduler contention with decode.
+- Speech output: text-side gains exist but Talker+Code2Wav serializer eats them before
+  audio reaches the user.
+
+**Lesson**: Don't treat "async encoder" as a global on/off. The path of the request
+determines whether speculation pays off. **Ship as opt-in for vision-input text-output
+workloads** (I2T-style) at B ≥ 16. Do not enable for audio input or speech output.
+
+### 9.3 Chunk-boundary encoder coalescing — `exp/encoder-chunk-coalesce`
+
+**Behind**: `MSTAR_ENCODER_CHUNK_COALESCE=1`, `MSTAR_ENCODER_COALESCE_SIZE=4`.
+
+**What**: Replace the previous failed *time-based* coalescing (§3.2) with a coalescer
+that flushes its pending encoder queue at **Thinker prefill-walk boundaries** instead
+of on a wall-clock timer. Boundaries are natural batch-formation windows.
+
+**Result**:
+| Path | B=1 | B=8 | B=16 | B=32 | Verdict |
+|---|---|---|---|---|---|
+| I2T | +8% req/s, -22% TTFT (PROMISING) | -0.7% | -0.4% | -1.6% | NEUTRAL overall |
+| S2T | -3.8% | +8.8% (noise; B=4,16 around it neutral) | -1.5% | -5.0% | NEUTRAL overall |
+
+TTFT improvements at low batches are small but real (-8% to -22% on I2T). Throughput is
+mostly flat. The chunk-boundary hook fires at the right place, but on the `e943d72`
+base the only chunk boundaries are inter-walk (e.g. `prefill_audio → prefill_text`) —
+not intra-prefill. The coalescer rarely accumulates a meaningful batch.
+
+**Lesson**: This optimization is structurally sound but needs single-walk chunked prefill
+to truly shine. **Park** until intra-prefill chunking lands; revisit when the chunk-boundary
+signal fires multiple times per request.
+
+### 9.4 Cross-experiment patterns
+
+Several methodology lessons emerged from running these three in parallel:
+
+- **MVP tests at low batch can mislead.** Exp 2's MVP at B=1,8 showed NEUTRAL on I2T,
+  but the full sweep revealed PROMISING at B=32. Always test the regime where the
+  optimization is theoretically supposed to help, not just the small-batch convenience
+  regime.
+
+- **Server-ready races bite when teardown is slow.** Multiple sweeps had A→B
+  transitions where the new server's `/v1/models` curl hit the dying A server's still-up
+  API, giving false "ready in 1s" + contaminated bench results. Mitigation: wait for
+  worker GPU memory to drop AND check the new server log contains its own
+  startup marker before benching.
+
+- **SHM socket prefix must be unique per concurrent server.** Otherwise concurrent
+  mstar serves collide on the default socket path. Always pass `--socket-path-prefix`.
+
+- **HF cache permissions matter.** The shared `/m-coriander/coriander/hf` has datasets
+  owned by other users with restrictive locks. Set `HF_DATASETS_CACHE=/home/tim/hf_datasets`
+  to keep dataset locks under your own UID. Don't change `HF_HOME` — model weights still
+  live in the shared path.
+
+- **B-only sweep vs committed baseline is good enough** for ±5% effects when the
+  experiment branch and baseline share GPU pair and NUMA. Saves an hour per experiment
+  vs full A/B.
+
+### 9.5 Recommended M\*-new v2 configuration
+
+Based on Round 2, the ideal deployed M\*-new should be `opt/combined-vision-opts` plus
+**path-gated** async encoder:
+- I2T, I2I (vision input, text output): `MSTAR_ENCODER_ASYNC=1` (+5-7% req/s, -10-30% TTFT at B≥16)
+- S2T, S2S (audio input): leave OFF (avoids the -18% S2T regression)
+- I2S, S2S (speech output): either way — gains don't propagate through Talker+Code2Wav
+
+A future code change should make this gating automatic (e.g. enable async when the
+encoder is the heavy one for the dispatched request), so operators don't need per-deployment
+env tuning.
