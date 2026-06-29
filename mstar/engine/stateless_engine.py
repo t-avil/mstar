@@ -520,6 +520,7 @@ class StatelessEngine(BaseEngine):
                 submodule.forward = torch.compile(
                     submodule.forward,
                     fullgraph=False,
+                    dynamic=True,
                 )
                 logger.info(
                     "StatelessEngine[%s]: torch.compile applied to %s.forward",
