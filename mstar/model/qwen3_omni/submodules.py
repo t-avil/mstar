@@ -27,6 +27,11 @@ from mstar.engine.cuda_graph_config import FlashInferPackedCudaGraphConfig
 from mstar.engine.cuda_graph_runner import BasicBatchedCudaGraphConfig
 from mstar.engine.kv_store import PositionInfo
 from mstar.model.qwen3_omni.components.code2wav import Qwen3OmniMoeCode2Wav
+from mstar.model.qwen3_omni.encoder_cache import (
+    content_hash as _enc_content_hash,
+    get_cache as _get_encoder_cache,
+    is_enabled as _encoder_cache_enabled,
+)
 from mstar.model.qwen3_omni.components.rope import (
     compute_3d_cos_sin,
     compute_rope_freqs,
@@ -97,6 +102,19 @@ class AudioEncoderSubmodule(NodeSubmodule):
             "Running AudioEncoder with audio_features shape=%s",
             audio_features.shape,
         )
+        # Encoder output cache (E2): hash the raw audio inputs and short-circuit
+        # the forward when an identical clip has been encoded before. OFF by
+        # default; flag = MSTAR_ENCODER_CACHE=1.
+        cache_enabled = _encoder_cache_enabled()
+        cache_key: str | None = None
+        if cache_enabled:
+            cache = _get_encoder_cache()
+            cache_key = _enc_content_hash(audio_features, audio_seqlens)
+            hit = cache.get("audio", cache_key)
+            if hit is not None:
+                logger.debug("AudioEncoder cache HIT key=%s", cache_key[:12])
+                return {"audio_embeds": [t for t in hit["audio_embeds"]]}
+
         audio_embeds = self.audio_encoder(
             audio_features,
             feature_lens=audio_seqlens,
@@ -107,7 +125,10 @@ class AudioEncoderSubmodule(NodeSubmodule):
         if audio_embeds.dim() == 3:
             audio_embeds = audio_embeds.squeeze(0)
 
-        return {"audio_embeds": [audio_embeds]}
+        result = {"audio_embeds": [audio_embeds]}
+        if cache_enabled and cache_key is not None:
+            _get_encoder_cache().put("audio", cache_key, result)
+        return result
 
 
 class NativeAudioEncoderSubmodule(NodeSubmodule):
@@ -155,25 +176,81 @@ class NativeAudioEncoderSubmodule(NodeSubmodule):
 
     def forward_batched(self, graph_walk, engine_inputs, audio_features,
                         audio_seqlens, req_token_counts=None, **kwargs):
-        embeds = self.audio_encoder(audio_features, audio_seqlens).last_hidden_state
-        if embeds.dim() == 3:
-            embeds = embeds.squeeze(0)
         request_ids = engine_inputs.request_ids
         if req_token_counts is None:  # single-segment-per-request fallback
             req_token_counts = [self._req_token_count(audio_seqlens[i:i + 1])
                                 for i in range(len(request_ids))]
+
+        # Encoder output cache (E2): for the cross-request batched path we hash
+        # each request's slice and look up; on a full-batch hit, skip the
+        # encoder forward entirely. Mixed hit/miss batches still run the full
+        # forward — splitting the batch would unwind the very batching win the
+        # native encoder buys us. OFF by default.
+        if _encoder_cache_enabled():
+            cache = _get_encoder_cache()
+            # Per-request hashing: re-build the per-request mel slice key.
+            # audio_features is concatenated along dim=1; we don't have the
+            # original per-rid segmentation here, so we hash the global
+            # concatenation under a composite key per request (still safe: the
+            # same set of requests in the same order will rehit).
+            keys: list[str | None] = []
+            all_hit = True
+            cached_outs: list[dict[str, list[torch.Tensor]] | None] = []
+            sl = audio_seqlens.reshape(-1)
+            off_feat = 0
+            for i, rid in enumerate(request_ids):
+                this_len = int(sl[i].item()) if sl.numel() > i else 0
+                # Hash the per-rid mel slice + this rid's seqlen.
+                feat_slice = audio_features[:, off_feat:off_feat + this_len]
+                off_feat += this_len
+                key = _enc_content_hash(feat_slice, sl[i:i + 1])
+                keys.append(key)
+                hit = cache.get("audio", key)
+                cached_outs.append(hit)
+                if hit is None:
+                    all_hit = False
+            if all_hit:
+                logger.debug("NativeAudioEncoder batched cache HIT-ALL bs=%d", len(request_ids))
+                results: dict[str, NameToTensorList] = {}
+                for rid, hit in zip(request_ids, cached_outs, strict=False):
+                    assert hit is not None
+                    results[rid] = {"audio_embeds": [t for t in hit["audio_embeds"]]}
+                return results
+        else:
+            keys = [None] * len(request_ids)
+
+        embeds = self.audio_encoder(audio_features, audio_seqlens).last_hidden_state
+        if embeds.dim() == 3:
+            embeds = embeds.squeeze(0)
         results: dict[str, NameToTensorList] = {}
         off = 0
-        for rid, c in zip(request_ids, req_token_counts, strict=False):
+        for i, (rid, c) in enumerate(zip(request_ids, req_token_counts, strict=False)):
             results[rid] = {"audio_embeds": [embeds[off:off + c]]}
+            if _encoder_cache_enabled() and keys[i] is not None:
+                _get_encoder_cache().put("audio", keys[i], results[rid])
             off += c
         return results
 
     def forward(self, graph_walk, engine_inputs, audio_features, audio_seqlens, **kwargs):
+        # Encoder output cache (E2): per-request sequential path. See
+        # encoder_cache.py for the rationale. OFF by default.
+        cache_enabled = _encoder_cache_enabled()
+        cache_key: str | None = None
+        if cache_enabled:
+            cache = _get_encoder_cache()
+            cache_key = _enc_content_hash(audio_features, audio_seqlens)
+            hit = cache.get("audio", cache_key)
+            if hit is not None:
+                logger.debug("NativeAudioEncoder cache HIT key=%s", cache_key[:12])
+                return {"audio_embeds": [t for t in hit["audio_embeds"]]}
+
         embeds = self.audio_encoder(audio_features, audio_seqlens).last_hidden_state
         if embeds.dim() == 3:
             embeds = embeds.squeeze(0)
-        return {"audio_embeds": [embeds]}
+        result = {"audio_embeds": [embeds]}
+        if cache_enabled and cache_key is not None:
+            _get_encoder_cache().put("audio", cache_key, result)
+        return result
 
     def can_batch(self, batch: NodeBatch, model_inputs: list[NodeInputs]) -> bool:
         # Safe pad-free batching needs one feature_lens entry per request so the
@@ -262,6 +339,22 @@ class VisionEncoderSubmodule(NodeSubmodule):
             "Running VisionEncoder with pixel_values shape=%s, grid_thw shape=%s",
             pixel_values.shape, grid_thw.shape,
         )
+        # Encoder output cache (E2): vision path. Hash includes grid_thw since
+        # the same pixel_values reshaped under a different grid would produce
+        # different token splits. OFF by default.
+        cache_enabled = _encoder_cache_enabled()
+        cache_key: str | None = None
+        if cache_enabled:
+            cache = _get_encoder_cache()
+            cache_key = _enc_content_hash(pixel_values, grid_thw)
+            hit = cache.get("vision", cache_key)
+            if hit is not None:
+                logger.debug("VisionEncoder cache HIT key=%s", cache_key[:12])
+                return {
+                    "vision_embeds": [t for t in hit["vision_embeds"]],
+                    "deepstack": [t for t in hit["deepstack"]],
+                }
+
         # HF vision encoder returns (hidden_states, deepstack_features)
         # depending on the model variant; handle both cases
         encoder_output = self.vision_encoder(
@@ -278,10 +371,13 @@ class VisionEncoderSubmodule(NodeSubmodule):
         if isinstance(deepstack, torch.Tensor):
             deepstack = [deepstack]
 
-        return {
+        result = {
             "vision_embeds": [vision_embeds],
             "deepstack": deepstack if deepstack is not None else [torch.tensor([])],
         }
+        if cache_enabled and cache_key is not None:
+            _get_encoder_cache().put("vision", cache_key, result)
+        return result
 
 
 class NativeVisionEncoderSubmodule(NodeSubmodule):
@@ -339,27 +435,81 @@ class NativeVisionEncoderSubmodule(NodeSubmodule):
 
     def forward_batched(self, graph_walk, engine_inputs, pixel_values, grid_thw,
                         req_token_counts=None, **kwargs):
-        embeds, deepstack = self._run(pixel_values, grid_thw)
         request_ids = engine_inputs.request_ids
+        g_full = grid_thw if grid_thw.dim() == 2 else grid_thw.unsqueeze(0)
         if req_token_counts is None:  # one-image-per-request fallback
-            g = grid_thw if grid_thw.dim() == 2 else grid_thw.unsqueeze(0)
-            req_token_counts = [self._merged_tokens(g[i:i + 1]) for i in range(len(request_ids))]
+            req_token_counts = [self._merged_tokens(g_full[i:i + 1]) for i in range(len(request_ids))]
+
+        # Encoder output cache (E2): batched vision. Hash each rid's
+        # (pixel_values slice, grid_thw row); on full-batch hit, skip forward.
+        # Mixed batches still run full forward — same trade-off as the audio
+        # path. OFF by default.
+        if _encoder_cache_enabled():
+            cache = _get_encoder_cache()
+            keys: list[str | None] = []
+            cached_outs: list[dict[str, list[torch.Tensor]] | None] = []
+            all_hit = True
+            # pixel_values rows-per-rid are (T*H*W) per their grid_thw row.
+            row_off = 0
+            for i, rid in enumerate(request_ids):
+                rows = int(g_full[i, 0] * g_full[i, 1] * g_full[i, 2])
+                pv_slice = pixel_values[row_off:row_off + rows]
+                row_off += rows
+                key = _enc_content_hash(pv_slice, g_full[i:i + 1])
+                keys.append(key)
+                hit = cache.get("vision", key)
+                cached_outs.append(hit)
+                if hit is None:
+                    all_hit = False
+            if all_hit:
+                logger.debug("NativeVisionEncoder batched cache HIT-ALL bs=%d", len(request_ids))
+                results: dict[str, NameToTensorList] = {}
+                for rid, hit in zip(request_ids, cached_outs, strict=False):
+                    assert hit is not None
+                    results[rid] = {
+                        "vision_embeds": [t for t in hit["vision_embeds"]],
+                        "deepstack": [t for t in hit["deepstack"]],
+                    }
+                return results
+        else:
+            keys = [None] * len(request_ids)
+
+        embeds, deepstack = self._run(pixel_values, grid_thw)
         results: dict[str, NameToTensorList] = {}
         off = 0
-        for rid, c in zip(request_ids, req_token_counts, strict=False):
+        for i, (rid, c) in enumerate(zip(request_ids, req_token_counts, strict=False)):
             results[rid] = {
                 "vision_embeds": [embeds[off:off + c]],
                 "deepstack": [d[off:off + c] for d in deepstack],
             }
+            if _encoder_cache_enabled() and keys[i] is not None:
+                _get_encoder_cache().put("vision", keys[i], results[rid])
             off += c
         return results
 
     def forward(self, graph_walk, engine_inputs, pixel_values, grid_thw, **kwargs):
+        # Encoder output cache (E2): per-request sequential path. OFF by default.
+        cache_enabled = _encoder_cache_enabled()
+        cache_key: str | None = None
+        if cache_enabled:
+            cache = _get_encoder_cache()
+            cache_key = _enc_content_hash(pixel_values, grid_thw)
+            hit = cache.get("vision", cache_key)
+            if hit is not None:
+                logger.debug("NativeVisionEncoder cache HIT key=%s", cache_key[:12])
+                return {
+                    "vision_embeds": [t for t in hit["vision_embeds"]],
+                    "deepstack": [t for t in hit["deepstack"]],
+                }
+
         embeds, deepstack = self._run(pixel_values, grid_thw)
-        return {
+        result = {
             "vision_embeds": [embeds],
             "deepstack": deepstack if deepstack else [torch.tensor([])],
         }
+        if cache_enabled and cache_key is not None:
+            _get_encoder_cache().put("vision", cache_key, result)
+        return result
 
     def can_batch(self, batch: NodeBatch, model_inputs: list[NodeInputs]) -> bool:
         return True
