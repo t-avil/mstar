@@ -286,6 +286,13 @@ class Worker:
             tuple[str, torch.dtype, tuple[int, ...]], list[torch.Tensor]
         ] = defaultdict(list)
 
+        # MSTAR_ENCODER_ASYNC: low-priority side stream for speculative encoder
+        # forwards. Lazy-init via ``_get_encoder_async_stream`` (so the flag
+        # can be flipped between init and run() without a restart for tests,
+        # and so workers without CUDA never allocate a stream they can't
+        # back). See ``_execute_on_gpu_thread`` for the dispatch site.
+        self._encoder_async_stream: "torch.cuda.Stream | None" = None
+
         # Streaming buffers: request_id -> edge_name -> list of tensors
         # (Legacy path — kept for models without PartitionTopology)
         self.streaming_buffers: dict[str, dict[str, list[torch.Tensor]]] = {}
@@ -484,6 +491,14 @@ class Worker:
 
         for node_name in self.engine_manager.lru_tracked_nodes():
             self._last_active.pop((body.request_id, node_name), None)
+
+        # If the removed request had an encoder forward dispatched but the
+        # Thinker prefill step that would consume that buffer never ran, the
+        # encoder-async depth counter would otherwise leak. Conservatively
+        # release one credit on every remove — the helper no-ops when the
+        # flag is off, or when the counter is already at zero (so a remove
+        # for a request that had no encoder step is harmless).
+        self.scheduler.release_encoder_async_credit()
 
     def _handle_tensor_received(self, body: TensorReceived) -> None:
         """Sender-side cleanup: receiver confirmed RDMA read, free source buffers."""
@@ -1155,6 +1170,41 @@ class Worker:
         engine = self.engine_manager.get_engine(spec_node_batch.node_name)
         engine.reset_pre_plan_for_batch(spec_node_batch)
 
+    def _get_encoder_async_stream(self) -> "torch.cuda.Stream | None":
+        """Lazily allocate the low-priority CUDA stream used for the encoder
+        forward when ``MSTAR_ENCODER_ASYNC=1``.
+
+        Using a non-default stream with the lowest priority lets the encoder
+        forward overlap with concurrent Thinker decode kernels (which keep
+        running on the default, higher-priority stream). The driver still
+        time-slices SM occupancy, but the lower-priority stream is preferred
+        when the queue is contended, so the encoder is a "good citizen"
+        relative to latency-sensitive decode steps.
+
+        Returns ``None`` when CUDA is unavailable (e.g. tests on CPU), in
+        which case we fall through to default-stream execution — the
+        speculative dispatch still helps by being scheduled earlier even if
+        it can't physically overlap.
+        """
+        if not torch.cuda.is_available():
+            return None
+        if getattr(self, "_encoder_async_stream", None) is None:
+            # priority=0 is the lowest priority (numerically larger = lower
+            # priority in CUDA's API). We deliberately don't pick the most
+            # extreme priority via ``get_stream_priority_range`` because the
+            # range can be empty on non-Tesla devices; the default low value
+            # is universally supported.
+            try:
+                self._encoder_async_stream = torch.cuda.Stream(
+                    device=self.device, priority=0,
+                )
+            except (TypeError, RuntimeError):
+                # Some builds may not accept the priority kwarg or device kw.
+                # Fallback to a plain side stream — still gets us the
+                # non-default-stream benefit even if priority isn't honored.
+                self._encoder_async_stream = torch.cuda.Stream()
+        return self._encoder_async_stream
+
     def _execute_on_gpu_thread(
         self,
         batch: ScheduledBatch,
@@ -1172,6 +1222,12 @@ class Worker:
         After ``execute_with_max_batch_size`` returns we record a CUDA event
         on the default stream and stash it on the output. Downstream sync
         points on the main thread wait on this event.
+
+        When MSTAR_ENCODER_ASYNC=1 and the batch is an encoder node
+        (``vision_encoder`` / ``audio_encoder``), we run the forward on a
+        dedicated low-priority side stream and record the completion event
+        on that stream. The downstream Thinker step waits on the event
+        (not on the default stream), so the two can physically overlap.
         """
         from mstar.utils.profiler import range_pop, range_push
 
@@ -1201,7 +1257,50 @@ class Worker:
                 f"worker[{self.worker_id}].node[{batch.node_name}].graph_walk[{batch.graph_walk}]",
                 synchronize=False,
             )
+
+        # MSTAR_ENCODER_ASYNC: run encoder nodes on a low-priority side stream
+        # so the kernels can overlap with Thinker decode running on the
+        # default stream. ``encoder_async_enabled`` is cached at scheduler
+        # construction; the cheap attribute lookup keeps the non-encoder hot
+        # path unchanged.
+        use_side_stream = (
+            getattr(self.scheduler, "encoder_async_enabled", False)
+            and batch.node_name in ("vision_encoder", "audio_encoder")
+            and torch.cuda.is_available()
+        )
         try:
+            if use_side_stream:
+                side_stream = self._get_encoder_async_stream()
+                if side_stream is None:
+                    # CUDA disappeared between the flag check and stream
+                    # allocation — degrade gracefully to default-stream
+                    # execution. This is the same fallback the rest of the
+                    # worker uses when ``torch.cuda.is_available()`` flips.
+                    output = engine.execute_with_max_batch_size(node_batch)
+                    if torch.cuda.is_available():
+                        event = torch.cuda.Event()
+                        event.record(torch.cuda.default_stream(self.device))
+                        output.completion_event = event
+                    return output
+                # Make the side stream wait for any default-stream work that
+                # produced the encoder's inputs (pixel_values / audio_features
+                # land on the default stream when the data worker pushes
+                # them in). Without this fence the encoder kernel could
+                # race the H2D copy.
+                side_stream.wait_stream(torch.cuda.default_stream(self.device))
+                with torch.cuda.stream(side_stream):
+                    output = engine.execute_with_max_batch_size(node_batch)
+                event = torch.cuda.Event()
+                event.record(side_stream)
+                output.completion_event = event
+                # Have the default stream wait on the side stream so any
+                # downstream consumer that does NOT explicitly wait on the
+                # completion_event still gets correct ordering. This costs
+                # nothing on the overlap path because the wait is recorded
+                # asynchronously — only kernels submitted to the default
+                # stream AFTER this point are gated.
+                torch.cuda.default_stream(self.device).wait_stream(side_stream)
+                return output
             output = engine.execute_with_max_batch_size(node_batch)
             if torch.cuda.is_available():
                 event = torch.cuda.Event()
