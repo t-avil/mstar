@@ -618,7 +618,35 @@ strictly negative. Park.
 | D5 — spatial-merge GraphNode | -10 to -41% (same-rank) | +200-400% | Park (only worth in cross-rank configs) |
 | E2 — encoder cache | -9 to -27% despite 94% hit rate | +140-260% at B≥8 | Park (wrong layer to cache) |
 
-### 9.8 Where to go next
+### 9.8a M\*-new promoted: opt/combined-lowrisk (1f66ce6)
+
+After Round 2, four additional low-risk opts landed and were swept together as
+`opt/combined-lowrisk`. They form the **new shipping M\*-new**. Branch tip: `1f66ce6`.
+
+New opts added on top of `opt/combined-vision-opts`:
+- `fbc9804` — vision-sync-elim: remove GPU→CPU syncs in `prefill_vision` prepare
+- `10bb1d5` — encoder-internal CUDA graph enabled by default
+- `1f66ce6` — `torch.compile(dynamic=True)` on encoder forward (single shape-poly artifact)
+- `95290f6` — defaults `MSTAR_ENCODER_ASYNC=0` (Round-2 finding: A/B win didn't reproduce)
+
+**Sweep result (all 4 paths, B=1..32, GPUs 5,6 NUMA 1 — same as committed baseline)** vs the
+previous `mstar_new` (combined-vision-opts only). I2T is the headline win — **PROMISING at EVERY batch**:
+
+| Path | B=1 | B=2 | B=4 | B=8 | B=16 | B=32 |
+|---|---|---|---|---|---|---|
+| S2T Δreq/s | -4% | **+5%** | -2% | +2% | -3% | **+8%** |
+| S2T ΔTTFT | -4% | -12% | -9% | -11% | +2% | -5% |
+| **I2T Δreq/s** | **+9%** | **+6%** | **+6%** | +3% | **+5%** | **+6%** |
+| **I2T ΔTTFT** | **-24%** | **-15%** | **-15%** | **-17%** | **-19%** | -1% |
+| S2S Δreq/s | **+7%** | +5% | **+5%** | 0% | +2% | +4% |
+| S2S ΔTTFT | -2% | -8% | -2% | -1% | 0% | -4% |
+| I2S Δreq/s | +1% | -2% | -1% | +4% | +4% | +1% |
+| I2S ΔTTFT | -7% | -9% | -7% | **-13%** | **-10%** | -11% |
+
+Charts and raw data updated: `mstar_new` in `raw_*.json` now points at lowrisk (1f66ce6).
+The previous `combined-vision-opts` baseline is archived as `mstar_new_v1` in the same JSON.
+
+### 9.8b Where to go next
 
 Confirmed by Exp 1 and verified by all Round-2 negatives: **the encoder is not the bottleneck.**
 The Thinker is. Future experiments should target:
