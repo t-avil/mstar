@@ -7,6 +7,7 @@ from enum import Enum
 from mstar.engine.base import EngineType
 from mstar.graph.base import GraphNode
 from mstar.utils.ipc_format import ScheduleTPNode
+from mstar.worker.encoder_coalescer import EncoderCoalescer
 from mstar.worker.engine_manager import EngineManager
 from mstar.worker.node_manager_utils import WorkerGraphsManager
 
@@ -57,6 +58,7 @@ class MicroScheduler:
         sched_type=SchedulingType.ROUND_ROBIN,
         tp_rank_zero_nodes: set[str] | None = None,
         max_consec_tp_follower_batches: int = 1,
+        encoder_coalescer: EncoderCoalescer | None = None,
     ):
         self.engine_manager = engine_manager
         self.batch_number = 0
@@ -74,6 +76,11 @@ class MicroScheduler:
         # Rids with a deferred remove; stop initiating new work for them.
         # Shared by reference with Worker._pending_removes.
         self.pending_removes: set[str] = set()
+
+        # Encoder coalescing (MSTAR_ENCODER_CHUNK_COALESCE=1). When None
+        # (the default), the OFF path is byte-identical to today: every
+        # ``should_defer_encoder`` check returns False.
+        self.encoder_coalescer = encoder_coalescer
 
     def _select_node_priority(
         self, node_name_to_requests: dict[str, list[ReadyNodeEntry]]
@@ -255,6 +262,57 @@ class MicroScheduler:
                         ReadyNodeEntry(request_id, worker_graph_id, graph_walk)
                     )
 
+        # MSTAR_ENCODER_CHUNK_COALESCE: tell the coalescer about every encoder
+        # node that's currently ready (idempotent). Then, for each encoder
+        # node that the coalescer says to defer, drop it from this round's
+        # candidate set so the scheduler picks something else (typically a
+        # Thinker prefill/decode walk). The OFF path skips this entirely.
+        deferred_encoders: list[str] = []
+        if self.encoder_coalescer is not None:
+            for enc_name in ("audio_encoder", "vision_encoder"):
+                entries = node_name_to_requests.get(enc_name)
+                if not entries:
+                    continue
+                for e in entries:
+                    self.encoder_coalescer.observe_ready(enc_name, e.request_id)
+                if not self.encoder_coalescer.should_dispatch(enc_name):
+                    deferred_encoders.append(enc_name)
+                    # Defer this encoder this round; the entries stay queued
+                    # in the worker-graph queues (pop_ready_nodes hasn't been
+                    # called yet), so they'll be re-evaluated next iteration.
+                    node_name_to_requests.pop(enc_name, None)
+
+            # Idle trigger (c): if the only ready work is the encoder(s) we
+            # just deferred, there's nothing else for the scheduler to do —
+            # force a flush. This keeps low-load TTFT honest (B=1: never wait)
+            # and ensures we don't deadlock by deferring forever.
+            if deferred_encoders and not node_name_to_requests:
+                self.encoder_coalescer.on_idle_tick()
+                for enc_name in deferred_encoders:
+                    if self.encoder_coalescer.should_dispatch(enc_name):
+                        # Re-collect: build entries fresh from the ready scan
+                        # we already did. We have to rebuild because the
+                        # candidate set was popped above.
+                        entries_now: list[ReadyNodeEntry] = []
+                        for wg_id, queue in worker_graphs_manager.queues.items():
+                            ready_map = queue.get_ready_node_names()
+                            for rid, names in ready_map.items():
+                                if enc_name not in names:
+                                    continue
+                                if rid in self.pending_removes or rid in self.held_until:
+                                    continue
+                                if rid not in worker_graphs_manager.per_request_info:
+                                    continue
+                                node_partition = worker_graphs_manager.get_partition_for_node(enc_name)
+                                gw = worker_graphs_manager.get_graph_walk(rid, node_partition)
+                                fwd_info = worker_graphs_manager.get_fwd_info(rid, node_partition)
+                                engine = self.engine_manager.get_engine(enc_name)
+                                if not engine.check_ready(enc_name, rid, fwd_info):
+                                    continue
+                                entries_now.append(ReadyNodeEntry(rid, wg_id, gw))
+                        if entries_now:
+                            node_name_to_requests[enc_name] = entries_now
+
         if not node_name_to_requests:
             return None
 
@@ -289,6 +347,17 @@ class MicroScheduler:
 
         if not node_objects:
             return None
+
+        # If we just popped an encoder batch, let the coalescer mark these rids
+        # as flushed (drains its pending queue + bumps the flush-reason counter
+        # used to diagnose NEUTRAL benchmarks).
+        if (
+            self.encoder_coalescer is not None
+            and best_node_name in ("audio_encoder", "vision_encoder")
+        ):
+            self.encoder_coalescer.mark_dispatched(
+                best_node_name, list(node_objects.keys()),
+            )
 
         logger.debug(
             "MicroScheduler scheduling node %s with graph walk %s for %d requests",

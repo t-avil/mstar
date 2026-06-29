@@ -234,9 +234,30 @@ class Worker:
 
         self.is_tp_follower = len(self.tp_nodes - self.tp_rank_zero_nodes) > 0
 
+        # MSTAR_ENCODER_CHUNK_COALESCE: when ON, build a per-worker coalescer
+        # that holds encoder dispatches until a Thinker chunk boundary, a
+        # size cap, or an idle tick fires. OFF -> ``None`` so the scheduler
+        # takes its byte-identical legacy path. See encoder_coalescer.py
+        # for the rationale (LEARNINGS §3.2: timer-based coalescing failed
+        # because the encoder is only ~10-20 ms; chunk boundaries are the
+        # right workload-driven trigger).
+        from mstar.worker.encoder_coalescer import (
+            EncoderCoalescer,
+            encoder_chunk_coalesce_enabled,
+        )
+        self._encoder_coalescer: EncoderCoalescer | None = (
+            EncoderCoalescer() if encoder_chunk_coalesce_enabled() else None
+        )
+        if self._encoder_coalescer is not None:
+            logger.info(
+                "Worker %s: MSTAR_ENCODER_CHUNK_COALESCE=1 (size_cap=%d)",
+                worker_id, self._encoder_coalescer.size_cap,
+            )
+
         self.scheduler = MicroScheduler(
             self.engine_manager,
-            tp_rank_zero_nodes=self.tp_rank_zero_nodes
+            tp_rank_zero_nodes=self.tp_rank_zero_nodes,
+            encoder_coalescer=self._encoder_coalescer,
         )
 
         # Determine store write policy based on worker graph topology
@@ -481,6 +502,12 @@ class Worker:
         self.worker_graphs_manager.remove_request(body.request_id)
         self.tensor_manager.cleanup_request(body.request_id)
         self.streaming_buffers.pop(body.request_id, None)
+
+        # MSTAR_ENCODER_CHUNK_COALESCE: drop from the coalescer's pending
+        # queues too (no-op when the flag is OFF).
+        if self._encoder_coalescer is not None:
+            for enc_name in ("audio_encoder", "vision_encoder"):
+                self._encoder_coalescer.drop(enc_name, body.request_id)
 
         for node_name in self.engine_manager.lru_tracked_nodes():
             self._last_active.pop((body.request_id, node_name), None)
@@ -1783,6 +1810,18 @@ class Worker:
                 partition_name=batch_N.partition,
                 node_speculatively_scheduled=batch_N.batch.node_objects[rid]._speculatively_scheduled
             )
+
+        # CHUNK_BOUNDARY_HOOK (MSTAR_ENCODER_CHUNK_COALESCE):
+        # The Thinker just finished a prefill or decode step on the worker. In
+        # the chunked-prefill build, a "prefill_*" graph walk that yields back
+        # to the scheduler is exactly the chunk-boundary the encoder coalescer
+        # wants to ride: flush pending encoders now so their embeds are ready
+        # for the next Thinker step. We also fire on ``thinker_decode`` (the
+        # Thinker is between steps anyway, so latching the flush here is free
+        # and keeps the encoder queue from sitting through a long decode burst).
+        # No-op when the coalescer is None (flag OFF).
+        if self._encoder_coalescer is not None and batch_N.partition == "Thinker":
+            self._encoder_coalescer.on_chunk_boundary()
 
         if self.enable_nvtx:
             range_pop(synchronize=False)
