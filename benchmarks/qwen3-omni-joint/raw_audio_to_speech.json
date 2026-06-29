@@ -24400,7 +24400,7 @@
           "n": 50,
           "request_throughput": 2.726013672684831,
           "text_token_throughput": null,
-          "audio_throughput": null,
+          "audio_throughput": 8.602140595182435,
           "rtf_mean": 0.12251663034105305,
           "rtf_p50": 0.12235836766851668
         },
@@ -24594,7 +24594,7 @@
           "n": 50,
           "request_throughput": 4.284883391114549,
           "text_token_throughput": null,
-          "audio_throughput": null,
+          "audio_throughput": 12.782985498627257,
           "rtf_mean": 0.16134303816341608,
           "rtf_p50": 0.1575911795620181
         },
@@ -24788,7 +24788,7 @@
           "n": 50,
           "request_throughput": 5.914813246318953,
           "text_token_throughput": null,
-          "audio_throughput": null,
+          "audio_throughput": 17.960330422447505,
           "rtf_mean": 0.22624229183385175,
           "rtf_p50": 0.2135629364839282
         },
@@ -24982,7 +24982,7 @@
           "n": 80,
           "request_throughput": 8.80050927197376,
           "text_token_throughput": null,
-          "audio_throughput": null,
+          "audio_throughput": 27.493822275326337,
           "rtf_mean": 0.2932092024644188,
           "rtf_p50": 0.280842811477461
         },
@@ -25176,7 +25176,7 @@
           "n": 160,
           "request_throughput": 12.730843462303204,
           "text_token_throughput": null,
-          "audio_throughput": null,
+          "audio_throughput": 39.12635764681246,
           "rtf_mean": 0.4149639011393653,
           "rtf_p50": 0.3868668877872584
         },
@@ -25370,7 +25370,7 @@
           "n": 320,
           "request_throughput": 18.48266552519993,
           "text_token_throughput": null,
-          "audio_throughput": null,
+          "audio_throughput": 54.630499615670736,
           "rtf_mean": 0.5943124716399164,
           "rtf_p50": 0.6010131043100309
         },
