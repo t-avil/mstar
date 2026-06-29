@@ -371,7 +371,34 @@ class Qwen3OmniModelConfig:
     code_predictor: CodePredictorConfig = field(default_factory=CodePredictorConfig)
     code2wav: Code2WavConfig = field(default_factory=Code2WavConfig)
 
+    # --- Native encoder toggles ------------------------------------------
+    # Default on: the native mstar audio/vision encoders (batched, decoupled
+    # from transformers) replace the thin HF-wrapper submodules. Set either flag
+    # to False to fall back to the HF wrapper (kept as a reference for one
+    # release so regressions can be bisected). See
+    # mstar/model/qwen3_omni/components/{audio_encoder,vision_encoder}.py.
+    native_audio_encoder: bool = True
+    native_vision_encoder: bool = True
+
     def __post_init__(self) -> None:
+        # Env overrides for the native-encoder toggles, so the M*-old (HF
+        # wrapper) vs M*-new (native) serving comparison can be driven without
+        # editing YAML or constructor kwargs: export
+        # MSTAR_QWEN3_NATIVE_AUDIO_ENCODER=0 / MSTAR_QWEN3_NATIVE_VISION_ENCODER=0
+        # (accepts 0/1/false/true/no/yes). Unset => keep the dataclass default.
+        import os as _os
+
+        def _envflag(name: str, current: bool) -> bool:
+            raw = _os.environ.get(name)
+            if raw is None:
+                return current
+            return raw.strip().lower() in ("1", "true", "yes", "on")
+
+        self.native_audio_encoder = _envflag(
+            "MSTAR_QWEN3_NATIVE_AUDIO_ENCODER", self.native_audio_encoder)
+        self.native_vision_encoder = _envflag(
+            "MSTAR_QWEN3_NATIVE_VISION_ENCODER", self.native_vision_encoder)
+
         # Sanity check: all codec special token IDs must be < the Talker's
         # codec_embedding vocab size (talker_text.vocab_size, typically 3072).
         # HF's class-level defaults for Qwen3OmniMoeTalkerConfig put these

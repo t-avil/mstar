@@ -118,6 +118,12 @@ class Qwen3OmniModel(Model):
         self.config = Qwen3OmniModelConfig.from_pretrained(local_dir)
         self.local_dir = local_dir
 
+        # Allow yaml model_kwargs / constructor kwargs to toggle native encoders
+        # (e.g. model_kwargs: {native_audio_encoder: true, native_vision_encoder: true}).
+        for _flag in ("native_audio_encoder", "native_vision_encoder"):
+            if _flag in kwargs:
+                setattr(self.config, _flag, bool(kwargs[_flag]))
+
         # Tokenizer (Thinker uses a Qwen-family tokenizer)
         self.tokenizer = AutoTokenizer.from_pretrained(
             local_dir, cache_dir=cache_dir, trust_remote_code=True,
@@ -1461,30 +1467,42 @@ class Qwen3OmniModel(Model):
         )
 
     def _create_audio_encoder_submodule(self, device: str) -> NodeSubmodule:
-        """Load the audio encoder (AuT) from HF weights."""
-        # Reuse HF audio encoder directly (Whisper-style, not perf-critical)
+        """Load the audio encoder (AuT) from HF weights.
+
+        Two paths, selected by ``config.native_audio_encoder``:
+          * native (default on): batched, transformers-decoupled mstar module
+            (``NativeAudioEncoderSubmodule``). Numerically matches HF (fp32
+            exact; bf16 within the parity bar).
+          * HF wrapper (fallback/reference, kept for one release).
+        """
         from transformers import AutoConfig
+
+        from mstar.model.utils import ModuleAndPrefix, load_weights_from_hf_shards
+
+        config = AutoConfig.from_pretrained(self.local_dir, trust_remote_code=True)
+        audio_config = config.thinker_config.audio_config
+
+        if getattr(self.config, "native_audio_encoder", False):
+            from mstar.model.qwen3_omni.components.audio_encoder import (
+                NativeQwen3OmniAudioEncoder,
+            )
+            from mstar.model.qwen3_omni.submodules import NativeAudioEncoderSubmodule
+            audio_encoder = NativeQwen3OmniAudioEncoder(audio_config).to(device)
+            load_weights_from_hf_shards(
+                repo_dir=self.local_dir,
+                modules=[ModuleAndPrefix(audio_encoder, prefix="thinker.audio_tower")],
+                device=device,
+            )
+            audio_encoder.eval()
+            return NativeAudioEncoderSubmodule(audio_encoder=audio_encoder, config=self.config)
+
+        # ---- HF-wrapper fallback path ----
         from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
             Qwen3OmniMoeAudioEncoder,
         )
 
-        from mstar.model.utils import ModuleAndPrefix, load_weights_from_hf_shards
-
-        # Load config only (no weights)
-        config = AutoConfig.from_pretrained(
-            self.local_dir,
-            trust_remote_code=True,
-        )
-
-        # This should be a Qwen3OmniMoeConfig
-        audio_config = config.thinker_config.audio_config
-
-        # Build the audio encoder from config.
         # IMPORTANT: pass attn_implementation="flash_attention_2" so the
-        # encoder uses the cu_seqlens FA2 path. With the HF default
-        # (which resolves to "sdpa"), Qwen3OmniMoeAudioAttention runs
-        # SDPA on the full packed sequence (no per-segment fusion),
-        # which is significantly slower than FA2's varlen path.
+        # encoder uses the cu_seqlens FA2 path.
         audio_encoder = Qwen3OmniMoeAudioEncoder._from_config(
             audio_config, attn_implementation="flash_attention_2"
         )
@@ -1500,34 +1518,42 @@ class Qwen3OmniModel(Model):
         return AudioEncoderSubmodule(audio_encoder=audio_encoder, config=self.config)
 
     def _create_vision_encoder_submodule(self, device: str) -> NodeSubmodule:
-        """Load the vision encoder (SigLIP2 ViT) from HF weights."""
-        # Reuse HF vision encoder directly
+        """Load the vision encoder (SigLIP2 ViT) from HF weights.
+
+        Two paths, selected by ``config.native_vision_encoder``:
+          * native (default on): batched, varlen mstar module
+            (``NativeVisionEncoderSubmodule``). Numerically matches HF (fp32
+            exact; bf16 within bar) for the pooler output and every DeepStack
+            level.
+          * HF wrapper (fallback/reference, kept for one release).
+        """
         from transformers import AutoConfig
+
+        from mstar.model.utils import ModuleAndPrefix, load_weights_from_hf_shards
+
+        config = AutoConfig.from_pretrained(self.local_dir, trust_remote_code=True)
+        vision_config = config.thinker_config.vision_config
+
+        if getattr(self.config, "native_vision_encoder", False):
+            from mstar.model.qwen3_omni.components.vision_encoder import (
+                NativeQwen3OmniVisionEncoder,
+            )
+            from mstar.model.qwen3_omni.submodules import NativeVisionEncoderSubmodule
+            vision_encoder = NativeQwen3OmniVisionEncoder(vision_config).to(device)
+            load_weights_from_hf_shards(
+                repo_dir=self.local_dir,
+                modules=[ModuleAndPrefix(vision_encoder, prefix="thinker.visual")],
+                device=device,
+            )
+            vision_encoder.eval()
+            return NativeVisionEncoderSubmodule(vision_encoder=vision_encoder, config=self.config)
+
+        # ---- HF-wrapper fallback path ----
         from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
             Qwen3OmniMoeVisionEncoder,
         )
 
-        from mstar.model.utils import ModuleAndPrefix, load_weights_from_hf_shards
-
-        # Load full config (no weights)
-        config = AutoConfig.from_pretrained(
-            self.local_dir,
-            trust_remote_code=True,
-        )
-
-        # Extract the vision sub-config
-        vision_config = config.thinker_config.vision_config
-
-        # Build the vision encoder.
-        # CRITICAL: pass attn_implementation="flash_attention_2". Without
-        # this, vision_config._attn_implementation defaults to None and is
-        # resolved to "sdpa" at runtime (modeling_utils.py:1889). With
-        # "sdpa", Qwen3OmniMoeVisionAttention.forward falls into the
-        # per-segment Python loop (modeling_qwen3_omni_moe.py:892-913),
-        # which issues N sequential attention calls per layer for an
-        # N-frame video. This causes the 10× V2T/V2S TTFT regression vs
-        # vllm-omni. With "flash_attention_2", a single varlen FA2 call
-        # per layer handles all frames at once via cu_seqlens.
+        # CRITICAL: pass attn_implementation="flash_attention_2" for varlen FA2.
         vision_encoder = Qwen3OmniMoeVisionEncoder._from_config(
             vision_config, attn_implementation="flash_attention_2"
         )
