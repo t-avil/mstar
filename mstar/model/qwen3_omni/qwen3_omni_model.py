@@ -975,6 +975,27 @@ class Qwen3OmniModel(Model):
                     schedule.append(("prefill_vision", entry))
                     video_idx += 1
 
+        # Robustness guard: ``process_prompt`` ALWAYS emits the full
+        # ChatML-templated ``text_inputs`` (system turn + user turn +
+        # ``<|im_start|>assistant`` generation prompt), but the api_server only
+        # lists ``"text"`` in ``input_modalities`` when the *user* prompt string
+        # was non-empty (entrypoint.py gates it on ``if text:``). An empty user
+        # prompt on a speech request (e.g. greedy T2S/I2S/A2S with no caption)
+        # therefore arrives with ``text_inputs`` present yet ``"text"`` absent
+        # from ``input_modalities``, so the loop above appends no ``prefill_text``
+        # step and the schedule comes back empty. That empties the Thinker
+        # prefill schedule (``schedule[step]`` -> IndexError in
+        # ``_get_thinker_prefill_inputs``) AND makes the Talker expect zero
+        # ``thinker_states`` chunks (``num_thinker_prefill_steps == 0``), so no
+        # audio is ever produced. Guarantee every templated ``text_inputs`` tensor
+        # is prefilled regardless of the ``input_modalities`` listing. For normal
+        # requests ``text_idx`` already equals ``len(texts)`` here, so this is a
+        # no-op; the appended order (text after any audio/vision) matches the
+        # existing ``"audio,text"`` ordering the api_server already sends.
+        while text_idx < len(texts):
+            schedule.append(("prefill_text", {"text_inputs": texts[text_idx]}))
+            text_idx += 1
+
         return schedule
 
     def _get_thinker_prefill_inputs(
