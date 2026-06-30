@@ -45,10 +45,20 @@ benchmark/sweep.sh --system mstar_old --gpus 6,7 --port 8182 --paths s2t,i2t,s2s
   --worktree /home/tim/tmp/mstar-old \
   --output /home/tim/tmp/sweep_old
 
-# vLLM-Omni baseline (commit 60c15004):
-benchmark/sweep.sh --system vllm --gpus 6,7 --port 8182 --paths s2t,i2t,s2s,i2s \
-  --batches 1,2,4,8,16,32 \
-  --output /home/tim/tmp/sweep_vllm
+# vLLM-Omni baseline (commit 60c15004) — NOTE: sweep.sh does NOT serve vLLM (it only
+# launches the M* server). vLLM-Omni is a SEPARATE stack with its own venv + deploy:
+#   Server: vLLM-Omni @60c15004 (vllm 0.21.0+cu129), 2-GPU deploy via qwen3_omni_moe.yaml
+#           (stage0/thinker->cuda:0 ; stage1/talker + stage2/code2wav->cuda:1 ; seed:42),
+#           served on port 8093 from /home/tim/baselines/vllm-omni/.venv.
+#   Client (this repo's runner) per path P and batch B:
+/home/tim/baselines/vllm-omni/.venv/bin/python -m benchmark.runner \
+  --url http://127.0.0.1:8093 --model qwen3omni \
+  --request-type <P: audio_to_text|image_to_text|audio_to_speech|image_to_speech> \
+  --dataset <libri for audio_*, food101 for image_*> \
+  --profiling-type closed_loop --max-concurrency B --num-requests N --num-warmup 5 \
+  --inference-system vllm_omni --local-cache /home/tim/tmp/libri_wavs
+# (Then ingest the resulting out_vllm_omni/<path>/B<b>/results.json via aggregate.py
+#  with --tags vllm, same as the M* systems below.)
 
 # ─── Stage 2: aggregate sweeps -> raw_<path>.json ─────────────────────────────
 # The committed raw_*.json carry provenance "generated_by": "aggregate.py".
