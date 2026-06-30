@@ -49,7 +49,7 @@ Pipeline: audio -> mel -> audio\_encoder -> Thinker.prefill\_audio -> Thinker.de
 | Talker MTP loop (per RVQ group, 8 codes/step) | Python `for pos in range(seq_len)` loop, eager (`qwen3_omni_moe_talker.py:125-189`) | One captured CUDA graph per batch size | One CUDA graph per batch size |
 | Talker batch CUDA-graph buckets | Limited / eager fallback | bs in {1,2,4,8,16,32} | bs in {1,2,4,8,16,32} |
 | Talker -> Code2Wav handoff per chunk | Cross-process IPC (Stage 1 -> Stage 2) | In-process, device-direct | In-process, device-direct |
-| Code2Wav chunk size | 25 frames (`qwen3_omni_moe.yaml:14`) | 15 frames (`codec_chunk_frames=15`) | 15 frames |
+| Code2Wav chunk size | 25 frames (`qwen3_omni_moe.yaml:14`) | 25 frames (`codec_chunk_frames=25`) | 15 frames |
 | Code2Wav CUDA-graph capture | Eager only | YES (Code2Wav captured at fixed chunk sizes, bs={1,2,4,8,16,32}) | YES |
 
 Per-token IPC cost for S2S = (Stage 0 -> Stage 1 hop) + (Stage 1 -> Stage 2 hop). Two cross-process boundaries per audio token.
