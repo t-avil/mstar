@@ -55,10 +55,24 @@ from mstar.utils.sampling import SamplingConfig
 
 logger = logging.getLogger(__name__)
 
-# Opt-in GPU log-mel feature extraction (default OFF = byte-identical HF CPU path).
-# When set, audio mel spectrograms are computed on the GPU instead of HF's CPU
-# WhisperFeatureExtractor, moving that work off the TTFT-critical host CPU path.
-_GPU_MEL = os.environ.get("MSTAR_GPU_MEL", "0") in ("1", "true", "True")
+# ---------------------------------------------------------------------------
+# Performance defaults — the benchmarked "canonical" config, ON by default.
+# ---------------------------------------------------------------------------
+# These move work off the TTFT-critical CPU path and are validated against HF to
+# cos>=0.9999 (test_qwen3_omni_gpu_mel_parity.py / gpu_image_parity.py). They
+# default ON so production gets the benchmarked performance out of the box; to run
+# the slower HF-identical baseline (debugging / strict parity) opt OUT explicitly:
+#     MSTAR_GPU_MEL=0              -> CPU WhisperFeatureExtractor mel
+#     MSTAR_GPU_IMAGE_PREPROCESS=0 -> CPU HF image processor
+#     MSTAR_VLLM_PROMPT_LAYOUT=0   -> legacy bare-block prompt layout
+# Native encoders are likewise ON by default; MSTAR_QWEN3_NATIVE_AUDIO_ENCODER=0 /
+# MSTAR_QWEN3_NATIVE_VISION_ENCODER=0 fall back to the HF encoder wrappers.
+# (MSTAR_VLLM_AUDIO_SENTINELS and MSTAR_BATCH_VISION_PREFILL stay opt-in — they
+#  were not part of the benchmarked canonical set.)
+#
+# GPU log-mel: audio mel spectrograms computed on the GPU instead of HF's CPU
+# WhisperFeatureExtractor, off the TTFT-critical host CPU path.
+_GPU_MEL = os.environ.get("MSTAR_GPU_MEL", "1") in ("1", "true", "True")
 
 
 def gpu_log_mel(waveform, mel_filters, window, n_fft, hop):
@@ -81,24 +95,24 @@ def gpu_log_mel(waveform, mel_filters, window, n_fft, hop):
     return log.to(torch.float32)
 
 
-def _envflag(name: str) -> bool:
-    """Read a boolean env flag (default OFF). Accepts 1/true/yes/on."""
+def _envflag(name: str, default: bool = False) -> bool:
+    """Read a boolean env flag. Accepts 1/true/yes/on; returns ``default`` if unset."""
     import os as _os
 
     raw = _os.environ.get(name)
     if raw is None:
-        return False
+        return default
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
 def vllm_prompt_layout_enabled() -> bool:
-    """When ON, replicate vLLM-Omni's prompt layout: position the audio block
-    INSIDE the user turn BEFORE the instruction text, so the effective Thinker
-    sequence is system-turn, then user-turn = [audio][instruction], then
-    assistant. Default OFF -> the legacy layout (audio prefilled as a separate
-    bare block) is byte-identical, preserving encoder parity.
+    """Replicate vLLM-Omni's prompt layout: position the audio block INSIDE the
+    user turn BEFORE the instruction text, so the effective Thinker sequence is
+    system-turn, then user-turn = [audio][instruction], then assistant. ON by
+    default (the benchmarked config; also gives audio M-RoPE h/w parity vs vLLM).
+    Set MSTAR_VLLM_PROMPT_LAYOUT=0 for the legacy bare-block layout.
     """
-    return _envflag("MSTAR_VLLM_PROMPT_LAYOUT")
+    return _envflag("MSTAR_VLLM_PROMPT_LAYOUT", default=True)
 
 
 def vllm_audio_sentinels_enabled() -> bool:
@@ -212,14 +226,16 @@ def _resolve_local_hf_snapshot(repo_id: str, cache_dir: str | None = None) -> st
 # kernel HF's torchvision backend calls -- just on a CUDA tensor, so the
 # output matches HF's CPU ``pixel_values`` within fp tolerance (grid_thw is
 # bit-exact; pixel_values cos > 0.9999, max-abs <= ~3 uint8 levels from
-# CPU-vs-GPU bicubic rounding).  Default OFF keeps current behaviour byte for
-# byte.
+# CPU-vs-GPU bicubic rounding).  ON by default; MSTAR_GPU_IMAGE_PREPROCESS=0
+# restores the byte-identical HF CPU path.
 
 
 def _gpu_image_preprocess_enabled() -> bool:
     import os
 
-    return os.environ.get("MSTAR_GPU_IMAGE_PREPROCESS", "0") == "1"
+    # ON by default (benchmarked canonical config); MSTAR_GPU_IMAGE_PREPROCESS=0
+    # falls back to the byte-identical HF CPU image processor.
+    return os.environ.get("MSTAR_GPU_IMAGE_PREPROCESS", "1") != "0"
 
 
 def _smart_resize(
