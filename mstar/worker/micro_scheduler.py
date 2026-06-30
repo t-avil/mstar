@@ -13,70 +13,8 @@ from mstar.worker.node_manager_utils import WorkerGraphsManager
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# MSTAR_ENCODER_ASYNC: pipeline the vision/audio encoder ahead of the Thinker.
-#
-# Default OFF. When ON, the micro-scheduler treats ``vision_encoder`` and
-# ``audio_encoder`` (both STATELESS) as higher-priority than the Thinker
-# decode/prefill — but only until ``MSTAR_ENCODER_ASYNC_DEPTH`` encoded
-# buffers are in flight (i.e. produced by the encoder but not yet consumed
-# by the Thinker's matching ``prefill_vision`` / ``prefill_audio`` step).
-#
-# Without this flag, the encoder for request N+1 only runs after request N
-# has been dispatched to the Thinker. The encoder GPU sits idle during the
-# Thinker decode of N. With this flag, the encoder for N+1 starts while N
-# is in ``thinker_decode``, so when the Thinker is ready for N+1's prefill
-# the encoded buffer is already populated — zero encoder wait.
-#
-# Bounding the in-flight depth prevents the encoder from monopolizing the
-# GPU under heavy admission and is the K=4 ceiling from the experiment spec.
-# ---------------------------------------------------------------------------
-def _encoder_async_enabled() -> bool:
-    # Default OFF. The full I2T sweep showed PROMISING at B>=16, but the feature
-    # has been flaky in integration testing, so it is opt-in via
-    # MSTAR_ENCODER_ASYNC=1. When enabled, pipelining is still restricted to the
-    # vision encoder only (audio is too cheap to amortize the speculation cost;
-    # see LEARNINGS §9.2/§9.5).
-    return os.environ.get("MSTAR_ENCODER_ASYNC", "0") in ("1", "true", "True")
-
-
-def _encoder_async_depth() -> int:
-    raw = os.environ.get("MSTAR_ENCODER_ASYNC_DEPTH", "4")
-    try:
-        v = int(raw)
-        return v if v > 0 else 4
-    except ValueError:
-        return 4
-
-
-def _encoder_async_node_names() -> frozenset[str]:
-    """Which encoder nodes are eligible for async pipelining.
-
-    Default: vision only. Audio encoder is too cheap (~10-20ms vs vision
-    ~160ms) for speculation to pay off and the S2T full sweep showed -18%
-    req/s at B=16+ when audio was included.
-
-    Override with MSTAR_ENCODER_ASYNC_PATHS=vision,audio to opt audio back
-    in (or =none to disable both even when MSTAR_ENCODER_ASYNC=1).
-    """
-    raw = os.environ.get("MSTAR_ENCODER_ASYNC_PATHS", "vision").strip().lower()
-    if raw in ("", "none", "off"):
-        return frozenset()
-    parts = {p.strip() for p in raw.split(",") if p.strip()}
-    out = set()
-    if "vision" in parts:
-        out.add("vision_encoder")
-    if "audio" in parts:
-        out.add("audio_encoder")
-    return frozenset(out)
-
-
-# Node names the encoder-async path treats as "encoder" walks.
-# Resolved at module-load; processes inheriting env vars from the server
-# launcher get the right set without restart-juggling per request.
-_ENCODER_NODE_NAMES = _encoder_async_node_names()
-# Graph walks whose first node consumes an encoder output on the Thinker.
-_ENCODER_CONSUMING_WALKS = frozenset({"prefill_vision", "prefill_audio"})
+# (encoder-async pipelining was removed — it was opt-in, default-off, flaky, and
+# never used by the benchmarks. See git history if it needs to be revived.)
 
 
 @dataclass
@@ -141,79 +79,9 @@ class MicroScheduler:
         # Shared by reference with Worker._pending_removes.
         self.pending_removes: set[str] = set()
 
-        # --- MSTAR_ENCODER_ASYNC bookkeeping ---------------------------------
-        # ``encoder_async_enabled``: cached at construction so a single feature-
-        # flag check governs every dispatch decision. Reading the env var once
-        # also keeps the hot path branch cheap.
-        # ``encoder_async_depth``: max number of encoded-but-not-yet-Thinker-
-        # consumed buffers we'll let pile up. Each batched encoder dispatch
-        # counts as one "in flight" credit regardless of how many requests
-        # were coalesced into the batch — batching is independent of
-        # pipelining depth, and the depth bound is about wall-clock head-room
-        # (how far ahead of Thinker the encoder is allowed to run), not
-        # about KV cache memory.
-        # ``encoder_async_in_flight``: incremented when the scheduler returns
-        # an encoder batch; decremented when the matching ``prefill_vision``
-        # / ``prefill_audio`` step is scheduled on the Thinker (the
-        # downstream consumer of the buffered embeddings).
-        self.encoder_async_enabled = _encoder_async_enabled()
-        self.encoder_async_depth = _encoder_async_depth()
-        self.encoder_async_in_flight = 0
-        if self.encoder_async_enabled:
-            logger.info(
-                "MicroScheduler: MSTAR_ENCODER_ASYNC=1 (depth=%d). "
-                "Encoder walks pipeline ahead of Thinker decode.",
-                self.encoder_async_depth,
-            )
-
-    def _maybe_pick_async_encoder(
-        self, node_name_to_requests: dict[str, list[ReadyNodeEntry]]
-    ) -> tuple[str | None, str | None]:
-        """If MSTAR_ENCODER_ASYNC is enabled, prefer a ready encoder node.
-
-        Returns ``(node_name, graph_walk)`` for the encoder pick, or
-        ``(None, None)`` if no preemption applies (flag off, no encoder
-        ready, depth saturated, or no encoder node has a ready request).
-
-        Depth budget: when ``encoder_async_in_flight`` reaches
-        ``encoder_async_depth`` we fall back to normal scheduling so the
-        Thinker can catch up. This prevents the encoder from running an
-        unbounded number of buffers ahead — bad both for GPU memory
-        (each buffer pins vision/audio embeds) and for first-token latency
-        of the requests already in the Thinker.
-        """
-        if not self.encoder_async_enabled:
-            return None, None
-        if self.encoder_async_in_flight >= self.encoder_async_depth:
-            return None, None
-        for node_name in _ENCODER_NODE_NAMES:
-            entries = node_name_to_requests.get(node_name)
-            if not entries:
-                continue
-            # Bias toward whichever walk is least-recently scheduled, mirroring
-            # the round-robin tie-breaker for non-encoder nodes. In practice
-            # both ``audio_encoder`` and ``vision_encoder`` only emit a single
-            # walk (``prefill_audio`` / ``prefill_vision``) so this collapses
-            # to the first entry's walk, but we keep the RR semantics for
-            # robustness if a future walk reuses these encoder nodes.
-            walk_counts: dict[str, int] = {}
-            for e in entries:
-                walk_counts[e.graph_walk] = walk_counts.get(e.graph_walk, 0) + 1
-            graph_walk = max(walk_counts, key=walk_counts.get)
-            return node_name, graph_walk
-        return None, None
-
     def _select_node_priority(
         self, node_name_to_requests: dict[str, list[ReadyNodeEntry]]
     ):
-        # MSTAR_ENCODER_ASYNC: pipeline the encoder ahead of the Thinker when
-        # there's budget. See ``_maybe_pick_async_encoder`` for the depth
-        # bound and rationale.
-        async_node, async_walk = self._maybe_pick_async_encoder(
-            node_name_to_requests
-        )
-        if async_node is not None:
-            return async_node, async_walk
 
         # Pick the node name with highest priority (lowest PRIORITY value)
         best_node_name = None
@@ -244,15 +112,6 @@ class MicroScheduler:
     def _select_node_rr(
         self, node_name_to_requests: dict[str, list[ReadyNodeEntry]]
     ):
-        # MSTAR_ENCODER_ASYNC: short-circuit the RR sweep to an encoder
-        # node when there's pipeline budget; otherwise fall through to
-        # the regular least-recent-step tie-breaker.
-        async_node, async_walk = self._maybe_pick_async_encoder(
-            node_name_to_requests
-        )
-        if async_node is not None:
-            return async_node, async_walk
-
         best_node_name = None
         best_graph_walk = None
         least_recent_step = float('inf')
@@ -445,57 +304,11 @@ class MicroScheduler:
             best_node_name, graph_walk
         )] = self.batch_number
 
-        # MSTAR_ENCODER_ASYNC depth bookkeeping. We count a credit each time
-        # an encoder batch is *scheduled* (regardless of batch size, since the
-        # depth bound is about pipeline lead, not memory footprint per batch),
-        # and release a credit when the matching Thinker prefill walk runs.
-        # The Sequential[encoder, Thinker] structure of ``prefill_audio`` /
-        # ``prefill_vision`` guarantees the encoder fires exactly once per
-        # walk on the Thinker side, so this counter stays bounded as long as
-        # the Thinker actually consumes the buffered embeddings. If a request
-        # is removed mid-flight (RemoveRequest before the Thinker step ran),
-        # the credit is reclaimed by ``release_encoder_async_credit`` from
-        # the worker's remove path so the counter cannot drift upward.
-        if self.encoder_async_enabled:
-            if best_node_name in _ENCODER_NODE_NAMES:
-                self.encoder_async_in_flight += 1
-            elif (
-                best_node_name == "Thinker"
-                and graph_walk in _ENCODER_CONSUMING_WALKS
-                and self.encoder_async_in_flight > 0
-            ):
-                # One Thinker prefill_vision/prefill_audio step consumes one
-                # buffered batch of encoder outputs. The encoder may have
-                # produced N requests' worth of embeds in a single batched
-                # call (MSTAR_BATCH_VISION_PREFILL), but the Thinker side
-                # consumes them sequentially — one walk per request. The
-                # accounting here is per encoder *batch*, so as long as a
-                # single Thinker walk releases a credit we'll always have
-                # capacity to keep the encoder one batch ahead.
-                self.encoder_async_in_flight -= 1
-
         return ScheduledBatch(
             node_name=best_node_name,
             graph_walk=graph_walk,
             node_objects=node_objects,
             request_to_worker_graph=request_to_worker_graph,
-        )
-
-    def release_encoder_async_credit(self, count: int = 1) -> None:
-        """Release ``count`` credits from the encoder-async in-flight counter.
-
-        Called when a request is torn down before its buffered encoder
-        output is consumed by the Thinker (e.g. RemoveRequest mid-flight,
-        or a hard failure that drops the Thinker prefill step). Without
-        this, the counter would drift up and eventually saturate the
-        depth budget, silently disabling the async pipeline path.
-
-        No-op when the flag is off or the counter is already at zero.
-        """
-        if not self.encoder_async_enabled:
-            return
-        self.encoder_async_in_flight = max(
-            0, self.encoder_async_in_flight - count,
         )
 
     def has_ready_excluding(
