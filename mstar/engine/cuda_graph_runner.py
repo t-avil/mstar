@@ -18,6 +18,7 @@ and PiecewiseCudaGraphRunner for capturing transformer block loops (VJepa2 predi
 import bisect
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -34,6 +35,7 @@ from mstar.engine.cuda_graph_config import (
 )
 from mstar.engine.kv_store import KVCacheConfig, PagedAllocationManager
 from mstar.model.submodule_base import ARNodeInputs, ARNodeSubmodule, ModelInputsFromEngine, NodeSubmodule
+from mstar.profile.worker import ExecTimings
 from mstar.utils.profiler import mark, range_pop, range_push
 from mstar.utils.sampling import Sampler, SamplerBuffers, SamplingConfig, make_sampler_from_buffers
 
@@ -1140,6 +1142,7 @@ class CudaGraphRunner:
         slot: int | None = None,
         advance_event: "object | None" = None,
         launch_started_event: "object | None" = None,
+        exec_timings: ExecTimings | None = None,
     ) -> dict:
         """Look up the matching captured graph and dispatch on config type.
 
@@ -1194,6 +1197,7 @@ class CudaGraphRunner:
                 request_ids, inputs, per_request_info, submodule,
                 advance_event=advance_event,
                 launch_started_event=launch_started_event,
+                exec_timings=exec_timings,
             )
         if cfg_type == CudaGraphConfigType.FLASH_INFER_PACKED:
             return self._run_flashinfer_packed(
@@ -1201,6 +1205,7 @@ class CudaGraphRunner:
                 request_ids, inputs, per_request_info, submodule,
                 advance_event=advance_event,
                 launch_started_event=launch_started_event,
+                exec_timings=exec_timings,
             )
         raise ValueError(f"Unknown CudaGraphConfigType: {cfg_type}")
 
@@ -1215,6 +1220,7 @@ class CudaGraphRunner:
         submodule: ARNodeSubmodule,
         advance_event: "object | None" = None,
         launch_started_event: "object | None" = None,
+        exec_timings: ExecTimings | None = None,
     ) -> dict:
         """Decode-style replay. Pads real inputs to padded_bs by cloning the capture
         template, then routes through submodule.preprocess (which re-plans attention
@@ -1352,6 +1358,8 @@ class CudaGraphRunner:
             # GIL inside C++, so main-thread postprocess can overlap.
             if launch_started_event is not None:
                 launch_started_event.set()
+            if exec_timings is not None:
+                exec_timings.fwd_start = time.perf_counter()
             graph.replay()
             if self.enable_nvtx:
                 range_pop(synchronize=False)
@@ -1431,6 +1439,7 @@ class CudaGraphRunner:
         submodule: ARNodeSubmodule,
         advance_event: "object | None" = None,
         launch_started_event: "object | None" = None,
+        exec_timings: ExecTimings | None = None,
     ) -> dict:
         """Prefill-style replay (vox-serve pattern).
 
@@ -1569,6 +1578,8 @@ class CudaGraphRunner:
             # GIL inside C++, so main-thread postprocess can overlap.
             if launch_started_event is not None:
                 launch_started_event.set()
+            if exec_timings is not None:
+                exec_timings.fwd_start = time.perf_counter()
             graph.replay()
             if self.enable_nvtx:
                 range_pop(synchronize=False)
@@ -2118,6 +2129,7 @@ class StatelessCudaGraphRunner:
         per_request_info: dict[str, CurrentForwardPassInfo],
         submodule: NodeSubmodule,
         launch_started_event: "object | None" = None,
+        exec_timings: ExecTimings | None = None,
     ) -> dict[str, dict[str, list[torch.Tensor]]]:
         """End-to-end replay: preprocess + replay + per-rid output split.
 
@@ -2181,6 +2193,8 @@ class StatelessCudaGraphRunner:
         # GIL inside C++, so main-thread postprocess can overlap.
         if launch_started_event is not None:
             launch_started_event.set()
+        if exec_timings is not None:
+            exec_timings.fwd_start = time.perf_counter()
         self.graphs[key].replay()
         if self.enable_nvtx:
             range_pop(synchronize=False)

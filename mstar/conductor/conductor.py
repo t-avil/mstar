@@ -28,6 +28,8 @@ from mstar.engine.kv_store import KVCacheConfig
 from mstar.graph.base import GraphEdge, NodeAndGraphWalk, TensorPointerInfo
 from mstar.graph.loop_indices import NestedLoopIndices
 from mstar.model.base import ForwardPassArgs, Model, WorkerGraph
+from mstar.profile.format import RxInfo, TxInfo
+from mstar.profile.worker import GraphTimings
 from mstar.utils.ipc_format import (
     ConductorMessageType,
     InputSignals,
@@ -90,6 +92,7 @@ def _worker_process_target(
     socket_path_prefix: str,
     dist_init_method: str,
     enable_nvtx: bool = False,
+    enable_prof: bool = False,
     model: Model | None = None,
     device: str = "cuda",
     log_level: str = "INFO",
@@ -125,6 +128,7 @@ def _worker_process_target(
             socket_path_prefix=socket_path_prefix,
             dist_init_method=dist_init_method,
             enable_nvtx=enable_nvtx,
+            enable_prof=enable_prof,
             device=torch.device(device),
             tensor_comm_protocol=tensor_comm_protocol,
             tcp_transfer_device=tcp_transfer_device,
@@ -157,6 +161,19 @@ class RequestData:
     # for api server recv bookeeping
     final_outputs: dict[str, NestedLoopIndices] = field(default_factory=dict)
 
+    # Conductor-side profiling timestamps, in ``time.perf_counter()`` seconds.
+    # Comparable with the api-server stamps because perf_counter is
+    # CLOCK_MONOTONIC (boot-relative) and these processes share a host. 0 until
+    # stamped.
+    conductor_ingest_time: float = 0.0
+    conductor_finish_time: float = 0.0
+    graph_timings: GraphTimings = field(default_factory=dict)
+    # Tensor-transport profiling merged across workers. Keyed so repeated
+    # WorkerGraphsDone updates (cumulative per worker) replace rather than
+    # double-count: rx by (source, dest, edge), tx by (source, edge).
+    rx_info: dict[tuple[str, str, str], RxInfo] = field(default_factory=dict)
+    tx_info: dict[tuple[str, str], TxInfo] = field(default_factory=dict)
+
     def remove_persist_signal_uuids(self, uuids: list[str]):
         uuids = set(uuids)
         for name in self.persist_signals:
@@ -183,6 +200,7 @@ class Conductor:
         socket_path_prefix: str = "/tmp/mstar",
         hostname: str = "localhost",
         enable_nvtx: bool = False,
+        enable_prof: bool = False,
         log_level: str = "INFO",
         tensor_comm_protocol=CommProtocol.RDMA,
         tcp_transfer_device=""
@@ -193,6 +211,7 @@ class Conductor:
         self.socket_path_prefix = socket_path_prefix
         self.log_level = log_level
         self.enable_nvtx = enable_nvtx
+        self.enable_prof = enable_prof
         self.tensor_comm_protocol = tensor_comm_protocol
         self.tcp_transfer_device = tcp_transfer_device
 
@@ -388,6 +407,7 @@ class Conductor:
                     "dist_init_method": self._dist_init_method,
                     "model": self.model,
                     "enable_nvtx": self.enable_nvtx,
+                    "enable_prof": self.enable_prof,
                     "device": f"cuda:{rank}",
                     "log_level": self.log_level,
                     "tensor_comm_protocol": self.tensor_comm_protocol,
@@ -591,6 +611,7 @@ class Conductor:
     ):
         """Actually dispatch a request to workers (no admission check)."""
         logger.debug("Conductor ingesting request %s", body.request_id)
+        ingest_time = time.perf_counter()
         worker_graph_to_workers = self._assign_worker_graphs_to_workers()
 
         model_kwargs = body.model_kwargs or {}
@@ -641,6 +662,7 @@ class Conductor:
             streaming_connections=streaming_connections,
             sampling_config=self._get_sampling_configs(model_kwargs),
             sharding_config=self._build_request_sharding_config(worker_graph_to_workers),
+            conductor_ingest_time=ingest_time,
         )
         for cfg in request_data.sampling_config.values():
             cfg.set_seed(seed)
@@ -775,6 +797,7 @@ class Conductor:
         """Called when all partitions are done."""
         logger.info("Request %s done", request_id)
         request_data = self.requests[request_id]
+        request_data.conductor_finish_time = time.perf_counter()
         for worker_ids in request_data.worker_graph_to_workers.values():
             for worker_id in worker_ids:
                 msg = WorkerMessage(
@@ -790,6 +813,11 @@ class Conductor:
                 body=RequestComplete(
                     request_id=request_id,
                     final_outputs=request_data.final_outputs,
+                    conductor_ingest_time=request_data.conductor_ingest_time,
+                    conductor_finish_time=request_data.conductor_finish_time,
+                    graph_timings=request_data.graph_timings,
+                    rx_info=list(request_data.rx_info.values()),
+                    tx_info=list(request_data.tx_info.values()),
                 )
             )
         )
@@ -813,6 +841,12 @@ class Conductor:
 
         request_data = self.requests[body.request_id]
         partition_name = body.partition_name
+        if self.enable_prof:
+            request_data.graph_timings.update(body.graph_timings)
+            for rx in body.rx_info:
+                request_data.rx_info[(rx.source_entity, rx.dest_entity, rx.edge_name)] = rx
+            for tx in body.tx_info:
+                request_data.tx_info[(tx.source_entity, tx.edge_name)] = tx
 
         pstate = request_data.partition_states.get(partition_name)
         request_data.final_outputs.update(body.output_loop_indices)
