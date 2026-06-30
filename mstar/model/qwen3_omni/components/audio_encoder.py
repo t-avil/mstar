@@ -1,7 +1,8 @@
 """Native Qwen3-Omni audio encoder (AuT, Whisper-style).
 
 A from-scratch mstar reimplementation of HF's ``Qwen3OmniMoeAudioEncoder`` that
-is decoupled from ``transformers`` at inference time. Submodule attribute names
+reimplements the encoder in mstar (only the ``ACT2FN`` activation table is
+imported from ``transformers``). Submodule attribute names
 mirror the HF module exactly so the existing
 ``load_weights_from_hf_shards(..., prefix="thinker.audio_tower")`` loads it with
 no remapping.
