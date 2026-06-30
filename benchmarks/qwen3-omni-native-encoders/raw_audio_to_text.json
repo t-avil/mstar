@@ -8054,7 +8054,8 @@
         "provenance": {
           "git_commit": "9ee1369",
           "build": "mstar_old",
-          "flags": "none"
+          "flags": "none",
+          "commit": "ae7d173"
         }
       },
       "mstar_new": {
@@ -8149,12 +8150,7 @@
             "p95": 0.8990522566949948,
             "p99": 0.9107620183308609
           },
-          "itl_text": {
-            "mean": 0.0006693560562375657,
-            "p50": 1.0175514034926891e-05,
-            "p95": 0.005515876796562226,
-            "p99": 0.009818664116319265
-          },
+          "itl_text": null,
           "req_throughput_reported": 2.91,
           "text_tok_throughput_reported": 42.13,
           "text_tokens_total": 724,
@@ -8165,7 +8161,8 @@
         "provenance": {
           "git_commit": "9ee1369",
           "build": "mstar_old",
-          "flags": "none"
+          "flags": "none",
+          "commit": "ae7d173"
         }
       },
       "mstar_new": {
@@ -8276,7 +8273,8 @@
         "provenance": {
           "git_commit": "9ee1369",
           "build": "mstar_old",
-          "flags": "none"
+          "flags": "none",
+          "commit": "ae7d173"
         }
       },
       "mstar_new": {
@@ -8371,12 +8369,7 @@
             "p95": 5.709867774415761,
             "p99": 5.918228297934402
           },
-          "itl_text": {
-            "mean": 0.0005400023523258931,
-            "p50": 9.043840691447258e-06,
-            "p95": 7.594055496156183e-05,
-            "p99": 0.00567574146669359
-          },
+          "itl_text": null,
           "req_throughput_reported": 2.52,
           "text_tok_throughput_reported": 36.54,
           "text_tokens_total": 1159,
@@ -8387,7 +8380,8 @@
         "provenance": {
           "git_commit": "9ee1369",
           "build": "mstar_old",
-          "flags": "none"
+          "flags": "none",
+          "commit": "ae7d173"
         }
       },
       "mstar_new": {
@@ -8482,12 +8476,7 @@
             "p95": 12.186384492903015,
             "p99": 12.594448521896265
           },
-          "itl_text": {
-            "mean": 0.00018054645254332501,
-            "p50": 7.82194547355175e-06,
-            "p95": 8.35343380458653e-05,
-            "p99": 0.006493499607313425
-          },
+          "itl_text": null,
           "req_throughput_reported": 2.45,
           "text_tok_throughput_reported": 35.15,
           "text_tokens_total": 2296,
@@ -8498,7 +8487,8 @@
         "provenance": {
           "git_commit": "9ee1369",
           "build": "mstar_old",
-          "flags": "none"
+          "flags": "none",
+          "commit": "ae7d173"
         }
       },
       "mstar_new": {
@@ -8609,7 +8599,8 @@
         "provenance": {
           "git_commit": "9ee1369",
           "build": "mstar_old",
-          "flags": "none"
+          "flags": "none",
+          "commit": "ae7d173"
         }
       },
       "mstar_new": {

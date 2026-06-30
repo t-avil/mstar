@@ -360,7 +360,8 @@
         "provenance": {
           "git_commit": "ae7d173",
           "build": "mstar_old",
-          "flags": "none (vanilla main)"
+          "flags": "none (vanilla main)",
+          "commit": "ae7d173"
         }
       },
       "mstar_new": {
@@ -485,7 +486,8 @@
         "provenance": {
           "git_commit": "ae7d173",
           "build": "mstar_old",
-          "flags": "none (vanilla main)"
+          "flags": "none (vanilla main)",
+          "commit": "ae7d173"
         }
       },
       "mstar_new": {
@@ -610,7 +612,8 @@
         "provenance": {
           "git_commit": "ae7d173",
           "build": "mstar_old",
-          "flags": "none (vanilla main)"
+          "flags": "none (vanilla main)",
+          "commit": "ae7d173"
         }
       },
       "mstar_new": {
@@ -735,7 +738,8 @@
         "provenance": {
           "git_commit": "ae7d173",
           "build": "mstar_old",
-          "flags": "none (vanilla main)"
+          "flags": "none (vanilla main)",
+          "commit": "ae7d173"
         }
       },
       "mstar_new": {
@@ -860,7 +864,8 @@
         "provenance": {
           "git_commit": "ae7d173",
           "build": "mstar_old",
-          "flags": "none (vanilla main)"
+          "flags": "none (vanilla main)",
+          "commit": "ae7d173"
         }
       },
       "mstar_new": {
@@ -985,7 +990,8 @@
         "provenance": {
           "git_commit": "ae7d173",
           "build": "mstar_old",
-          "flags": "none (vanilla main)"
+          "flags": "none (vanilla main)",
+          "commit": "ae7d173"
         }
       },
       "mstar_new": {
