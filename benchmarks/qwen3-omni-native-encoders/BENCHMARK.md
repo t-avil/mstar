@@ -8,8 +8,14 @@ Serving benchmark: M\*-new (`1f66ce6`, `opt/combined-lowrisk`) vs M\*-old
 | System | Commit | Description |
 |--------|--------|-------------|
 | M\*-new | `1f66ce6` | Native encoders + CUDA graph + flashinfer varlen (opt/combined-lowrisk) |
-| M\*-old | `ae7d173` | Upstream main, HF encoder wrappers |
-| vLLM | — | vLLM-Omni baseline |
+| M\*-old | `9ee1369` | fork main `9ee1369` (= upstream `ae7d173` + benchmark tooling/docs only, no model change), HF encoder wrappers |
+| vLLM | `60c15004` | vLLM-Omni baseline |
+
+> Baseline note: the old-system raw cells record fork main `9ee1369` for S2T/I2T/I2S and
+> upstream `ae7d173` for S2S. These are the **same model** — the 5 commits between
+> `ae7d173` and `9ee1369` are benchmark tooling + docs only, with **zero** change to
+> `mstar/model`, `mstar/engine`, or `mstar/worker` — so the old-baseline numbers are
+> directly comparable across all four paths.
 
 ## Hardware
 

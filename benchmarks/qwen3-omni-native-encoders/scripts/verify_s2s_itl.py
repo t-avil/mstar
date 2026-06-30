@@ -6,6 +6,7 @@ from load_data import load_raw, BATCHES
 
 data = load_raw("audio_to_speech")
 agg = data["aggregates"]
+issues = []
 
 print("=" * 80)
 print("S2S ITL DEEP DIVE")
@@ -46,13 +47,30 @@ for b in BATCHES:
         itl_ratio = itl_new / itl_old if itl_old > 0.001 else float("inf")
         print(f"    ITL mean:   new/old={itl_ratio:.3f}x  (new={itl_new*1000:.1f}ms old={itl_old*1000:.1f}ms)")
 
-        if itl_ratio > 1.1 and tp_ratio > 1.1:
+        if b == 1:
+            # B=1 has no batching contention, so a worse ITL here is a genuine
+            # per-token regression with no excuse. This is the claim the script
+            # exists to substantiate, so it must be able to FAIL.
+            if itl_ratio > 1.10:
+                issues.append(f"S2S B=1: ITL {itl_ratio:.2f}x worse (no batching excuse)")
+                print(f"    >>> B=1 ITL {itl_ratio:.2f}x worse — REGRESSION (no batching contention)")
+            else:
+                print(f"    >>> B=1 ITL {itl_ratio:.2f}x — OK (no batching contention)")
+        elif itl_ratio > 1.1 and tp_ratio > 1.1:
             print(f"    >>> ITL {itl_ratio:.1f}x worse BUT throughput {tp_ratio:.1f}x better — BATCHING TRADE-OFF")
         elif itl_ratio > 1.1 and tp_ratio < 1.0:
+            issues.append(f"S2S B={b}: ITL {itl_ratio:.2f}x worse AND throughput {tp_ratio:.2f}x worse")
             print(f"    >>> ITL {itl_ratio:.1f}x worse AND throughput {tp_ratio:.1f}x worse — REAL REGRESSION")
         else:
             print(f"    >>> ITL within acceptable range relative to throughput gain")
 
 print(f"\n{'='*80}")
-print("VERDICT: B=1 comparison (no batching) proves per-token latency is not worse.")
+if issues:
+    print(f"VERDICT: FAIL — {len(issues)} S2S ITL issue(s):")
+    for i in issues:
+        print(f"  {i}")
+    print(f"{'='*80}")
+    sys.exit(1)
+print("VERDICT: PASS — B=1 (no batching) shows no per-token regression; "
+      "higher-B ITL increases are covered by the throughput trade-off.")
 print(f"{'='*80}")
