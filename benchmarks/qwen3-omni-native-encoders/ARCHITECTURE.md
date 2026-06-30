@@ -18,7 +18,7 @@ Pipeline: audio bytes -> mel -> audio\_encoder -> Thinker.prefill\_audio -> Thin
 | Audio mel computation | CPU | GPU (`MSTAR_GPU_MEL=1`) | CPU |
 | Audio encoder placement | Stage 0 process (Thinker GPU) | In-process, Thinker GPU | In-process, Thinker GPU |
 | Audio encoder batched across concurrent requests | NO | YES (varlen-packed, concat mel + multi-entry feature\_lens) | NO |
-| Audio encoder CUDA-graph capture | NO | YES (sized-bucket captures) | NO |
+| Audio encoder CUDA-graph capture | NO | YES (exact-layout keyed: one graph per (seq\_len, cu\_seqlens) tuple) | NO |
 | Thinker -> text-out cross-process hop per token | NO (Stage 0 only) | NO (single process) | NO (single process) |
 | Talker/Code2Wav touched | No | No | No |
 
@@ -32,6 +32,7 @@ Pipeline: image bytes -> resize/patchify -> vision\_encoder -> Thinker.prefill\_
 | Vision encoder placement | Stage 0 process (Thinker GPU) | In-process, Thinker GPU | In-process, Thinker GPU |
 | Vision encoder batched across concurrent requests | NO (per-request) | YES (`MSTAR_BATCH_VISION_PREFILL=1`) | NO |
 | Vision encoder CUDA-graph buckets aligned to actual token counts | NO | YES (`MSTAR_VISION_GRAPH_ALIGN=1` -- intermediate buckets 128/192/256/320/384/512/768/1024/1536/2048/...) | NO (default coarse buckets) |
+| Encoder torch.compile | NO | YES (`dynamic=True` via StatelessEngine, applied to `.forward` of enc\_dec submodules) | NO |
 | Vision encoder GPU<->CPU syncs in prefill prepare | YES | NO (sync-elim: grid\_thw kept on CPU, avoids GPU max-reduction) | YES |
 | Thinker -> text-out cross-process hop per token | NO (Stage 0 only) | NO | NO |
 | Talker/Code2Wav touched | No | No | No |
@@ -62,6 +63,7 @@ Pipeline: image -> preprocess -> vision\_encoder -> Thinker.prefill\_vision -> T
 | Image preprocess (resize + patchify) | CPU, marshaled to GPU | GPU (`MSTAR_GPU_IMAGE_PREPROCESS=1`) | CPU |
 | Vision encoder batched across requests | NO | YES (`MSTAR_BATCH_VISION_PREFILL=1`) | NO |
 | Vision encoder CUDA-graph bucket alignment | NO | YES (`MSTAR_VISION_GRAPH_ALIGN=1`) | NO |
+| Encoder torch.compile | NO | YES (`dynamic=True`) | NO |
 | Vision encoder sync-elim | NO | YES | NO |
 | Thinker -> Talker handoff per token | Cross-process IPC | In-process, device-direct | In-process, device-direct |
 | Talker MTP loop | Python for-loop, eager | One captured CUDA graph per batch size | One CUDA graph per bs |
@@ -72,7 +74,7 @@ Per-token IPC cost for I2S = same as S2S (Stage 0 -> Stage 1 -> Stage 2 = two cr
 
 ## Takeaway
 
-- **Throughput wins (every path)**: KV page=128 + same-walk-only decode batching, plus on vision paths (BATCH\_VISION\_PREFILL + VISION\_GRAPH\_ALIGN + sync-elim).
+- **Throughput wins (every path)**: KV page=128 + same-walk-only decode batching + encoder torch.compile, plus on vision paths (BATCH\_VISION\_PREFILL + VISION\_GRAPH\_ALIGN + sync-elim).
 - **TTFT wins on S2T at low batch**: GPU mel + no IPC.
 - **Speech-path TTFT (S2S, I2S)**: M\* wins by ~30-50% at every batch because of the cumulative 2x cross-process IPC vLLM pays per audio token vs M\*'s in-process device-direct edges.
 - **M\*-old**: same in-process pipeline as M\*-new but missing the vision opts (batching, graph-align, sync-elim) and encoder CUDA graphs -- throughput ceilings at ~2-5 req/s due to whole-walk prefill serialization.
