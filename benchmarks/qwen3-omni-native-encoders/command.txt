@@ -1,0 +1,67 @@
+# How to reproduce the benchmark data (raw_<path>.json, NUMBERS.md, charts/).
+#
+# Pipeline (4 stages):
+#   0. validate the build (parity + unit tests) BEFORE benchmarking
+#   1. benchmark/sweep.sh        -> per-(path,batch) results.json under a sweep dir
+#   2. scripts/aggregate.py      -> raw_<path>.json (datapoints + aggregates)   <-- THIS produced the committed raw_*.json
+#   3. make_numbers.py / make_proof_charts.py -> NUMBERS.md + charts/ from raw_*.json
+#
+# Stages 1-2 need the same hardware (GPUs 6,7) and the (uncommitted) sweep output
+# dirs; re-running the sweeps reproduces aggregates within ~1-5%. Stage 3 is fully
+# reproducible from the committed raw_*.json alone.
+
+PY=/home/tim/mstar-encoders/.venv/bin/python
+
+# ─── Stage 0: validate the build before spending GPU on a sweep ───────────────
+# Only benchmark a build that passes the native-encoder parity + unit tests
+# (they pin native==HF, graph==eager==HF, and the GPU mel/image/varlen paths).
+$PY -m pytest \
+  test/modular/test_qwen3_omni_native_encoders.py \
+  test/modular/test_qwen3_omni_native_encoders_ci.py \
+  test/modular/test_qwen3_omni_encoder_graph_parity.py \
+  test/modular/test_qwen3_omni_gpu_mel_parity.py \
+  test/modular/test_qwen3_omni_gpu_image_parity.py \
+  test/modular/test_qwen3_omni_varlen_backend_parity.py \
+  -q
+
+# ─── Stage 1: sweeps (GPUs 6,7, all 4 paths) ──────────────────────────────────
+# encoder-v4 ships the perf optimizations ON BY DEFAULT (GPU log-mel / GPU image
+# preprocess / vLLM prompt layout + native encoders), so NO --flags are needed to
+# get the benchmarked numbers. To instead measure the slower HF-identical
+# baseline, opt OUT explicitly:
+#   --flags "MSTAR_GPU_MEL=0 MSTAR_GPU_IMAGE_PREPROCESS=0 MSTAR_VLLM_PROMPT_LAYOUT=0 \
+#            MSTAR_QWEN3_NATIVE_AUDIO_ENCODER=0 MSTAR_QWEN3_NATIVE_VISION_ENCODER=0"
+
+# M*-new (encoder-v4 = opt/combined-lowrisk 1f66ce6 + review fixes), worktree at a
+# clean checkout of branch `encoder-v4`:
+benchmark/sweep.sh --system mstar_new --gpus 6,7 --port 8182 --paths s2t,i2t,s2s,i2s \
+  --batches 1,2,4,8,16,32 \
+  --worktree <checkout of encoder-v4> \
+  --output /home/tim/tmp/sweep_lowrisk
+
+# M*-old (upstream main, ae7d173), worktree checked out at ae7d173:
+benchmark/sweep.sh --system mstar_old --gpus 6,7 --port 8182 --paths s2t,i2t,s2s,i2s \
+  --batches 1,2,4,8,16,32 \
+  --worktree /home/tim/tmp/mstar-old \
+  --output /home/tim/tmp/sweep_old
+
+# vLLM-Omni baseline (commit 60c15004):
+benchmark/sweep.sh --system vllm --gpus 6,7 --port 8182 --paths s2t,i2t,s2s,i2s \
+  --batches 1,2,4,8,16,32 \
+  --output /home/tim/tmp/sweep_vllm
+
+# ─── Stage 2: aggregate sweeps -> raw_<path>.json ─────────────────────────────
+# The committed raw_*.json carry provenance "generated_by": "aggregate.py".
+# Build them from the three sweep dirs (one --roots entry + --tags per system),
+# writing into THIS benchmark dir:
+$PY scripts/aggregate.py \
+  --roots /home/tim/tmp/sweep_lowrisk /home/tim/tmp/sweep_old /home/tim/tmp/sweep_vllm \
+  --tags  mstar_new mstar_old vllm \
+  --paths s2t i2t s2s i2s --batches 1 2 4 8 16 32 \
+  --out   benchmarks/qwen3-omni-native-encoders
+# (see `$PY scripts/aggregate.py --help`; --refine-dir <thisdir> re-runs the
+#  recheck pass over already-built raw_*.json.)
+
+# ─── Stage 3: regenerate NUMBERS.md + charts from committed raw_*.json ─────────
+$PY scripts/make_numbers.py
+$PY scripts/make_proof_charts.py
