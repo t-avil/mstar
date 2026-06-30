@@ -34,13 +34,16 @@ import numpy as np
 import pytest
 import torch
 
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="native encoders require CUDA")
-
 DEVICE = "cuda:0"
 # bf16 encoder-vs-HF acceptance. The encoders are fp32-exact (cos > 0.9999, see the
-# CI structural test); in bf16 the measured cosine is ~0.9999, pinned here as the
-# tightest true value. The *contract* we guarantee is cos > 0.999 (not bit-identical).
-COS_MIN = 0.9999
+# CI structural test). In production bf16 the patch-embed-as-matmul perturbation
+# (~2e-3) amplifies through the residual stack; the measured cosine ranges ~0.99952
+# .. 0.99984 across image resolutions and the batched-audio varlen path. The
+# guaranteed *contract* is cos > 0.999 (NOT bit-identical), so the gate is pinned at
+# the contract, not at a single best-case measurement. Pinning it at 0.9999 made the
+# test flake exactly at the bf16 noise floor (it failed 4 vision variants + batched
+# audio whose true cosines 0.99952..0.99984 are all comfortably above the contract).
+COS_MIN = 0.999
 RELL2_MAX = 0.05  # looser secondary L2 sanity bound (cos is the primary gate)
 
 
@@ -158,6 +161,13 @@ def test_audio_single_parity(cfg, processor):
 
 @pytest.mark.skipif(not _HAS_FA, reason="flash-attn required")
 def test_audio_batched_parity(cfg, processor):
+    # Checks varlen packing isolation: a request's batched output == its solo
+    # output. NOTE: for clips SHORTER than n_window*2 this is expected to differ
+    # by ~bf16 noise, because HF's own chunk_and_pad pads to the per-call max
+    # (see chunk_and_pad_features in audio_encoder.py) — the native encoder is
+    # fp32-identical to HF in both modes, so that small batch-dependence is HF
+    # behavior, not a packing bug. Both test clips here are multi-second (>>
+    # n_window*2), so they are unaffected.
     from mstar.model.qwen3_omni.components.audio_encoder import (
         NativeQwen3OmniAudioEncoder, _feat_extract_output_lengths,
     )

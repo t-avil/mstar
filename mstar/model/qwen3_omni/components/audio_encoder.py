@@ -243,6 +243,14 @@ def _sdpa_varlen(q, k, v, cu_seqlens, scale):
 @torch.compiler.disable
 def varlen_attention(q, k, v, cu_seqlens, max_seqlen, scale):
     """q/k/v: (total_tokens, num_heads, head_dim). Bidirectional, packed by cu_seqlens."""
+    # During encoder CUDA-graph capture the vision/audio encoders install a
+    # FlashInfer override (set_fi_override). flash-attn's varlen custom op is NOT
+    # reliably CUDA-graph-capturable for the production encoder head dims (it
+    # fails capture and the encoder then silently falls back to eager, defeating
+    # the whole point of the graph). While an override is live we MUST take the
+    # capture-legal flashinfer path, regardless of flash-attn availability.
+    if _fi_override is not None:
+        return _flashinfer_varlen(q, k, v, cu_seqlens, scale)
     if _FLASH_ATTN_AVAILABLE:
         return flash_attn_varlen_func(
             q, k, v,
@@ -264,6 +272,16 @@ def _feat_extract_output_lengths(input_lengths: torch.Tensor) -> torch.Tensor:
 
 
 def chunk_and_pad_features(input_features, feature_lens, n_window):
+    # NOTE (parity): the pad_sequence below pads chunks to the LONGEST chunk in
+    # THIS call, not to a fixed n_window*2. So a sub-chunk clip (len < n_window*2)
+    # gets more zero-padding when batched behind a longer clip than when run
+    # alone, and Conv2d's bias makes that boundary non-zero — i.e. a short clip's
+    # output depends slightly on its batch-mates (~4e-4 fp32). This is NOT a bug
+    # to fix: it is byte-for-byte what HF's chunk_and_pad_features does
+    # (modeling_qwen3_omni_moe.py), and the native encoder is fp32-bit-identical
+    # to HF in every batching mode (test_qwen3_omni_native_encoders_ci.py). Pinning
+    # the pad to n_window*2 would make this clip-padding deterministic but would
+    # DIVERGE from the HF reference — breaking the parity contract, not improving it.
     chunk_num = torch.ceil(feature_lens / (n_window * 2)).long()
     chunk_lengths = torch.full((chunk_num.sum(),), n_window * 2, dtype=torch.long,
                                device=feature_lens.device)

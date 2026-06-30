@@ -1353,7 +1353,7 @@ class ThinkerSubmodule(ARNodeSubmodule):
             outputs.pop("new_token", None)
 
         if not request_info.step_metadata.get("audio_output", True):
-            # drop thinker_states and thinker_match
+            # drop thinker_states and thinker_mask
             outputs.pop("thinker_states", None)
             outputs.pop("thinker_mask", None)
         else:
@@ -1554,7 +1554,7 @@ class TalkerSubmodule(ARNodeSubmodule):
         self, thinker_hidden: torch.Tensor
     ):
         # Build assistant prefix (matching HF/sglang-omni/vllm-omni pattern):
-        # Text hidden: [pad*4, bos, proj[3]] (9 tokens)
+        # Text hidden: [pad*4, bos, proj[3]] (6 tokens)
         # (note that the assistant prefix was handled in the previous prefill stage)
 
         # Text part of assistant prefix
@@ -1574,7 +1574,7 @@ class TalkerSubmodule(ARNodeSubmodule):
     ):
         # Build assistant prefix (matching HF/sglang-omni/vllm-omni pattern):
         # Codec hidden: [codec_embed(nothink, think_bos, think_eos,
-        #                speaker, pad, bos)] (9 tokens)
+        #                speaker, pad, bos)] (6 tokens)
         tc = self.config.talker
         speaker_id = tc.speaker_id.get(speaker.lower())
         if speaker_id is None:
@@ -1712,7 +1712,7 @@ class TalkerSubmodule(ARNodeSubmodule):
         **kwargs
     ):
         """
-        Runs the Talker LLM for stages that grpoh walks that sample a token
+        Runs the Talker LLM for stages that graph walks that sample a token
         and feed into the code predictor.
 
         ``last_token_indices`` (when provided) is used to ``index_select`` the
@@ -1831,7 +1831,7 @@ class TalkerSubmodule(ARNodeSubmodule):
           __batched_logits__) and returns ``{rid: {} for rid in request_ids}``,
           matching eager.
 
-        Last-prefill path (``talker_last_prefill``; fixed 9 tokens per request,
+        Last-prefill path (``talker_last_prefill``; fixed 6 tokens per request,
         ``hidden`` shape ``(bs * 9, hidden)``):
           Same _forward_decode_like as decode but uses the ``last_token_indices``
           tensor produced by ``preprocess`` (``cumsum(seq_lens) - 1``) to

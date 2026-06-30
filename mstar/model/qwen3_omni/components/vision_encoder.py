@@ -198,7 +198,6 @@ class NativeQwen3OmniVisionEncoder(nn.Module):
         # MSTAR_ENCODER_CUDA_GRAPH=1; only legal with the FlashInfer varlen
         # backend (SDPA's data-dependent mask build is not capture-safe).
         self._cg_cache: dict = {}
-        self._cg_pool = None
         self._cg_max_keys = int(os.environ.get("MSTAR_ENCODER_CG_MAX_KEYS", "16"))
         self._cg_warmed = False
 

@@ -1477,6 +1477,15 @@ class Qwen3OmniModel(Model):
         # placeholders are inserted.  add_generation_prompt=True
         # appends the trailing ``<|im_start|>assistant\n`` so the
         # model knows to start the assistant response.
+        if self._processor is None:
+            # __init__ sets _processor=None and warns if AutoProcessor fails to
+            # load. Fail fast with a clear message instead of a cryptic
+            # AttributeError on the first request (the old commented-out guard
+            # promised a tokenizer fallback that was never wired up).
+            raise RuntimeError(
+                "Qwen3-Omni processor failed to load at init; cannot build the "
+                "chat-template prompt. Check the checkpoint/processor files."
+            )
         text = self._processor.apply_chat_template(
             messages,
             tokenize=False,

@@ -26,6 +26,23 @@ sys.modules.setdefault("flash_attn", None)
 
 transformers = pytest.importorskip("transformers")
 
+
+@pytest.fixture(autouse=True)
+def _force_sdpa_cpu_path():
+    """``sys.modules.setdefault`` above only blocks a *future* import; if the GPU
+    parity test file already imported ``audio_encoder`` in the same session,
+    ``_FLASH_ATTN_AVAILABLE`` / the flashinfer backend are already baked in and the
+    CPU structural tests would route to a CUDA-only kernel and error. Force the
+    pure-SDPA path for the duration of each CI test regardless of import order."""
+    import mstar.model.qwen3_omni.components.audio_encoder as AE
+    saved = (AE._FLASH_ATTN_AVAILABLE, AE._VARLEN_BACKEND)
+    AE._FLASH_ATTN_AVAILABLE = False
+    AE._VARLEN_BACKEND = "per_segment"   # SDPA, CPU-capable, no flashinfer/flash-attn
+    try:
+        yield
+    finally:
+        AE._FLASH_ATTN_AVAILABLE, AE._VARLEN_BACKEND = saved
+
 DEVICE = "cpu"
 DTYPE = torch.float32          # fp32 => native is bit-for-bit equal to HF
 COS_MIN = 0.9999
