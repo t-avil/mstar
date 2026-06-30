@@ -163,7 +163,7 @@ class NativeAudioEncoderSubmodule(NodeSubmodule):
                                 for i in range(len(request_ids))]
         results: dict[str, NameToTensorList] = {}
         off = 0
-        for rid, c in zip(request_ids, req_token_counts, strict=False):
+        for rid, c in zip(request_ids, req_token_counts, strict=True):
             results[rid] = {"audio_embeds": [embeds[off:off + c]]}
             off += c
         return results
@@ -345,7 +345,7 @@ class NativeVisionEncoderSubmodule(NodeSubmodule):
             req_token_counts = [self._merged_tokens(g[i:i + 1]) for i in range(len(request_ids))]
         results: dict[str, NameToTensorList] = {}
         off = 0
-        for rid, c in zip(request_ids, req_token_counts, strict=False):
+        for rid, c in zip(request_ids, req_token_counts, strict=True):
             results[rid] = {
                 "vision_embeds": [embeds[off:off + c]],
                 "deepstack": [d[off:off + c] for d in deepstack],
@@ -357,7 +357,7 @@ class NativeVisionEncoderSubmodule(NodeSubmodule):
         embeds, deepstack = self._run(pixel_values, grid_thw)
         return {
             "vision_embeds": [embeds],
-            "deepstack": deepstack if deepstack else [torch.tensor([])],
+            "deepstack": deepstack if deepstack is not None else [torch.tensor([])],
         }
 
     def can_batch(self, batch: NodeBatch, model_inputs: list[NodeInputs]) -> bool:

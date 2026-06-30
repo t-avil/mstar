@@ -198,12 +198,11 @@ class NativeQwen3OmniVisionEncoder(nn.Module):
         # MSTAR_ENCODER_CUDA_GRAPH=1; only legal with the FlashInfer varlen
         # backend (SDPA's data-dependent mask build is not capture-safe).
         self._cg_cache: dict = {}
-        self._cg_pool = None
         self._cg_max_keys = int(os.environ.get("MSTAR_ENCODER_CG_MAX_KEYS", "16"))
         self._cg_warmed = False
 
     def _cuda_graph_enabled(self) -> bool:
-        if os.environ.get("MSTAR_ENCODER_CUDA_GRAPH", "0") not in ("1", "true", "True"):
+        if os.environ.get("MSTAR_ENCODER_CUDA_GRAPH", "1") not in ("1", "true", "True"):
             return False
         import mstar.model.qwen3_omni.components.audio_encoder as AE
         return AE._FLASHINFER_AVAILABLE and AE._VARLEN_BACKEND == "flashinfer"
@@ -280,7 +279,7 @@ class NativeQwen3OmniVisionEncoder(nn.Module):
         if self._cg_warmed:
             return
         self._cg_warmed = True
-        spec = os.environ.get("MSTAR_ENCODER_CG_WARMUP", "")
+        spec = os.environ.get("MSTAR_ENCODER_CG_WARMUP", "1,2,4,8")
         if not spec or not self._cuda_graph_enabled():
             return
         try:
