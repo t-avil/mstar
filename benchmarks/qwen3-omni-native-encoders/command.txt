@@ -1,0 +1,57 @@
+# How to reproduce the benchmark data (raw_<path>.json, NUMBERS.md, charts/).
+#
+# Pipeline (3 stages):
+#   1. benchmark/sweep.sh        -> per-(path,batch) results.json under a sweep dir
+#   2. scripts/aggregate.py      -> raw_<path>.json (datapoints + aggregates)   <-- THIS produced the committed raw_*.json
+#   3. make_numbers.py / make_proof_charts.py -> NUMBERS.md + charts/ from raw_*.json
+#
+# Stages 1-2 need the same hardware (GPUs 6,7) and the (uncommitted) sweep output
+# dirs; re-running the sweeps reproduces aggregates within ~1-5%. Stage 3 is fully
+# reproducible from the committed raw_*.json alone.
+
+PY=/home/tim/mstar-encoders/.venv/bin/python
+
+# ─── Stage 1: sweeps (GPUs 6,7, all 4 paths) ──────────────────────────────────
+# IMPORTANT: the optimization flags are NOT defaults in sweep.sh; they must be
+# passed via --flags or the headline S2T TTFT numbers do NOT reproduce
+# (MSTAR_GPU_MEL alone is ~3.5x of S2T TTFT — see ../../CANONICAL_FLAGS.md).
+
+# M*-new (opt/combined-lowrisk, 1f66ce6), worktree checked out at that commit:
+benchmark/sweep.sh --system mstar_new --gpus 6,7 --port 8182 --paths s2t,i2t,s2s,i2s \
+  --batches 1,2,4,8,16,32 \
+  --flags "MSTAR_GPU_MEL=1 MSTAR_GPU_IMAGE_PREPROCESS=1 MSTAR_VLLM_PROMPT_LAYOUT=1" \
+  --worktree /home/tim/mstar-encoders \
+  --output /home/tim/tmp/sweep_lowrisk
+
+# M*-old (upstream main, ae7d173), worktree checked out at ae7d173:
+benchmark/sweep.sh --system mstar_old --gpus 6,7 --port 8182 --paths s2t,i2t,s2s,i2s \
+  --batches 1,2,4,8,16,32 \
+  --worktree /home/tim/tmp/mstar-old \
+  --output /home/tim/tmp/sweep_old
+
+# vLLM-Omni baseline (commit 60c15004) — REQUIRED for the new/vLLM columns, was
+# previously undocumented. Uses the vllm system mode of sweep.sh:
+benchmark/sweep.sh --system vllm --gpus 6,7 --port 8182 --paths s2t,i2t,s2s,i2s \
+  --batches 1,2,4,8,16,32 \
+  --output /home/tim/tmp/sweep_vllm
+
+# ─── Stage 2: aggregate sweeps -> raw_<path>.json ─────────────────────────────
+# The committed raw_*.json carry provenance "generated_by": "aggregate.py".
+# Build them from the three sweep dirs (one --roots entry + --tags per system),
+# writing into THIS benchmark dir (do NOT rely on the default, which points at
+# benchmarks/qwen3-omni-joint):
+$PY scripts/aggregate.py \
+  --roots /home/tim/tmp/sweep_lowrisk /home/tim/tmp/sweep_old /home/tim/tmp/sweep_vllm \
+  --tags  mstar_new mstar_old vllm \
+  --paths s2t i2t s2s i2s --batches 1 2 4 8 16 32 \
+  --out   benchmarks/qwen3-omni-native-encoders
+# (see `$PY scripts/aggregate.py --help`; --refine-dir <thisdir> re-runs the
+#  recheck pass over already-built raw_*.json.)
+
+# NOTE: scripts/ingest_sweep.py is a SEPARATE, older ingestion path and was NOT
+# used to produce the committed raw_*.json. Its default --raw-dir is
+# benchmarks/qwen3-omni-joint (the wrong dir for this benchmark); do not use it here.
+
+# ─── Stage 3: regenerate NUMBERS.md + charts from committed raw_*.json ─────────
+$PY scripts/make_numbers.py
+$PY scripts/make_proof_charts.py
