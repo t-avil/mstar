@@ -101,6 +101,19 @@ class CudaGraphKey:
     requires_cfg: bool
     bs: int
     num_tokens: int
+    # --- MSTAR_MIXED_WALK extension (default-inert) ---
+    # A mixed key captures one varlen forward serving ``num_decode`` decode
+    # requests (1 query token each) PLUS one prefill chunk of
+    # ``num_prefill_tokens`` tokens. ``bs == num_decode + 1`` and
+    # ``num_tokens == num_decode + num_prefill_tokens``. The three fields below
+    # default to the non-mixed values so every existing CudaGraphKey
+    # construction (which omits them) hashes and compares exactly as before —
+    # the mixed path is purely additive. ``num_prefill_tokens`` is drawn from a
+    # FIXED bucket set (see DESIGN_mixed_walk.md, capture-shape risk) so the
+    # captured-graph count stays finite.
+    mixed: bool = False
+    num_decode: int = 0
+    num_prefill_tokens: int = 0
 
 
 @dataclass
@@ -1208,6 +1221,49 @@ class CudaGraphRunner:
                 exec_timings=exec_timings,
             )
         raise ValueError(f"Unknown CudaGraphConfigType: {cfg_type}")
+
+    def run_mixed(
+        self,
+        decode_walk: str,
+        prefill_walk: str,
+        requires_cfg: bool,
+        decode_request_ids: list[str],
+        prefill_request_ids: list[str],
+        decode_inputs: list[ARNodeInputs],
+        prefill_inputs: list[ARNodeInputs],
+        per_request_info: dict[str, CurrentForwardPassInfo],
+        submodule: ARNodeSubmodule,
+        slot: int | None = None,
+    ) -> dict:
+        """Mixed prefill+decode varlen replay (MSTAR_MIXED_WALK).
+
+        Serves one flat varlen forward containing ``decode_request_ids``
+        (1 query token each) plus ``prefill_request_ids`` (a capped prefill
+        chunk each). The flat-tensor layout is built by
+        ``build_mixed_varlen_layout``; FlashInfer's prefill wrapper handles
+        the mixed qo_indptr natively (1-token decode rows are just length-1
+        queries).
+
+        Current implementation: **eager fallback** — returns ``None`` to signal
+        the caller (KVCacheEngine) to use the eager mixed path
+        (``_execute_mixed_eager``). This is correct and validates the mixed
+        layout end-to-end; CUDA graph capture/replay on top is future work
+        that requires GPU testing.
+
+        TODO(mixed-walk-graph): add MIXED CudaGraphConfig + capture loop +
+        graph replay. See DESIGN_mixed_walk.md section 9 and the bucketing
+        in ``pad_prefill_tokens_to_bucket``.
+        """
+        # Eager fallback: return None. The engine detects this and uses
+        # _execute_mixed_eager instead of the CUDA graph path. This is
+        # functionally correct and validates the mixed layout end-to-end.
+        # CUDA graph capture for mixed batches is future work.
+        logger.debug(
+            "run_mixed: eager fallback for %d decode + %d prefill requests "
+            "(graph capture not yet implemented for mixed batches)",
+            len(decode_request_ids), len(prefill_request_ids),
+        )
+        return None
 
     def _run_basic_batched(
         self,

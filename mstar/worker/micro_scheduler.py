@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -22,6 +23,30 @@ class ReadyNodeEntry:
 
 
 @dataclass
+class MixedBatchPlan:
+    """Describes a mixed prefill+decode ("piggyback") step.
+
+    Produced ONLY when ``MSTAR_MIXED_WALK`` is enabled. Attached to a
+    ``ScheduledBatch`` whose primary ``graph_walk`` is the latency-sensitive
+    decode walk; the named prefill request(s) ride the same scheduler step so
+    a freshly-arrived request's prefill no longer waits a full cycle behind
+    the running decode batch (continuous batching, vLLM-v1 style).
+
+    The decode and prefill requests share one ``node_name`` (in M*'s
+    Qwen3-Omni topology the Thinker decode and all Thinker prefill walks run on
+    the same "Thinker" node), so a single mixed varlen forward can serve both.
+    See DESIGN_mixed_walk.md for the forward/replay contract this descriptor
+    drives.
+    """
+    decode_rids: list[str]
+    prefill_rids: list[str]
+    decode_walk: str
+    prefill_walk: str | None
+    token_budget: int
+    prefill_chunk_cap: int
+
+
+@dataclass
 class ScheduledBatch:
     """A batch of nodes ready to be executed."""
     node_name: str
@@ -29,6 +54,10 @@ class ScheduledBatch:
     node_objects: dict[str,GraphNode]
     # request_id -> worker_graph_id (for push-back on OOM)
     request_to_worker_graph: dict[str, str] = None
+    # Set ONLY under MSTAR_MIXED_WALK when a waiting prefill piggybacks onto
+    # this decode batch. None on every default-path batch, so the flag-OFF
+    # behavior (and every consumer that doesn't inspect it) is unchanged.
+    mixed_plan: "MixedBatchPlan | None" = None
 
 
 # Priority: lower value = higher priority
@@ -43,6 +72,60 @@ class SchedulingType(Enum):
     ROUND_ROBIN = "round_robin"
 
 
+def is_decode_walk(graph_walk: str) -> bool:
+    """Heuristic split of decode (1-token AR step) walks from prefill walks.
+
+    A walk is a decode if its name is exactly ``decode`` or ends in
+    ``_decode`` (M*'s ``thinker_decode`` / ``talker_decode``). M*'s prefill
+    walks carry a ``prefill`` segment (``prefill_text`` / ``prefill_audio`` /
+    ``prefill_vision`` / ``talker_prefill``), so this cleanly identifies the
+    latency-sensitive decode that should remain the PRIMARY of a mixed step,
+    with prefills piggybacking onto it. Used only on the env-gated mixed path;
+    rationale and override points are in DESIGN_mixed_walk.md.
+    """
+    return graph_walk == "decode" or graph_walk.endswith("_decode")
+
+
+def plan_mixed_budget(
+    decode_count: int,
+    prefill_candidates: list,
+    token_budget: int,
+    prefill_chunk_cap: int,
+    max_prefill_requests: int = 1,
+    token_count_fn=None,
+) -> list[int]:
+    """Pure token-budget admission for one mixed prefill+decode step.
+
+    Mirrors vLLM v1's single-token-budget loop (scheduler.py: running decodes
+    consume one token each, then waiting prefills consume the remaining
+    budget). Returns the indices INTO ``prefill_candidates`` admitted to
+    piggyback this step (highest-priority/scan-order first).
+
+    ``token_count_fn(candidate) -> int`` estimates a candidate's prefill token
+    cost; it defaults to the conservative ``prefill_chunk_cap`` because exact
+    per-request prefill lengths are not reliably available at schedule time
+    (they live in the request's pending input tensors, not in the ready-node
+    metadata the scheduler scans). Every candidate's cost is capped at
+    ``prefill_chunk_cap`` so the captured-graph shape set stays finite — see
+    the capture-shape risk section of DESIGN_mixed_walk.md.
+
+    Pure function (no scheduler/queue state) so it is unit-testable on CPU.
+    """
+    if token_count_fn is None:
+        token_count_fn = lambda _c: prefill_chunk_cap  # noqa: E731
+    admitted: list[int] = []
+    used = decode_count  # each running decode contributes exactly 1 query token
+    for idx, cand in enumerate(prefill_candidates):
+        if len(admitted) >= max_prefill_requests:
+            break
+        cost = min(token_count_fn(cand), prefill_chunk_cap)
+        if used + cost > token_budget:
+            continue
+        admitted.append(idx)
+        used += cost
+    return admitted
+
+
 class MicroScheduler:
     """
     Simple MVP scheduler: scans all worker graph queues for ready nodes,
@@ -51,6 +134,15 @@ class MicroScheduler:
 
     # Seconds to wait before retrying a held request after OOM
     HOLD_BACKOFF_SECONDS = 0.05
+
+    # Poll granularity used inside the encoder coalescing window. Re-scan the
+    # ready queues a few times across the wait window rather than busy-spinning.
+    COALESCE_POLL_SECONDS = 0.0005
+
+    # Node names whose forward is worth coalescing across requests. These are
+    # the STATELESS multimodal encoders (Qwen3-Omni prefill_audio /
+    # prefill_vision walks); their submodules implement forward_batched.
+    ENCODER_NODE_NAMES = frozenset({"audio_encoder", "vision_encoder"})
 
     def __init__(
         self, engine_manager: EngineManager,
@@ -62,6 +154,44 @@ class MicroScheduler:
         self.batch_number = 0
         self.sched_type = sched_type
 
+        # --- Cross-request encoder coalescing (env-gated, default OFF) ---
+        # When enabled, once an encoder node is the selected node for this
+        # scheduling cycle, briefly wait to accumulate more ready encoder
+        # requests for the SAME (node, graph_walk) and dispatch them as one
+        # forward_batched call. Only encoder nodes get a window; decode and
+        # other latency-critical nodes are never delayed. The window aborts
+        # early once it is full, the wait elapses, OR a higher-priority
+        # (KV-cache decode) node becomes ready.
+        self._coalesce_enabled = os.environ.get(
+            "MSTAR_ENCODER_COALESCE", "0"
+        ) in ("1", "true", "True")
+        try:
+            self._coalesce_wait_s = max(
+                0.0,
+                float(os.environ.get("MSTAR_ENCODER_COALESCE_WAIT_MS", "5")) / 1000.0,
+            )
+        except ValueError:
+            self._coalesce_wait_s = 0.005
+        try:
+            self._coalesce_max_batch = max(
+                1, int(os.environ.get("MSTAR_ENCODER_COALESCE_MAX_BATCH", "32"))
+            )
+        except ValueError:
+            self._coalesce_max_batch = 32
+        # Coalescing window stats — lightweight counters logged periodically so
+        # operators can observe effectiveness and tune the window parameters.
+        self._coalesce_invocations = 0
+        self._coalesce_total_batched = 0
+        self._coalesce_preempted = 0      # aborted early due to higher-prio node
+        self._coalesce_log_interval = 200  # log every N invocations
+        if self._coalesce_enabled:
+            logger.info(
+                "MicroScheduler: encoder coalescing ON (wait=%.1fms max_batch=%d nodes=%s)",
+                self._coalesce_wait_s * 1000.0,
+                self._coalesce_max_batch,
+                sorted(self.ENCODER_NODE_NAMES),
+            )
+
         # tensor parallel
         self.tp_rank_zero_nodes = tp_rank_zero_nodes
         self.tp_batches_pending_schedule = deque()
@@ -71,6 +201,22 @@ class MicroScheduler:
         self.node_and_walk_to_last_batch_num = {}
         # request_id -> monotonic time until which the request is held
         self.held_until: dict[str, float] = {}
+
+        # --- MSTAR_MIXED_WALK: continuous-batching (prefill piggybacks decode) ---
+        # Default OFF -> strict one-(node, graph_walk)-per-step, byte-identical to
+        # the pre-existing scheduler. When ON, get_next_batch may admit one (or a
+        # few) waiting prefill requests onto the running decode batch under a
+        # shared token budget. See DESIGN_mixed_walk.md.
+        self.mixed_walk_enabled = os.environ.get("MSTAR_MIXED_WALK", "0") == "1"
+        self.mixed_token_budget = int(
+            os.environ.get("MSTAR_MIXED_TOKEN_BUDGET", "8192")
+        )
+        self.mixed_prefill_chunk_cap = int(
+            os.environ.get("MSTAR_MIXED_PREFILL_CHUNK", "512")
+        )
+        self.mixed_max_prefill_requests = int(
+            os.environ.get("MSTAR_MIXED_MAX_PREFILL_REQS", "1")
+        )
         # Rids with a deferred remove; stop initiating new work for them.
         # Shared by reference with Worker._pending_removes.
         self.pending_removes: set[str] = set()
@@ -188,42 +334,20 @@ class MicroScheduler:
         )
 
 
-    def get_next_batch(
+    def _collect_ready_nodes(
         self,
         worker_graphs_manager: WorkerGraphsManager,
-        max_batch_size: int | None = None,
         target_node_name: str | None = None,
         target_graph_walk: str | None = None,
         exclude_target: tuple[str, str] | None = None,
-    ) -> ScheduledBatch | None:
+    ) -> dict[str, list[ReadyNodeEntry]]:
+        """Scan every worker-graph queue for ready, engine-ready nodes that
+        rank 0 may initiate, grouped by node name. Mirrors the (node, walk,
+        request) filtering used by get_next_batch. Does not pop or mutate
+        queue state. Safe to call repeatedly (used by the coalescing window).
         """
-        Scans all worker graph queues for ready nodes.
-        Groups by node name. Returns highest-priority group.
-
-        Args:
-            max_batch_size: If set, limit the number of requests in the batch.
-                Useful for CUDA graph compatibility (must match captured sizes).
-            target_node_name: If set, only schedule this node name.
-            target_graph_walk: If set, only schedule this graph walk.
-            exclude_target: If set, skip this (node_name, graph_walk) pair.
-        """
-        # Collect all ready (node_name, request_id, graph_walk) tuples
-        # grouped by node name
-        node_name_to_requests: dict[str, list[ReadyNodeEntry]] = {}
         now = time.monotonic()
-
-        # Expire stale hold entries
-        self.held_until = {
-            rid: t for rid, t in self.held_until.items() if t > now
-        }
-
-        tp_follow_batch = self._try_schedule_tp_follow(worker_graphs_manager)
-        if tp_follow_batch is None:
-            self.num_consec_tp_follower_batches = 0
-        else:
-            self.num_consec_tp_follower_batches += 1
-            return tp_follow_batch
-
+        node_name_to_requests: dict[str, list[ReadyNodeEntry]] = {}
         for worker_graph_id, queue in worker_graphs_manager.queues.items():
             ready_map = queue.get_ready_node_names()
             for request_id, node_names in ready_map.items():
@@ -232,7 +356,7 @@ class MicroScheduler:
                 if request_id in self.pending_removes:
                     continue  # remove deferred for in-flight safety; don't start new work
                 # Skip requests in OOM backoff
-                if request_id in self.held_until:
+                if request_id in self.held_until and self.held_until[request_id] > now:
                     continue
                 for sname in node_names:
                     if sname not in self.tp_rank_zero_nodes:
@@ -254,6 +378,148 @@ class MicroScheduler:
                     node_name_to_requests.setdefault(sname, []).append(
                         ReadyNodeEntry(request_id, worker_graph_id, graph_walk)
                     )
+        return node_name_to_requests
+
+    def _has_higher_priority_ready(
+        self,
+        node_name_to_requests: dict[str, list[ReadyNodeEntry]],
+        encoder_node_name: str,
+    ) -> bool:
+        """True if any ready node has strictly higher priority (lower PRIORITY
+        value) than the encoder node — e.g. a KV-cache decode step. Used to
+        abort the coalescing window early so latency-critical work is never
+        starved by the encoder wait.
+        """
+        if encoder_node_name not in self.engine_manager.node_to_engine:
+            return False
+        enc_engine = self.engine_manager.get_engine(encoder_node_name)
+        enc_prio = PRIORITY.get(enc_engine.engine_type(), 99)
+        for sname in node_name_to_requests:
+            if sname == encoder_node_name:
+                continue
+            if sname not in self.engine_manager.node_to_engine:
+                continue
+            engine = self.engine_manager.get_engine(sname)
+            if PRIORITY.get(engine.engine_type(), 99) < enc_prio:
+                return True
+        return False
+
+    def _coalesce_encoder_window(
+        self,
+        worker_graphs_manager: WorkerGraphsManager,
+        node_name: str,
+        graph_walk: str,
+        max_batch_size: int | None,
+        target_node_name: str | None,
+        target_graph_walk: str | None,
+        exclude_target: tuple[str, str] | None,
+        initial_entries: list[ReadyNodeEntry],
+    ) -> list[ReadyNodeEntry]:
+        """Bounded wait window that accumulates more ready encoder requests for
+        (node_name, graph_walk) so they dispatch as one forward_batched call.
+
+        Terminates as soon as ANY of these holds (all bound the added delay):
+          * the batch reaches the coalescing cap (or the caller's
+            max_batch_size, whichever is smaller),
+          * MSTAR_ENCODER_COALESCE_WAIT_MS has elapsed,
+          * a higher-priority (decode) node becomes ready.
+
+        Returns the (possibly larger) list of entries to dispatch.
+        """
+        cap = self._coalesce_max_batch
+        if max_batch_size is not None:
+            cap = min(cap, max_batch_size)
+
+        entries = initial_entries
+        if len(entries) >= cap:
+            # Fast path: already at cap, no need to wait. Still track stats.
+            self._coalesce_invocations += 1
+            self._coalesce_total_batched += len(entries)
+            return entries
+
+        deadline = time.monotonic() + self._coalesce_wait_s
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(self.COALESCE_POLL_SECONDS, remaining))
+            node_name_to_requests = self._collect_ready_nodes(
+                worker_graphs_manager,
+                target_node_name=target_node_name,
+                target_graph_walk=target_graph_walk,
+                exclude_target=exclude_target,
+            )
+            entries = [
+                e for e in node_name_to_requests.get(node_name, [])
+                if e.graph_walk == graph_walk
+            ]
+            if len(entries) >= cap:
+                break
+            # Don't starve latency-critical decode: if a higher-priority node
+            # became ready during the wait, stop accumulating and dispatch now.
+            if self._has_higher_priority_ready(node_name_to_requests, node_name):
+                self._coalesce_preempted += 1
+                break
+
+        # Track stats
+        final_count = len(entries)
+        self._coalesce_invocations += 1
+        self._coalesce_total_batched += final_count
+        if entries:
+            logger.debug(
+                "MicroScheduler coalesced %d encoder requests for node %s walk %s",
+                final_count, node_name, graph_walk,
+            )
+        if self._coalesce_invocations % self._coalesce_log_interval == 0:
+            avg = (
+                self._coalesce_total_batched / self._coalesce_invocations
+                if self._coalesce_invocations > 0 else 0.0
+            )
+            logger.info(
+                "MicroScheduler coalesce stats: invocations=%d avg_batch=%.1f preempted=%d",
+                self._coalesce_invocations, avg, self._coalesce_preempted,
+            )
+        return entries
+
+    def get_next_batch(
+        self,
+        worker_graphs_manager: WorkerGraphsManager,
+        max_batch_size: int | None = None,
+        target_node_name: str | None = None,
+        target_graph_walk: str | None = None,
+        exclude_target: tuple[str, str] | None = None,
+    ) -> ScheduledBatch | None:
+        """
+        Scans all worker graph queues for ready nodes.
+        Groups by node name. Returns highest-priority group.
+
+        Args:
+            max_batch_size: If set, limit the number of requests in the batch.
+                Useful for CUDA graph compatibility (must match captured sizes).
+            target_node_name: If set, only schedule this node name.
+            target_graph_walk: If set, only schedule this graph walk.
+            exclude_target: If set, skip this (node_name, graph_walk) pair.
+        """
+        now = time.monotonic()
+
+        # Expire stale hold entries
+        self.held_until = {
+            rid: t for rid, t in self.held_until.items() if t > now
+        }
+
+        tp_follow_batch = self._try_schedule_tp_follow(worker_graphs_manager)
+        if tp_follow_batch is None:
+            self.num_consec_tp_follower_batches = 0
+        else:
+            self.num_consec_tp_follower_batches += 1
+            return tp_follow_batch
+
+        node_name_to_requests = self._collect_ready_nodes(
+            worker_graphs_manager,
+            target_node_name=target_node_name,
+            target_graph_walk=target_graph_walk,
+            exclude_target=exclude_target,
+        )
 
         if not node_name_to_requests:
             return None
@@ -271,6 +537,27 @@ class MicroScheduler:
         # Pop ready nodes for all requests of this node name
         entries = [e for e in node_name_to_requests[best_node_name] \
                    if e.graph_walk == graph_walk]
+
+        # Cross-request encoder coalescing window. Only when enabled and the
+        # selected node is a (STATELESS) multimodal encoder: briefly wait to
+        # accumulate more ready requests for the SAME (node, walk) so they run
+        # as one forward_batched call. Decode / non-encoder nodes are never
+        # delayed (they were already selected and dispatched immediately).
+        if (
+            self._coalesce_enabled
+            and best_node_name in self.ENCODER_NODE_NAMES
+            and len(entries) < self._coalesce_max_batch
+        ):
+            entries = self._coalesce_encoder_window(
+                worker_graphs_manager,
+                best_node_name,
+                graph_walk,
+                max_batch_size=max_batch_size,
+                target_node_name=target_node_name,
+                target_graph_walk=target_graph_walk,
+                exclude_target=exclude_target,
+                initial_entries=entries,
+            )
 
         # Limit batch size if requested (e.g., for CUDA graph compatibility)
         if max_batch_size is not None and len(entries) > max_batch_size:
@@ -299,11 +586,107 @@ class MicroScheduler:
             best_node_name, graph_walk
         )] = self.batch_number
 
+        mixed_plan = self._maybe_plan_mixed(
+            best_node_name=best_node_name,
+            graph_walk=graph_walk,
+            node_name_to_requests=node_name_to_requests,
+            node_objects=node_objects,
+            request_to_worker_graph=request_to_worker_graph,
+            worker_graphs_manager=worker_graphs_manager,
+        )
+
         return ScheduledBatch(
             node_name=best_node_name,
             graph_walk=graph_walk,
             node_objects=node_objects,
             request_to_worker_graph=request_to_worker_graph,
+            mixed_plan=mixed_plan,
+        )
+
+    def _engine_is_kv_cache(self, node_name: str) -> bool:
+        if node_name not in self.engine_manager.node_to_engine:
+            return False
+        return self.engine_manager.get_engine(node_name).engine_type() == EngineType.KV_CACHE
+
+    def _maybe_plan_mixed(
+        self,
+        best_node_name: str,
+        graph_walk: str,
+        node_name_to_requests: dict[str, list[ReadyNodeEntry]],
+        node_objects: dict,
+        request_to_worker_graph: dict,
+        worker_graphs_manager: WorkerGraphsManager,
+    ) -> "MixedBatchPlan | None":
+        """Piggyback waiting prefill(s) onto a decode batch (MSTAR_MIXED_WALK).
+
+        No-op (returns None) unless the flag is on AND the just-selected
+        primary is a latency-sensitive decode on a KV-cache node. When it
+        applies, it admits prefill request(s) of OTHER walks on the SAME node
+        under the shared token budget, pops their ready nodes into
+        ``node_objects`` (mutated in place, like the decode loop above), and
+        returns the plan describing the mixed step. On the flag-OFF path this
+        method is never called with effect — every batch keeps ``mixed_plan=None``.
+        """
+        if not self.mixed_walk_enabled:
+            return None
+        if not node_objects:
+            return None
+        if not is_decode_walk(graph_walk):
+            return None  # only piggyback ONTO a decode primary, never onto a prefill
+        if not self._engine_is_kv_cache(best_node_name):
+            return None
+
+        decode_rids = list(node_objects.keys())
+        prefill_candidates = [
+            e for e in node_name_to_requests[best_node_name]
+            if e.request_id not in node_objects and not is_decode_walk(e.graph_walk)
+        ]
+        if not prefill_candidates:
+            return None
+
+        admitted = plan_mixed_budget(
+            decode_count=len(decode_rids),
+            prefill_candidates=prefill_candidates,
+            token_budget=self.mixed_token_budget,
+            prefill_chunk_cap=self.mixed_prefill_chunk_cap,
+            max_prefill_requests=self.mixed_max_prefill_requests,
+        )
+        if not admitted:
+            return None
+
+        prefill_rids: list[str] = []
+        prefill_walk: str | None = None
+        for idx in admitted:
+            entry = prefill_candidates[idx]
+            queue = worker_graphs_manager.queues[entry.worker_graph_id]
+            popped = queue.pop_ready_nodes(entry.request_id, [best_node_name])
+            if not popped:
+                continue
+            assert len(popped) == 1
+            node_objects[entry.request_id] = popped[0]
+            request_to_worker_graph[entry.request_id] = entry.worker_graph_id
+            prefill_rids.append(entry.request_id)
+            prefill_walk = entry.graph_walk
+            self.node_and_walk_to_last_batch_num[
+                (best_node_name, entry.graph_walk)
+            ] = self.batch_number
+
+        if not prefill_rids:
+            return None
+
+        logger.debug(
+            "MicroScheduler MIXED step on node %s: decode walk %s (%d reqs) + "
+            "prefill walk %s (%d reqs)",
+            best_node_name, graph_walk, len(decode_rids),
+            prefill_walk, len(prefill_rids),
+        )
+        return MixedBatchPlan(
+            decode_rids=decode_rids,
+            prefill_rids=prefill_rids,
+            decode_walk=graph_walk,
+            prefill_walk=prefill_walk,
+            token_budget=self.mixed_token_budget,
+            prefill_chunk_cap=self.mixed_prefill_chunk_cap,
         )
 
     def has_ready_excluding(
