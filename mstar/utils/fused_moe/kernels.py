@@ -22,6 +22,7 @@ grids and keep the Triton-specific boilerplate out of the runner.
 
 from __future__ import annotations
 
+import os
 from typing import Any, Dict
 
 import torch
@@ -398,14 +399,37 @@ def moe_sum_reduce_triton(
 # ---------------------------------------------------------------------------
 
 
+# H200-tuned decode configs for the Qwen3-Omni Thinker MoE (E=128, top_k=8,
+# hidden=2048, moe_inter=768), keyed by decode batch M (== num_tokens, since
+# get_default_config is called with M=num_tokens). Measured offline by
+# tune_moe.py (216-config grid: BLOCK_{M,N,K} x GROUP x warps x stages), best
+# per batch. Numerically identical to the old static 16x32x64 — pure tile speed.
+# num_warps / num_stages flow through the kernel launch via **config.
+_DECODE_CONFIGS_H200 = {
+    1:  {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32,  "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 1, "num_warps": 4, "num_stages": 3},
+    2:  {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 32,  "BLOCK_SIZE_K": 64,  "GROUP_SIZE_M": 1, "num_warps": 8, "num_stages": 3},
+    4:  {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 256, "BLOCK_SIZE_K": 64,  "GROUP_SIZE_M": 1, "num_warps": 4, "num_stages": 2},
+    8:  {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 64,  "BLOCK_SIZE_K": 256, "GROUP_SIZE_M": 1, "num_warps": 8, "num_stages": 4},
+    16: {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 32,  "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 1, "num_warps": 4, "num_stages": 3},
+    32: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64,  "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 1, "num_warps": 4, "num_stages": 3},
+}
+
+
 def get_default_config(M: int, E: int, N: int, K: int, top_k: int) -> Dict[str, int]:
     """Pick Triton tile sizes based on problem shape.
 
-    Mirrors sglang's ``get_default_config`` for the unquantized path.
-    For decode batch sizes (``M`` on the order of 1--64) we always fall
-    into the ``M <= E`` branch since Qwen3-Omni has ``E == 128``.
+    For decode batch sizes (``M`` on the order of 1--64) we fall into the
+    ``M <= E`` branch since Qwen3-Omni has ``E == 128``. There we use the
+    H200-tuned per-batch configs (``tune_moe.py`` output); disable with
+    ``MSTAR_MOE_TUNED_TILES=0`` to fall back to the static 16x32x64.
     """
     if M <= E:
+        if os.environ.get("MSTAR_MOE_TUNED_TILES", "1") != "0":
+            # snap M up to the nearest measured decode bucket
+            for b in (1, 2, 4, 8, 16, 32):
+                if M <= b:
+                    return dict(_DECODE_CONFIGS_H200[b])
+            return dict(_DECODE_CONFIGS_H200[32])
         return {
             "BLOCK_SIZE_M": 16,
             "BLOCK_SIZE_N": 32,
