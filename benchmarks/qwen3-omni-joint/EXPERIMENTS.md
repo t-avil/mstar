@@ -316,3 +316,19 @@ unresolvable at triage scale. TTFT signal positive: i2t B1 p50 0.187 vs
 real value is chunk-size granularity for W5-P1 (chunks are sized from
 PREFILL_TOKEN_BUCKETS); the branch merges into exp/chunked-prefill-v2 when
 P1 lands rather than shipping alone.
+
+## W5-P1 — chunked prefill via step alternation — REJECTED as shipped form; plumbing validated for P2
+Branch exp/chunked-prefill-v2 (76f3afe text, 6e39106 vision, 23d07ee readiness
+fix — the silent hang was a missing empty-payload edge for a declared input).
+Correctness: multi-chunk execution verified live (offsets 0/128/256), all
+seq_len/position asserts green, outputs semantically identical to unchunked
+(same dish IDs on every sample; bitwise divergence after a few tokens is
+expected — chunked spans route through different fp8 tile configs and
+FlashInfer split-KV schedules, so greedy amplifies ULP drift; same property
+as vLLM's chunked prefill). Perf: i2t B1 0.82×, B8 0.90×, B32 0.82×,
+s2t B8 0.73× — the per-chunk conductor round-trips (~3-4 per admission) cost
+more than the stall they remove AT EVERY batch size. Verdict: alternation-
+style chunking is structurally unprofitable in this engine; the validated
+chunk cursor/staging/deferred-completion plumbing feeds W5-P2 (mixed
+CAPTURED step: chunk rides the decode step, no extra round-trips), now the
+sole path for the i2t B32 win.
