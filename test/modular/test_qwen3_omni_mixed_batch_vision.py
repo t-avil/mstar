@@ -163,3 +163,100 @@ def test_text_chunk_always_admitted(clean_flags):
     assert batch is not None
     assert batch.graph_walk == "thinker_mixed"
     assert set(batch.node_objects.keys()) == {"d0", "d1", "c0"}
+
+
+# --- has_mixed_opportunity peek ---------------------------------------------
+# The peek is what the worker uses to decide whether to break a decode spec
+# chain into the non-speculative path (so get_next_batch can assemble the mixed
+# batch). During a spec chain the decode rids are absent from the ready queue,
+# so the peek only confirms a mixable CHUNK is ready on the decode's node.
+class _FakeEngine:
+    def engine_type(self):
+        return None
+
+    def check_ready(self, node_name, request_id, fwd_info):
+        return True
+
+
+class _FakeEngineManager:
+    def get_engine(self, node_name):
+        return _FakeEngine()
+
+
+class _PeekWGM:
+    """WorkerGraphsManager surface for has_mixed_opportunity: a ready scan
+    (get_ready_node_names), per-rid walk + fwd_info, and per_request_info."""
+
+    def __init__(self, node_name, ready_by_rid, walk_by_rid, fwd_by_rid):
+        self._node_name = node_name
+        self._walk_by_rid = walk_by_rid
+        self._fwd_by_rid = fwd_by_rid
+        self.per_request_info = {rid: object() for rid in ready_by_rid}
+        self.queues = {"wg0": _PeekQueue(ready_by_rid)}
+
+    def get_partition_for_node(self, node_name):
+        return "p0"
+
+    def get_graph_walk(self, request_id, node_partition):
+        return self._walk_by_rid[request_id]
+
+    def get_fwd_info(self, request_id, node_partition):
+        return self._fwd_by_rid[request_id]
+
+
+class _PeekQueue:
+    def __init__(self, ready_by_rid):
+        # rid -> set of ready node names
+        self._ready = ready_by_rid
+
+    def get_ready_node_names(self):
+        return {rid: set(names) for rid, names in self._ready.items()}
+
+
+def _peek_scheduler():
+    sched = MicroScheduler(engine_manager=_FakeEngineManager())
+    # Only rank-0 nodes can initiate; the peek honors the same gate.
+    sched.tp_rank_zero_nodes = {"Thinker"}
+    return sched
+
+
+def test_has_mixed_opportunity_true_when_chunk_ready(clean_flags):
+    # Decode rids are mid-chain (absent from the ready scan); a chunk row on the
+    # decode node IS ready. The peek should report an opportunity so the worker
+    # breaks the chain into the non-spec mixed path.
+    _set(MSTAR_MIXED_BATCH="1")
+    sched = _peek_scheduler()
+    wgm = _PeekWGM(
+        "Thinker",
+        ready_by_rid={"c0": {"Thinker"}},          # only the chunk is ready
+        walk_by_rid={"c0": "prefill_text"},
+        fwd_by_rid={"c0": _FakeFwdInfo(256)},
+    )
+    assert sched.has_mixed_opportunity(wgm, ("Thinker", "thinker_decode"))
+
+
+def test_has_mixed_opportunity_false_flag_off(clean_flags):
+    # Flag off -> peek always False so the default yield-away path is unchanged.
+    _set()  # clears all flags
+    sched = _peek_scheduler()
+    wgm = _PeekWGM(
+        "Thinker",
+        ready_by_rid={"c0": {"Thinker"}},
+        walk_by_rid={"c0": "prefill_text"},
+        fwd_by_rid={"c0": _FakeFwdInfo(256)},
+    )
+    assert not sched.has_mixed_opportunity(wgm, ("Thinker", "thinker_decode"))
+
+
+def test_has_mixed_opportunity_false_unchunked_prefill(clean_flags):
+    # A full unchunked prefill (no prefill_chunk_len) is not mixable -> no
+    # opportunity; the worker keeps the normal yield-away.
+    _set(MSTAR_MIXED_BATCH="1")
+    sched = _peek_scheduler()
+    wgm = _PeekWGM(
+        "Thinker",
+        ready_by_rid={"c0": {"Thinker"}},
+        walk_by_rid={"c0": "prefill_text"},
+        fwd_by_rid={"c0": _FakeFwdInfo(None)},      # unchunked
+    )
+    assert not sched.has_mixed_opportunity(wgm, ("Thinker", "thinker_decode"))

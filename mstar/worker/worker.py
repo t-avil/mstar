@@ -2787,7 +2787,31 @@ class Worker:
                         consecutive_spec_steps >= max_consecutive_spec
                         or must_yield_for_fairness
                     )
-                    if not must_yield_away:
+
+                    # W5-P2 mixed batch: if the ready contending work is a
+                    # mixable prefill CHUNK on the decode's own node, do NOT
+                    # yield-away to a prefill-only step. Yield-away schedules
+                    # with exclude_target=decode AND the decode rids are still
+                    # _speculatively_scheduled (absent from the ready queue), so
+                    # _try_assemble_mixed can never see the decode side there —
+                    # which is exactly why "thinker_mixed step" never fired.
+                    # Instead break the spec chain WITHOUT yield-away: fall
+                    # through to the non-speculative path (section 4), where the
+                    # in-flight decode completes, un-flags, re-queues, and the
+                    # plain get_next_batch assembles decode + chunk into a
+                    # thinker_mixed batch (mixed is non-speculative by design —
+                    # see _can_speculate). No mixed opportunity → unchanged
+                    # yield-away.
+                    if must_yield_away and self.scheduler.has_mixed_opportunity(
+                        self.worker_graphs_manager,
+                        (pending.node_name, pending.graph_walk),
+                    ):
+                        must_yield_away = False
+                        break_chain_for_mixed = True
+                    else:
+                        break_chain_for_mixed = False
+
+                    if not must_yield_away and not break_chain_for_mixed:
                         if self.enable_nvtx:
                             range_push("worker.speculate", synchronize=False)
                         _t0 = _time.perf_counter() if phase_period else 0.0
@@ -2796,7 +2820,7 @@ class Worker:
                             _phase_record("speculate", _time.perf_counter() - _t0)
                         if self.enable_nvtx:
                             range_pop(synchronize=False)
-                    if speculation is None:
+                    if speculation is None and not break_chain_for_mixed:
                         yield_away_from_target = (
                             pending.node_name,
                             pending.graph_walk,

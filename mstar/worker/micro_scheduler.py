@@ -77,6 +77,10 @@ class MicroScheduler:
         self.max_consec_tp_follower_batches = max_consec_tp_follower_batches
 
         self.node_and_walk_to_last_batch_num = {}
+        # W5-P2 mixed-batch: count of thinker_mixed batches assembled by this
+        # scheduler. Surfaced in the per-assembly INFO log; a monotonic counter
+        # gives runtime evidence the mixed path is firing without DEBUG.
+        self.mixed_batches_assembled = 0
         # request_id -> monotonic time until which the request is held
         self.held_until: dict[str, float] = {}
         # Rids with a deferred remove; stop initiating new work for them.
@@ -209,6 +213,114 @@ class MicroScheduler:
     _MIXED_MAX_DECODE = 31          # padded_bs 32 = up to 31 decode + 1 chunk row
     _MIXED_MAX_CHUNK_TOKENS = 512   # largest captured chunk bucket (C in {256,512})
 
+    def _mixed_chunk_walks(self) -> set[str]:
+        """Walks that may serve as a mixed step's single chunk row. prefill_text
+        always; prefill_vision only when MSTAR_MIXED_BATCH_VISION is on (the
+        vision chunk carries deepstack + MRoPE, replayable only by the
+        vision-capable mixed capture — see _try_assemble_mixed)."""
+        from mstar.model.qwen3_omni.qwen3_omni_model import (
+            mixed_batch_vision_enabled,
+        )
+        walks = {self._MIXED_CHUNK_WALK}
+        if mixed_batch_vision_enabled():
+            walks.add(self._MIXED_VISION_CHUNK_WALK)
+        return walks
+
+    def _chunk_entry_passes_gates(
+        self,
+        worker_graphs_manager: WorkerGraphsManager,
+        node_name: str,
+        node_partition,
+        entry: "ReadyNodeEntry",
+    ) -> bool:
+        """Per-request gates a chunk row must pass to join a mixed batch.
+
+        Shared by the assembler (_try_assemble_mixed) and the read-only peek
+        (has_mixed_opportunity) so the two never diverge on what counts as a
+        mixable chunk. Gates (see _try_assemble_mixed docstring): chunk metadata
+        present (P1 chunked, not a full unchunked prefill), C within the largest
+        captured bucket, and repetition_penalty == 1.0 (a discarded chunk sample
+        must not perturb penalty state)."""
+        fwd_info = worker_graphs_manager.get_fwd_info(
+            entry.request_id, node_partition,
+        )
+        clen = fwd_info.step_metadata.get("prefill_chunk_len")
+        if clen is None:
+            return False  # unchunked full prefill — don't mix (bucket blow)
+        if int(clen) > self._MIXED_MAX_CHUNK_TOKENS:
+            return False
+        sc = fwd_info.sampling_config.get(node_name)
+        if sc is not None and getattr(sc, "repetition_penalty", 1.0) != 1.0:
+            return False  # penalty state corruption on discarded chunk sample
+        return True
+
+    def has_mixed_opportunity(
+        self,
+        worker_graphs_manager: WorkerGraphsManager,
+        decode_target: tuple[str, str],
+    ) -> bool:
+        """Read-only peek: would a mixed batch assemble RIGHT NOW if the decode
+        group named by ``decode_target`` were back in the ready queue?
+
+        The worker calls this while a decode chain is in flight — the decode
+        rids are ``_speculatively_scheduled`` and thus absent from the ready
+        scan (base.py register_ingested_input gate) — to decide whether to break
+        the chain into the NON-speculative path so ``get_next_batch`` can
+        assemble decode + chunk into a ``thinker_mixed`` batch there. Because the
+        decode rids are absent, this peek only needs to confirm a mixable CHUNK
+        is ready on the decode's node; the decode side is guaranteed to re-enter
+        the queue once the in-flight step completes and un-flags.
+
+        Mirrors the gates in ``_try_assemble_mixed`` without popping or mutating
+        queue state. Returns False when the flag is off (so the default
+        yield-away path is byte-identical when mixed batching is disabled).
+        """
+        from mstar.model.qwen3_omni.qwen3_omni_model import mixed_batch_enabled
+        if not mixed_batch_enabled():
+            return False
+
+        decode_node_name, decode_walk = decode_target
+        if decode_walk != self._MIXED_DECODE_WALK:
+            return False
+        if decode_node_name in self.tp_nodes:
+            return False  # TP mixed batches are P3
+
+        chunk_walks = self._mixed_chunk_walks()
+        node_partition = worker_graphs_manager.get_partition_for_node(
+            decode_node_name
+        )
+        now = time.monotonic()
+        for _wg_id, queue in worker_graphs_manager.queues.items():
+            ready_map = queue.get_ready_node_names()
+            for request_id, node_names in ready_map.items():
+                if request_id not in worker_graphs_manager.per_request_info:
+                    continue
+                if request_id in self.pending_removes:
+                    continue
+                if request_id in self.held_until and self.held_until[request_id] > now:
+                    continue
+                if decode_node_name not in node_names:
+                    continue
+                if decode_node_name not in self.tp_rank_zero_nodes:
+                    continue
+                walk = worker_graphs_manager.get_graph_walk(
+                    request_id, node_partition,
+                )
+                if walk not in chunk_walks:
+                    continue
+                fwd_info = worker_graphs_manager.get_fwd_info(
+                    request_id, node_partition,
+                )
+                engine = self.engine_manager.get_engine(decode_node_name)
+                if not engine.check_ready(decode_node_name, request_id, fwd_info):
+                    continue
+                entry = ReadyNodeEntry(request_id, _wg_id, walk)
+                if self._chunk_entry_passes_gates(
+                    worker_graphs_manager, decode_node_name, node_partition, entry,
+                ):
+                    return True
+        return False
+
     def _try_assemble_mixed(
         self,
         worker_graphs_manager: WorkerGraphsManager,
@@ -239,10 +351,7 @@ class MicroScheduler:
             when any rep-penalty is active, which would corrupt the chunk
             request's penalty state. Decode rows are unaffected. (design D gate)
         """
-        from mstar.model.qwen3_omni.qwen3_omni_model import (
-            mixed_batch_enabled,
-            mixed_batch_vision_enabled,
-        )
+        from mstar.model.qwen3_omni.qwen3_omni_model import mixed_batch_enabled
         if not mixed_batch_enabled():
             return None
 
@@ -250,9 +359,7 @@ class MicroScheduler:
         # when the vision flag is on. A vision chunk carries deepstack + the
         # MRoPE side-channel, which only the vision-capable mixed capture can
         # replay; with the flag off the chunk row stays prefill_text (P2).
-        chunk_walks = {self._MIXED_CHUNK_WALK}
-        if mixed_batch_vision_enabled():
-            chunk_walks.add(self._MIXED_VISION_CHUNK_WALK)
+        chunk_walks = self._mixed_chunk_walks()
 
         for node_name, entries in node_name_to_requests.items():
             if node_name in self.tp_nodes:
@@ -271,19 +378,11 @@ class MicroScheduler:
             # Pick the first chunk entry that passes the per-request gates.
             chunk_entry = None
             for e in chunk_entries:
-                fwd_info = worker_graphs_manager.get_fwd_info(
-                    e.request_id, node_partition,
-                )
-                clen = fwd_info.step_metadata.get("prefill_chunk_len")
-                if clen is None:
-                    continue  # unchunked full prefill — don't mix (bucket blow)
-                if int(clen) > self._MIXED_MAX_CHUNK_TOKENS:
-                    continue
-                sc = fwd_info.sampling_config.get(node_name)
-                if sc is not None and getattr(sc, "repetition_penalty", 1.0) != 1.0:
-                    continue  # penalty state corruption on discarded chunk sample
-                chunk_entry = e
-                break
+                if self._chunk_entry_passes_gates(
+                    worker_graphs_manager, node_name, node_partition, e,
+                ):
+                    chunk_entry = e
+                    break
             if chunk_entry is None:
                 continue
 
@@ -315,6 +414,12 @@ class MicroScheduler:
         Mirrors the pop loop in get_next_batch. If nothing pops (races with a
         removal), returns None so the caller falls back to the normal path.
         """
+        node_partition = worker_graphs_manager.get_partition_for_node(node_name)
+        chunk_fwd_info = worker_graphs_manager.get_fwd_info(
+            chunk_entry.request_id, node_partition,
+        )
+        chunk_len = chunk_fwd_info.step_metadata.get("prefill_chunk_len")
+
         node_objects = {}
         request_to_worker_graph = {}
         for entry in [*decode_entries, chunk_entry]:
@@ -333,10 +438,15 @@ class MicroScheduler:
         self.batch_number += 1
         self.node_and_walk_to_last_batch_num[(node_name, "thinker_mixed")] = \
             self.batch_number
-        logger.debug(
-            "MicroScheduler assembled thinker_mixed batch on node %s: "
-            "%d decode + 1 chunk (chunk rid=%s)",
-            node_name, len(node_objects) - 1, chunk_entry.request_id,
+        n_decode = len(node_objects) - 1
+        self.mixed_batches_assembled += 1
+        # INFO (not DEBUG): one line per assembly so runtime evidence that mixed
+        # batching is actually firing doesn't require a DEBUG flood. n_decode/C
+        # are the batch shape; total = the assembled count so far this worker.
+        logger.info(
+            "mixed batch: n_decode=%d C=%s node=%s chunk_rid=%s total=%d",
+            n_decode, chunk_len, node_name,
+            chunk_entry.request_id, self.mixed_batches_assembled,
         )
         return ScheduledBatch(
             node_name=node_name,
