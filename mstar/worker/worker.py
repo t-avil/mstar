@@ -51,6 +51,7 @@ from mstar.worker.node_manager_utils import (
     WorkerGraphQueues,
     WorkerGraphsManager,
 )
+from mstar.worker import step_txn as _step_txn
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +181,21 @@ class Worker:
         # byte-identical when off. See _postprocess_batch and
         # TensorCommunicationManager.store_and_populate_graph_edges_fast.
         self._fast_postproc = os.environ.get("MSTAR_FAST_POSTPROC", "0") == "1"
+
+        # Fast path (W2, composes with W1/_fast_postproc): memoize the WHOLE
+        # per-rid postprocess derivation — node-complete loop advance, ready-slot
+        # bookkeeping, output routing, ref-count fanout — for a uniform
+        # *continuing* thinker_decode step, replaying it as a "step transaction"
+        # instead of walking mark_node_complete / process_node_outputs /
+        # set_output_ref_counts every step. Default OFF. Any structural change
+        # drops the txn and the slow block rebuilds it; byte-identical when off.
+        # See mstar/worker/step_txn.py and _postprocess_batch.
+        self._step_txn = os.environ.get("MSTAR_STEP_TXN", "0") == "1"
+        # Read-only shadow verification: run the slow block AND compare the
+        # post-state fields the fast path would have produced (see
+        # _postprocess_batch). Never mutates via the fast path when set.
+        self._step_txn_verify = os.environ.get("MSTAR_STEP_TXN_VERIFY", "0") == "1"
+        self._step_txns = _step_txn.StepTransactionRegistry()
 
         if self.device.type == "cuda" and self.device.index is not None:
             torch.cuda.set_device(self.device)
@@ -558,6 +574,10 @@ class Worker:
         self.engine_manager.remove_request(body.request_id)
         self.worker_graphs_manager.remove_request(body.request_id)
         self.tensor_manager.cleanup_request(body.request_id)
+        # Request teardown: drop any step transaction that references this rid's
+        # (now-freed) graph objects, mirroring cleanup_request's plan drop.
+        if self._step_txn:
+            self._step_txns.invalidate(body.request_id)
         self.profile_info.pop_request(body.request_id)
         self.streaming_buffers.pop(body.request_id, None)
 
@@ -1720,6 +1740,64 @@ class Worker:
         wg_id = batch.request_to_worker_graph[rid]
         return self.worker_graphs_manager.queues[wg_id].per_request_queues[rid]
 
+    def _step_txn_shadow_verify(
+        self, rid: str, node: GraphNode,
+        txn: "_step_txn.StepTransaction",
+        req_output_tensors: NameToTensorList,
+    ) -> None:
+        """MSTAR_STEP_TXN_VERIFY: read-only cross-check of the just-captured
+        transaction against the actual post-slow-block live state.
+
+        Deep-copying the live registries to run a true parallel fast_execute is
+        unsafe (they hold tensor-store handles and cross-reference each other),
+        so instead we verify the txn's *predictions* against what the slow path
+        actually produced this step:
+
+          * the node's live current-iter ready state (ready_names / is_ready)
+            matches what a loop-back re-ingestion should yield,
+          * every routing-template edge carries the captured output names,
+          * the per-name fanout counts recomputed from the live routing match
+            the captured fanout_counts (the ref-delta driver).
+
+        Any divergence is logged loudly (does NOT raise — verify must never
+        perturb the slow path). This is a debug aid, not a correctness gate.
+        """
+        problems: list[str] = []
+
+        # (a) fanout counts recomputed from the live routing must match capture.
+        live_routing = txn.routing_template
+        live_counts: dict[str, int] = {}
+        for edge in _step_txn._routed_edges_of(live_routing):
+            live_counts[edge.name] = live_counts.get(edge.name, 0) + 1
+        if live_counts != txn.fanout_counts:
+            problems.append(
+                f"fanout_counts mismatch: live={live_counts} "
+                f"captured={txn.fanout_counts}"
+            )
+
+        # (b) captured output-name set matches the live output tensor names.
+        live_names = frozenset(req_output_tensors.keys())
+        if live_names - txn.expected_output_names:
+            problems.append(
+                f"output names {sorted(live_names)} exceed captured "
+                f"{sorted(txn.expected_output_names)}"
+            )
+
+        # (c) the node is queued/ready for the next iter exactly as the loop-back
+        # re-ingestion should have left it (the slow path already applied this).
+        expected_ready = node.input_names.issubset(node.ready_signals.ready_names)
+        if node.ready_signals.is_ready != expected_ready:
+            problems.append(
+                f"ready_signals.is_ready={node.ready_signals.is_ready} "
+                f"but input_names.issubset(ready_names)={expected_ready}"
+            )
+
+        if problems:
+            logger.error(
+                "step_txn VERIFY rid %s node %s: %s",
+                rid, node.name, "; ".join(problems),
+            )
+
     def _get_input_tensors(
         self, rid: str, node: GraphNode, check_next_iter: bool
     ) -> NameToTensorList:
@@ -1992,6 +2070,12 @@ class Worker:
             for r in dropped:
                 speculation.node_batch.per_request_input_tensors.pop(r, None)
                 speculation.node_batch.per_request_info.pop(r, None)
+                # Spec composition changed for this rid: drop its txn so the
+                # next real step for it rebuilds from the slow path. (valid_for
+                # would also catch this via the spec-state / fingerprint guards;
+                # this is the conservative belt-and-suspenders drop.)
+                if getattr(self, "_step_txn", False):
+                    self._step_txns.invalidate(r)
                 speculation.scheduled_batch.request_to_worker_graph.pop(r, None)
                 speculation.scheduled_batch.node_objects.pop(r, None)
                 for edge in speculation.consumed_streaming_edges.get(rid, []):
@@ -2072,6 +2156,8 @@ class Worker:
                 # Structural change (rid dropped mid-step): drop any replay plan.
                 if self._fast_postproc:
                     self.tensor_manager.invalidate_populate_plan(stopped_rid)
+                if self._step_txn:
+                    self._step_txns.invalidate(stopped_rid)
         batch_N.node_batch.request_ids = list(valid_rids)
 
         # pending stops are only needed for one iteration, so can be cleared now
@@ -2141,6 +2227,9 @@ class Worker:
             # rebuilds from the slow path.
             if self._fast_postproc:
                 self.tensor_manager.invalidate_populate_plan(rid)
+            # A loop stop ends the "uniform continuing" invariant: drop the txn.
+            if self._step_txn:
+                self._step_txns.invalidate(rid)
             self.worker_graphs_manager.stop_loops(
                 rid, partition=batch_N.partition,
                 loop_names=loop_names,
@@ -2189,6 +2278,49 @@ class Worker:
             # loop outputs can be buffered properly.
             req_output_tensors = output.per_request_output_tensors.get(rid)
             node = batch_N.batch.node_objects[rid]
+
+            # W2 fast path: if a valid step transaction exists for this rid, and
+            # there are output tensors to store, replay it instead of walking
+            # the slow block. On ANY exception mid-replay, drop the txn and fall
+            # through to the slow block for THIS rid (so the step still runs).
+            # Shadow-verify mode never takes the fast path — it runs slow then
+            # compares (see _step_txn_verify handling after the slow block).
+            if (
+                self._step_txn
+                and not self._step_txn_verify
+                and req_output_tensors
+            ):
+                txn = self._step_txns.get(rid, node.name, batch_N.graph_walk)
+                if txn is not None and _step_txn.valid_for(
+                    txn, node=node, graph_walk=batch_N.graph_walk,
+                    req_output_tensors=req_output_tensors,
+                ):
+                    try:
+                        routing, uuids = _step_txn.fast_execute(
+                            txn, rid=rid,
+                            req_output_tensors=req_output_tensors,
+                            tensor_manager=self.tensor_manager,
+                        )
+                        routing_per_request[rid] = routing
+                        per_request_uuids[rid] = uuids
+                        continue  # rid handled by the fast path
+                    except Exception:
+                        # Replay failed: drop the plan and re-run the slow block
+                        # for this rid. fast_execute is built to be atomic — every
+                        # fallible lookup happens BEFORE the first state mutation
+                        # (curr_iter advance), and the W1 store (also pre-advance)
+                        # leaves clean state the slow block re-does — so an
+                        # anticipated failure raises with NOTHING mutated, making
+                        # this fall-through safe. A failure AFTER the advance
+                        # (only truly-unexpected errors, e.g. OOM in a ref-count
+                        # op) could leave a half-advanced step; that residual risk
+                        # is called out in step_txn.py and the report.
+                        logger.warning(
+                            "step_txn: fast replay failed for rid %s, "
+                            "falling back to slow block", rid, exc_info=True,
+                        )
+                        self._step_txns.invalidate(rid)
+
             node.reset_outputs() # reset stale outputs
             if req_output_tensors:
                 if self._fast_postproc:
@@ -2241,6 +2373,47 @@ class Worker:
                 self.tensor_manager.set_output_ref_counts(
                     rid, per_request_uuids[rid], routed_edges
                 )
+
+            # W2: after the slow block ran for this rid, build+store a step
+            # transaction IFF the step was a uniform continuing thinker_decode
+            # (same walk gate as the prem-ints restriction below). Uses the
+            # values the slow block just computed. Shadow-verify mode compares
+            # (read-only) instead of replaying. Wrapped so txn bookkeeping can
+            # never break the slow path.
+            if self._step_txn and req_output_tensors:
+                try:
+                    wgio = self._get_wgio_for_rid(batch_N.batch, rid)
+                    loop = None
+                    if node.name in wgio.nodes:
+                        mreg = wgio.nodes[node.name]._managing_registry
+                        loop = getattr(mreg, "loop", None)
+                    if loop is not None and _step_txn.is_uniform_continuing(
+                        loop, batch_N.graph_walk, node
+                    ):
+                        new_txn = _step_txn.capture(
+                            rid=rid, node=node, loop=loop, wgio=wgio,
+                            graph_walk=batch_N.graph_walk,
+                            routing=routing_per_request[rid],
+                        )
+                        if self._step_txn_verify:
+                            self._step_txn_shadow_verify(
+                                rid, node, new_txn, req_output_tensors,
+                            )
+                        self._step_txns.put(
+                            rid, node.name, batch_N.graph_walk, new_txn,
+                        )
+                    else:
+                        # Not memoizable this step (near boundary / non-uniform):
+                        # drop any stale txn so we never replay it later.
+                        self._step_txns.invalidate(
+                            rid, node.name, batch_N.graph_walk,
+                        )
+                except Exception:
+                    logger.warning(
+                        "step_txn: capture failed for rid %s (slow path "
+                        "unaffected)", rid, exc_info=True,
+                    )
+                    self._step_txns.invalidate(rid, node.name, batch_N.graph_walk)
 
         # Build the prematerialized new-token ints once, before register_outputs,
         # so both the SHM-skip decision (register_outputs) and the inline send
