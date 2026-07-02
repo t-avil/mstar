@@ -172,6 +172,15 @@ class Worker:
         if self._batch_emit:
             self._inline_emit = True
 
+        # Fast path: memoize the per-rid store_and_populate_graph_edges work in
+        # _postprocess_batch so a continuing steady-state decode step replays a
+        # cached routing-metadata plan (uuid + tensor payload swapped) instead of
+        # re-deriving sharding/tp/TensorPointerInfo every step. Default OFF. The
+        # replay is invalidated on ANY structural change; the slow path stays
+        # byte-identical when off. See _postprocess_batch and
+        # TensorCommunicationManager.store_and_populate_graph_edges_fast.
+        self._fast_postproc = os.environ.get("MSTAR_FAST_POSTPROC", "0") == "1"
+
         if self.device.type == "cuda" and self.device.index is not None:
             torch.cuda.set_device(self.device)
 
@@ -2060,6 +2069,9 @@ class Worker:
                 batch_N.batch.node_objects.pop(stopped_rid)
                 batch_N.batch.request_to_worker_graph.pop(stopped_rid)
                 batch_N.node_batch.per_request_info.pop(stopped_rid)
+                # Structural change (rid dropped mid-step): drop any replay plan.
+                if self._fast_postproc:
+                    self.tensor_manager.invalidate_populate_plan(stopped_rid)
         batch_N.node_batch.request_ids = list(valid_rids)
 
         # pending stops are only needed for one iteration, so can be cleared now
@@ -2122,6 +2134,13 @@ class Worker:
 
         # Stop loops, if applicable
         for rid, loop_names in new_stops.items():
+            # A loop stop makes this rid's next completion terminal (declared
+            # loop outputs + filtered loop-back signals) rather than the
+            # steady-state loop-back re-injection the plan was captured for.
+            # Drop the plan so the terminal step (and any subsequent walk)
+            # rebuilds from the slow path.
+            if self._fast_postproc:
+                self.tensor_manager.invalidate_populate_plan(rid)
             self.worker_graphs_manager.stop_loops(
                 rid, partition=batch_N.partition,
                 loop_names=loop_names,
@@ -2172,15 +2191,29 @@ class Worker:
             node = batch_N.batch.node_objects[rid]
             node.reset_outputs() # reset stale outputs
             if req_output_tensors:
-                graph_node_info = self.tensor_manager.store_and_populate_graph_edges(
-                    request_id=rid,
-                    tensors=req_output_tensors,
-                    graph_edges=node.outputs,
-                    node_name=node.name,
-                    graph_walk=batch_N.graph_walk,
-                    skip_cuda_sync=True,
-                    skip_ref_count=True,
-                )
+                if self._fast_postproc:
+                    # Memoized replay of the (rid, node, walk) store/populate
+                    # derivation; falls back internally to the exact slow-path
+                    # call below on any miss/mismatch and rebuilds the plan.
+                    graph_node_info = (
+                        self.tensor_manager.store_and_populate_graph_edges_fast(
+                            request_id=rid,
+                            tensors=req_output_tensors,
+                            graph_edges=node.outputs,
+                            node_name=node.name,
+                            graph_walk=batch_N.graph_walk,
+                        )
+                    )
+                else:
+                    graph_node_info = self.tensor_manager.store_and_populate_graph_edges(
+                        request_id=rid,
+                        tensors=req_output_tensors,
+                        graph_edges=node.outputs,
+                        node_name=node.name,
+                        graph_walk=batch_N.graph_walk,
+                        skip_cuda_sync=True,
+                        skip_ref_count=True,
+                    )
                 per_request_uuids[rid] = {
                     info.uuid for infos in graph_node_info.values() for info in infos
                 }
