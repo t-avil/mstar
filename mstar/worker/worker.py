@@ -189,6 +189,14 @@ class Worker:
             in ("1", "true", "yes", "on")
         )
 
+        # W5 fold-rate experiment (MSTAR_MIXED_SINGLE_CHUNK): short spans are
+        # single-chunk-mixable AND folds are attempted at every chain step
+        # (not just yield boundaries). Read once; static for the process.
+        from mstar.model.qwen3_omni.qwen3_omni_model import (
+            mixed_single_chunk_enabled as _msce,
+        )
+        self.mixed_single_chunk = _msce()
+
         # Diagnostics (MSTAR_WALK_STATS): count executed steps per
         # (node, graph_walk) and log every 200 steps at WARNING (visible under
         # --log-level WARNING). Measures the mixed-batch fold rate on real runs
@@ -3080,10 +3088,23 @@ class Worker:
                     #   uninterrupted — no chain break, overlap preserved.
                     #
                     # No mixed opportunity → unchanged yield-away either way.
+                    # Fold trigger. Default (P2): only at a must_yield_away
+                    # boundary — the fold replaces the yield. EAGER
+                    # (MSTAR_MIXED_SINGLE_CHUNK): attempt at EVERY chain step.
+                    # With single-chunk on, every admission needs ~one fold
+                    # slot per prompt walk; yield-boundary-only folding drains
+                    # chunks ~8x slower than standalone prefill would and
+                    # starves decode occupancy (measured 6.18 -> 3.48 req/s).
+                    # The occupancy floor inside has_mixed_opportunity keeps
+                    # ramp-up on the standalone path either way.
                     speculate_into_mixed = False
-                    if must_yield_away and self.scheduler.has_mixed_opportunity(
+                    fold_probe = must_yield_away or (
+                        mixed_spec_enabled and self.mixed_single_chunk
+                    )
+                    if fold_probe and self.scheduler.has_mixed_opportunity(
                         self.worker_graphs_manager,
                         (pending.node_name, pending.graph_walk),
+                        n_decode=len(pending.node_batch.request_ids),
                     ):
                         must_yield_away = False
                         self._ws_inc("_mix_opp")

@@ -213,6 +213,28 @@ class MicroScheduler:
     _MIXED_MAX_DECODE = 31          # padded_bs 32 = up to 31 decode + 1 chunk row
     _MIXED_MAX_CHUNK_TOKENS = 512   # largest captured chunk bucket (C in {256,512})
 
+    def _mixed_min_decode(self) -> int:
+        """Occupancy floor for chain-folding (see has_mixed_opportunity).
+
+        Default 0 (no floor — preserves the measured-positive P2 behavior,
+        including small-batch s2t folds) UNLESS MSTAR_MIXED_SINGLE_CHUNK is on,
+        where every admission depends on fold slots and a small decode side
+        means folding throttles admission: default 24 there. Env
+        MSTAR_MIXED_MIN_DECODE overrides either. Cached after first read."""
+        v = getattr(self, "_mixed_min_decode_cached", None)
+        if v is None:
+            import os
+            from mstar.model.qwen3_omni.qwen3_omni_model import (
+                mixed_single_chunk_enabled,
+            )
+            default = 24 if mixed_single_chunk_enabled() else 0
+            try:
+                v = int(os.environ.get("MSTAR_MIXED_MIN_DECODE", str(default)))
+            except ValueError:
+                v = default
+            self._mixed_min_decode_cached = v
+        return v
+
     def _mixed_chunk_walks(self) -> set[str]:
         """Walks that may serve as a mixed step's single chunk row. prefill_text
         always; prefill_vision only when MSTAR_MIXED_BATCH_VISION is on (the
@@ -258,6 +280,7 @@ class MicroScheduler:
         self,
         worker_graphs_manager: WorkerGraphsManager,
         decode_target: tuple[str, str],
+        n_decode: int | None = None,
     ) -> bool:
         """Read-only peek: would a mixed batch assemble RIGHT NOW if the decode
         group named by ``decode_target`` were back in the ready queue?
@@ -274,9 +297,20 @@ class MicroScheduler:
         Mirrors the gates in ``_try_assemble_mixed`` without popping or mutating
         queue state. Returns False when the flag is off (so the default
         yield-away path is byte-identical when mixed batching is disabled).
+
+        ``n_decode``: size of the in-flight decode chain, when the caller knows
+        it. Folding admits at most ONE chunk per step, so during ramp-up (small
+        decode side, many requests still prefilling) folding THROTTLES admission
+        and starves decode occupancy — measured 6.18 -> 3.48 req/s at i2t B32
+        when every short span became foldable (MSTAR_MIXED_SINGLE_CHUNK).
+        Standalone prefill fills the batch faster there. Gate: fold only when
+        n_decode >= MSTAR_MIXED_MIN_DECODE (default 24); None skips the gate
+        (non-spec assembler paths size the decode side themselves).
         """
         from mstar.model.qwen3_omni.qwen3_omni_model import mixed_batch_enabled
         if not mixed_batch_enabled():
+            return False
+        if n_decode is not None and n_decode < self._mixed_min_decode():
             return False
 
         decode_node_name, decode_walk = decode_target
@@ -371,6 +405,12 @@ class MicroScheduler:
                 e for e in entries if e.graph_walk in chunk_walks
             ]
             if not decode_entries or not chunk_entries:
+                continue
+            # Occupancy floor (see _mixed_min_decode): a small decode side
+            # makes the mixed step poor value AND throttles admission (one
+            # chunk per step). Let prefills run standalone instead. Floor is
+            # 0 unless MSTAR_MIXED_SINGLE_CHUNK, so P2 behavior is unchanged.
+            if len(decode_entries) < self._mixed_min_decode():
                 continue
 
             node_partition = worker_graphs_manager.get_partition_for_node(node_name)
