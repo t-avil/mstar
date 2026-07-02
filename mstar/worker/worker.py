@@ -1493,6 +1493,7 @@ class Worker:
                     sorted(self._walk_stats.items(), key=lambda kv: -kv[1]),
                 )
 
+        _ws_t0 = _time.perf_counter() if self._walk_stats is not None else 0.0
         try:
             if stream is not None:
                 # Side-stream execution (MSTAR_SIDE_PREFILL): run the whole
@@ -1510,6 +1511,13 @@ class Worker:
                     event = torch.cuda.Event()
                     event.record(torch.cuda.default_stream(self.device))
                     output.completion_event = event
+            if self._walk_stats is not None:
+                # Wall ms per walk (CPU submit side; GPU async tail not
+                # included — comparable across configs, not absolute).
+                mk = f"_ms_{batch.graph_walk}"
+                self._walk_stats[mk] = self._walk_stats.get(mk, 0) + int(
+                    (_time.perf_counter() - _ws_t0) * 1000
+                )
             return output
         finally:
             # Safety net: ensure advance_event fires even if the engine
