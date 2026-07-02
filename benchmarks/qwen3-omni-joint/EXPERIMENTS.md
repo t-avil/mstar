@@ -380,7 +380,7 @@ definitive record.
 
 ## W5 FINAL (2026-07-02): spec-fold mixed batching = NET WIN, one lever from decisive
 Definitive interleaved A/B (ab_p2spec/, bucket-fixed build 62472cf, full
-flag stack vs shipping): i2t 1.027/1.017/0.969×, s2t 1.040/1.066×. The B32
+flag stack vs shipping): i2t 1.027/1.017/0.969×, s2t 1.040/1.066/1.007× (complete 6-cell table; 5 positive). The i2t B32
 cell straddles unity across measurements (interleaved 0.969, same-pair
 back-to-back +3.2%) → true effect ≈ 1.00±0.03. Verdict: mixed batching is
 positive at B1-B8 on both text paths, neutral at B32, fully captured, fully
