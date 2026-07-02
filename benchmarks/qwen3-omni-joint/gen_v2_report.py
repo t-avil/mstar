@@ -11,7 +11,7 @@ import glob
 import json
 import os
 
-SWEEP = "/m-coriander/coriander/tim/sweep_mstar_v2"
+SWEEP = "/m-coriander/coriander/tim/sweep_mstar_v2_final"
 PATHS = ["audio_to_text", "image_to_text", "audio_to_speech", "image_to_speech"]
 SHORT = {"audio_to_text": "s2t", "image_to_text": "i2t",
          "audio_to_speech": "s2s", "image_to_speech": "i2s"}
@@ -72,7 +72,7 @@ def ratio(a, b):
 def main():
     cells = load_cells()
     lines = [
-        "# NUMBERS_V2.md — M*-v2 (opt/decode-v2 b9de820, fp8 MoE + fused topk +",
+        "# NUMBERS_V2.md — M*-v2 (opt/decode-v2 d04dcb4, fp8 MoE + fused topk +",
         "# worker CPU fixes + inline/batch emit + encoders-on-rank-0) vs recorded baselines",
         "",
         "Sweep: 2026-07-02, GPUs 6,7, WARMUP=5, N=max(50,10B), closed loop.",

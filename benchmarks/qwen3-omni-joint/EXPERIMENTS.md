@@ -53,7 +53,21 @@ i2t 1.134/1.224/1.153×, s2t 1.057/1.165/1.201× vs base. Lesson from the v2
 re-profile: send_outputs stayed ~5ms — the cost was per-rid ZMQ message
 construction/pickling, not the D2H; (a) mostly mattered for unblocking overlap.
 
-## E4 — encoders on rank 0 (`configs/qwen3omni_2gpu_encoff.yaml`) — WIN, kept
+## E4b — encoder-placement tension + audio-path contamination fix (2026-07-02 late)
+The first full sweep showed audio-output paths regressing vs M*-new at batch
+(i2s B32 0.61×). Attribution probes (qb_queue1.log): (1) ~17% was
+UNCONDITIONAL worker fast paths (prem-ints dict + batched check_stop probe)
+running on Talker steps as pure overhead — fixed by gating both to the
+thinker_decode walk (commit d04dcb4; flag-off parity with pristine 4c33b33
+restored: i2s B32 2.071 vs 2.089). (2) The rest is a REAL placement tension:
+with the fix, encoff gives s2t +31% and i2t +9% but costs s2s −22% and i2s
+−4% (audio encoder on rank 0 collides with talker+code2wav). No static
+placement wins all four paths. Resolution: encoff = primary config
+(maximizes the minimum margin vs vLLM: s2t flips from 0.81× to 1.07×; s2s
+keeps ≥1.78× over vLLM), default layout = documented audio-optimized
+alternative with its own mini-sweep numbers.
+
+## E4 — encoders on rank 0 (`configs/qwen3omni_2gpu_encoff.yaml`) — WIN for text, see E4b
 Commit 9be08a2. One-line topology change: audio+vision encoders move to the
 Talker GPU (idle on text paths), so encoder batches stop serializing against
 thinker decode. Bundled with E5 in round-3 (ab_encoff/): i2t
@@ -136,6 +150,18 @@ flag stays default-off and out of the final config.
   (i2t B32 0.78×). Faster GIL switching adds context-switch overhead on the
   hot loops. Rejected.
 - E12: lm_head fp8 (B1 lever: ~0.6GB weight read per step) — not implemented.
+- W1: memoized decode postprocess (`MSTAR_FAST_POSTPROC`, commit 4ce0125 on
+  exp/batched-postprocess) — caches the step-invariant parts of
+  store_and_populate (sharding/tp lookups, TensorPointerInfo construction)
+  per (rid,node,walk) with conservative invalidation; routing traversal +
+  Loop.complete_iter proved load-bearing and untouched. Quick-bench: i2t
+  1.031/1.062/**1.068×** vs ref. PROMOTED to combo confirmation.
+- W7: denser decode graph buckets [+24,+28] (commit 845faff on exp/bucket24) —
+  cuts round-up padding at churn (live bs 17-31 padded to 32). Quick-bench:
+  i2t 1.051/1.075/**1.126×**. Strongest single result since fp8. PROMOTED.
+- Combo W1+W7 (exp/combo-w1w7, c8cebc7) — triage in flight; if additive
+  (~+18% at i2t B32) the final config is re-frozen and affected sweep cells
+  re-run.
 - vLLM-0.22 feature inventory vs M*: full-decode CUDA graphs (have),
   async scheduling (have, as speculation), chunked prefill (their prefill
   lever; our E8 alternative), FA3 (tested, loses on our shapes), bf16 triton
