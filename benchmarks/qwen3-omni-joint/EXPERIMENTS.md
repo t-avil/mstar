@@ -217,3 +217,13 @@ would subsume both.
    bookkeeping is the structural swing.
 3. W1+W7 combo interference unexplained (combo < W7 alone) — rerun after
    W1 rebase.
+
+## A1-A3 — i2s high-batch residual attribution (2026-07-02) — EXONERATED
+Probes on equal quick-bench terms (default config, i2s B16/B32, GPUs 4,5):
+fused-topk off 2.097, fp8 off 2.089, batch-emit off 2.095, all-flags 2.060,
+no-flags 2.071, pristine 4c33b33 2.089 req/s — a ±1% band. No feature causes
+the apparent i2s B32 −5% from the sweep table; that delta is cross-campaign
+measurement noise (same class as the documented ±7% s2t B32 variance).
+Speech-generation parity vs encoders-implemeneted original is confirmed in
+the audio config; the encoff config's documented audio cost is placement
+contention only.
