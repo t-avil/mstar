@@ -178,3 +178,42 @@ flag stays default-off and out of the final config.
   (vLLM ~217 tok/req vs M* ~176 at i2t B1); use req/s for cross-system
   ranking, tok/s for within-system deltas.
 - Out-of-graph kernel timing at decode M: invalid (see E1 note).
+
+## Learnings (2026-07-02 session wrap)
+
+**Methodology (these paid for themselves repeatedly):**
+1. In-graph kernel timing only — out-of-graph decode-M microbenchmarks
+   inverted the fp8 verdict and had already misled a previous engineer.
+2. Interleaved A/B or paired probes only; time-separated ratios lie on this
+   box (the committed vLLM B1/B8 baselines themselves proved understated).
+3. Attribute regressions with a pristine-base probe BEFORE blaming the
+   obvious suspect: the "encoff audio regression" was mostly an
+   unconditional-code bug (walk-gating fix d04dcb4), not placement.
+4. req/s for cross-system claims; tok/s embeds output-length skew (vLLM
+   generates ~20% longer text on identical inputs).
+5. One branch per experiment + quick-bench triage (12 min) before any
+   45-min interleaved A/B. Env knobs get triaged first — both "obvious"
+   knobs (NUM_SLOTS=3, GIL interval) were −20%.
+6. Fast paths in shared code MUST be walk/node-gated: thinker-decode
+   optimizations silently taxed Talker steps 17%.
+7. pgrep/kill by pattern self-matches your own shell; setsid survives
+   TaskStop — kill by pgid, verify by GPU compute-apps list.
+
+**Deployment guidance (per-workload configs endorsed):** the encoder
+placement tradeoff is fundamental to the current pipeline (s2t and i2t want
+encoders off the thinker GPU; s2s wants the audio encoder off the talker
+GPU). Ship per-workload: text-heavy deployments run
+`qwen3omni_2gpu_encoff.yaml`, speech-generation-heavy run the default yaml.
+A future scheduler-level fix (per-request encoder routing to the idler GPU)
+would subsume both.
+
+**Open items (priority order):**
+1. Speech generation at B16/B32 still ≤ M*-new even in the audio config
+   (i2s B32 0.95×, s2s B16 1.00×): residual attribution in flight
+   (suspects: fused talker topk, fp8 side effects on thinker_states timing,
+   batch-emit; probes A1-A3).
+2. i2t B32 vs vLLM (0.76×): per-token routing floor; W1 memoization (+7%
+   triaged) needs rebase onto d04dcb4 + interleaved confirm; batched loop
+   bookkeeping is the structural swing.
+3. W1+W7 combo interference unexplained (combo < W7 alone) — rerun after
+   W1 rebase.
