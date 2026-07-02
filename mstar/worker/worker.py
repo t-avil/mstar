@@ -2111,7 +2111,9 @@ class Worker:
 
         # Check for stops
         engine = self.engine_manager.get_engine(batch_N.node_name)
-        cpu_output = self._prematerialize_for_check_stop(output)
+        cpu_output = self._prematerialize_for_check_stop(
+            output, batch_fast=(batch_N.graph_walk == "thinker_decode"),
+        )
         new_stops = engine.check_stop_for_batch(batch_N.node_batch, cpu_output)
 
         if self.enable_nvtx:
@@ -2209,11 +2211,18 @@ class Worker:
 
         # Build the prematerialized new-token ints once, before register_outputs,
         # so both the SHM-skip decision (register_outputs) and the inline send
-        # (_send_outputs) see the same per-rid prem dict.
-        prem_per_request: dict[str, dict[str, list[int]] | None] = {
-            rid: self._prematerialized_new_tokens(cpu_output, rid)
-            for rid in routing_per_request
-        }
+        # (_send_outputs) see the same per-rid prem dict. Restricted to the
+        # Thinker text-decode walk: on Talker/Code2Wav steps this dict is pure
+        # per-step overhead (their outputs route via streaming edges, never
+        # via buffer_new_tokens/inline emit) and measurably regressed the
+        # audio paths at batch (i2s B32 −17% flag-off, qb_queue1.log probes).
+        if batch_N.graph_walk == "thinker_decode":
+            prem_per_request: dict[str, dict[str, list[int]] | None] = {
+                rid: self._prematerialized_new_tokens(cpu_output, rid)
+                for rid in routing_per_request
+            }
+        else:
+            prem_per_request = {rid: None for rid in routing_per_request}
 
         if self.enable_nvtx:
             range_pop(synchronize=False)
@@ -2333,6 +2342,7 @@ class Worker:
     def _prematerialize_for_check_stop(
         self,
         output: NodeOutput,
+        batch_fast: bool = True,
     ) -> NodeOutput:
         """Side-stream D→H of every CUDA tensor in
         ``output.per_request_output_tensors`` so the subsequent
@@ -2368,7 +2378,10 @@ class Worker:
         per_rid = output.per_request_output_tensors
         rids = list(per_rid.keys())
         uniform_key: str | None = None
-        if rids and all(
+        # batch_fast gates the uniform-shape probe to the Thinker text-decode
+        # walk: on Talker steps the per-step probe cost outweighs the copy
+        # savings (audio-path regression, see qb_queue1.log attribution).
+        if batch_fast and rids and all(
             isinstance(per_rid[r], dict)
             and len(per_rid[r]) == 1
             and isinstance(next(iter(per_rid[r].values())), list)
