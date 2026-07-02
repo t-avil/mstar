@@ -70,6 +70,42 @@ def ratio(a, b):
     return "-" if (a is None or not b) else f"{a / b:.2f}x"
 
 
+
+def latency_cell(res):
+    t = ((res.get("ttft") or {}).get("text") or {})
+    i = res.get("itl") or {}
+    itl_mean = (i.get("text") or {}).get("mean") if isinstance(i.get("text"), dict) else (i.get("mean") if isinstance(i, dict) else None)
+    return t.get("p50"), itl_mean
+
+
+def latency_section(lines):
+    import glob as _g, json as _j, os as _o
+    lines.append("## Latency — TTFT p50 / ITL mean (s, lower is better), M*-v2 vs recorded vLLM/M*-new")
+    lines.append("")
+    lines.append("| path | B | v2 TTFT p50 | vLLM TTFT | M*-new TTFT | v2 ITL | vLLM ITL | M*-new ITL |")
+    lines.append("|---|---|---|---|---|---|---|---|")
+    for path in PATHS:
+        s = SHORT[path]
+        raw = _j.load(open(f"raw_{path}.json"))
+        for b in BATCHES:
+            sw = SWEEP_TEXT if s in ("s2t", "i2t") else SWEEP
+            fp = f"{sw}/{s}/B{b}/results.json"
+            if not _o.path.exists(fp):
+                continue
+            t50, itl = latency_cell(_j.load(open(fp)))
+            ag = (raw.get("aggregates", {}).get(f"B{b}") or {})
+            vh = (ag.get("vllm") or {}).get("harness") or {}
+            nh = (ag.get("mstar_new") or {}).get("harness") or {}
+            def g(h, k):
+                v = h.get(k)
+                if isinstance(v, dict):
+                    return v.get("p50") if "ttft" in k else v.get("mean")
+                return v
+            lines.append("| %s | %d | %s | %s | %s | %s | %s | %s |" % (
+                s, b, fmt(t50), fmt(g(vh, "ttft_text")), fmt(g(nh, "ttft_text")),
+                fmt(itl, 4), fmt(g(vh, "itl_text"), 4), fmt(g(nh, "itl_text"), 4)))
+    lines.append("")
+
 def main():
     cells = load_cells()
     lines = [
@@ -109,6 +145,7 @@ def main():
                     f"{ratio(v2.get('audio_s'), vll.get('audio_s'))} | "
                     f"{fmt(v2.get('rtf_p50'))} | {fmt(vll.get('rtf_p50'))} |")
         lines.append("")
+    latency_section(lines)
     open("NUMBERS_V2.md", "w").write("\n".join(lines))
     print("wrote NUMBERS_V2.md")
 

@@ -6,12 +6,6 @@ Baselines (mstar_new/mstar_old/vllm) are the committed v2 rebenchmark
 aggregates — NOT re-run. Metric: req/s primary (cross-system;
 tok/s embeds output-length skew: vLLM generates ~20% longer text).
 
-**Note on the W1 re-sweep (final numbers above):** the s2t/i2t cells are from
-the 1e171e1 build (adds MSTAR_FAST_POSTPROC, validated +6.4% i2t B32 /
-+13.5% s2t B8 in a contention-robust interleaved A/B, ab_w1v2/). Sweep-scale
-deltas vs the d04dcb4 sweep are within sweep-to-sweep variance (~±5%) — the
-interleaved A/Bs carry the per-feature evidence; single sweeps bound it.
-
 ## s2t — audio_to_text
 
 | B | M*-v2 req/s | M*-new | M*-old | vLLM | v2/vLLM | v2/new |
@@ -73,3 +67,32 @@ interleaved A/Bs carry the per-feature evidence; single sweeps bound it.
 | 8 | 57.28 | 27.22 | 2.10x | 0.133 | 0.287 |
 | 16 | 80.64 | 41.28 | 1.95x | 0.194 | 0.382 |
 | 32 | 93.14 | 54.75 | 1.70x | 0.337 | 0.575 |
+
+## Latency — TTFT p50 / ITL mean (s, lower is better), M*-v2 vs recorded vLLM/M*-new
+
+| path | B | v2 TTFT p50 | vLLM TTFT | M*-new TTFT | v2 ITL | vLLM ITL | M*-new ITL |
+|---|---|---|---|---|---|---|---|
+| s2t | 1 | 0.099 | 0.066 | 0.106 | 0.0064 | 0.0050 | 0.0070 |
+| s2t | 2 | 0.097 | 0.052 | 0.138 | 0.0087 | 0.0060 | 0.0110 |
+| s2t | 4 | 0.110 | 0.060 | 0.166 | 0.0114 | 0.0090 | 0.0160 |
+| s2t | 8 | 0.144 | 0.143 | 0.251 | 0.0146 | 0.0150 | 0.0260 |
+| s2t | 16 | 0.167 | 0.191 | 0.291 | 0.0222 | 0.0230 | 0.0460 |
+| s2t | 32 | 0.257 | 0.217 | 0.401 | 0.0307 | 0.0290 | 0.0610 |
+| i2t | 1 | 0.217 | 0.123 | 0.267 | 0.0061 | 0.0050 | 0.0070 |
+| i2t | 2 | 0.250 | 0.092 | 0.318 | 0.0075 | 0.0060 | 0.0090 |
+| i2t | 4 | 0.271 | 0.098 | 0.366 | 0.0089 | 0.0070 | 0.0110 |
+| i2t | 8 | 0.292 | 0.140 | 0.418 | 0.0110 | 0.0100 | 0.0160 |
+| i2t | 16 | 0.352 | 0.138 | 0.526 | 0.0160 | 0.0130 | 0.0220 |
+| i2t | 32 | 0.431 | 0.159 | 0.717 | 0.0243 | 0.0170 | 0.0340 |
+| s2s | 1 | 0.086 | - | 0.098 | 0.0066 | - | 0.0070 |
+| s2s | 2 | 0.093 | - | 0.108 | 0.0077 | - | 0.0090 |
+| s2s | 4 | 0.112 | - | 0.157 | 0.0097 | - | 0.0130 |
+| s2s | 8 | 0.125 | - | 0.196 | 0.0106 | - | 0.0210 |
+| s2s | 16 | 0.148 | - | 0.266 | 0.0136 | - | 0.0310 |
+| s2s | 32 | 0.160 | - | 0.357 | 0.0154 | - | 0.0550 |
+| i2s | 1 | 0.197 | - | - | 0.0065 | - | - |
+| i2s | 2 | 0.235 | - | - | 0.0070 | - | - |
+| i2s | 4 | 0.267 | - | 0.317 | 0.0081 | - | 0.0100 |
+| i2s | 8 | 0.282 | - | 0.305 | 0.0093 | - | 0.0120 |
+| i2s | 16 | 0.307 | - | 0.367 | 0.0114 | - | 0.0160 |
+| i2s | 32 | 0.349 | - | 0.382 | 0.0129 | - | 0.0200 |
