@@ -181,6 +181,14 @@ class Worker:
         # TensorCommunicationManager.store_and_populate_graph_edges_fast.
         self._fast_postproc = os.environ.get("MSTAR_FAST_POSTPROC", "0") == "1"
 
+        # W5 mixed-batch DEBUG validation (MSTAR_MIXED_BATCH_ASSERT): assert the
+        # spec chain survives a folded mixed step and flag lost fold races. Read
+        # once; static for the process.
+        self.mixed_batch_assert = (
+            os.environ.get("MSTAR_MIXED_BATCH_ASSERT", "").strip().lower()
+            in ("1", "true", "yes", "on")
+        )
+
         if self.device.type == "cuda" and self.device.index is not None:
             torch.cuda.set_device(self.device)
 
@@ -1506,15 +1514,25 @@ class Worker:
         ) or batch.node_name in self.tp_nodes:
             # disable speculation for TP nodes for now
             return False
-        # W5-P2 mixed batch: never speculate FROM a thinker_mixed step. A mixed
-        # batch mixes decode rids (whose next step is thinker_decode) with the
-        # chunk rid (whose next step is the following prefill chunk or decode),
-        # so a speculated N+1 built off it would be a heterogeneous guess we
-        # don't yet capture. Run mixed on the non-speculative path and let the
-        # spec chain restart on the following uniform decode step (P3 folds
-        # mixed into the chain).
+        # Mixed batch: whether the chain may CONTINUE from a thinker_mixed step.
+        #
+        # * MSTAR_MIXED_SPEC off (0cc7c71): never speculate FROM a mixed step.
+        #   The mixed batch ran on the non-spec path and the chain restarts on
+        #   the following uniform decode step.
+        #
+        # * MSTAR_MIXED_SPEC on: DO speculate the next uniform decode step from
+        #   the mixed batch. The decode rids' new-token outputs exist, so
+        #   ``_try_speculate_next`` threads them into the continuation exactly as
+        #   a pure-decode step; the chunk rid is excluded from the continuation
+        #   there (it emits no continuing decode token, or its first token is
+        #   admitted via the normal ready path) so the guess is uniform decode,
+        #   not heterogeneous. This is what keeps the folded mixed step INSIDE
+        #   the chain instead of breaking it.
         if batch.graph_walk == "thinker_mixed":
-            return False
+            from mstar.model.qwen3_omni.qwen3_omni_model import (
+                mixed_batch_spec_enabled,
+            )
+            return mixed_batch_spec_enabled()
         return True
 
     def _is_side_eligible(self, batch: ScheduledBatch) -> bool:
@@ -1766,11 +1784,50 @@ class Worker:
         """
         batch_N = pending.batch
         partition_N = pending.partition
+
+        # The walk the CONTINUATION runs under. Normally identical to
+        # batch_N.graph_walk. When speculating FROM a folded thinker_mixed step
+        # (MSTAR_MIXED_SPEC), the continuation is a UNIFORM decode batch —
+        # thinker_decode — so every downstream use of the walk here (loop-stop
+        # dedup match, fresh-rid target_graph_walk, spec batch / node batch walk)
+        # must be thinker_decode, NOT thinker_mixed (which matches no ready rid
+        # and no recorded stop). Any further chunk fold onto this continuation is
+        # decided back in run() and re-tags the batch there.
         graph_walk = pending.graph_walk
+        if graph_walk == "thinker_mixed":
+            graph_walk = "thinker_decode"
+
+        # MSTAR_MIXED_SPEC: when speculating FROM a folded thinker_mixed step,
+        # the chunk row is NOT part of the continuing decode chain. A non-last
+        # chunk emits no decode token (its next step is the following prefill
+        # chunk, a different spec target), and even a last chunk's first decode
+        # token is cleaner to admit via the normal ready path than to special-
+        # case here. So exclude the chunk rid(s) from BOTH the spec-target sample
+        # and the continuation membership: sample from a decode rid, skip the
+        # chunk in the continuation loop. The chunk rid re-enters the ready queue
+        # when the mixed step's postprocess routes its output under its own walk,
+        # and rejoins the chain via the usual fresh-rid merge / normal schedule.
+        # For every non-mixed batch ``chunk_rids`` is empty → byte-identical.
+        chunk_rids: set[str] = set()
+        if batch_N.graph_walk == "thinker_mixed":
+            for r in batch_N.node_objects:
+                info = pending.node_batch.per_request_info.get(r)
+                if info is not None and info.graph_walk != "thinker_decode":
+                    chunk_rids.add(r)
 
         # sample node and RID to see which node we will be speculating
-        # (TODO: refine this to be, e.g., a majority vote)
-        rid, sample_node = next(iter(batch_N.node_objects.items()))
+        # (TODO: refine this to be, e.g., a majority vote). Sample a DECODE rid
+        # so the spec target is the decode loop-back, never the chunk's next
+        # (prefill) node.
+        rid, sample_node = next(
+            (
+                (r, n) for r, n in batch_N.node_objects.items()
+                if r not in chunk_rids
+            ),
+            (None, None),
+        )
+        if sample_node is None:
+            return  # mixed step was chunk-only (no decode rows) — nothing to continue
         wgio = self._get_wgio_for_rid(batch_N, rid)
 
         # If sample_node has no outputs at all, it can't feed any spec target.
@@ -1811,6 +1868,11 @@ class Worker:
         per_request_inputs: dict[str, NameToTensorList] = {}
         consumed_streaming_edges: dict[str, GraphEdge] = {}
         for rid, batch_N_node in batch_N.node_objects.items():
+            if rid in chunk_rids:
+                # Folded chunk row (MSTAR_MIXED_SPEC): not a continuing decode
+                # rid — it advances to its own next node via postprocess routing
+                # and rejoins the chain through the normal ready path.
+                continue
             wgio = self._get_wgio_for_rid(batch_N, rid)
             loop = wgio.loops.get(spec_node_info.loop_name)
 
@@ -1910,7 +1972,7 @@ class Worker:
         fresh_batch = self.scheduler.get_next_batch(
             self.worker_graphs_manager,
             target_node_name=spec_node_info.node_name,
-            target_graph_walk=batch_N.graph_walk,
+            target_graph_walk=graph_walk,
         )
 
         if fresh_batch is not None:
@@ -1933,7 +1995,7 @@ class Worker:
 
         spec_batch = ScheduledBatch(
             node_name=spec_node_info.node_name,
-            graph_walk=batch_N.graph_walk,
+            graph_walk=graph_walk,
             node_objects=new_node_objects,
             request_to_worker_graph=new_request_to_worker_graph,
         )
@@ -1941,7 +2003,7 @@ class Worker:
         request_ids = list(new_node_objects.keys())
         spec_node_batch = NodeBatch(
             node_name=spec_node_info.node_name,
-            graph_walk=batch_N.graph_walk,
+            graph_walk=graph_walk,
             request_ids=request_ids,
             per_request_input_tensors=per_request_inputs,
             per_request_info={
@@ -1968,6 +2030,99 @@ class Worker:
             loop_name=spec_node_info.loop_name,
             consumed_streaming_edges=consumed_streaming_edges
         )
+
+    def _try_fold_mixed_chunk_into_spec(
+        self, speculation: Speculation
+    ) -> bool:
+        """MSTAR_MIXED_SPEC: fold ONE ready mixable prefill chunk row into an
+        already-built decode continuation ``speculation``, turning the next
+        speculative batch into a MIXED (thinker_mixed) step that rides inside the
+        chain instead of breaking it (0cc7c71).
+
+        The decode side of ``speculation`` is exactly the normal continuation
+        built by ``_try_speculate_next`` — same membership, same loop-back
+        threading. This only ADDS the chunk row:
+
+          * pops the chunk node from the ready queue via the scheduler's
+            ``pop_mixed_chunk_for_spec`` (the decode rids are mid-chain and NOT
+            in the ready queue, so only the chunk is popped);
+          * gathers the chunk's inputs from its ``ready_signals`` — the same
+            source ``_build_node_batch`` uses for the non-spec mixed path — NOT
+            from N's outputs (the chunk rid's inputs were already delivered by
+            the conductor when its chunk node became ready, exactly like a
+            "fresh" rid in ``_try_speculate_next``);
+          * flips the batch-level ``graph_walk`` to ``thinker_mixed`` (per-rid
+            walks are untouched — postprocess routes by per-request
+            effective_walk, 7c09d10).
+
+        The chunk rid is deliberately NOT added to ``continuing_rids``, so
+        ``_thread_outputs_to_speculative`` skips it (no loop-back from N) — same
+        as a fresh rid. Returns True if a chunk was folded in (batch is now
+        mixed), False if none was ready (leave ``speculation`` as the uniform
+        decode continuation). Only called when the flag is on and a mixed
+        opportunity was peeked, so the common case (chunk still ready) folds.
+        """
+        spec_batch = speculation.scheduled_batch
+        spec_node_batch = speculation.node_batch
+        decode_node_name = spec_batch.node_name
+
+        popped = self.scheduler.pop_mixed_chunk_for_spec(
+            self.worker_graphs_manager,
+            (decode_node_name, spec_batch.graph_walk),
+        )
+        if popped is None:
+            return False
+        chunk_node, chunk_rid, chunk_wg_id, chunk_len = popped
+
+        # Guard: the chunk rid must be distinct from the continuing decode rids.
+        # Decode rids are mid-chain (speculatively scheduled, off the queue) so
+        # this should always hold; if it somehow doesn't, push the chunk back and
+        # keep the pure-decode continuation rather than corrupt membership.
+        if chunk_rid in spec_batch.node_objects:
+            self.worker_graphs_manager.queues[chunk_wg_id].push_back_node(
+                chunk_rid, chunk_node
+            )
+            return False
+
+        # Keep the chunk node off the ready queue while it executes in the spec
+        # step (same guard the decode nodes carry), so a concurrent schedule
+        # can't re-pick it.
+        chunk_node._speculatively_scheduled = True
+
+        # Chunk inputs come from its own ready_signals (conductor-delivered),
+        # exactly like _build_node_batch / a fresh rid — never threaded from N.
+        chunk_inputs = self._get_input_tensors(
+            chunk_rid, chunk_node, check_next_iter=False,
+        )
+        chunk_final_stream = any(
+            edge._final_stream_chunk
+            for edge in chunk_node.ready_signals.ready_inputs.values()
+        )
+
+        spec_batch.node_objects[chunk_rid] = chunk_node
+        spec_batch.request_to_worker_graph[chunk_rid] = chunk_wg_id
+        spec_batch.graph_walk = "thinker_mixed"
+
+        spec_node_batch.graph_walk = "thinker_mixed"
+        spec_node_batch.request_ids = list(spec_node_batch.request_ids) + [chunk_rid]
+        spec_node_batch.per_request_input_tensors[chunk_rid] = chunk_inputs
+        spec_node_batch.per_request_info[chunk_rid] = (
+            self.worker_graphs_manager.get_fwd_info(chunk_rid, speculation.partition)
+        )
+        if chunk_final_stream:
+            spec_node_batch.final_stream_rids = set(
+                spec_node_batch.final_stream_rids
+            ) | {chunk_rid}
+
+        # Validation hook: distinguish a chain-RIDING mixed assembly from a
+        # chain-BREAK assembly (micro_scheduler's "mixed batch:" log). n_decode
+        # is the continuation size; C is the chunk bucket.
+        logger.info(
+            "mixed-in-chain: n_decode=%d C=%s node=%s chunk_rid=%s",
+            len(spec_batch.node_objects) - 1, chunk_len,
+            decode_node_name, chunk_rid,
+        )
+        return True
 
     def _thread_outputs_to_speculative(
         self, speculation: Speculation, output_N: NodeOutput
@@ -2066,9 +2221,20 @@ class Worker:
         # sure to not route their outputs
         valid_rids = set(batch_N.node_batch.request_ids)
         if batch_N.speculative_new_iter:
+            # MSTAR_MIXED_SPEC: a mixed spec batch carries batch-level walk
+            # "thinker_mixed", but loop stops are recorded under the rid's OWN
+            # walk (thinker_decode, see the stop-recording below / 7c09d10). The
+            # overstay dedup here only concerns the CONTINUING decode rids (the
+            # chunk row has no pending loop stop), so match pending stops against
+            # the decode walk, not "thinker_mixed" (which no stop is keyed under
+            # and would skip the dedup entirely). Non-mixed batches are
+            # unchanged: overstay_walk == batch_N.graph_walk.
+            overstay_walk = batch_N.graph_walk
+            if overstay_walk == "thinker_mixed":
+                overstay_walk = "thinker_decode"
             for pending_stop in self._pending_loop_stops:
                 if pending_stop.loop_name != batch_N.loop_name \
-                        or pending_stop.graph_walk != batch_N.graph_walk \
+                        or pending_stop.graph_walk != overstay_walk \
                         or pending_stop.rid not in batch_N.node_batch.request_ids:
                     continue
                 stopped_rid = pending_stop.rid
@@ -2687,6 +2853,16 @@ class Worker:
         spec_peek_for_fairness = (
             os.environ.get("MSTAR_SPEC_PEEK_FOR_FAIRNESS", "1") == "1"
         )
+        # MSTAR_MIXED_SPEC: fold a mixable prefill chunk INTO the running decode
+        # spec chain (thinker_mixed spec batch) instead of breaking the chain to
+        # run mixed on the non-spec path (0cc7c71). Read once — the flag is
+        # static for the process. Implies MSTAR_MIXED_BATCH (mixed_batch_spec_
+        # enabled already ANDs it). ``self.mixed_batch_assert`` is set in
+        # __init__ from MSTAR_MIXED_BATCH_ASSERT.
+        from mstar.model.qwen3_omni.qwen3_omni_model import (
+            mixed_batch_spec_enabled as _mixed_batch_spec_enabled,
+        )
+        mixed_spec_enabled = _mixed_batch_spec_enabled()
         consecutive_spec_steps = 0
         yield_away_from_target: tuple[str, str] | None = None
 
@@ -2788,26 +2964,40 @@ class Worker:
                         or must_yield_for_fairness
                     )
 
-                    # W5-P2 mixed batch: if the ready contending work is a
-                    # mixable prefill CHUNK on the decode's own node, do NOT
-                    # yield-away to a prefill-only step. Yield-away schedules
-                    # with exclude_target=decode AND the decode rids are still
-                    # _speculatively_scheduled (absent from the ready queue), so
+                    # Mixed batch: the ready contending work is a mixable
+                    # prefill CHUNK on the decode's own node. Do NOT yield-away
+                    # to a prefill-only step (yield-away schedules with
+                    # exclude_target=decode while the decode rids are still
+                    # _speculatively_scheduled and off the ready queue, so
                     # _try_assemble_mixed can never see the decode side there —
-                    # which is exactly why "thinker_mixed step" never fired.
-                    # Instead break the spec chain WITHOUT yield-away: fall
-                    # through to the non-speculative path (section 4), where the
-                    # in-flight decode completes, un-flags, re-queues, and the
-                    # plain get_next_batch assembles decode + chunk into a
-                    # thinker_mixed batch (mixed is non-speculative by design —
-                    # see _can_speculate). No mixed opportunity → unchanged
-                    # yield-away.
+                    # which is why "thinker_mixed step" never fired on yield).
+                    # Two ways to admit the chunk instead:
+                    #
+                    # * MSTAR_MIXED_SPEC off (0cc7c71): break the spec chain
+                    #   WITHOUT yield-away — fall through to the non-speculative
+                    #   path (section 4), where the in-flight decode completes,
+                    #   un-flags, re-queues, and the plain get_next_batch
+                    #   assembles decode + chunk into a thinker_mixed batch (mixed
+                    #   is non-speculative there — see _can_speculate). Loses the
+                    #   overlap for that step (measured 4-9%/admission).
+                    #
+                    # * MSTAR_MIXED_SPEC on: keep speculating the decode
+                    #   continuation and fold the chunk row INTO that spec batch
+                    #   (thinker_mixed) below, so the mixed step rides the chain
+                    #   uninterrupted — no chain break, overlap preserved.
+                    #
+                    # No mixed opportunity → unchanged yield-away either way.
+                    speculate_into_mixed = False
                     if must_yield_away and self.scheduler.has_mixed_opportunity(
                         self.worker_graphs_manager,
                         (pending.node_name, pending.graph_walk),
                     ):
                         must_yield_away = False
-                        break_chain_for_mixed = True
+                        if mixed_spec_enabled:
+                            speculate_into_mixed = True
+                            break_chain_for_mixed = False
+                        else:
+                            break_chain_for_mixed = True
                     else:
                         break_chain_for_mixed = False
 
@@ -2816,6 +3006,31 @@ class Worker:
                             range_push("worker.speculate", synchronize=False)
                         _t0 = _time.perf_counter() if phase_period else 0.0
                         speculation = self._try_speculate_next(pending)
+                        # Fold a ready mixable chunk into the decode continuation
+                        # so the next spec batch is a thinker_mixed step that
+                        # rides the chain. If no decode continuation survived
+                        # (speculation is None — e.g. every decode rid stopping),
+                        # there is nothing to ride the chain: fall back to the
+                        # 0cc7c71 non-spec mixed path (break_chain_for_mixed) so
+                        # the chunk still gets mixed, just off-chain.
+                        if speculate_into_mixed:
+                            if speculation is not None:
+                                folded = self._try_fold_mixed_chunk_into_spec(
+                                    speculation
+                                )
+                                if (
+                                    not folded
+                                    and self.mixed_batch_assert
+                                ):
+                                    # Peek said a chunk was ready; a lost race is
+                                    # tolerable, but under the assert flag surface
+                                    # a persistent miss so it can't hide.
+                                    logger.warning(
+                                        "MIXED_SPEC: fold missed a peeked chunk "
+                                        "opportunity (raced removal?)"
+                                    )
+                            else:
+                                break_chain_for_mixed = True
                         if phase_period:
                             _phase_record("speculate", _time.perf_counter() - _t0)
                         if self.enable_nvtx:
