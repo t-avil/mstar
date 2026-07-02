@@ -938,7 +938,10 @@ class ThinkerSubmodule(ARNodeSubmodule):
     def can_batch(self, batch: NodeBatch, model_inputs: list[NodeInputs]) -> bool:
         return len(model_inputs) > 1
 
-    PREFILL_TOKEN_BUCKETS = [128, 256, 512, 1024, 2048]
+    # Denser buckets: i2t prompts land ~280-380 tokens (bucket-512 padded
+    # up to ~45%), s2t straddles 256/512. 384/768/1536 cut prefill padding
+    # waste -> directly shrinks the phased-batching stall + TTFT.
+    PREFILL_TOKEN_BUCKETS = [128, 256, 384, 512, 768, 1024, 1536, 2048]
     PREFILL_CAPTURE_BATCH_SIZES = [1, 2, 4]
 
     # prefill_vision buckets are larger than text/audio because video
