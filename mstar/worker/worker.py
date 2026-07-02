@@ -67,6 +67,19 @@ class PendingBatch:
     loop_name: str = None
 
 @dataclass
+class PendingSide:
+    """A prefill/encoder batch executing on the side stream + side executor,
+    concurrent with the decode chain. Distinct from PendingBatch: it never
+    speculates, never loops back, and its postprocess runs opportunistically
+    on the main thread. See Worker.run() (MSTAR_SIDE_PREFILL)."""
+    batch: ScheduledBatch
+    node_batch: NodeBatch
+    node_name: str
+    partition: str
+    graph_walk: str
+    future: Future
+
+@dataclass
 class Speculation:
     scheduled_batch: ScheduledBatch
     node_batch: NodeBatch
@@ -310,6 +323,37 @@ class Worker:
         self._pinned_d2h_buffers: dict[
             tuple[str, torch.dtype, tuple[int, ...]], list[torch.Tensor]
         ] = defaultdict(list)
+
+        # MSTAR_SIDE_PREFILL: run a thinker-prefill (or stateless encoder)
+        # batch CONCURRENTLY with the decode chain on a second CUDA stream +
+        # second executor thread, instead of yielding the decode chain to run
+        # it inline. Default OFF. See run() for the loop restructure and
+        # _execute_on_gpu_thread for the stream plumbing.
+        #
+        # Correctness note on KV: the thinker-prefill hands its first token to
+        # decode ASYNCHRONOUSLY through the conductor (persist → conductor
+        # rebuilds text_inputs → back as a fresh decode batch a later iter),
+        # NOT via a local graph edge. The side batch's postprocess runs on the
+        # main thread and fully drains the side stream (the completion_event is
+        # recorded ON the side stream, and _prematerialize_for_check_stop
+        # side.wait_event(completion_event)+synchronize before the token is
+        # even routed). So the prefill's KV pages are durably written long
+        # before the decode step for that rid arrives — no cross-stream
+        # wait_event is needed on the decode replay path. The single invariant
+        # is: record the side batch's completion_event on the side stream (see
+        # _execute_on_gpu_thread), so the existing token-materialization wait
+        # gates on the right stream.
+        self._side_prefill = os.environ.get("MSTAR_SIDE_PREFILL", "0") == "1"
+        self._side_stream: "torch.cuda.Stream | None" = None
+        # rids currently executing on the side stream — treated as in-flight
+        # for deferred-remove safety (see _apply_pending_removes_safe_to_drop).
+        self._side_in_flight_rids: set[str] = set()
+        # Belt-and-suspenders: the scheduler is single-caller by construction
+        # (main thread owns all get_next_batch / has_ready_excluding calls; the
+        # side executor only EXECUTES pre-built batches). This lock guards the
+        # scan+pop critical section so the invariant is defended even if a
+        # future change slips a scheduler call onto another thread.
+        self._scheduler_lock = threading.Lock()
 
         # Streaming buffers: request_id -> edge_name -> list of tensors
         # (Legacy path — kept for models without PartitionTopology)
@@ -1299,8 +1343,9 @@ class Worker:
         node_batch: NodeBatch,
         plan_future: Future | None = None,
         advance_event: "threading.Event | None" = None,
+        stream: "torch.cuda.Stream | None" = None,
     ) -> NodeOutput:
-        """Run the engine on the GPU executor thread.
+        """Run the engine on a GPU executor thread.
 
         The NVTX range bracketing this call is ``synchronize=False`` —
         adding a ``cudaDeviceSynchronize`` at the marker boundary would
@@ -1308,8 +1353,19 @@ class Worker:
         post-processing and the next step's kernel execution.
 
         After ``execute_with_max_batch_size`` returns we record a CUDA event
-        on the default stream and stash it on the output. Downstream sync
-        points on the main thread wait on this event.
+        and stash it on the output. Downstream sync points on the main thread
+        wait on this event.
+
+        ``stream``: when None (the decode / normal path), execute and record
+        the completion event on the DEFAULT stream — unchanged behavior. When
+        a side stream is passed (MSTAR_SIDE_PREFILL), execute the batch and
+        record the completion event on THAT stream, so the batch overlaps
+        decode replays on the default stream and downstream token-
+        materialization waits gate on the correct stream. The captured graphs
+        carry no stream affinity (torch.cuda.graph captures on its own
+        internal stream), so replay on a side stream is valid; prefill and
+        decode use disjoint static I/O buffers and FlashInfer workspaces, so
+        concurrent execution does not corrupt.
         """
         from mstar.utils.profiler import range_pop, range_push
 
@@ -1341,11 +1397,22 @@ class Worker:
             )
 
         try:
-            output = engine.execute_with_max_batch_size(node_batch)
-            if torch.cuda.is_available():
-                event = torch.cuda.Event()
-                event.record(torch.cuda.default_stream(self.device))
-                output.completion_event = event
+            if stream is not None:
+                # Side-stream execution (MSTAR_SIDE_PREFILL): run the whole
+                # batch on the side stream so it overlaps default-stream decode
+                # replays, and record the completion event on the SAME stream.
+                with torch.cuda.stream(stream):
+                    output = engine.execute_with_max_batch_size(node_batch)
+                    if torch.cuda.is_available():
+                        event = torch.cuda.Event()
+                        event.record(stream)
+                        output.completion_event = event
+            else:
+                output = engine.execute_with_max_batch_size(node_batch)
+                if torch.cuda.is_available():
+                    event = torch.cuda.Event()
+                    event.record(torch.cuda.default_stream(self.device))
+                    output.completion_event = event
             return output
         finally:
             # Safety net: ensure advance_event fires even if the engine
@@ -1430,6 +1497,189 @@ class Worker:
             # disable speculation for TP nodes for now
             return False
         return True
+
+    def _is_side_eligible(self, batch: ScheduledBatch) -> bool:
+        """Whether ``batch`` may run on the side stream concurrently with the
+        decode chain (MSTAR_SIDE_PREFILL).
+
+        Eligible batches are the ones whose GPU work we want to hide behind
+        decode: thinker-PREFILL walks (KV_CACHE engine, graph_walk starting
+        with ``prefill``) and STATELESS encoder nodes (which route into a
+        prefill; they may or may not be co-located depending on the 2-GPU
+        config variant). Decode (``thinker_decode``) is never side-eligible —
+        it is the chain we overlap AGAINST, not a batch to overlap.
+
+        TP nodes are excluded: TP scheduling is driven by rank-0 broadcast
+        (ScheduleTPNode) and the follower ranks execute on their own GPU
+        threads with default-stream ordering assumptions; running a TP batch on
+        a side stream on rank 0 only would desynchronize the group. Keep the
+        side path single-rank (non-TP) prefill/encoder work.
+        """
+        if not self._side_prefill:
+            return False
+        if not batch.node_objects:
+            return False
+        if batch.node_name in self.tp_nodes:
+            return False
+        engine = self.engine_manager.get_engine(batch.node_name)
+        etype = engine.engine_type()
+        if etype == EngineType.STATELESS:
+            return True
+        if etype == EngineType.KV_CACHE and batch.graph_walk.startswith("prefill"):
+            return True
+        return False
+
+    def _reap_side_if_done(self, pending_side: "PendingSide | None") -> "PendingSide | None":
+        """If a side batch has finished on the side stream, postprocess it on
+        the MAIN thread and return None; otherwise return it unchanged.
+
+        Opportunistic: never blocks on the future. Postprocess reuses the
+        normal routing path (_postprocess_batch), whose completion_event
+        handling drains the side stream before routing — see the correctness
+        note in __init__."""
+        if pending_side is None:
+            return None
+        if not pending_side.future.done():
+            return pending_side
+        try:
+            output: NodeOutput = pending_side.future.result()
+            for node in pending_side.batch.node_objects.values():
+                node._speculatively_scheduled = False
+            if output.allocation_failed:
+                # KV OOM on the side prefill: rehabilitate exactly like the
+                # decode path (push nodes back + hold rids). Does not touch the
+                # decode chain — the failed rids are disjoint from live decode.
+                self._handle_allocation_failure(
+                    pending_side.batch, pending_side.node_batch
+                )
+            else:
+                # _postprocess_batch unconditionally clears
+                # self._pending_loop_stops at its tail (they are a one-iter
+                # decode-speculation mechanism, consumed only by the NEXT
+                # decode speculative_new_iter postprocess). This side reap runs
+                # at the TOP of the loop, BEFORE the current iter's decode
+                # speculation consumes the stops the previous decode iter set —
+                # so letting the side postprocess clear them would drop a
+                # legitimate decode loop-stop. Prefill batches never set
+                # speculative_new_iter and any prefill-walk stops they add are
+                # never consumed, so the decode chain's pending stops must pass
+                # through the side postprocess untouched: snapshot and restore.
+                saved_loop_stops = set(self._pending_loop_stops)
+                self._postprocess_batch(
+                    PendingBatch(
+                        batch=pending_side.batch,
+                        node_batch=pending_side.node_batch,
+                        node_name=pending_side.node_name,
+                        partition=pending_side.partition,
+                        graph_walk=pending_side.graph_walk,
+                        future=pending_side.future,
+                    ),
+                    output,
+                )
+                self._pending_loop_stops = saved_loop_stops
+        except Exception:
+            logger.exception(
+                "Worker %s: side prefill batch failed", self.worker_id
+            )
+        finally:
+            self._side_in_flight_rids = set()
+        return None
+
+    def _maybe_dispatch_side(
+        self,
+        pending_side: "PendingSide | None",
+        side_executor: "ThreadPoolExecutor | None",
+        exclude_target: "tuple[str, str] | None",
+    ) -> "PendingSide | None":
+        """When a decode chain is active and no side batch is in flight, try to
+        schedule a prefill/encoder batch and run it on the side stream.
+
+        ``exclude_target`` is the active decode (node, walk) so the scheduler
+        never hands back the decode group. Because get_next_batch POPS the
+        chosen nodes out of the ready queue, the subsequent speculation
+        has_ready_excluding won't re-see them — so dispatching here does not
+        disturb the decode speculation chain. Returns the new pending_side (or
+        the unchanged one if nothing was dispatched).
+
+        All scheduling stays on the main thread (this method is only called
+        from run()); the side executor solely EXECUTES the built batch."""
+        if not self._side_prefill or side_executor is None:
+            return pending_side
+        if pending_side is not None:
+            return pending_side  # one side batch in flight at a time
+        with self._scheduler_lock:
+            batch = self.scheduler.get_next_batch(
+                self.worker_graphs_manager,
+                exclude_target=exclude_target,
+            )
+        if batch is None:
+            return pending_side
+        if not self._is_side_eligible(batch):
+            # Not a prefill/encoder we want on the side stream. We already
+            # popped it from the queue; push its nodes back so the normal
+            # (main-stream) path schedules it next iter.
+            self._pushback_scheduled_batch(batch)
+            return pending_side
+
+        node_batch = self._build_node_batch(batch)
+        # Force this batch down the eager / batched path, NEVER the captured
+        # decode CUDA graph. KVCacheEngine._can_use_cuda_graph returns False
+        # when this flag is set: the captured graph shares interned static I/O
+        # buffers across slots and mutates a single-writer next_slot counter,
+        # both of which a concurrent side replay would race. The eager path
+        # uses FlashInfer workspace label "main", disjoint from decode's
+        # per-slot labels, so it is safe concurrent with decode. The flag rides
+        # NodeBatch.metadata, which execute_with_max_batch_size propagates to
+        # every minibatch, so the gate holds even under max-batch-size splits.
+        node_batch.metadata["side_stream"] = True
+        batch_partition = self.worker_graphs_manager.get_partition_for_node(
+            batch.node_name
+        )
+        for request_id, req_info in node_batch.per_request_info.items():
+            req_info.dynamic_loop_iter_counts.update(
+                self.worker_graphs_manager.get_dynamic_loop_iters(
+                    request_id, partition=batch_partition,
+                )
+            )
+        # In-flight bookkeeping: defer removes for these rids until the side
+        # batch is postprocessed, and keep the nodes off the ready queue while
+        # executing (same guard decode uses).
+        for node in batch.node_objects.values():
+            node._speculatively_scheduled = True
+        self._side_in_flight_rids = set(batch.node_objects.keys())
+        self.maybe_send_zmq_to_tp_followers(node_batch)
+        future = side_executor.submit(
+            self._execute_on_gpu_thread,
+            batch, node_batch,
+            None,            # plan_future — side prefill plans inline (eager)
+            None,            # advance_event — not part of the spec chain
+            self._side_stream,
+        )
+        self.wakeup_event.register_future(future)
+        logger.debug(
+            "Side-dispatch: %s %s", batch.node_name, node_batch.request_ids
+        )
+        return PendingSide(
+            batch=batch,
+            node_batch=node_batch,
+            node_name=batch.node_name,
+            partition=batch_partition,
+            graph_walk=batch.graph_walk,
+            future=future,
+        )
+
+    def _pushback_scheduled_batch(self, batch: ScheduledBatch) -> None:
+        """Return a popped-but-not-run batch's nodes to their ready queues so a
+        later schedule can pick them up. Used when a side-dispatch candidate
+        turns out not to be side-eligible."""
+        for rid, node in batch.node_objects.items():
+            wg_id = batch.request_to_worker_graph.get(rid)
+            if wg_id is None:
+                continue
+            queue = self.worker_graphs_manager.queues.get(wg_id)
+            if queue is None:
+                continue
+            queue.push_back_node(rid, node)
 
     def _get_wgio_for_rid(self, batch: ScheduledBatch, rid: str):
         """Per-rid WorkerGraphIO for the wg that owns this rid in this batch.
@@ -2171,8 +2421,15 @@ class Worker:
     ) -> None:
         """Apply ``REMOVE_REQUEST`` for any rid that is not currently held by
         an in-flight GPU step. Removes for in-flight rids stay deferred and
-        are reattempted next iter."""
-        to_apply = [r for r in self._pending_removes if r not in in_flight_rids]
+        are reattempted next iter.
+
+        A rid running on the side stream (MSTAR_SIDE_PREFILL) is also in-flight:
+        its GPU work may still be reading/writing that rid's KV pages, so its
+        REMOVE must stay deferred until the side batch is postprocessed. We
+        union ``self._side_in_flight_rids`` here so every caller respects it
+        without having to thread the side set through each call site."""
+        held = in_flight_rids | self._side_in_flight_rids
+        to_apply = [r for r in self._pending_removes if r not in held]
         for rid in to_apply:
             self._pending_removes.discard(rid)
             self._remove_request(RemoveRequest(request_id=rid, source=MessageSource.SELF))
@@ -2271,6 +2528,47 @@ class Worker:
         # In-flight: (batch, node_batch, batch_partition, future) | None.
         pending: PendingBatch | None = None
 
+        # MSTAR_SIDE_PREFILL: a second 1-worker executor + a separate CUDA
+        # stream that runs a prefill/encoder batch CONCURRENTLY with the decode
+        # chain. The side executor only EXECUTES pre-built batches; the main
+        # thread still owns all scheduling and postprocess. The side stream is
+        # created at the least CUDA priority the device supports, so decode
+        # replays on the default stream win SM arbitration and prefill fills
+        # the gaps (protecting decode ITL). We fall back to a default-priority
+        # stream if the priority query is unavailable. Lazily gated so non-CUDA
+        # workers and the flag-off path allocate nothing.
+        side_executor: ThreadPoolExecutor | None = None
+        pending_side: PendingSide | None = None
+        if self._side_prefill:
+            side_executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix=f"mstar-side-{self.worker_id}"
+            )
+            if torch.cuda.is_available():
+                # In CUDA, a MORE-NEGATIVE priority = HIGHER priority; the
+                # default stream is priority 0. There is no user priority
+                # lower than the default, so the best we can do to keep decode
+                # ahead is leave the side stream at default priority and rely
+                # on decode being launched first each step. If a wider
+                # negative range exists we still keep the side stream at the
+                # least-priority (largest) value the device reports.
+                side_priority = 0
+                try:
+                    least, _greatest = torch.cuda.get_stream_priority_range()
+                    side_priority = least
+                except Exception:
+                    side_priority = 0
+                try:
+                    self._side_stream = torch.cuda.Stream(
+                        device=self.device, priority=side_priority
+                    )
+                except Exception:
+                    self._side_stream = torch.cuda.Stream(device=self.device)
+            logger.info(
+                "Worker %s: MSTAR_SIDE_PREFILL enabled — prefill/encoder "
+                "batches run on a side stream concurrent with decode",
+                self.worker_id,
+            )
+
         # MSTAR_SPEC_PEEK_FOR_FAIRNESS=1: only break the spec chain when
         # MicroScheduler.has_ready_excluding finds another (node, walk)
         # ready RIGHT NOW. Single-walk workers always speculate; multi-walk
@@ -2346,6 +2644,13 @@ class Worker:
                 self._poll_stream_buffers()
                 if self.enable_nvtx:
                     range_pop(synchronize=False)
+
+                # 1b. Reap a finished side-stream prefill (MSTAR_SIDE_PREFILL).
+                # Opportunistic: never blocks. Postprocess (routing + token
+                # emit) runs here on the main thread. No-op when the flag is
+                # off or nothing is in flight.
+                if self._side_prefill:
+                    pending_side = self._reap_side_if_done(pending_side)
 
                 # 2. Speculatively schedule + build N+1 — overlaps with GPU(N).
                 # Only when (a) there's a pending step and (b) it's AR-engine.
@@ -2590,6 +2895,20 @@ class Worker:
                         consecutive_spec_steps = 0
                     else:
                         consecutive_spec_steps += 1
+                    # 3b. Dispatch a prefill/encoder batch onto the side stream
+                    # to overlap the decode chain (MSTAR_SIDE_PREFILL). Only
+                    # when the chain we just queued is a genuine (non-yield-away)
+                    # decode/AR chain — a yield-away step is itself a handoff to
+                    # another node, so there's no decode chain to overlap. The
+                    # exclude_target keeps the scheduler off the active decode
+                    # group; get_next_batch pops the prefill nodes so the
+                    # decode speculation next iter won't re-see them.
+                    if self._side_prefill and not speculation.is_yield_away:
+                        pending_side = self._maybe_dispatch_side(
+                            pending_side,
+                            side_executor,
+                            (spec_pending.node_name, spec_pending.graph_walk),
+                        )
                     if phase_period:
                         _phase_record("iter_total", _time.perf_counter() - _iter_start)
                         phase_iter[0] += 1
