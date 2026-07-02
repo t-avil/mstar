@@ -1,0 +1,154 @@
+# Qwen3-Omni optimization — experiment knowledge base
+
+Maintained by the optimization session of 2026-07-02. One paragraph per
+experiment: what was ACTUALLY implemented (not what docs claim), where it
+lives, and the measured verdict with data pointers. All perf ratios are from
+interleaved A/Bs (two preloaded servers, per-cell back-to-back runs, ratio
+contention-robust) unless noted. Committed code: branch `opt/decode-v2`
+(fork t-avil/mstar), base = encoders-implemeneted @ 4c33b33.
+
+**Ground truth on the baseline gap** (do not trust older docs): committed raw
+data (`benchmarks/qwen3-omni-joint/raw_image_to_text.json`, branch
+`benchmarks`) shows M*-new i2t B32 at 4.394 req/s / 768.6 tok/s vs vLLM-0.22
+at 8.210 req/s / 1723.2 tok/s → 0.45–0.53×. The NUMBERS.md claim of M* winning
+1.48× at that cell came from a superseded 6-datapoint favorable-conditions run
+(fixed 2026-07-02). Profiling (nsys `--cuda-graph-trace=node` + NVTX,
+`/m-coriander/coriander/tim/prof_kern2/`, `prof_v2/`): at B32 the thinker GPU
+was 49% idle on base (37% after fp8) — the gap is per-step Python
+(~26ms/step across two GIL-sharing threads: postprocess 13.2ms + send 4.75ms +
+GPU-thread prepare/plan) plus phased-batching prefill stalls (~8.7ms/step
+amortized; encoder 17.6ms + thinker prefill 27.5ms per admission), NOT the
+forward. Decode graph itself: 12.8ms at B32 (76% = MoE at the bf16 bandwidth
+floor), 5.1ms at B1.
+
+## E1 — block-fp8 w8a8 MoE (`MSTAR_MOE_FP8`) — WIN, kept
+Commit ca97ba2 + fix 22b3cd6. Triton grouped-GEMM with per-(128,128)-block
+weight scales + per-(token,128)-group activation quant (DeepSeek scheme);
+weights quantized lazily at first forward under `@torch.compiler.disable`
+(dynamo re-trace of a later capture bucket otherwise sees the freed bf16
+param and the capture fails — that bug silently sent 29 buckets to eager in
+the first A/B attempt). bf16 originals freed (−27GB VRAM). Decode tiles tuned
+in-graph (BLOCK_M=16). Validated with REAL layer-10 checkpoint weights:
+cos 0.998, worst-token 0.9977; in-graph kernel 1.44–1.61× for M=8..128.
+E2E (ab_fp8/): i2t 1.00/1.13/1.13× at B1/8/32; s2t 1.00/1.11/1.05×. Outputs
+text-identical to bf16. NOTE: the same kernel measured OUT-of-graph shows
+0.75–0.85× — out-of-graph microbenchmarks at decode M are launch-noise
+garbage; always graph-capture loops (this artifact misled the June agent
+into rejecting fp8).
+
+## E2 — fused router topk (`MSTAR_FUSED_TOPK`, default ON) — WIN, kept
+Commit 856d103. `sgl_kernel.topk_softmax` replaces softmax→torch.topk→renorm
+(gatherTopK+bitonicSortKVInPlace, 27.6µs/layer → 11.3µs in-graph). Expert ids
+bit-identical, weights equal to 3e-8. ~0.5–0.8ms/step at B32. Measured only
+as part of the round-2 stack (not isolated).
+
+## E3 — worker CPU cuts (send prematerialized ints, batched prepare_inputs,
+## batched check_stop D2H) — PARTIAL WIN, kept
+Commits 9193cd7, de4a741. (a) `_send_outputs` now consumes check_stop's
+side-stream D2H ints instead of 32 per-rid `get_tensor().cpu()` default-stream
+syncs; (b) `prepare_inputs_batched` for thinker_decode: one token cat + ONE
+embed_tokens + one pos H2D instead of 32 per-rid embeds; (c) check_stop D2H:
+one flat cat + one pinned copy. Round-2 stack A/B (ab_stack/, includes E1+E2):
+i2t 1.134/1.224/1.153×, s2t 1.057/1.165/1.201× vs base. Lesson from the v2
+re-profile: send_outputs stayed ~5ms — the cost was per-rid ZMQ message
+construction/pickling, not the D2H; (a) mostly mattered for unblocking overlap.
+
+## E4 — encoders on rank 0 (`configs/qwen3omni_2gpu_encoff.yaml`) — WIN, kept
+Commit 9be08a2. One-line topology change: audio+vision encoders move to the
+Talker GPU (idle on text paths), so encoder batches stop serializing against
+thinker decode. Bundled with E5 in round-3 (ab_encoff/): i2t
+1.044/1.014/1.090×, s2t 1.093/1.071/0.983× on top of the round-2 stack.
+(Attribution between E4/E5 not isolated; s2t B32 −1.7% ≈ wash.)
+
+## E5 — inline token emit (`MSTAR_INLINE_EMIT`) — WIN (bundled w/ E4), kept
+Commit a06c08f. Qualifying integer new-token emit_to_client tensors ride the
+result_tensors message metadata; no /dev/shm file per token per rid per step,
+no data-worker fetch, no TENSOR_RECEIVED ack; producer releases the tensor
+ref locally. Only uuids used exclusively by emit edges qualify; audio/
+multimodal excluded. Ran clean under load (no leaks/errors in server logs).
+
+## E6 — batched per-step emit (`MSTAR_BATCH_EMIT`, implies E5) — WASH, off in final config
+Commit c2b9b5b. All qualifying inline emits of one decode step coalesce into
+ONE result_tensors_batch APIServerMessage (was 32 messages/step at B32),
+fanned out per-item on the api_server. Round-5 (ab_r5/, vs the E4+E5 config):
+i2t 0.960/0.997/1.011×, s2t 1.017/1.008/**1.107×** — noise-band on i2t, but a
+real win on s2t B32 (highest token-message rate: ~480 msg/s coalesced 32:1).
+Conclusion: per-rid ZMQ pickling only matters at extreme message rates; the
+residual i2t send cost is the per-rid python around it. KEPT ON in the final
+config (harmless where it's a wash, +10% where messaging saturates).
+
+## E7 — side-stream prefill overlap (`MSTAR_SIDE_PREFILL`) — REJECTED (catastrophic at B32)
+Commits 31ea1bc (engine: eager-path gate via node_batch.metadata["side_stream"],
+locks in kv_store.get_state / WorkspaceBufferManager.get) + b9de820 (worker:
+PendingSide, side executor + side stream, main-thread-only scheduling/
+postprocess, loop-stop snapshot/restore, KV visibility via side-stream
+completion_event host-synced in postprocess before token routing). Design
+constraint: side batches take the EAGER prefill path (captured prefill graph
+is single-writer). Round-4 (ab_r4/): i2t B1 1.055×, B8 **0.820×**, B32
+**0.098×** (0.545 req/s — collapse; run killed after this cell). The B8 cell
+was clean data (uniform +23% JCT, no outliers, no foreign GPU processes); at
+B32 the eager side prefill + GIL contention starves the decode chain almost
+completely. Verdict: the eager-path side stream is not viable. A future E8
+would need the captured prefill graph made side-thread-safe (per-slot static
+buffers + locked next_slot) AND bounded side-thread Python; until then the
+flag stays default-off and out of the final config.
+
+## Rejected with data
+- **FA3 decode attention** (sgl_kernel.flash_attn_with_kvcache): correct on
+  M*'s paged layout (cos 0.9999) but SLOWER than FlashInfer on H200 GQA 28/4
+  (14.2µs vs 7.6µs at bs=1; parity at bs=32). FA4 not compiled into
+  sgl_kernel 0.3.21. Keep FlashInfer.
+- **w8a16 weight-only fp8 MoE**: in-graph only 1.16–1.26× vs w8a8's
+  1.44–1.61×. Kernel kept in fp8.py for reference.
+- **Prior agent's claims** (audited): tuned bf16 MoE tiles + NUM_SLOTS=3 =
+  wash (confirmed); MSTAR_MIXED_WALK eager loses at concurrency (confirmed,
+  0.17× at B32); fp8 "validated cos 0.998 but loses e2e" — was NEVER wired
+  into the model; the microbench used random weights.
+
+## Queue (not yet run)
+- E8: side-prefill v2 — replay captured prefill graph from the side thread
+  via per-slot static buffers (needs cuda_graph_runner surgery), or
+  decode-priority chunked prefill.
+- E9: direct GPU token feed (`MSTAR_DIRECT_FEED`, commit 6644913 on
+  exp/direct-feed) — implemented; SCOPE CORRECTION from implementation: the
+  route/store block is load-bearing (mark_node_complete drives
+  Loop.complete_iter; the stored loop-back edge feeds next-step readiness for
+  the non-spec fallback), so it cannot be skipped and the spec path never
+  fetched from the registry anyway. Standalone gain expected MARGINAL; value
+  = the in-thread feed substrate for E10. Round-6 verdict (ab_r6/): WASH as
+  predicted (i2t 0.960/1.018/0.964, s2t 0.993/0.995/1.067) with clean outputs
+  and zero dropped-rid/traceback — the mechanism is correctness-validated for
+  E10. Note: the s2t B32 cell shows ±7% round-to-round variance (0.983 r3,
+  1.107 r5, 1.067 r6) — treat single-cell s2t B32 ratios as noisy.
+- E10: two-step decode (`MSTAR_MULTISTEP_DECODE=2`, commit 6bf6136 on
+  exp/two-step-decode, same-slot double-replay, requires DIRECT_FEED) —
+  implemented + GPU-tested round-7 (ab_r7/): **FLAT** (i2t 0.969/0.995/0.998).
+  Outputs correct, zero failures. Interpretation: with E9 also flat, the
+  "main-loop cycle overhead" hypothesis is falsified at this granularity —
+  the awaited/submit bookkeeping already overlaps GPU time; the true residual
+  floor is the per-token route/store/emit Python that E9's analysis proved
+  load-bearing (Loop semantics). Further B32 gains need batched loop
+  bookkeeping across rids/steps — a deeper engine redesign (future work).
+- E11: NUM_SLOTS=3 retest — DONE via quick-bench (qb_queue1.log): REGRESSION
+  (i2t B32 0.81× vs ref; B1/B8 also down). Third graph slot hurts on the
+  current stack. Rejected.
+- W6: MSTAR_PY_SWITCH_INTERVAL_SEC=0.001 — DONE via quick-bench: REGRESSION
+  (i2t B32 0.78×). Faster GIL switching adds context-switch overhead on the
+  hot loops. Rejected.
+- E12: lm_head fp8 (B1 lever: ~0.6GB weight read per step) — not implemented.
+- vLLM-0.22 feature inventory vs M*: full-decode CUDA graphs (have),
+  async scheduling (have, as speculation), chunked prefill (their prefill
+  lever; our E8 alternative), FA3 (tested, loses on our shapes), bf16 triton
+  MoE (we beat it with fp8), prefix caching (N/A for this benchmark's
+  prompt distribution).
+
+## Data-quality rules (hard-won)
+- Only interleaved A/B ratios are trustworthy on this shared box.
+- Check `nvidia-smi` idle before every run; never co-schedule with other
+  users' jobs (GPUs 0–5 are often taken; 6,7 = project set).
+- Inspect per-request JCT std/max in results.json for contention outliers
+  before believing a cell.
+- tok/s comparisons across systems embed output-length differences
+  (vLLM ~217 tok/req vs M* ~176 at i2t B1); use req/s for cross-system
+  ranking, tok/s for within-system deltas.
+- Out-of-graph kernel timing at decode M: invalid (see E1 note).
