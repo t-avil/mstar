@@ -548,6 +548,18 @@ class KVCacheEngine(BaseEngine):
         implementation on NodeSubmodule derives this from
         ``get_cuda_graph_configs`` (graph_walk membership).
         """
+        # MSTAR_SIDE_PREFILL: batches dispatched to the side stream must NEVER
+        # replay a captured graph. The captured decode graph shares interned
+        # static input buffers across its slots and mutates a single
+        # ``next_slot`` RMW counter under a single-writer (main GPU thread)
+        # assumption; a concurrent side replay would race both. The eager /
+        # batched path this forces uses FlashInfer workspace label "main",
+        # disjoint from decode's per-slot "..._cugraph_slotN" labels, so it is
+        # safe to run concurrently with decode replays. Side prefill batches
+        # aren't decode shapes anyway (they'd miss the captured graph), but
+        # gate explicitly so the invariant doesn't depend on shape luck.
+        if batch.metadata.get("side_stream"):
+            return False
         submod_mgmt = self.submodule_management[batch.node_name]
         submodule = submod_mgmt.submodule
         if submodule is None:

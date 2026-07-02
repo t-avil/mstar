@@ -1,3 +1,4 @@
+import threading
 from dataclasses import dataclass
 
 import torch
@@ -44,13 +45,21 @@ class WorkspaceBufferManager:
         self.size = size
         self.device = device
         self.buffers = {}
+        # Guards the lazy per-label buffer allocation below. With
+        # MSTAR_SIDE_PREFILL the side prefill path (eager, label "main")
+        # plans on a second executor thread while the main GPU thread plans
+        # decode (per-slot labels), so two threads can hit this
+        # check-then-create concurrently for different labels in the same
+        # dict. The lock makes the allocate-and-insert atomic.
+        self._lock = threading.Lock()
 
     def get(self, label: str="main"):
-        if label not in self.buffers:
-            self.buffers[label] = torch.empty(
-                self.size, dtype=torch.uint8, device=self.device
-            )
-        return self.buffers[label]
+        with self._lock:
+            if label not in self.buffers:
+                self.buffers[label] = torch.empty(
+                    self.size, dtype=torch.uint8, device=self.device
+                )
+            return self.buffers[label]
 
 
 class BatchedCacheManager:
