@@ -144,6 +144,30 @@ def chunked_prefill_v2_assert() -> bool:
     return _envflag("MSTAR_CHUNKED_PREFILL_V2_ASSERT")
 
 
+def mixed_batch_enabled() -> bool:
+    """W5-P2 mixed prefill+decode CAPTURED batch. When ON, the worker scheduler
+    may assemble ONE fully-captured forward covering N ``thinker_decode`` rows
+    (1 token each) plus ONE prefill-chunk row (C tokens), eliminating the
+    decode/prefill-chunk alternation that P1 (chunked prefill) still leaves.
+
+    Default OFF -> flag-off is byte-identical: the scheduler never emits a
+    ``thinker_mixed`` batch, so assembly / preprocess / dispatch changes are
+    all unreachable. Requires ``MSTAR_CHUNKED_PREFILL_V2`` to produce the
+    prefill chunks that a mixed step consumes; with V2 off there are no chunk
+    rows to mix, so a mixed batch never assembles and the path falls back to
+    normal decode.
+    """
+    return _envflag("MSTAR_MIXED_BATCH")
+
+
+def mixed_batch_assert() -> bool:
+    """DEBUG validation for the mixed batch: after a mixed step, assert each
+    decode rid's seq_len advanced by exactly 1 and the chunk rid's by exactly
+    C. Cheap worker-side check; default OFF.
+    """
+    return _envflag("MSTAR_MIXED_BATCH_ASSERT")
+
+
 def prefill_chunk_tokens() -> int:
     """Cap on chunk size C for chunked prefill. The planner picks the largest
     ``ThinkerSubmodule.PREFILL_TOKEN_BUCKETS`` entry <= min(remaining, this cap),

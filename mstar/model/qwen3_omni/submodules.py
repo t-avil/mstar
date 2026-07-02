@@ -596,6 +596,17 @@ class ThinkerSubmodule(ARNodeSubmodule):
     ) -> ARNodeInputs:
         device = self.get_device()
         start_pos = pos_info.get("main", PositionInfo()).position_id_start
+
+        # W5-P2 mixed batch: the batch-level ``graph_walk`` is "thinker_mixed",
+        # but each request in the batch carries its OWN walk (a decode row or
+        # the single prefill-chunk row). ``prepare_inputs`` runs once per
+        # request, so dispatch on the request's real walk from ``fwd_info``,
+        # not the batch walk. The resulting per-request ARNodeInputs
+        # (input_seq_len=1 for decode rows, =C for the chunk row) are what
+        # ``preprocess`` concatenates into the mixed [1]*n+[C] layout.
+        if graph_walk == "thinker_mixed":
+            graph_walk = fwd_info.graph_walk
+
         if graph_walk == "thinker_decode":
             # Get previous token ID from text_inputs
             token_id = inputs["text_inputs"][0].to(device)  # (1,) or scalar
@@ -901,6 +912,11 @@ class ThinkerSubmodule(ARNodeSubmodule):
         return os.environ.get("MSTAR_CHUNKED_PREFILL_V2_ASSERT", "").strip().lower() \
             in ("1", "true", "yes", "on")
 
+    @staticmethod
+    def _mixed_batch_assert_enabled() -> bool:
+        return os.environ.get("MSTAR_MIXED_BATCH_ASSERT", "").strip().lower() \
+            in ("1", "true", "yes", "on")
+
     def preprocess(
         self,
         graph_walk: str,
@@ -939,6 +955,24 @@ class ThinkerSubmodule(ARNodeSubmodule):
         cache_manager.plan_rope(seq_lens=seq_lens, pos_ids=None, label="main")
 
         extra_inputs = {}
+        # W5-P2 mixed batch: the concatenation above already produces the mixed
+        # [decode embeds (n,H); chunk embeds (C,H)] layout and the
+        # ``seq_lens=[1]*n+[C]`` that plan_attention needs — no walk-specific
+        # code required, because the mixed capture bucket uses the text-packed
+        # tensor signature (input_embeds + cos_3d + sin_3d only). The P2 mixed
+        # chunk row is therefore restricted to ``prefill_text`` at assembly
+        # time (mstar/worker/micro_scheduler.py): audio needs the MRoPE
+        # ``mrope_pos_advance`` side-channel and vision needs deepstack tensors,
+        # neither of which the text-signature capture carries. Those are P3.
+        if graph_walk == "thinker_mixed" and self._mixed_batch_assert_enabled():
+            for inp in inputs:
+                assert not any(
+                    k.startswith("deepstack_") for k in inp.tensor_inputs
+                ), (
+                    "mixed batch got a vision chunk (deepstack tensors present); "
+                    "P2 mixed capture is text-signature only — assembly must gate "
+                    "the chunk row to prefill_text."
+                )
         if graph_walk == "prefill_vision":
             from mstar.model.qwen3_omni.qwen3_omni_model import (
                 batch_vision_prefill_enabled,
@@ -1089,6 +1123,21 @@ class ThinkerSubmodule(ARNodeSubmodule):
     PREFILL_TOKEN_BUCKETS = [128, 256, 512, 1024, 2048]
     PREFILL_CAPTURE_BATCH_SIZES = [1, 2, 4]
 
+    # W5-P2 mixed prefill+decode CAPTURED batch (MSTAR_MIXED_BATCH). Each bucket
+    # is (padded_bs, total_tokens) where total_tokens = padded_bs decode-row
+    # tokens (1 each) + one prefill-chunk row of C tokens minus the one row the
+    # chunk occupies. Concretely: a mixed step has N decode rows + 1 chunk row,
+    # padded to bs=32, so the row count is fixed at 32 and total_tokens =
+    # (N decode tokens) + C. With N up to 31 and the chunk row replacing the
+    # 32nd, the captured token bucket is 32 + C for the two P2 chunk sizes:
+    #   C=256 -> 288,  C=512 -> 544.
+    # Padding to bs=32 contributes zero-length rows (input_seq_len=0), so a
+    # step with fewer decode rows still lands on the same bucket; the packed
+    # path walks only real_num_tokens (see _run_flashinfer_packed). Grid
+    # expansion (more bs / C buckets) is P3.
+    MIXED_BATCH_BS = 32
+    MIXED_BATCH_CHUNK_SIZES = [256, 512]
+
     # prefill_vision buckets are larger than text/audio because video
     # produces many vision tokens per request (UCF101 ≈ 1k–4k tokens; 8192
     # gives headroom for VideoMME-style longer clips). Capture only bs=1
@@ -1229,6 +1278,7 @@ class ThinkerSubmodule(ARNodeSubmodule):
         }
         from mstar.model.qwen3_omni.qwen3_omni_model import (
             batch_vision_prefill_enabled,
+            mixed_batch_enabled,
         )
         prefill_vision_capture_bs = (
             self.PREFILL_VISION_BATCH_CAPTURE_BATCH_SIZES
@@ -1249,7 +1299,7 @@ class ThinkerSubmodule(ARNodeSubmodule):
                     dtype=torch.bfloat16, device=device,
                 )
             )
-        return [
+        configs = [
             BasicBatchedCudaGraphConfig(
                 capture_graph_walk="thinker_decode",
                 requires_cfg=False,
@@ -1336,6 +1386,57 @@ class ThinkerSubmodule(ARNodeSubmodule):
             ),
         ]
 
+        # W5-P2 mixed prefill+decode CAPTURED batch (MSTAR_MIXED_BATCH). Only
+        # register the capture when the flag is ON so flag-off is byte-identical
+        # (no extra captures, no ``thinker_mixed`` graph in the runner's table,
+        # so the scheduler could never route to it even if it tried).
+        #
+        # The post-preprocess tensor signature of a mixed batch is IDENTICAL to
+        # prefill_text/audio (``input_embeds`` + ``cos_3d`` + ``sin_3d``): the
+        # decode rows and the chunk row both contribute only these three packed
+        # tensors after ``preprocess`` concatenates them, so we synthesize the
+        # capture inputs with the same ``_build_prefill_text_packed`` helper.
+        # The token buckets are ``MIXED_BATCH_BS + C`` (see MIXED_BATCH_* above).
+        if mixed_batch_enabled():
+            mixed_packed = {
+                self.MIXED_BATCH_BS + c: self._build_prefill_text_packed(
+                    self.MIXED_BATCH_BS + c, device,
+                )
+                for c in self.MIXED_BATCH_CHUNK_SIZES
+            }
+            configs.append(
+                FlashInferPackedCudaGraphConfig(
+                    capture_graph_walk="thinker_mixed",
+                    replay_graph_walks=["thinker_mixed"],
+                    packed_seq_len_to_inputs=mixed_packed,
+                    requires_cfg=False,
+                    labels=["main"],
+                    compile=True,
+                    causal_attention=True,
+                    capture_batch_sizes=[self.MIXED_BATCH_BS],
+                    zero_padding_input=ARNodeInputs(
+                        input_seq_len=0,
+                        input_embeds=torch.zeros(
+                            (0, self.config.thinker_hidden_size),
+                            device=device, dtype=torch.bfloat16,
+                        ),
+                        custom_pos_ids=torch.zeros(
+                            (3, 0),
+                            dtype=torch.float,
+                            device=device,
+                        ),
+                        tensor_inputs={
+                            "masks_for_talker": torch.zeros(
+                                (2, 0),
+                                dtype=torch.float,
+                                device=device,
+                            )
+                        },
+                    ),
+                )
+            )
+        return configs
+
     def forward_batched(
         self,
         graph_walk: str,
@@ -1393,8 +1494,14 @@ class ThinkerSubmodule(ARNodeSubmodule):
         # entries), so for prefill walks we recover mrope_section from the
         # class constant when the kwarg is missing. Decode goes through
         # preprocess which does pass it explicitly.
+        # ``thinker_mixed`` (W5-P2) is packed exactly like a prefill walk: the
+        # forward runs over ``total_tokens = n + C`` packed rows and the
+        # per-request last-token logits are gathered via ``qo_indptr[1:]-1``
+        # (decode rows: their single token; chunk row: its last token). So it
+        # takes the ``is_prefill`` packed-output branch below, emitting
+        # ``__batched_logits__`` (n+1 rows) + ``__batched_thinker_states__``.
         is_prefill = graph_walk in (
-            "prefill_text", "prefill_audio", "prefill_vision",
+            "prefill_text", "prefill_audio", "prefill_vision", "thinker_mixed",
         )
         if mrope_section is None and is_prefill:
             mrope_section = self.MROPE_SECTION
