@@ -1505,6 +1505,15 @@ class Worker:
         ) or batch.node_name in self.tp_nodes:
             # disable speculation for TP nodes for now
             return False
+        # W5-P2 mixed batch: never speculate FROM a thinker_mixed step. A mixed
+        # batch mixes decode rids (whose next step is thinker_decode) with the
+        # chunk rid (whose next step is the following prefill chunk or decode),
+        # so a speculated N+1 built off it would be a heterogeneous guess we
+        # don't yet capture. Run mixed on the non-speculative path and let the
+        # spec chain restart on the following uniform decode step (P3 folds
+        # mixed into the chain).
+        if batch.graph_walk == "thinker_mixed":
+            return False
         return True
 
     def _is_side_eligible(self, batch: ScheduledBatch) -> bool:

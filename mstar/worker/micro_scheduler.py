@@ -188,6 +188,137 @@ class MicroScheduler:
         )
 
 
+    # W5-P2 mixed-batch walk names + capacity. Kept as module-adjacent
+    # constants (mirroring ThinkerSubmodule.MIXED_BATCH_*) so the scheduler
+    # does not import the model submodule. If those change, change these.
+    _MIXED_DECODE_WALK = "thinker_decode"
+    _MIXED_CHUNK_WALK = "prefill_text"
+    _MIXED_MAX_DECODE = 31          # padded_bs 32 = up to 31 decode + 1 chunk row
+    _MIXED_MAX_CHUNK_TOKENS = 512   # largest captured chunk bucket (C in {256,512})
+
+    def _try_assemble_mixed(
+        self,
+        worker_graphs_manager: WorkerGraphsManager,
+        node_name_to_requests: dict[str, list["ReadyNodeEntry"]],
+        max_batch_size: int | None,
+    ) -> "ScheduledBatch | None":
+        """Assemble a mixed thinker_decode + prefill_text-chunk batch (W5-P2).
+
+        Returns a ScheduledBatch with graph_walk="thinker_mixed" covering all
+        ready decode rows on a node plus ONE ready prefill_text chunk row, or
+        None when the flag is off / no node has both / a gate fails (in which
+        case ``get_next_batch`` falls through to the normal single-walk path).
+
+        Per-request CurrentForwardPassInfo.graph_walk is NOT touched here — each
+        popped node keeps its own walk (thinker_decode / prefill_text), which is
+        what the submodule's prepare_inputs / postprocess dispatch on. Only the
+        batch-level graph_walk is "thinker_mixed" (drives config + runner).
+
+        Gates (any failing → None, fall back to P1 alternation):
+          * MSTAR_MIXED_BATCH on.
+          * A node with BOTH a decode group and >=1 prefill_text chunk row.
+          * The chunk row carries P1 chunk metadata (prefill_chunk_len set): a
+            full unchunked prefill is not mixed (it would blow the token bucket).
+          * Chunk C <= _MIXED_MAX_CHUNK_TOKENS so (n + C) fits a captured bucket.
+          * Chunk request repetition_penalty == 1.0: a non-last chunk row's
+            sampled token is discarded (postprocess drops it), but Sampler.sample
+            adds every sampled token to the seen-token mask + advances the RNG
+            when any rep-penalty is active, which would corrupt the chunk
+            request's penalty state. Decode rows are unaffected. (design D gate)
+        """
+        from mstar.model.qwen3_omni.qwen3_omni_model import mixed_batch_enabled
+        if not mixed_batch_enabled():
+            return None
+
+        for node_name, entries in node_name_to_requests.items():
+            decode_entries = [
+                e for e in entries if e.graph_walk == self._MIXED_DECODE_WALK
+            ]
+            chunk_entries = [
+                e for e in entries if e.graph_walk == self._MIXED_CHUNK_WALK
+            ]
+            if not decode_entries or not chunk_entries:
+                continue
+
+            node_partition = worker_graphs_manager.get_partition_for_node(node_name)
+
+            # Pick the first chunk entry that passes the per-request gates.
+            chunk_entry = None
+            for e in chunk_entries:
+                fwd_info = worker_graphs_manager.get_fwd_info(
+                    e.request_id, node_partition,
+                )
+                clen = fwd_info.step_metadata.get("prefill_chunk_len")
+                if clen is None:
+                    continue  # unchunked full prefill — don't mix (bucket blow)
+                if int(clen) > self._MIXED_MAX_CHUNK_TOKENS:
+                    continue
+                sc = fwd_info.sampling_config.get(node_name)
+                if sc is not None and getattr(sc, "repetition_penalty", 1.0) != 1.0:
+                    continue  # penalty state corruption on discarded chunk sample
+                chunk_entry = e
+                break
+            if chunk_entry is None:
+                continue
+
+            # Cap decode rows so total rows (decode + 1 chunk) fit the padded_bs
+            # bucket, honoring any caller max_batch_size too.
+            cap = self._MIXED_MAX_DECODE
+            if max_batch_size is not None:
+                cap = min(cap, max_batch_size - 1)
+            if cap < 1:
+                continue
+            decode_entries = decode_entries[:cap]
+
+            batch = self._pop_mixed_batch(
+                worker_graphs_manager, node_name, decode_entries, chunk_entry,
+            )
+            if batch is not None:
+                return batch
+        return None
+
+    def _pop_mixed_batch(
+        self,
+        worker_graphs_manager: WorkerGraphsManager,
+        node_name: str,
+        decode_entries: list["ReadyNodeEntry"],
+        chunk_entry: "ReadyNodeEntry",
+    ) -> "ScheduledBatch | None":
+        """Pop the selected decode + chunk nodes and build the mixed batch.
+
+        Mirrors the pop loop in get_next_batch. If nothing pops (races with a
+        removal), returns None so the caller falls back to the normal path.
+        """
+        node_objects = {}
+        request_to_worker_graph = {}
+        for entry in [*decode_entries, chunk_entry]:
+            queue = worker_graphs_manager.queues[entry.worker_graph_id]
+            popped = queue.pop_ready_nodes(entry.request_id, [node_name])
+            if popped:
+                assert len(popped) == 1
+                node_objects[entry.request_id] = popped[0]
+                request_to_worker_graph[entry.request_id] = entry.worker_graph_id
+
+        # Require at least one decode row AND the chunk row to have popped;
+        # a lone chunk is just a normal prefill and should go the normal path.
+        if chunk_entry.request_id not in node_objects or len(node_objects) < 2:
+            return None
+
+        self.batch_number += 1
+        self.node_and_walk_to_last_batch_num[(node_name, "thinker_mixed")] = \
+            self.batch_number
+        logger.debug(
+            "MicroScheduler assembled thinker_mixed batch on node %s: "
+            "%d decode + 1 chunk (chunk rid=%s)",
+            node_name, len(node_objects) - 1, chunk_entry.request_id,
+        )
+        return ScheduledBatch(
+            node_name=node_name,
+            graph_walk="thinker_mixed",
+            node_objects=node_objects,
+            request_to_worker_graph=request_to_worker_graph,
+        )
+
     def get_next_batch(
         self,
         worker_graphs_manager: WorkerGraphsManager,
@@ -257,6 +388,18 @@ class MicroScheduler:
 
         if not node_name_to_requests:
             return None
+
+        # W5-P2 mixed prefill+decode batch (MSTAR_MIXED_BATCH). Before the
+        # normal one-walk-per-batch selection, try to assemble a mixed batch
+        # (N thinker_decode rows + 1 prefill_text chunk row) so the captured
+        # thinker_mixed graph runs both kinds in one forward. Returns None
+        # (flag off, no opportunity, or gates fail) → fall through to the
+        # normal path, byte-identical to today.
+        mixed = self._try_assemble_mixed(
+            worker_graphs_manager, node_name_to_requests, max_batch_size,
+        )
+        if mixed is not None:
+            return mixed
 
         if self.sched_type == SchedulingType.PRIORITY:
             best_node_name, graph_walk = self._select_node_priority(node_name_to_requests)

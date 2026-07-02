@@ -964,15 +964,39 @@ class ThinkerSubmodule(ARNodeSubmodule):
         # time (mstar/worker/micro_scheduler.py): audio needs the MRoPE
         # ``mrope_pos_advance`` side-channel and vision needs deepstack tensors,
         # neither of which the text-signature capture carries. Those are P3.
-        if graph_walk == "thinker_mixed" and self._mixed_batch_assert_enabled():
-            for inp in inputs:
-                assert not any(
-                    k.startswith("deepstack_") for k in inp.tensor_inputs
-                ), (
-                    "mixed batch got a vision chunk (deepstack tensors present); "
-                    "P2 mixed capture is text-signature only — assembly must gate "
-                    "the chunk row to prefill_text."
+        if graph_walk == "thinker_mixed":
+            # Structure of a mixed batch: n decode rows (seq_len 1) followed by
+            # exactly one chunk row (seq_len C > 1). Padding rows (seq_len 0)
+            # appended by the runner sit AFTER the real rows; count only real
+            # (>0) rows here. n_decode / C / total feed the DEBUG log + the
+            # optional assert.
+            real_lens = [sl for sl in seq_lens if sl > 0]
+            n_decode = sum(1 for sl in real_lens if sl == 1)
+            chunk_lens = [sl for sl in real_lens if sl > 1]
+            total = sum(real_lens)
+            logger.debug(
+                "thinker_mixed step: n_decode=%d C=%s total_tokens=%d bucket=%d",
+                n_decode,
+                chunk_lens[0] if chunk_lens else None,
+                total,
+                len(input_embeds),
+            )
+            if self._mixed_batch_assert_enabled():
+                assert len(chunk_lens) == 1, (
+                    f"mixed batch expected exactly 1 chunk row (seq_len>1); "
+                    f"got {len(chunk_lens)} in seq_lens={seq_lens}"
                 )
+                assert n_decode == len(real_lens) - 1, (
+                    f"mixed batch: non decode/chunk row in seq_lens={seq_lens}"
+                )
+                for inp in inputs:
+                    assert not any(
+                        k.startswith("deepstack_") for k in inp.tensor_inputs
+                    ), (
+                        "mixed batch got a vision chunk (deepstack tensors "
+                        "present); P2 mixed capture is text-signature only — "
+                        "assembly must gate the chunk row to prefill_text."
+                    )
         if graph_walk == "prefill_vision":
             from mstar.model.qwen3_omni.qwen3_omni_model import (
                 batch_vision_prefill_enabled,
