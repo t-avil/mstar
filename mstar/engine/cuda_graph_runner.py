@@ -42,6 +42,20 @@ from mstar.utils.sampling import Sampler, SamplerBuffers, SamplingConfig, make_s
 logger = logging.getLogger(__name__)
 
 
+# MSTAR_DIRECT_FEED: on the CUDA-graph AR decode fast path, additionally hand
+# the batched [bs] sampled-tokens tensor + rid order up to the worker (under a
+# private sentinel key in the remap output) so it can splice loop-back
+# ``text_inputs`` into the speculative batch straight from that tensor's rows,
+# skipping the per-rid registry re-read. Default OFF; when off the remap output
+# and the whole path are byte-identical. See worker._thread_outputs_to_speculative.
+MSTAR_DIRECT_FEED = os.environ.get("MSTAR_DIRECT_FEED", "0") == "1"
+
+# Sentinel key carrying (batched_sampled_tokens, rid_order) out of
+# _sample_and_remap without polluting the per-rid output map. Popped in
+# kv_cache_engine._execute_with_cuda_graph and hoisted onto NodeOutput.
+_DIRECT_FEED_KEY = "__direct_feed_sampled__"
+
+
 DEFAULT_AR_CAPTURE_BATCH_SIZES = [1, 2, 4, 8, 16, 32, 64]
 
 
@@ -1789,6 +1803,16 @@ class CudaGraphRunner:
                 rid: {"new_token": [view]}
                 for rid, view in zip(request_ids, sampled_views, strict=True)
             }
+
+            # MSTAR_DIRECT_FEED: also expose the batched [bs] tensor + rid order
+            # so the worker can feed loop-back text_inputs from its rows without
+            # a registry re-read. The per-rid ``new_token`` views above are rows
+            # of this same clone, so no extra copy — just a second handle to the
+            # already-cloned tensor. Popped off before the per-rid map reaches
+            # the worker (kv_cache_engine._execute_with_cuda_graph), so
+            # per_request_output_tensors stays byte-identical to flag-off.
+            if MSTAR_DIRECT_FEED:
+                outputs[_DIRECT_FEED_KEY] = (sampled, list(request_ids))
 
             # Collect non-logit per-rid outputs (e.g. hidden states) only when
             # the captured graph actually produced any — for most AR models
