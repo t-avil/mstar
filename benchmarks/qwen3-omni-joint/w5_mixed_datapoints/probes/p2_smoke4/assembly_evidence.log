@@ -1,0 +1,2 @@
+2026-07-02 19:55:04,491 INFO [worker_1] mstar.engine.cuda_graph_runner: Captured CUDA graph for Thinker: CudaGraphKey(graph_walk='thinker_mixed', requires_cfg=False, bs=32, num_tokens=544) bs=32
+2026-07-02 19:55:07,317 INFO [worker_1] mstar.engine.cuda_graph_runner: Captured CUDA graph for Thinker: CudaGraphKey(graph_walk='thinker_mixed', requires_cfg=False, bs=32, num_tokens=288) bs=32

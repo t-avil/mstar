@@ -1,0 +1,6 @@
+RESULT i2t B=1  base=0.754 req/s (146.1 tok/s)  v2=0.774 req/s (140.3 tok/s)  ratio=1.027x
+RESULT i2t B=8  base=3.172 req/s (568.4 tok/s)  v2=3.225 req/s (570.8 tok/s)  ratio=1.017x
+RESULT i2t B=32  base=5.708 req/s (1018.3 tok/s)  v2=5.530 req/s (976.3 tok/s)  ratio=0.969x
+RESULT s2t B=1  base=3.714 req/s (77.7 tok/s)  v2=3.863 req/s (80.6 tok/s)  ratio=1.040x
+RESULT s2t B=8  base=11.629 req/s (245.1 tok/s)  v2=12.395 req/s (261.2 tok/s)  ratio=1.066x
+RESULT s2t B=32  base=24.663 req/s (518.7 tok/s)  v2=24.847 req/s (522.6 tok/s)  ratio=1.007x

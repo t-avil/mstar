@@ -1,0 +1,20 @@
+# W5 mixed-batch datapoints (2026-07-02)
+
+Raw per-cell results + assembly evidence for every W5 measurement. Code:
+branch `exp/mixed-batch-p2` (final: 62472cf). Narrative + verdicts:
+../EXPERIMENTS.md (W5 sections).
+
+- `ab_p2/` — chain-break wiring A/B (0cc7c71+tail-merge base): i2t
+  0.959/0.956/0.912 — REJECTED wiring.
+- `ab_p2spec/` — DEFINITIVE spec-fold + C=288-bucket A/B: i2t
+  1.027/1.017/0.969, s2t 1.040/1.066/1.007 (5 of 6 cells positive).
+- `probes/p2_probe_fix/` — first live assembly (88 mixed steps, B16,
+  chain-break era). `probes/p2spec_probe/` — spec-fold probe (41 in-chain
+  folds vs 3 breaks). `probes/qb_specb32/` — same-pair back-to-back B32:
+  6.179 vs 5.986 (+3.2%). `probes/qb_p1perf/` — P1 alternation rejection
+  data. `probes/p1_verify/` + `probes/p2_smoke4/` — chunking/mixed
+  validation runs. `assembly_evidence.log` files carry the INFO/DEBUG
+  proof lines (mixed batch: n_decode=…, mixed-in-chain: …, chunk offsets).
+
+Methodology: interleaved A/Bs (both servers preloaded, per-cell
+back-to-back); probes are single-server quick-bench (triage only).

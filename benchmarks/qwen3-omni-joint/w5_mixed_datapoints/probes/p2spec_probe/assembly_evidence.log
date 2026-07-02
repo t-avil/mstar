@@ -1,0 +1,46 @@
+2026-07-02 20:42:18,711 INFO [worker_1] mstar.engine.cuda_graph_runner: Captured CUDA graph for Thinker: CudaGraphKey(graph_walk='thinker_mixed', requires_cfg=False, bs=32, num_tokens=544) bs=32
+2026-07-02 20:42:21,645 INFO [worker_1] mstar.engine.cuda_graph_runner: Captured CUDA graph for Thinker: CudaGraphKey(graph_walk='thinker_mixed', requires_cfg=False, bs=32, num_tokens=288) bs=32
+2026-07-02 20:42:51,241 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=15 C=258 node=Thinker chunk_rid=0ec435aa-1e10-4116-8e16-29f99c4f7c50
+2026-07-02 20:42:52,096 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=15 C=258 node=Thinker chunk_rid=b02a7d75-29c9-4255-b4a9-57c7588a4a4c
+2026-07-02 20:42:52,893 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=14 C=258 node=Thinker chunk_rid=6cfe662a-13e7-4e39-92ec-db0f6cdeeed6
+2026-07-02 20:42:53,360 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=14 C=258 node=Thinker chunk_rid=d47957d8-97a6-4251-8725-2f95e5a6967e
+2026-07-02 20:42:53,398 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=14 C=258 node=Thinker chunk_rid=24b74471-587e-4455-bc87-4d7b5349d8ac
+2026-07-02 20:42:53,538 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=14 C=258 node=Thinker chunk_rid=8ccf9fee-e577-4658-bbcb-fc471435fd99
+2026-07-02 20:42:53,646 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=14 C=258 node=Thinker chunk_rid=bf2f4fd7-8262-4018-b27b-151c5aa13b99
+2026-07-02 20:42:53,702 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=14 C=258 node=Thinker chunk_rid=541cf67f-398c-48c3-8d2c-7f63c8153715
+2026-07-02 20:42:53,899 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=15 C=258 node=Thinker chunk_rid=6c30b862-1e82-443a-956d-f361bd7474ae
+2026-07-02 20:42:54,140 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=15 C=258 node=Thinker chunk_rid=3ba281c2-55f6-43ef-af44-1e4c1fed4594
+2026-07-02 20:42:54,537 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=11 C=258 node=Thinker chunk_rid=712f2527-1e25-46de-bdbe-953d084f4f08
+2026-07-02 20:42:54,696 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=12 C=258 node=Thinker chunk_rid=c93e0d30-c5fd-416f-847e-e98a455e66ea
+2026-07-02 20:42:57,304 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=2 C=258 node=Thinker chunk_rid=d83f24ee-5da8-4e20-995d-1fb6d8036ae5
+2026-07-02 20:42:57,428 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=3 C=258 node=Thinker chunk_rid=b4274e46-775c-4d3e-a7ce-1ed3dfcbd29a
+2026-07-02 20:42:57,644 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=5 C=258 node=Thinker chunk_rid=73c308f0-5f39-43b4-b598-f59290d4ad54
+2026-07-02 20:42:57,770 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=6 C=258 node=Thinker chunk_rid=48b2aa81-5b46-456a-a86e-b744c1f2064f
+2026-07-02 20:42:58,010 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=8 C=258 node=Thinker chunk_rid=24e66375-2a9f-4979-9aa3-4196841d6f6b
+2026-07-02 20:42:58,091 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=9 C=258 node=Thinker chunk_rid=f6e1f667-2e95-4c5c-a699-64c1853b8407
+2026-07-02 20:42:58,181 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=10 C=258 node=Thinker chunk_rid=d516d33d-a0b0-4172-8542-5a9d66cab88a
+2026-07-02 20:42:58,347 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=11 C=258 node=Thinker chunk_rid=4a8edb7f-92ce-4371-9a2d-e4cd29bda691
+2026-07-02 20:42:58,393 INFO [worker_1] mstar.worker.micro_scheduler: mixed batch: n_decode=11 C=258 node=Thinker chunk_rid=ee3ef27d-d10b-4491-8301-aaf26a996172 total=1
+2026-07-02 20:42:59,076 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=15 C=258 node=Thinker chunk_rid=84a0aa35-84d0-4054-87f2-a37cf44f44e7
+2026-07-02 20:42:59,533 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=14 C=258 node=Thinker chunk_rid=1b76f5b5-defd-4f95-badf-45e7e33eb841
+2026-07-02 20:42:59,818 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=15 C=258 node=Thinker chunk_rid=948a54f8-24ce-4432-8f48-91a4a989d2ff
+2026-07-02 20:43:00,379 INFO [worker_1] mstar.worker.micro_scheduler: mixed batch: n_decode=14 C=258 node=Thinker chunk_rid=9a97154a-084c-4ec0-9ff1-ec5bc8055963 total=2
+2026-07-02 20:43:00,628 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=15 C=258 node=Thinker chunk_rid=e821e866-bd28-48d3-9b3f-4428136544e6
+2026-07-02 20:43:00,974 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=15 C=258 node=Thinker chunk_rid=0c66dcca-da56-4dbc-a1e0-0642f7eba37f
+2026-07-02 20:43:01,236 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=11 C=258 node=Thinker chunk_rid=f85aca03-324a-4e22-914c-510d785d9613
+2026-07-02 20:43:01,372 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=11 C=258 node=Thinker chunk_rid=043b9027-b3f7-466a-8fb3-a802c0d7179b
+2026-07-02 20:43:01,568 INFO [worker_1] mstar.worker.micro_scheduler: mixed batch: n_decode=12 C=258 node=Thinker chunk_rid=8d7108b0-d13b-428f-891a-b64c39ea7d06 total=3
+2026-07-02 20:43:01,617 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=13 C=258 node=Thinker chunk_rid=5b3d9a96-c1a5-4584-85af-fc50c81566bd
+2026-07-02 20:43:01,683 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=14 C=258 node=Thinker chunk_rid=a429a1e6-6769-4ea0-8b67-dfffc4df76ba
+2026-07-02 20:43:02,041 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=13 C=258 node=Thinker chunk_rid=9e0f41e8-a437-43db-a1a0-a34e731612a7
+2026-07-02 20:43:02,352 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=11 C=258 node=Thinker chunk_rid=7d2de395-7fb8-441d-a65a-c651e18bb6ec
+2026-07-02 20:43:02,515 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=13 C=258 node=Thinker chunk_rid=af4dba14-ad99-4f3e-9d33-c58c8936822c
+2026-07-02 20:43:02,566 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=12 C=258 node=Thinker chunk_rid=4979e36e-59fc-4c0d-9773-e20fc51a7a39
+2026-07-02 20:43:02,695 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=14 C=258 node=Thinker chunk_rid=b67b382a-f8e3-44e7-a0a9-691e3cf9e76a
+2026-07-02 20:43:02,834 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=15 C=258 node=Thinker chunk_rid=c164c740-bfe1-48c2-95fa-fffefbacf7a0
+2026-07-02 20:43:03,103 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=15 C=258 node=Thinker chunk_rid=0217522e-85c1-4190-993c-0364b6086afb
+2026-07-02 20:43:04,078 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=13 C=258 node=Thinker chunk_rid=8c13750c-528a-4a0b-b293-445e55998542
+2026-07-02 20:43:04,200 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=13 C=258 node=Thinker chunk_rid=b52a2785-7b04-4d98-8717-dbbf15709e7e
+2026-07-02 20:43:04,267 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=13 C=258 node=Thinker chunk_rid=ad4efd4c-3237-4d0b-8e77-568773cd172f
+2026-07-02 20:43:04,532 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=14 C=258 node=Thinker chunk_rid=e6d61d59-2eb7-4f56-a22d-a73a38c161da
+2026-07-02 20:43:04,574 INFO [worker_1] mstar.worker.worker: mixed-in-chain: n_decode=14 C=258 node=Thinker chunk_rid=087ca6b1-1512-4b42-9a6b-ce1ee466308d
