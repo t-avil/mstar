@@ -1131,6 +1131,238 @@ class CudaGraphRunner:
             for label in graph_data.config.labels:
                 self.alloc_manager.reset_label(rid, label, free=True)
 
+    # ── Packed (FLASH_INFER_PACKED) pre-plan surface ────────────────────
+    #
+    # The BASIC_BATCHED pre-plan trio above (reserve_slot / pre_plan_for_batch
+    # / reset_pre_plan_state_for_slot) all key on _get_basic_batched_key_for,
+    # which returns None for FLASH_INFER_PACKED — so a chain-folded thinker_mixed
+    # step reserves no slot and gets no pre-plan, and its prefill-wrapper plan
+    # (~0.75-1.5ms for a 32-row bucket) runs inline on the GPU thread. The trio
+    # below mirrors the decode pattern for packed configs, gated by
+    # MSTAR_MIXED_PREPLAN at the worker layer. The KEY DIFFERENCES from decode:
+    #   * key lookup uses _get_key_for (num_tokens-aware) not the BASIC-only
+    #     _get_basic_batched_key_for — the bucket depends on total tokens
+    #     (n_decode + C), so the caller must pass num_tokens.
+    #   * seq_lens are reconstructed by the caller ([1]*n + [C]) rather than
+    #     derived from config.single_request_inputs (which packed configs lack).
+    # _select_packed_key_slot is the ONE selection both reserve and pre-plan
+    # (and, via the reserved slot on batch.metadata, the run path) go through,
+    # so the three can't pick different buckets/slots.
+
+    def _select_packed_key_slot(
+        self,
+        graph_walk: str,
+        requires_cfg: bool,
+        batch_size: int,
+        num_tokens: int,
+        reserve: bool,
+    ) -> tuple[CudaGraphKey, int] | None:
+        """Resolve the (key, slot) a packed run/pre-plan will target.
+
+        ``num_tokens`` picks the bucket exactly as the run path does
+        (``_get_key_for``: pad bs, then bisect the token buckets). ``reserve``
+        controls the slot side-effect so the two callers stay in lockstep:
+
+          * ``reserve=True`` (main thread, at fold time): advance the per-key
+            ``next_slot`` counter and return the slot just consumed — the SAME
+            RMW the run path performs when ``slot is None``. The worker stashes
+            this on ``batch.metadata['cuda_graph_slot']``; the run path then
+            passes it into ``run(slot=...)`` and does NOT advance again.
+          * ``reserve=False`` (plan thread, at pre-plan time): read the slot the
+            reservation already stashed (passed back in via the caller) — never
+            touch ``next_slot`` here, or pre-plan and run would target different
+            slots.
+
+        Returns ``None`` when no captured packed graph matches (eager fallback);
+        also ``None`` for a non-packed config so this never disturbs the decode
+        pre-plan path.
+        """
+        config = self._config_for(graph_walk, requires_cfg)
+        if config is None or config.get_config_type() != CudaGraphConfigType.FLASH_INFER_PACKED:
+            return None
+        key = self._get_key_for(
+            batch_size=batch_size,
+            num_tokens=num_tokens,
+            graph_walk=graph_walk,
+            requires_cfg=requires_cfg,
+        )
+        if key is None:
+            return None
+        graph_data = self.graphs[key]
+        if not graph_data.slots:
+            return None
+        if reserve:
+            slot = graph_data.next_slot
+            graph_data.next_slot = (graph_data.next_slot + 1) % len(graph_data.slots)
+            return key, slot
+        # reserve=False: caller supplies the reserved slot separately; here we
+        # only confirm a graph exists and hand back slot 0 as a placeholder the
+        # caller overrides. Kept explicit so the two branches are symmetric.
+        return key, 0
+
+    def reserve_packed_slot(
+        self,
+        graph_walk: str,
+        requires_cfg: bool,
+        batch_size: int,
+        num_tokens: int,
+    ) -> int | None:
+        """Reserve the next double-buffer slot for a packed (mixed) batch.
+
+        Packed analogue of ``reserve_slot``. Advances ``next_slot`` so the
+        matching pre-plan and replay both land on the reserved slot (and the
+        OPPOSITE slot from any in-flight replay). Returns the slot, or ``None``
+        if no captured packed graph matches (inline fallback).
+        """
+        sel = self._select_packed_key_slot(
+            graph_walk=graph_walk,
+            requires_cfg=requires_cfg,
+            batch_size=batch_size,
+            num_tokens=num_tokens,
+            reserve=True,
+        )
+        if sel is None:
+            return None
+        return sel[1]
+
+    def pre_plan_packed_batch(
+        self,
+        graph_walk: str,
+        requires_cfg: bool,
+        request_ids: list[str],
+        seq_lens: list[int],
+        num_tokens: int,
+        slot: int,
+    ) -> bool:
+        """Pre-plan a packed (mixed) batch's FlashInfer prefill attention.
+
+        Packed analogue of ``pre_plan_for_batch``. ``seq_lens`` is the caller's
+        reconstructed per-real-row list (``[1]*n_decode + [C]``, one entry per
+        request in ``request_ids``); we pad it with zero-length rows to the
+        captured bs exactly as the run path's ``_run_flashinfer_packed`` does,
+        so ``plan_attention`` writes the same qo_indptr / paged indices /
+        token_to_page buffers the replay will read. Runs on the plan_stream,
+        records ``_plan_done_event``, and marks every config label pre-planned
+        so the run path's ``preprocess -> plan_attention`` short-circuits.
+
+        The decode rows' KV length (``state.seq_len``) must already reflect
+        advance(N) — the worker gates this call on N's advance_event, identical
+        to decode pre-plan. The chunk row's seq_len (C) comes from the caller's
+        conductor-known chunk length and needs no prior advance.
+
+        Returns True if pre-planning was applied; False otherwise (GPU thread
+        plans inline). ``slot`` is the slot ``reserve_packed_slot`` returned.
+        """
+        from mstar.utils.profiler import range_pop, range_push
+
+        real_bs = len(request_ids)
+        if len(seq_lens) != real_bs:
+            # Caller contract violation — reconstructed seq_lens must be
+            # one-per-request. Fall back to inline rather than mis-plan.
+            return False
+        key = self._get_key_for(
+            batch_size=real_bs,
+            num_tokens=num_tokens,
+            graph_walk=graph_walk,
+            requires_cfg=requires_cfg,
+        )
+        if key is None:
+            return False
+
+        graph_data = self.graphs[key]
+        if not graph_data.slots:
+            return False
+        slot %= len(graph_data.slots)
+        slot_data = graph_data.slots[slot]
+        static_cm = slot_data.static_cache_manager
+        config = graph_data.config
+        padded_bs = key.bs
+
+        if self.enable_nvtx:
+            range_push("plan_worker.pre_plan_packed", synchronize=False)
+        plan_stream = self._get_or_make_plan_stream()
+        plan_done_event: torch.cuda.Event | None = None
+
+        # Alias real rids onto this slot's cache_manager tail-padded with the
+        # slot's own dummy rids, mirroring _run_flashinfer_packed's swap. The
+        # padded rows carry seq_len 0 (zero_padding_input), so they contribute
+        # nothing to qo_indptr — same as the run path's zero-length padding.
+        saved_request_ids = static_cm.request_ids
+        saved_active_labels = static_cm.active_labels
+        config_labels = config.labels
+        padded_seq_lens = list(seq_lens) + [0] * (len(saved_request_ids) - real_bs)
+        try:
+            static_cm.request_ids = list(request_ids) + saved_request_ids[real_bs:]
+            if plan_stream is not None:
+                with torch.cuda.stream(plan_stream):
+                    for label_name in config_labels:
+                        static_cm.active_labels = {rid: label_name for rid in request_ids}
+                        static_cm.set_active_label(label_name)
+                        static_cm.plan_attention(
+                            seq_lens=padded_seq_lens,
+                            dtype=self.autocast_dtype,
+                            is_causal=config.causal_attention,
+                            label=label_name,
+                        )
+                plan_done_event = torch.cuda.Event()
+                plan_done_event.record(plan_stream)
+            else:
+                for label_name in config_labels:
+                    static_cm.active_labels = {rid: label_name for rid in request_ids}
+                    static_cm.set_active_label(label_name)
+                    static_cm.plan_attention(
+                        seq_lens=padded_seq_lens,
+                        dtype=self.autocast_dtype,
+                        is_causal=config.causal_attention,
+                        label=label_name,
+                    )
+            static_cm._pre_planned_labels = set(config_labels)
+            static_cm._plan_done_event = plan_done_event
+        finally:
+            static_cm.request_ids = saved_request_ids
+            static_cm.active_labels = saved_active_labels
+            if self.enable_nvtx:
+                range_pop(synchronize=False)
+        return True
+
+    def reset_packed_pre_plan_for_slot(
+        self,
+        graph_walk: str,
+        requires_cfg: bool,
+        batch_size: int,
+        num_tokens: int,
+        slot: int | None = None,
+    ) -> None:
+        """Clear packed pre-plan state on the targeted (key, slot).
+
+        Packed analogue of ``reset_pre_plan_state_for_slot``: used when a
+        chain-folded mixed spec batch is dropped between pre-plan and replay,
+        so the next real ``plan_attention`` on that slot re-plans instead of
+        short-circuiting on stale ``_pre_planned_labels``. Same page-leak
+        cleanup for the slot's dummy rids as the decode reset.
+        """
+        key = self._get_key_for(
+            batch_size=batch_size,
+            num_tokens=num_tokens,
+            graph_walk=graph_walk,
+            requires_cfg=requires_cfg,
+        )
+        if key is None:
+            return
+        graph_data = self.graphs.get(key)
+        if graph_data is None or not graph_data.slots:
+            return
+        if slot is None:
+            slot = 0
+        slot %= len(graph_data.slots)
+        slot_data = graph_data.slots[slot]
+        cm = slot_data.static_cache_manager
+        cm._pre_planned_labels.clear()
+        cm._plan_done_event = None
+        for rid in slot_data.static_inputs.get("dummy_rids", []):
+            for label in graph_data.config.labels:
+                self.alloc_manager.reset_label(rid, label, free=True)
+
     def run(
         self,
         graph_walk: str,
@@ -1569,6 +1801,16 @@ class CudaGraphRunner:
                 mark("gpu_thread.preprocess_end")
 
             # --- Step 4: Replay ---
+            # If a packed pre-plan ran for this iter (MSTAR_MIXED_PREPLAN), the
+            # prefill wrapper's static buffers (qo_indptr / token_to_page /
+            # token_to_cache) were written on the plan_stream. Gate the default
+            # stream on plan_done_event before replay reads them — mirrors the
+            # decode path (_run_basic_batched Step 4). No-op when pre-plan
+            # didn't run (event is None), so the flag-off path is unchanged.
+            plan_done_event = getattr(static_cm, "_plan_done_event", None)
+            if plan_done_event is not None:
+                torch.cuda.default_stream(self.device).wait_event(plan_done_event)
+                static_cm._plan_done_event = None
             if self.enable_nvtx:
                 mark("gpu_thread.cuda_graph_start")
                 range_push("gpu_thread.cuda_graph", synchronize=False)
