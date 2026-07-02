@@ -1,4 +1,4 @@
-# NUMBERS_V2.md — M*-v2 (opt/decode-v2 d04dcb4, fp8 MoE + fused topk +
+# NUMBERS_V2.md — M*-v2 (opt/decode-v2 1e171e1 (+FAST_POSTPROC), fp8 MoE + fused topk +
 # worker CPU fixes + inline/batch emit + encoders-on-rank-0) vs recorded baselines
 
 Sweep: 2026-07-02, GPUs 6,7, WARMUP=5, N=max(50,10B), closed loop.
@@ -6,27 +6,33 @@ Baselines (mstar_new/mstar_old/vllm) are the committed v2 rebenchmark
 aggregates — NOT re-run. Metric: req/s primary (cross-system;
 tok/s embeds output-length skew: vLLM generates ~20% longer text).
 
+**Note on the W1 re-sweep (final numbers above):** the s2t/i2t cells are from
+the 1e171e1 build (adds MSTAR_FAST_POSTPROC, validated +6.4% i2t B32 /
++13.5% s2t B8 in a contention-robust interleaved A/B, ab_w1v2/). Sweep-scale
+deltas vs the d04dcb4 sweep are within sweep-to-sweep variance (~±5%) — the
+interleaved A/Bs carry the per-feature evidence; single sweeps bound it.
+
 ## s2t — audio_to_text
 
 | B | M*-v2 req/s | M*-new | M*-old | vLLM | v2/vLLM | v2/new |
 |---|---|---|---|---|---|---|
-| 1 | 4.330 | 4.032 | 2.036 | 3.831 | 1.13x | 1.07x |
-| 2 | 7.766 | 5.848 | 4.106 | 9.143 | 0.85x | 1.33x |
-| 4 | 11.876 | 8.188 | 4.460 | 13.225 | 0.90x | 1.45x |
-| 8 | 17.365 | 10.066 | 4.440 | 15.791 | 1.10x | 1.73x |
-| 16 | 25.307 | 12.572 | 6.641 | 19.798 | 1.28x | 2.01x |
-| 32 | 30.895 | 19.087 | 6.724 | 30.850 | 1.00x | 1.62x |
+| 1 | 4.360 | 4.032 | 2.036 | 3.831 | 1.14x | 1.08x |
+| 2 | 7.546 | 5.848 | 4.106 | 9.143 | 0.83x | 1.29x |
+| 4 | 11.801 | 8.188 | 4.460 | 13.225 | 0.89x | 1.44x |
+| 8 | 17.197 | 10.066 | 4.440 | 15.791 | 1.09x | 1.71x |
+| 16 | 24.935 | 12.572 | 6.641 | 19.798 | 1.26x | 1.98x |
+| 32 | 31.565 | 19.087 | 6.724 | 30.850 | 1.02x | 1.65x |
 
 ## i2t — image_to_text
 
 | B | M*-v2 req/s | M*-new | M*-old | vLLM | v2/vLLM | v2/new |
 |---|---|---|---|---|---|---|
-| 1 | 0.770 | 0.686 | 0.675 | 0.898 | 0.86x | 1.12x |
-| 2 | 1.313 | 1.125 | 1.011 | 1.556 | 0.84x | 1.17x |
-| 4 | 2.154 | 1.719 | 1.526 | 2.426 | 0.89x | 1.25x |
-| 8 | 3.312 | 2.401 | 2.069 | 3.455 | 0.96x | 1.38x |
-| 16 | 4.770 | 3.451 | 2.852 | 5.112 | 0.93x | 1.38x |
-| 32 | 6.260 | 4.394 | 3.363 | 8.210 | 0.76x | 1.42x |
+| 1 | 0.800 | 0.686 | 0.675 | 0.898 | 0.89x | 1.17x |
+| 2 | 1.294 | 1.125 | 1.011 | 1.556 | 0.83x | 1.15x |
+| 4 | 2.138 | 1.719 | 1.526 | 2.426 | 0.88x | 1.24x |
+| 8 | 3.361 | 2.401 | 2.069 | 3.455 | 0.97x | 1.40x |
+| 16 | 4.707 | 3.451 | 2.852 | 5.112 | 0.92x | 1.36x |
+| 32 | 6.299 | 4.394 | 3.363 | 8.210 | 0.77x | 1.43x |
 
 ## s2s — audio_to_speech
 
@@ -67,24 +73,3 @@ tok/s embeds output-length skew: vLLM generates ~20% longer text).
 | 8 | 57.28 | 27.22 | 2.10x | 0.133 | 0.287 |
 | 16 | 80.64 | 41.28 | 1.95x | 0.194 | 0.382 |
 | 32 | 93.14 | 54.75 | 1.70x | 0.337 | 0.575 |
-
-## Audio-optimized alternative config (same code+flags, default GPU layout)
-
-`configs/qwen3omni_2gpu.yaml` (encoders on the Thinker GPU). The primary
-(encoff) config maximizes text paths; this one maximizes audio-output paths.
-Same commit d04dcb4, MSTAR_MOE_FP8=1 MSTAR_BATCH_EMIT=1. s2s/i2s only:
-
-| path | B | req/s | audio_s/s | vs M*-new (req/s) | vs vLLM (req/s) |
-|---|---|---|---|---|---|
-| s2s | 1 | 2.282 | 9.90 | 1.06x | 2.54x |
-| s2s | 2 | 3.725 | 16.59 | 1.11x | 2.69x |
-| s2s | 4 | 5.684 | 25.14 | 1.08x | 2.55x |
-| s2s | 8 | 7.521 | 36.90 | 1.09x | 2.12x |
-| s2s | 16 | 10.814 | 51.78 | 1.00x | 2.47x |
-| s2s | 32 | 13.749 | 66.69 | 1.05x | 2.49x |
-| i2s | 1 | 0.287 | 12.68 | 1.13x | 2.48x |
-| i2s | 2 | 0.464 | 20.30 | 1.15x | 2.65x |
-| i2s | 4 | 0.837 | 36.29 | 1.05x | 2.89x |
-| i2s | 8 | 1.300 | 59.49 | 1.07x | 3.00x |
-| i2s | 16 | 1.875 | 84.20 | 1.00x | 2.89x |
-| i2s | 32 | 2.193 | 98.34 | 0.95x | 2.52x |

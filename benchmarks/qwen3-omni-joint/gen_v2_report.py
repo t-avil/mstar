@@ -11,6 +11,7 @@ import glob
 import json
 import os
 
+SWEEP_TEXT = "/m-coriander/coriander/tim/sweep_text_w1"
 SWEEP = "/m-coriander/coriander/tim/sweep_mstar_v2_final"
 PATHS = ["audio_to_text", "image_to_text", "audio_to_speech", "image_to_speech"]
 SHORT = {"audio_to_text": "s2t", "image_to_text": "i2t",
@@ -36,7 +37,7 @@ def load_cells():
                 }
         # mstar_v2 straight from the sweep results
         s = SHORT[path]
-        for bdir in sorted(glob.glob(f"{SWEEP}/{s}/B*")):
+        for bdir in sorted(glob.glob(f"{(SWEEP_TEXT if s in ('s2t', 'i2t') else SWEEP)}/{s}/B*")):
             b = int(os.path.basename(bdir)[1:])
             try:
                 res = json.load(open(f"{bdir}/results.json"))
@@ -72,7 +73,7 @@ def ratio(a, b):
 def main():
     cells = load_cells()
     lines = [
-        "# NUMBERS_V2.md — M*-v2 (opt/decode-v2 d04dcb4, fp8 MoE + fused topk +",
+        "# NUMBERS_V2.md — M*-v2 (opt/decode-v2 1e171e1 (+FAST_POSTPROC), fp8 MoE + fused topk +",
         "# worker CPU fixes + inline/batch emit + encoders-on-rank-0) vs recorded baselines",
         "",
         "Sweep: 2026-07-02, GPUs 6,7, WARMUP=5, N=max(50,10B), closed loop.",
