@@ -237,6 +237,25 @@ def mixed_batch_vision_enabled() -> bool:
     )
 
 
+def mixed_single_chunk_enabled() -> bool:
+    """W5 fold-rate: let a prefill span that FITS in one chunk still take the
+    chunked path as a single chunk, so it carries ``prefill_chunk_len``
+    metadata and becomes ELIGIBLE to fold into a ``thinker_mixed`` step.
+
+    Motivation (WALK_STATS, i2t B32 encoff, 2026-07-02): only ~35% of prefill
+    steps folded; the mixable gate excludes any step without chunk metadata,
+    which is every short span (span <= MSTAR_PREFILL_CHUNK_TOKENS) — e.g. the
+    question-text walk of an i2t prompt. A one-chunk chunked prefill runs the
+    same math over [0, span) and pads to the same capture bucket when it does
+    NOT fold, so the standalone cost is unchanged; when it does fold, the
+    whole walk rides a decode step instead of serializing the batch.
+
+    Default OFF (opt-in A/B). Only meaningful with ``MSTAR_MIXED_BATCH`` on;
+    callers AND it with the matching mixed flag per walk kind.
+    """
+    return _envflag("MSTAR_MIXED_SINGLE_CHUNK")
+
+
 def prefill_chunk_tokens() -> int:
     """Cap on chunk size C for chunked prefill. The planner picks the largest
     ``ThinkerSubmodule.PREFILL_TOKEN_BUCKETS`` entry <= min(remaining, this cap),
@@ -262,6 +281,7 @@ _PREFILL_CHUNK_BUCKETS = [128, 256, 512, 1024, 2048]
 
 def plan_prefill_chunk(
     span: int, offset: int, cap: int,
+    allow_single_chunk: bool = False,
 ) -> tuple[int, bool] | None:
     """Pure planner for one chunk of a resumable chunked Thinker prefill.
 
@@ -272,6 +292,15 @@ def plan_prefill_chunk(
     Returns ``(chunk_len, walk_done)`` for the chunk starting at ``offset``, or
     ``None`` when the walk should NOT be chunked (span fits in a single chunk),
     so callers fall back to the byte-identical single-shot path.
+
+    ``allow_single_chunk``: when True, a span that fits in one chunk returns
+    ``(span, True)`` instead of ``None`` — a one-chunk chunked prefill. Same
+    math as the single-shot path (one step covering [0, span)), but it carries
+    ``prefill_chunk_len`` metadata, which is what makes the step ELIGIBLE to
+    fold into a thinker_mixed batch (the scheduler's mixable gate requires
+    chunk metadata). Callers pass mixed_batch_enabled() here: without mixed
+    batching the metadata buys nothing, so short spans keep the byte-identical
+    single-shot path.
 
     Chunk size = largest ``_PREFILL_CHUNK_BUCKETS`` entry <= min(remaining, cap),
     floored at 128, but never past the end of the span. ``walk_done`` is True
@@ -284,12 +313,15 @@ def plan_prefill_chunk(
     if remaining <= 0:
         return None
     # First-chunk decision: if the whole span fits in one capped bucket-sized
-    # chunk, don't chunk at all (single-shot, byte-identical to flag-off).
+    # chunk, don't chunk at all (single-shot, byte-identical to flag-off) —
+    # unless allow_single_chunk wants the chunk metadata for mixability.
     if offset == 0 and span <= max(128, min(cap, _PREFILL_CHUNK_BUCKETS[-1])):
         # Only skip chunking when a single chunk actually covers the span,
         # i.e. span <= cap and span <= the largest bucket. Otherwise fall
         # through and chunk.
         if span <= cap:
+            if allow_single_chunk:
+                return span, True
             return None
     limit = min(cap, remaining)
     # Largest bucket <= limit, floored at 128.
@@ -1431,7 +1463,12 @@ class Qwen3OmniModel(Model):
             return None
         span = int(dims[0])
         offset = int(metadata.kwargs.get("prefill_chunk_offset", 0))
-        plan = plan_prefill_chunk(span, offset, prefill_chunk_tokens())
+        plan = plan_prefill_chunk(
+            span, offset, prefill_chunk_tokens(),
+            allow_single_chunk=(
+                mixed_single_chunk_enabled() and mixed_batch_enabled()
+            ),
+        )
         if plan is None:
             return None
         chunk_len, walk_done = plan
@@ -1473,7 +1510,12 @@ class Qwen3OmniModel(Model):
             return None
         span = int(dims[0]) + 2  # + vision_bos / vision_eos sentinels
         offset = int(metadata.kwargs.get("prefill_chunk_offset", 0))
-        plan = plan_prefill_chunk(span, offset, prefill_chunk_tokens())
+        plan = plan_prefill_chunk(
+            span, offset, prefill_chunk_tokens(),
+            allow_single_chunk=(
+                mixed_single_chunk_enabled() and mixed_batch_vision_enabled()
+            ),
+        )
         if plan is None:
             return None
         chunk_len, walk_done = plan
