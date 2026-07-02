@@ -168,6 +168,27 @@ def mixed_batch_assert() -> bool:
     return _envflag("MSTAR_MIXED_BATCH_ASSERT")
 
 
+def mixed_batch_spec_enabled() -> bool:
+    """W5 spec-chain integration: fold a mixed step INTO the running decode
+    speculation chain instead of breaking the chain to run mixed on the
+    non-speculative path (0cc7c71). When ON, and a decode spec chain is live and
+    a mixable prefill chunk becomes ready, the NEXT speculative batch is
+    assembled as MIXED (the decode rids continue exactly as the normal
+    continuation + the chunk row injected), submitted through the normal spec
+    pipeline (reserve slot, submit-before-postprocess-of-N, overlap preserved),
+    and the chain CONTINUES uninterrupted afterwards (the following spec step
+    threads decode tokens out of the mixed step's outputs).
+
+    Default OFF, and a strict extension of ``MSTAR_MIXED_BATCH``: with this flag
+    off the worker keeps 0cc7c71's behavior (break the chain → non-spec mixed
+    step → chain re-warm), byte-identical. Measured: 0cc7c71 loses 4-9% per
+    admission (each mixed step trades ~9ms of stall savings for ~15-25ms of lost
+    speculation overlap); riding the chain recovers that. Implies
+    ``MSTAR_MIXED_BATCH`` (there is nothing to fold in without mixed steps).
+    """
+    return _envflag("MSTAR_MIXED_SPEC") and mixed_batch_enabled()
+
+
 def mixed_batch_vision_enabled() -> bool:
     """W5-P3-lite: allow a VISION prefill chunk (not just ``prefill_text``) to
     ride a captured ``thinker_mixed`` step. When ON, the scheduler may pick a
