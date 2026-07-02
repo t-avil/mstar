@@ -1,0 +1,18 @@
+model: "qwen3_omni"
+max_seq_len: 32768
+# Variant of qwen3omni_2gpu.yaml: encoders moved off the Thinker GPU onto the
+# Talker/Code2Wav GPU (rank 0). On text paths (i2t/s2t) rank 0 is otherwise
+# idle, and encoder batches (~17.6ms vision graph per admission) stop
+# serializing against Thinker decode steps on rank 1. Embedding transfer
+# (~4MB) crosses via the tensor transport.
+node_groups:
+  - node_names: [audio_encoder, vision_encoder]
+    ranks: [0]
+  - node_names: [Thinker]
+    ranks: [1]
+
+  - node_names: [Talker]
+    ranks: [0]
+
+  - node_names: [Code2Wav]
+    ranks: [0]
