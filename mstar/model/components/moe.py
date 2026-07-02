@@ -225,6 +225,7 @@ def _ensure_fp8_experts(experts: nn.Module):
     return experts._fp8_cache
 
 
+@torch.compiler.disable
 def _dispatch_fp8(
     experts: nn.Module,
     hidden_states: torch.Tensor,
@@ -232,6 +233,10 @@ def _dispatch_fp8(
     routing_weights: torch.Tensor,
     reduce_results: bool = True,
 ) -> torch.Tensor:
+    # compiler.disable (same pattern as FlashInferDecodeWrapper.run): the
+    # lazy quantization mutates module state (frees the bf16 params), which
+    # dynamo must not trace — re-tracing a later bucket otherwise sees the
+    # freed size-0 param and inductor fails the capture.
     from mstar.utils.fused_moe.fp8 import fused_experts_fp8
 
     w1, s1, w2, s2 = _ensure_fp8_experts(experts)
