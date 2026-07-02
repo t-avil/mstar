@@ -348,3 +348,19 @@ OFF; CPU suites 16/16. Known perf wrinkle: vision-span tails (258=256+2)
 miss buckets → eager fallback per admission; tail-merge planned if frequent.
 GPU ladder: text-mixed smoke → vision-mixed smoke → B32 interleaved A/B vs
 shipping config.
+
+## W5-P2/P3 first integration — mixed steps WORK but chain-break wiring LOSES
+Fix 0cc7c71 (chain-break-for-mixed) + tail-merge 8595fc4: mixed assembly
+CONFIRMED LIVE (88 captured mixed steps at B16 probe, n_decode=13-15 C=256,
+zero asserts, healthy outputs — the captured-mixed machinery is correct end
+to end, retiring all remaining capture/numerics risks). But the A/B
+(ab_p2/): i2t 0.959/0.956/0.912× — LOSES at every batch. Economics: each
+admission's mixed step requires breaking the speculation chain (decode
+nodes are invisible to the scheduler while _speculatively_scheduled — root
+cause confirmed at base.py:729), costing ~2-3 non-overlapped pipeline steps
+(~15-25ms) against ~9ms of stall saved. CONCLUSION: mixed batching can only
+win inside the speculation chain (spec-capable thinker_mixed: _can_speculate
+allowance + spec-path per-request routing for mixed batches) — the deferred
+deep variant is now the required next step, sized ~1-2 days. All machinery
+(capture, assembly, routing, chunk plumbing, tail-merge) is validated and
+waiting for it.
