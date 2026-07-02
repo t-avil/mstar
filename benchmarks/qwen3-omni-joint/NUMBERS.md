@@ -1,3 +1,11 @@
+> **⚠️ CORRECTION (2026-07-02): the vLLM columns below are INVALID — do not cite this table.**
+> This file was generated from the superseded provenance-`1f66ce6` run whose vLLM cells ran under
+> heavy GPU contention. The clean re-run committed in the same directory's `raw_*.json`
+> (provenance: v2 rebenchmark on idle GPUs, 710 datapoints) gives, e.g., **i2t B32: vLLM
+> 1723.2 tok/s / 8.210 req/s vs M*-new 768.6 tok/s / 4.394 req/s → M*-new is 0.45x (tok/s) /
+> 0.54x (req/s) of vLLM**, the opposite of the 1.48x this table claims. The raw JSON files —
+> not this table — are authoritative; regenerate via `command.txt` REFINE MODE before use.
+
 # NUMBERS.md -- headline numbers (auto-generated)
 
 Ratios: new/vLLM and new/old; for lower-is-better metrics the ratio is inverted so **>1.00x always means M*-new is faster**.
