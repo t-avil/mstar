@@ -1293,10 +1293,14 @@ class CudaGraphRunner:
         padded_seq_lens = list(seq_lens) + [0] * (len(saved_request_ids) - real_bs)
         try:
             static_cm.request_ids = list(request_ids) + saved_request_ids[real_bs:]
+            # plan_attention takes label explicitly, so _plan_attention_impl
+            # keys _get_state off that arg, not active_labels — but set the
+            # active label over the full (real + dummy) request_ids anyway so
+            # the padding rows carry it, matching the run path's state after
+            # set_active_label in _run_flashinfer_packed.
             if plan_stream is not None:
                 with torch.cuda.stream(plan_stream):
                     for label_name in config_labels:
-                        static_cm.active_labels = {rid: label_name for rid in request_ids}
                         static_cm.set_active_label(label_name)
                         static_cm.plan_attention(
                             seq_lens=padded_seq_lens,
@@ -1308,7 +1312,6 @@ class CudaGraphRunner:
                 plan_done_event.record(plan_stream)
             else:
                 for label_name in config_labels:
-                    static_cm.active_labels = {rid: label_name for rid in request_ids}
                     static_cm.set_active_label(label_name)
                     static_cm.plan_attention(
                         seq_lens=padded_seq_lens,
