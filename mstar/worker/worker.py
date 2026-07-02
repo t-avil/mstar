@@ -189,6 +189,19 @@ class Worker:
             in ("1", "true", "yes", "on")
         )
 
+        # Diagnostics (MSTAR_WALK_STATS): count executed steps per
+        # (node, graph_walk) and log every 200 steps at WARNING (visible under
+        # --log-level WARNING). Measures the mixed-batch fold rate on real runs
+        # without nsys. Default OFF; a dict lookup + int increment per step when
+        # on.
+        self._walk_stats = (
+            {}
+            if os.environ.get("MSTAR_WALK_STATS", "").strip().lower()
+            in ("1", "true", "yes", "on")
+            else None
+        )
+        self._walk_stats_step = 0
+
         # W5-P2 residual (MSTAR_MIXED_PREPLAN): pre-plan a chain-folded
         # thinker_mixed step's packed attention on the plan_executor thread
         # (implies MSTAR_MIXED_SPEC). Read once via the model flag helper so
@@ -1425,6 +1438,16 @@ class Worker:
                 f"worker[{self.worker_id}].node[{batch.node_name}].graph_walk[{batch.graph_walk}]",
                 synchronize=False,
             )
+        if self._walk_stats is not None:
+            key = (batch.node_name, batch.graph_walk)
+            self._walk_stats[key] = self._walk_stats.get(key, 0) + 1
+            self._walk_stats_step += 1
+            if self._walk_stats_step % 200 == 0:
+                logger.warning(
+                    "WALK_STATS step=%d %s",
+                    self._walk_stats_step,
+                    sorted(self._walk_stats.items(), key=lambda kv: -kv[1]),
+                )
 
         try:
             if stream is not None:
