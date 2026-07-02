@@ -1585,6 +1585,30 @@ class Worker:
             self._side_in_flight_rids = set()
         return None
 
+    def _drain_side(self, pending_side: "PendingSide | None") -> None:
+        """BLOCK until an in-flight side prefill finishes, then postprocess it.
+
+        Called before a NON-speculative scheduling round (the decode chain has
+        broken). The next get_next_batch may hand out a decode batch that reads
+        KV pages a still-running side prefill is writing; those two would land
+        on the default stream and the side stream with no ordering between
+        them. Draining here forces the side prefill (and its KV writes) to
+        complete and be routed before any new default-stream work is scheduled,
+        so the drain is the chain-break correctness gate. No-op when the flag
+        is off or nothing is in flight."""
+        if not self._side_prefill or pending_side is None:
+            return
+        # Block on the future so _reap_side_if_done's done() check passes and
+        # it runs the full postprocess (which itself drains the side stream via
+        # the completion_event before routing).
+        try:
+            pending_side.future.result()
+        except Exception:
+            logger.exception(
+                "Worker %s: side prefill drain failed", self.worker_id
+            )
+        self._reap_side_if_done(pending_side)
+
     def _maybe_dispatch_side(
         self,
         pending_side: "PendingSide | None",
@@ -2537,6 +2561,10 @@ class Worker:
         # the gaps (protecting decode ITL). We fall back to a default-priority
         # stream if the priority query is unavailable. Lazily gated so non-CUDA
         # workers and the flag-off path allocate nothing.
+        #
+        # No explicit shutdown: run() is a `while True` loop and gpu_executor /
+        # plan_executor are likewise never shut down (they die with the
+        # process). side_executor follows the same convention.
         side_executor: ThreadPoolExecutor | None = None
         pending_side: PendingSide | None = None
         if self._side_prefill:
@@ -2919,6 +2947,16 @@ class Worker:
 
                 # 4. Non-speculative path: no pending or speculation skipped
                 # (e.g., non-AR engine, or loop ended). Run MicroScheduler.
+                #
+                # Chain-break drain (MSTAR_SIDE_PREFILL): the decode chain has
+                # broken, so the get_next_batch below may schedule a decode
+                # batch that reads KV pages a side prefill is still writing on
+                # the side stream — with no ordering between the two streams.
+                # Block on any in-flight side prefill and route it BEFORE
+                # scheduling new default-stream work.
+                if self._side_prefill and pending_side is not None:
+                    self._drain_side(pending_side)
+                    pending_side = None
                 if self.enable_nvtx:
                     range_push("worker.schedule", synchronize=False)
                 batch = None
