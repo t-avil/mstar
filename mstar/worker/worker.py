@@ -202,6 +202,13 @@ class Worker:
         )
         self._walk_stats_step = 0
 
+    def _ws_inc(self, key: str) -> None:
+        """MSTAR_WALK_STATS: bump a named diagnostic counter (no-op when off).
+        Counters ride the same dict as the per-walk step counts and are logged
+        by the same every-200-steps WARNING line."""
+        if self._walk_stats is not None:
+            self._walk_stats[key] = self._walk_stats.get(key, 0) + 1
+
         # W5-P2 residual (MSTAR_MIXED_PREPLAN): pre-plan a chain-folded
         # thinker_mixed step's packed attention on the plan_executor thread
         # (implies MSTAR_MIXED_SPEC). Read once via the model flag helper so
@@ -3050,6 +3057,7 @@ class Worker:
                         (pending.node_name, pending.graph_walk),
                     ):
                         must_yield_away = False
+                        self._ws_inc("_mix_opp")
                         if mixed_spec_enabled:
                             speculate_into_mixed = True
                             break_chain_for_mixed = False
@@ -3063,6 +3071,9 @@ class Worker:
                             range_push("worker.speculate", synchronize=False)
                         _t0 = _time.perf_counter() if phase_period else 0.0
                         speculation = self._try_speculate_next(pending)
+                        self._ws_inc(
+                            "_spec_ok" if speculation is not None else "_spec_none"
+                        )
                         # Fold a ready mixable chunk into the decode continuation
                         # so the next spec batch is a thinker_mixed step that
                         # rides the chain. If no decode continuation survived
@@ -3075,6 +3086,7 @@ class Worker:
                                 folded = self._try_fold_mixed_chunk_into_spec(
                                     speculation
                                 )
+                                self._ws_inc("_fold_ok" if folded else "_fold_miss")
                                 if (
                                     not folded
                                     and self.mixed_batch_assert
@@ -3088,6 +3100,7 @@ class Worker:
                                     )
                             else:
                                 break_chain_for_mixed = True
+                                self._ws_inc("_fold_lost_chain")
                         if phase_period:
                             _phase_record("speculate", _time.perf_counter() - _t0)
                         if self.enable_nvtx:
@@ -3105,6 +3118,7 @@ class Worker:
                             node_batch = self._build_node_batch(batch)
                             batch_partition = self.worker_graphs_manager.get_partition_for_node(batch.node_name)
                             logger.debug(f"Yield away: {batch.node_name} {node_batch.request_ids}")
+                            self._ws_inc("_yield_away")
                             speculation = Speculation(
                                 scheduled_batch=batch,
                                 node_batch=node_batch,
