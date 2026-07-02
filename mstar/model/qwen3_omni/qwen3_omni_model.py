@@ -1065,6 +1065,11 @@ class Qwen3OmniModel(Model):
         input_signals: dict[str, list[TensorPointerInfo]],
         model_kwargs: dict | None = None,
     ) -> ForwardPassArgs:
+        # MSTAR_DYNFLAGS triage hook (conductor process): per-admission refresh
+        # so chunk-planner flags flip without restart. No-op unless set.
+        from mstar.utils import dynflags as _dynflags
+        if _dynflags.enabled():
+            _dynflags.maybe_refresh()
         audio_output = "audio" in output_modalities
 
         if model_kwargs is None:

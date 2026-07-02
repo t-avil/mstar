@@ -1324,6 +1324,16 @@ class Worker:
     # for rids whose loop is still continuing.
     # ------------------------------------------------------------------
 
+    def _refresh_dynamic_flags(self) -> None:
+        """Re-derive init-cached flag values after a MSTAR_DYNFLAGS refresh.
+        Keep in sync with the flags cached in __init__ / the scheduler."""
+        from mstar.model.qwen3_omni.qwen3_omni_model import (
+            mixed_single_chunk_enabled,
+        )
+        self.mixed_single_chunk = mixed_single_chunk_enabled()
+        if hasattr(self.scheduler, "_mixed_min_decode_cached"):
+            self.scheduler._mixed_min_decode_cached = None
+
     def _ws_inc(self, key: str) -> None:
         """MSTAR_WALK_STATS: bump a named diagnostic counter (no-op when off).
         Counters ride the same dict as the per-walk step counts and are logged
@@ -3011,10 +3021,18 @@ class Worker:
             )
             phase_buf.clear()
 
+        from mstar.utils import dynflags as _dynflags
+        _dyn_ctr = 0
         while True:
             from mstar.utils.profiler import range_pop, range_push
             try:
                 _iter_start = _time.perf_counter() if phase_period else 0.0
+                # MSTAR_DYNFLAGS triage hook: refresh runtime-mutable env flags
+                # every 50 iters (mtime stat when unchanged — ~1µs).
+                _dyn_ctr += 1
+                if _dyn_ctr % 50 == 0 and _dynflags.enabled():
+                    if _dynflags.maybe_refresh():
+                        self._refresh_dynamic_flags()
                 self._apply_pending_removes_safe_to_drop(
                     self._in_flight_rids
                 )
