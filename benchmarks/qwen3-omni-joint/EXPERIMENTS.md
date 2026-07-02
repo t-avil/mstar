@@ -390,3 +390,15 @@ mixed step still plans FlashInfer inline on the GPU thread (~1-3ms exposed
 per fold) where decode steps enjoy pre-plan overlap. After that: fold-rate
 telemetry + bucket grid. Ship posture: flags validated and available;
 default-on recommended after the pre-plan increment clears B32 ≥1.03×.
+
+## Packed pre-plan (MSTAR_MIXED_PREPLAN, commits 49d0204..824b84a) — REJECTED pending stream-race debug
+Back-to-back B32, identical stack ±flag: off 6.141; on+asserts 5.465 (−11%);
+on-clean **3.083 (−50%)**. The assert path blocks on the plan future — its
+"better" number means the blocking MASKED a concurrency defect: with true
+overlap enabled, the packed pre-plan path stalls catastrophically (JCT 4.8s
+→ 9.7s; suspects: plan_stream event ordering vs the persistent packed
+wrapper's in-place buffer writes, or bucket-slot disjointness failing under
+consecutive folds — the implementer's own risks #1/#3). Needs NVTX-level
+stream debugging on hardware. Flag default-off; the shipped spec-fold
+(net-positive, 5 of 6 cells) is unaffected. Datapoints in qb_preplan.log /
+qb_pponclean.log.
