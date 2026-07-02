@@ -255,6 +255,15 @@ def plan_prefill_chunk(
             break
     # Never exceed the remaining span.
     chunk_len = min(chunk_len, remaining)
+    # Tail-merge: if the leftover after this chunk is tiny (<= 32 tokens,
+    # e.g. the +2 sentinels of a 258-token vision span after a 256 chunk),
+    # absorb it into this chunk instead of scheduling a separate micro-step.
+    # Live evidence: ~40% of assembled mixed steps were C=2 tails before
+    # this. The merged chunk still pads to the same capture bucket (buckets
+    # have headroom over the nominal C), so no new bucket is required.
+    leftover = span - (offset + chunk_len)
+    if 0 < leftover <= 32:
+        chunk_len += leftover
     walk_done = (offset + chunk_len) >= span
     return chunk_len, walk_done
 
