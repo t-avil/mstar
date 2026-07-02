@@ -332,3 +332,19 @@ style chunking is structurally unprofitable in this engine; the validated
 chunk cursor/staging/deferred-completion plumbing feeds W5-P2 (mixed
 CAPTURED step: chunk rides the decode step, no extra round-trips), now the
 sole path for the i2t B32 win.
+
+## W5-P2 + P3-lite — CAPTURED mixed batches, implemented (2026-07-02 evening)
+Branch exp/mixed-batch-p2 (on P1's 23d07ee): P2 = 1093527/b265cd1/7c09d10
+(scheduler mixed assembly, per-request effective_walk routing — the batch-walk
+routing variant of the silent-hang class was caught pre-GPU via the shared
+trap warning; TP gate; thinker_mixed FlashInferPacked buckets 288/544 —
+BOTH CAPTURED SUCCESSFULLY ON H200 at first boot, retiring the
+capture-vs-replay risk's first half). P3-lite = 864d492/a599bb6/f45cbbd
+(vision chunk rows in mixed steps: dense row-position-agnostic deepstack
+packing with zero rows for decode + always-emit-under-flag to prevent
+static-buffer bleed; per-request custom_pos_advance list for the two-part
+MRoPE landing). Flags: MSTAR_MIXED_BATCH / MSTAR_MIXED_BATCH_VISION, default
+OFF; CPU suites 16/16. Known perf wrinkle: vision-span tails (258=256+2)
+miss buckets → eager fallback per admission; tail-merge planned if frequent.
+GPU ladder: text-mixed smoke → vision-mixed smoke → B32 interleaved A/B vs
+shipping config.
