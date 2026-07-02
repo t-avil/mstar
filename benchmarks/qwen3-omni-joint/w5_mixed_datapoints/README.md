@@ -24,3 +24,16 @@ MSTAR_MIXED_PREPLAN shootout, same pair back-to-back: off 6.141 / on+asserts
 5.465 / on-clean 3.083 req/s — clean run exposes a plan_stream concurrency
 defect the assert's blocking masked. REJECTED pending stream-race debug
 (EXPERIMENTS.md). ab_p2spec/ now carries the complete 6-cell final A/B.
+
+## Addendum 2 (2026-07-02 ~23:00): pre-plan stream-race theory RETRACTED
+The preplan/ shootout numbers (off 6.141 / on+asserts 5.465 / on-clean 3.083)
+led to a "plan_stream race" rejection. Re-examination refuted it:
+- nsys-profiled on-clean run: 4.42 req/s WITH profiler overhead; await_plan
+  median 3.4µs; 577 plans skipped as pre-planned; zero fold misses.
+- Same-server repeats: 3.748 / 3.662 / 5.567; then 8 cells across two fresh
+  servers all 5.30-5.92 (see qb_pprecheck / qb_ppstats2 in the workspace).
+- All slow datapoints clustered in one ~25-min window on this shared host
+  (load observed up to 165). Contention, not code.
+Verdict: MSTAR_MIXED_PREPLAN code is sound but worth <1% by design; stays
+default-off. The on-clean 3.083 row in preplan/ should be read as a
+contaminated measurement, kept for the record.
