@@ -1122,7 +1122,11 @@ class ThinkerSubmodule(ARNodeSubmodule):
                     }
                 ),
                 compile=True,
-                capture_batch_sizes=[1, 2, 4, 8, 16, 32],
+                # Denser high-end buckets: at B32 closed loop the live batch
+                # churns through 17-31 as requests finish/join; without 24/28
+                # every such step pads to 32 (up to ~2x wasted decode compute
+                # on the padded rows at the low end of the bucket).
+                capture_batch_sizes=[1, 2, 4, 8, 16, 24, 28, 32],
             ),
             FlashInferPackedCudaGraphConfig(
                 capture_graph_walk="prefill_text",
