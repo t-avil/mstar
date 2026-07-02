@@ -410,3 +410,33 @@ is sound; no stream debugging owed. Lesson reinforced: time-separated
 cells on this box can swing ±40% under foreign load; only interleaved A/B
 or many repeats count. Datapoints: qb_preplan.log / qb_pponclean.log /
 qb_pprecheck / qb_ppstats2 (WALK_STATS counter log in server.log).
+
+## W5 fold-rate: MSTAR_MIXED_SINGLE_CHUNK + eager folds + occupancy floor (exp/fold-rate, 2026-07-02 late)
+Counters (WALK_STATS) showed only ~35% of i2t prefill work folds into mixed
+steps and 100% of standalone prefill_text steps are UNCHUNKED short spans
+(<=256 tok) — excluded by the mixable gate (needs prefill_chunk_len). Fix
+iterated three times, each stage caught by counters:
+1. Single-chunk planner alone: catastrophic (i2t B32 6.18->3.48) — folds
+   fire only at must_yield_away (~every 8th step) so chunk drain is ~8x
+   slower than standalone and admission starves decode occupancy (~3900
+   chain steps vs ~2300 for identical tokens).
+2. + eager folds (every chain step) + n_decode>=24 floor (default only
+   under the flag; P2 behavior untouched): mechanism works — folds 415 vs
+   180, standalone text steps 218 vs 382, per-step _ms identical ON vs OFF
+   (prefill_text 17.2 vs 17.4ms — the 1-chunk chunked path costs the same
+   as single-shot; "eager fallback" theory dead). req/s ~neutral: ON 5.67/
+   5.75 i2t B32, 16.6/16.7 s2t B8 vs OFF 6.00/4.05, 15.7/17.6 (OFF's own
+   4th cell crashed to 4.05 — earlier "regressions" were server-age/box
+   artifacts; this box lies at cell granularity).
+3. THE CEILING (per-step _ms, measured): a mixed step costs 36ms but
+   replaces prefill(17.2) + decode(11.8) = 29ms — folding is compute-
+   NEGATIVE ~7ms/fold. The P2 net-positive came from avoided chain breaks,
+   not compute. Root cause: packed capture runs decode rows through the
+   PREFILL kernel path (qo_len=1 rows lose split-KV decode optimizations)
+   — the POD-attention problem. NEXT LEVER: split attention inside the
+   mixed capture (decode wrapper for 1-token rows + prefill wrapper for
+   the chunk row, both in one graph) -> mixed step ~decode-cost -> every
+   fold a real ~10ms win x ~400 folds/cell at i2t B32.
+Also: MSTAR_DYNFLAGS runtime flag file + dyn_ab.sh = one-server interleaved
+A/B (no restart between configs, adjacent-in-time cells cancel box noise).
+Triage protocol from now on; committed numbers stay static-env.
