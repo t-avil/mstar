@@ -49,6 +49,20 @@ except Exception as e:  # pragma: no cover -- exercised only when optional dep m
     _HAS_FUSED = False
     logger.warning(f"Could not load fused MoE kernel: {e}")
 
+# Fused softmax+topk router kernel (sgl_kernel). Replaces the
+# softmax -> torch.topk -> renorm chain (3 kernels incl. a bitonic sort,
+# ~28us/layer at decode) with one kernel (~11us). Bit-identical expert ids,
+# weights equal to float rounding. MSTAR_FUSED_TOPK=0 restores torch ops.
+try:
+    from sgl_kernel import topk_softmax as _topk_softmax
+except Exception:  # pragma: no cover
+    _topk_softmax = None
+
+_FUSED_TOPK = (
+    _topk_softmax is not None
+    and os.environ.get("MSTAR_FUSED_TOPK", "1") == "1"
+)
+
 
 class TopKRouter(nn.Module):
     """Softmax top-k router shared by all MoE blocks.
@@ -87,6 +101,24 @@ class TopKRouter(nn.Module):
         """
         hidden_states = hidden_states.reshape(-1, hidden_states.shape[-1])
         router_logits = F.linear(hidden_states, self.weight)
+
+        if _FUSED_TOPK and _HAS_FUSED and router_logits.is_cuda:
+            # Single-kernel softmax+topk(+renorm). All callers discard the
+            # first return value, so the full softmax distribution is not
+            # materialized on this path.
+            m = router_logits.shape[0]
+            routing_weights = torch.empty(
+                m, self.top_k, device=router_logits.device, dtype=torch.float32,
+            )
+            router_indices = torch.empty(
+                m, self.top_k, device=router_logits.device, dtype=torch.int32,
+            )
+            _topk_softmax(
+                routing_weights, router_indices,
+                router_logits.float(), self.norm_topk_prob,
+            )
+            return None, routing_weights, router_indices
+
         router_logits = F.softmax(router_logits, dtype=torch.float, dim=-1)
 
         router_top_value, router_indices = torch.topk(router_logits, self.top_k, dim=-1)
