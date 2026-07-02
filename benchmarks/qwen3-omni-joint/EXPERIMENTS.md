@@ -227,3 +227,43 @@ measurement noise (same class as the documented ±7% s2t B32 variance).
 Speech-generation parity vs encoders-implemeneted original is confirmed in
 the audio config; the encoff config's documented audio cost is placement
 contention only.
+
+## P-tiles — fp8 prefill tile tuning (commit 2239005) — kernel WIN, e2e neutral
+In-graph sweep at M=2048/4096 (real weights): BLOCK_M=64/GROUP=8 = 1.63x over
+the previous prefill config on the fp8 MoE GEMM. End-to-end TTFT unchanged
+within noise (the prefill MoE slice is ~30ms of a ~200ms TTFT). Kept: free
+kernel improvement, no regression (i2t B32 unchanged at 5.91 qb-scale).
+
+## Deep-research-derived roadmap (2026-07-02, 103-agent verified sweep)
+Full cited report: tasks/woiddyj7e.output. Key verified findings and the queue
+they generate (ranked by win × feasibility at OUR bottlenecks):
+- **W3 — future-token overlap scheduler** (from SGLang v0.4, pure Python,
+  1.1× measured, default-on there): run scheduler/metadata prep for batch N+1
+  BEFORE batch N's tokens exist, using placeholder "future token" tensors
+  resolved on-GPU (CUDA-event ordered). Kills the remaining await→thread→
+  submit dependency our speculation pipeline still has. Composes with W2.
+  DIRECTLY refutes our "irreducible ~5ms/step Python" assumption.
+- **W5 — token-budget mixed batching, done the way vLLM actually does it**:
+  vLLM does NOT graph mixed batches with FlashInfer — FlashInfer is the
+  backend that BLOCKS it; vLLM runs attention EAGER inside piecewise graphs
+  for mixed/prefill steps, full graphs only for uniform decode. Our MIXED_WALK
+  failed because the ENTIRE step went eager, not because mixing is wrong.
+  Two viable shapes for us: (a) piecewise-style: graph the MoE/dense stack,
+  eager FlashInfer prefill-wrapper attention for mixed buckets; (b) creative
+  hybrid: FA3 varlen (validated correct on our KV layout, CG-ALWAYS capable)
+  as the attention inside FULLY-graphed mixed buckets — FA3's per-kernel
+  slowness vs FlashInfer matters little on occasional mixed steps replacing
+  27.5ms serialized prefills. Also: vLLM V1 chunks VISION prefill via an
+  encoder cache (EncoderCacheManager) — needed for chunked i2t prefill.
+- **W4 — output-process isolation** (vLLM V1 EngineCore pattern): detok/
+  stream/preprocess in a separate process. We're partway there (api_server
+  is separate; inline/batch emit cut the transport); W2 txn covers most of
+  the rest of the worker-side cost.
+- **POD-Attention** (ASPLOS'25): fused prefill+decode attention kernel, up to
+  +22% e2e — the kernel-level version of W5; revisit if W5(a/b) attention
+  becomes the bottleneck.
+- **Scoped out with evidence**: megakernels (batch-1/1B-model regime, no MoE
+  support in MPK); free-threaded Python (not production-ready as of 11/2025);
+  Rust/C++ scheduler rewrite (TRT-LLM's C++ executor — wrong cost/benefit for
+  us given W3 exists in pure Python). Spec-decode for MoE/multimodal and MoE
+  kernel claims did not survive adversarial verification — treat as unproven.
