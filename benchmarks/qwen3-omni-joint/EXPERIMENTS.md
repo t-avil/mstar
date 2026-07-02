@@ -440,3 +440,20 @@ iterated three times, each stage caught by counters:
 Also: MSTAR_DYNFLAGS runtime flag file + dyn_ab.sh = one-server interleaved
 A/B (no restart between configs, adjacent-in-time cells cancel box noise).
 Triage protocol from now on; committed numbers stay static-env.
+
+## Split-attention microbench (mb_split_attn.py, in-graph, 2026-07-02 23:50) — LEVER CONFIRMED 4.3ms/mixed-step
+The mixed step's packed attention (ONE BatchPrefillWrapper over [1]*31 +
+[256]) costs 6.112 ms per 48-layer forward; decode-wrapper[31 rows,
+tensor-core] + prefill-wrapper[256] back-to-back in the same graph cost
+1.841 ms — 3.3x faster, 4.27 ms saved per mixed step. Note: M*'s decode
+wrapper already uses use_tensor_cores=True (flashinfer routes it through
+the prefill kernel internally; plain decode kernel REJECTS GQA group 7),
+so the win is from per-shape PLANNING/load-balancing, not the kernel
+itself — a single mixed-shape plan is what's catastrophic. This flips fold
+economics (mixed 36ms - 4.3 ≈ 31.7 vs 29 replaced, + saved chain breaks)
+and also speeds the already-shipped P2 mixed steps. Interleaved dyn_ab
+verdict on single-chunk WITHOUT this fix: i2t B32 0.896/0.999/0.950 (−5%)
+— stays off until split-attention lands. Build plan: fixed row regions
+([n real decode][bs-1-n qo=1 dummies][chunk @ row bs-1][zero pads]) so the
+static graph can slice at bs-1; split wrapper plans decode part + chunk
+part separately. Flag MSTAR_MIXED_SPLIT_ATTN.
