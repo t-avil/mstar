@@ -229,6 +229,19 @@ class Worker:
         self._mixed_preplan_count = 0
         self._mixed_inline_count = 0
 
+        # MSTAR_DIRECT_FEED: on uniform AR decode speculation (same-walk,
+        # same-node loop-back), splice the spec batch's loop-back text_inputs
+        # straight from batch_N's batched sampled-tokens tensor
+        # (NodeOutput.batched_sampled_tokens) instead of the per-rid tensors
+        # threaded out of the registry-backed output map. Default OFF; when
+        # off _thread_outputs_to_speculative is byte-identical. The registry
+        # store / route path (_postprocess_batch) is UNCHANGED either way — it
+        # still populates the loop-back edge's ready-state + tensor_info that
+        # the NEXT spec placeholder build (_get_input_tensors) and any fall
+        # back to non-speculative decode depend on. See the block in
+        # _thread_outputs_to_speculative for the exact safety conditions.
+        self._direct_feed = os.environ.get("MSTAR_DIRECT_FEED", "0") == "1"
+
         if self.device.type == "cuda" and self.device.index is not None:
             torch.cuda.set_device(self.device)
 
@@ -2261,13 +2274,55 @@ class Worker:
     ):
         threaded_continuing: set[str] = set()
         dropped: set[str] = set()
+
+        # MSTAR_DIRECT_FEED fast path. Precondition for using the batched
+        # tensor at all: the flag is on, this is a same-node loop-back
+        # (uniform thinker_decode) step, and batch_N's engine exposed the
+        # [bs] sampled-tokens tensor + its rid order. Any consumed edge NOT
+        # covered by that tensor (a rid missing from batched_sampled_rids, or
+        # a consumed edge that isn't the loop-back token) falls through to the
+        # per-rid output-map copy below — so a partial/absent tensor never
+        # drops a rid, it just uses the slower (but identical-valued) route.
+        # The batched tensor's rows are the SAME clone the per-rid new_token /
+        # text_inputs views point at (cuda_graph_runner._sample_and_remap), so
+        # sampled[i:i+1] is byte-identical to rid_outputs["text_inputs"][0];
+        # it's a fresh per-step clone (no aliasing with FlashInfer's reused
+        # sampling buffer — see the clone rationale there), so the row views
+        # stay valid until the spec batch consumes them.
+        row_for_rid: dict[str, "torch.Tensor"] = {}
+        direct_feed_active = (
+            self._direct_feed
+            and speculation.is_same_node
+            and output_N.batched_sampled_tokens is not None
+            and output_N.batched_sampled_rids is not None
+        )
+        if direct_feed_active:
+            sampled = output_N.batched_sampled_tokens
+            for i, r in enumerate(output_N.batched_sampled_rids):
+                row_for_rid[r] = sampled[i:i + 1]
+
         for rid in list(speculation.node_batch.request_ids):
             if rid not in speculation.continuing_rids:
                 continue  # fresh rid — inputs already gathered.
             rid_outputs = output_N.per_request_output_tensors.get(rid, {})
+            row_view = row_for_rid.get(rid) if direct_feed_active else None
             ok = True
             for input_name, _ in speculation.consumed_edges:
                 tensors = rid_outputs.get(input_name, [])
+                # Substitute the batched row ONLY when it is provably the same
+                # value as this edge's per-rid output: a single 1-element token
+                # view (the loop-back sampled token). Any other loop-back edge
+                # (multi-tensor / non-token) takes the per-rid copy path so a
+                # future same-node loop with a non-token loop-back stays correct.
+                if (
+                    row_view is not None
+                    and len(tensors) == 1
+                    and torch.is_tensor(tensors[0])
+                    and tensors[0].numel() == 1
+                ):
+                    speculation.node_batch.per_request_input_tensors[rid][input_name] \
+                        = [row_view]
+                    continue
                 if not tensors:
                     ok = False
                     break

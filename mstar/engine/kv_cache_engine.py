@@ -18,7 +18,7 @@ from mstar.engine.base import (
 )
 from mstar.engine.cache_manager import BatchedCacheManager, WorkspaceBufferManager
 from mstar.engine.cpu_page_pool import CPUPagePool
-from mstar.engine.cuda_graph_runner import CudaGraphRunner
+from mstar.engine.cuda_graph_runner import _DIRECT_FEED_KEY, CudaGraphRunner
 from mstar.engine.kv_store import (
     AllocationFailedError,
     KVCacheConfig,
@@ -666,6 +666,21 @@ class KVCacheEngine(BaseEngine):
             launch_started_event=batch.metadata.get("launch_started_event"),
             exec_timings=batch.exec_timings if self.enable_profile else None,
         )
+
+        # MSTAR_DIRECT_FEED: the runner may stash (batched_sampled_tokens,
+        # rid_order) under a private sentinel key in the per-rid map. Pop it off
+        # here — never let it reach the worker's rid-keyed
+        # per_request_output_tensors — and hoist it onto the NodeOutput.
+        # Absent (flag off, or non-fast-path) → NodeOutput carries None and the
+        # per-rid map is byte-identical.
+        direct_feed = batched_output.pop(_DIRECT_FEED_KEY, None)
+        if direct_feed is not None:
+            sampled, rid_order = direct_feed
+            return NodeOutput(
+                per_request_output_tensors=batched_output,
+                batched_sampled_tokens=sampled,
+                batched_sampled_rids=rid_order,
+            )
 
         return NodeOutput(per_request_output_tensors=batched_output)
 
