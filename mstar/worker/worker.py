@@ -185,6 +185,32 @@ class Worker:
         # _thread_outputs_to_speculative for the exact safety conditions.
         self._direct_feed = os.environ.get("MSTAR_DIRECT_FEED", "0") == "1"
 
+        # MSTAR_MULTISTEP_DECODE=N: run up to N thinker-decode steps inside ONE
+        # GPU-thread submission, amortizing the per-step main-loop cycle
+        # (await + speculate + thread + submit + prepare/plan/copy) over N
+        # replays. Default 1 (OFF). Requires DIRECT_FEED: the between-step feed
+        # of the sampled token into the next replay's static input buffers IS
+        # the DIRECT_FEED mechanism, applied inline on the GPU thread. The
+        # worker gates each submission (uniform thinker_decode, enough tokens
+        # remaining) and postprocesses the returned steps SEQUENTIALLY as N
+        # normal steps so Loop bookkeeping / emission / check_stop stay
+        # per-token-exact. When off, the whole path is byte-identical. See
+        # _eligible_multistep_decode / _postprocess_batch and
+        # cuda_graph_runner._run_basic_batched.
+        self._multistep_decode = max(
+            1, int(os.environ.get("MSTAR_MULTISTEP_DECODE", "1"))
+        )
+        # Multistep is meaningless without DIRECT_FEED (it reuses that feed
+        # mechanism between inline steps); force OFF if DIRECT_FEED is off so a
+        # misconfiguration can't silently take an untested path.
+        if self._multistep_decode > 1 and not self._direct_feed:
+            logger.warning(
+                "Worker %s: MSTAR_MULTISTEP_DECODE=%d requires "
+                "MSTAR_DIRECT_FEED=1; disabling multistep.",
+                self.worker_id, self._multistep_decode,
+            )
+            self._multistep_decode = 1
+
         if self.device.type == "cuda" and self.device.index is not None:
             torch.cuda.set_device(self.device)
 
@@ -1426,6 +1452,15 @@ class Worker:
                     event = torch.cuda.Event()
                     event.record(torch.cuda.default_stream(self.device))
                     output.completion_event = event
+            # MSTAR_MULTISTEP_DECODE: the single completion event, recorded
+            # after the LAST step's replay was submitted, covers every step's
+            # GPU work (all steps ran back-to-back on the default stream in one
+            # submission). Share it with the extra-step NodeOutputs so their
+            # postprocess sync waits on the same event instead of falling back
+            # to a full default-stream synchronize. No-op when single-step.
+            if output.extra_step_outputs and output.completion_event is not None:
+                for extra in output.extra_step_outputs:
+                    extra.completion_event = output.completion_event
             return output
         finally:
             # Safety net: ensure advance_event fires even if the engine
@@ -1498,6 +1533,86 @@ class Worker:
                 "holding %d requests",
                 batch.node_name, batch.graph_walk, len(batch_ids),
             )
+
+    # ------------------------------------------------------------------
+    # Multistep decode (MSTAR_MULTISTEP_DECODE)
+    # ------------------------------------------------------------------
+
+    def _eligible_multistep_decode(
+        self, batch: ScheduledBatch, node_batch: NodeBatch
+    ) -> int:
+        """Return the number of decode steps to run in one submission for
+        ``batch`` (>=2 when eligible, 1 otherwise).
+
+        Eligibility (all must hold):
+          * multistep enabled (flag > 1) and DIRECT_FEED on (checked at init);
+          * uniform ``thinker_decode`` batch (single AR decode node/walk) — the
+            same batch shape the BASIC_BATCHED decode graph captures and the
+            only walk ``prepare_inputs_batched`` builds inline inputs for;
+          * async scheduling allowed + not a TP node (same base gate as
+            speculation — TP/eager can't do the inline replay chain);
+          * every rid has a comfortable margin of loop iterations remaining.
+            ``curr_iter`` counts only POSTPROCESSED iterations; when this runs
+            there can be another in-flight batch (the current ``pending``, whose
+            postprocess happens after this submit) plus THIS batch, each up to
+            ``num_steps`` steps. Requiring ``max_iters - curr_iter >=
+            2 * num_steps`` guarantees no rid overshoots ``max_iters`` even with
+            one other multistep batch in flight — keeping the max-tokens
+            overshoot within the accepted ``num_steps - 1`` (constraint: EOS /
+            last-token late by up to num_steps-1, discarded cleanly by the
+            stopped-rid guards). A rid missing loop state is treated as
+            ineligible (fall back to single-step for the whole batch — the
+            captured graph runs one shape for all rids).
+
+        The in-graph seen-token penalty also forces single-step; that gate
+        lives in the runner (it owns the captured-config flag), which reduces
+        num_steps to 1 defensively even if this returns 2. The postprocess
+        loop keys off the steps ACTUALLY returned, so a runner downgrade is
+        handled transparently.
+        """
+        num_steps = self._multistep_decode
+        if num_steps <= 1:
+            return 1
+        if batch.graph_walk != "thinker_decode":
+            return 1
+        if not self._can_speculate(batch):
+            return 1
+        for rid in node_batch.request_ids:
+            wgio = self._get_wgio_for_rid(batch, rid)
+            # Find the loop governing this decode node for this rid. All rids
+            # in a uniform decode batch share the same loop; bail to
+            # single-step if any rid's loop can't be resolved or is too close
+            # to its max_iters.
+            if batch.node_objects.get(rid) is None:
+                return 1
+            rid_loop = None
+            for loop in wgio.loops.values():
+                if batch.node_name in loop.get_nodes():
+                    rid_loop = loop
+                    break
+            if rid_loop is None:
+                return 1
+            if rid_loop._finish_signal or rid_loop.is_done:
+                return 1
+            # curr_iter counts postprocessed iters only. Reserve margin for one
+            # other in-flight multistep batch (pending) + this batch, each up to
+            # num_steps steps, so no rid runs past max_iters by more than
+            # num_steps-1 (see docstring).
+            remaining = rid_loop.max_iters - rid_loop.curr_iter
+            if remaining < 2 * num_steps:
+                return 1
+            # Also honor the per-request ``max_tokens`` stop that check_stop
+            # enforces on ``dynamic_loop_iter_counts`` — it can be tighter than
+            # the loop's ``max_iters``. Same 2*num_steps margin so a rid never
+            # overshoots max_tokens by more than the accepted num_steps-1.
+            info = node_batch.per_request_info.get(rid)
+            if info is not None:
+                done_iters = info.dynamic_loop_iter_counts.get(
+                    "thinker_decode_loop", 0
+                )
+                if info.max_tokens - done_iters < 2 * num_steps:
+                    return 1
+        return num_steps
 
     # ------------------------------------------------------------------
     # Speculation
@@ -2816,6 +2931,21 @@ class Worker:
                     if self.enable_nvtx:
                         range_pop(synchronize=False)
 
+                    # MSTAR_MULTISTEP_DECODE: ``pending`` may have run several
+                    # decode steps in one submission. ``output`` is step 1;
+                    # ``output.extra_step_outputs`` holds steps 2..N in order.
+                    # The NEXT speculation's loop-back token must come from the
+                    # LAST step (step N), so thread from ``last_output`` below.
+                    # Absent extra steps → last_output IS output (single-step,
+                    # byte-identical). allocation_failed is only ever set on a
+                    # single-step submission (multistep is gated to
+                    # decode-in-cache batches; a mid-sequence OOM raises
+                    # AllocationFailedError before any step, yielding one
+                    # allocation_failed NodeOutput with no extra steps).
+                    last_output: NodeOutput = output
+                    if output.extra_step_outputs:
+                        last_output = output.extra_step_outputs[-1]
+
                     # set node._speculatively_scheduled to false, since
                     # the node has just completed
                     for node in pending.batch.node_objects.values():
@@ -2857,9 +2987,14 @@ class Worker:
                     if speculation is not None:
                         spec_batch = speculation.scheduled_batch
                         spec_node_batch = speculation.node_batch
-                        # Promote per-rid speculative_signals → real inputs
+                        # Promote per-rid speculative_signals → real inputs.
+                        # Feed from the LAST decode step of a multistep pending
+                        # (its sampled token is what the next spec step decodes
+                        # from); last_output == output for single-step.
                         if not speculation.is_yield_away:
-                            self._thread_outputs_to_speculative(speculation, output)
+                            self._thread_outputs_to_speculative(
+                                speculation, last_output
+                            )
                         # set node._speculatively_scheduled to true, so that it doesn't
                         # accidentally get put on the ready queue while already executing
                         for node in spec_batch.node_objects.values():
@@ -2890,6 +3025,29 @@ class Worker:
                             # in the eager AR path).
                             spec_launch_started_event = threading.Event()
                             spec_node_batch.metadata["launch_started_event"] = spec_launch_started_event
+                            # MSTAR_MULTISTEP_DECODE: request N inline decode
+                            # steps for this submission when the (post-thread)
+                            # spec batch is an eligible uniform thinker_decode
+                            # step with enough tokens left. Step 1 uses this
+                            # batch's pre-plan (opposite slot); step 2+ re-plan
+                            # inline on that same slot on the GPU thread. 1 =
+                            # unchanged single-step. Gated to same-node loop-back
+                            # speculation (a new decode iteration of the SAME
+                            # node) so ``speculative_new_iter`` / ``loop_name``
+                            # are set — the sequential-step stopped-rid discard
+                            # in _postprocess_batch depends on them. Evaluated
+                            # after the drop pass above so it sees the final rid
+                            # set.
+                            spec_multistep = 1
+                            if (
+                                speculation.is_same_node
+                                and not speculation.is_yield_away
+                                and speculation.is_new_iter
+                            ):
+                                spec_multistep = self._eligible_multistep_decode(
+                                    spec_batch, spec_node_batch
+                                )
+                            spec_node_batch.metadata["num_decode_steps"] = spec_multistep
                             spec_future = gpu_executor.submit(
                                 self._execute_on_gpu_thread,
                                 spec_batch, spec_node_batch,
@@ -2930,12 +3088,29 @@ class Worker:
                     # allocation_failed since the output tensors aren't valid;
                     # ``_handle_allocation_failure`` already rehabilitated the
                     # failed rids upstream.
+                    #
+                    # MSTAR_MULTISTEP_DECODE: a multistep pending produced one
+                    # NodeOutput per decode step (step 1 = ``output``, steps
+                    # 2..N = ``output.extra_step_outputs``). Postprocess them
+                    # SEQUENTIALLY as N normal steps against the SAME pending:
+                    # each call runs mark_node_complete / process_node_outputs /
+                    # dynamic_loop_iter_counts / emission / check_stop once,
+                    # advancing the Loop's curr_iter one iteration per step, in
+                    # order. ``_pending_loop_stops`` set by step k's check_stop
+                    # is consumed at step k+1's start (its stopped-rid outputs
+                    # discarded, matching the single-step chain) because both
+                    # calls share ``self._pending_loop_stops``. Single-step:
+                    # the list is just ``[output]`` — byte-identical to before.
                     _t0 = _time.perf_counter() if phase_period else 0.0
 
                     if not output.allocation_failed:
                         if self.enable_nvtx:
                             range_push("worker.postprocess_batch", synchronize=False)
-                        self._postprocess_batch(pending, output)
+                        step_outputs = [output]
+                        if output.extra_step_outputs:
+                            step_outputs.extend(output.extra_step_outputs)
+                        for step_out in step_outputs:
+                            self._postprocess_batch(pending, step_out)
                         if self.enable_nvtx:
                             range_pop(synchronize=False)
 
@@ -3020,6 +3195,15 @@ class Worker:
                 # advance_seq_lens.
                 fallthrough_advance_event = threading.Event()
                 node_batch.metadata["advance_event"] = fallthrough_advance_event
+                # MSTAR_MULTISTEP_DECODE stays single-step on this
+                # (non-speculative) fallthrough path: it's the cold-start /
+                # yield-away / drain path, not the steady-state decode chain
+                # where cycle amortization pays off, and its PendingBatch lacks
+                # the populated ``loop_name`` / ``speculative_new_iter`` that the
+                # sequential-step stopped-rid discard relies on. Multistep is
+                # applied only on the speculative-submit path above, where both
+                # are set. Explicit 1 keeps this path byte-identical.
+                node_batch.metadata["num_decode_steps"] = 1
                 future = gpu_executor.submit(
                     self._execute_on_gpu_thread, batch, node_batch,
                     None, fallthrough_advance_event,

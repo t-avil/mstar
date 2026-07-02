@@ -138,6 +138,15 @@ class NodeOutput:
     # worker._thread_outputs_to_speculative.
     batched_sampled_tokens: "torch.Tensor | None" = None
     batched_sampled_rids: "list[str] | None" = None
+    # MSTAR_MULTISTEP_DECODE: additional decode steps run inside the SAME
+    # GPU-thread submission after this (the first) step. Each entry is a fully
+    # formed NodeOutput for a subsequent decode step, in step order, carrying
+    # its own per-rid tensors + DIRECT_FEED sampled tensor. The worker
+    # postprocesses this step, then each of these in order, as if they were
+    # separate single-step submissions (per-token-exact Loop bookkeeping). None
+    # / empty unless multistep actually ran >1 step. Set by
+    # kv_cache_engine._execute_with_cuda_graph.
+    extra_step_outputs: "list[NodeOutput] | None" = None
 
 
 class BaseEngine(ABC):
@@ -362,6 +371,16 @@ class BaseEngine(ABC):
             per_request_output_tensors={}
         )
 
+        # MSTAR_MULTISTEP_DECODE: a split batch cannot run multistep (each
+        # minibatch would return its own extra_step_outputs, which this merge
+        # drops). The worker only requests multistep for a single captured-graph
+        # batch (no split), so reaching here with it set is a gate bug; strip it
+        # from the per-minibatch metadata so each minibatch runs single-step.
+        split_metadata = batch.metadata
+        if split_metadata.get("num_decode_steps", 1) != 1:
+            split_metadata = dict(batch.metadata)
+            split_metadata["num_decode_steps"] = 1
+
         for i in range(0, n, bs):
             rids = batch.request_ids[i:min(i+bs, n)]
             minibatch = NodeBatch(
@@ -376,7 +395,7 @@ class BaseEngine(ABC):
                     rid: batch.per_request_info[rid] for rid in rids \
                         if rid in batch.per_request_info
                 },
-                metadata=batch.metadata
+                metadata=split_metadata
             )
             minibatch_out = self.execute_batch(minibatch)
             # Fold each sub-batch's forward window back into the parent batch's

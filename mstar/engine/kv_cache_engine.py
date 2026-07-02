@@ -18,7 +18,11 @@ from mstar.engine.base import (
 )
 from mstar.engine.cache_manager import BatchedCacheManager, WorkspaceBufferManager
 from mstar.engine.cpu_page_pool import CPUPagePool
-from mstar.engine.cuda_graph_runner import _DIRECT_FEED_KEY, CudaGraphRunner
+from mstar.engine.cuda_graph_runner import (
+    _DIRECT_FEED_KEY,
+    _MULTISTEP_EXTRA_KEY,
+    CudaGraphRunner,
+)
 from mstar.engine.kv_store import (
     AllocationFailedError,
     KVCacheConfig,
@@ -665,24 +669,42 @@ class KVCacheEngine(BaseEngine):
             advance_event=batch.metadata.get("advance_event"),
             launch_started_event=batch.metadata.get("launch_started_event"),
             exec_timings=batch.exec_timings if self.enable_profile else None,
+            # MSTAR_MULTISTEP_DECODE: run this many decode steps in one
+            # submission. 1 (default / absent) is the unchanged single-step
+            # path. The worker sets this only when it has confirmed the batch
+            # is eligible (uniform thinker_decode + DIRECT_FEED + enough tokens).
+            num_decode_steps=batch.metadata.get("num_decode_steps", 1),
         )
 
-        # MSTAR_DIRECT_FEED: the runner may stash (batched_sampled_tokens,
-        # rid_order) under a private sentinel key in the per-rid map. Pop it off
-        # here — never let it reach the worker's rid-keyed
-        # per_request_output_tensors — and hoist it onto the NodeOutput.
-        # Absent (flag off, or non-fast-path) → NodeOutput carries None and the
-        # per-rid map is byte-identical.
-        direct_feed = batched_output.pop(_DIRECT_FEED_KEY, None)
+        # MSTAR_MULTISTEP_DECODE: the runner may stash a list of later steps'
+        # per-rid maps under a sentinel key. Pop it off first (never let it
+        # reach the worker's rid-keyed map) and build one NodeOutput per extra
+        # step, each with its own DIRECT_FEED hoist. Absent for single-step.
+        extra_raw = batched_output.pop(_MULTISTEP_EXTRA_KEY, None)
+        extra_outputs = (
+            [self._hoist_direct_feed(m) for m in extra_raw]
+            if extra_raw else None
+        )
+
+        primary = self._hoist_direct_feed(batched_output)
+        primary.extra_step_outputs = extra_outputs
+        return primary
+
+    def _hoist_direct_feed(self, per_rid_map: dict) -> NodeOutput:
+        """Wrap a runner per-rid output map in a NodeOutput, hoisting the
+        MSTAR_DIRECT_FEED sentinel (if present) onto ``batched_sampled_tokens``
+        / ``batched_sampled_rids`` and popping it off the rid-keyed map so it
+        never reaches the worker's ``per_request_output_tensors``. Absent
+        sentinel → NodeOutput carries None and the map is byte-identical."""
+        direct_feed = per_rid_map.pop(_DIRECT_FEED_KEY, None)
         if direct_feed is not None:
             sampled, rid_order = direct_feed
             return NodeOutput(
-                per_request_output_tensors=batched_output,
+                per_request_output_tensors=per_rid_map,
                 batched_sampled_tokens=sampled,
                 batched_sampled_rids=rid_order,
             )
-
-        return NodeOutput(per_request_output_tensors=batched_output)
+        return NodeOutput(per_request_output_tensors=per_rid_map)
 
     def execute_batch(self, batch: NodeBatch) -> NodeOutput:
         """Wrap the template with the KV-cache allocation-failure envelope.
@@ -902,12 +924,23 @@ class KVCacheEngine(BaseEngine):
     def postprocess_batch(self, planned: PlannedBatch, output: NodeOutput) -> None:
         batch = planned.batch
         submodule = planned.submodule
-        for rid, info in batch.per_request_info.items():
-            submodule.postprocess(
-                request_id=rid,
-                request_info=info,
-                outputs=output.per_request_output_tensors.get(rid, {}),
-            )
+        # MSTAR_MULTISTEP_DECODE: apply submodule.postprocess to EVERY decode
+        # step produced by this submission, not just the first. postprocess does
+        # per-step work the downstream (e.g. Talker) depends on — dropping
+        # new_token on non-return walks and, for audio_output requests,
+        # collapsing the packed (seq_len, 2*hidden) thinker_states into the
+        # masked (kept, hidden) form. Skipping it on steps 2..N would ship the
+        # wrong thinker_states shape. Single-step: just [output].
+        step_outputs = [output]
+        if output.extra_step_outputs:
+            step_outputs.extend(output.extra_step_outputs)
+        for step_out in step_outputs:
+            for rid, info in batch.per_request_info.items():
+                submodule.postprocess(
+                    request_id=rid,
+                    request_info=info,
+                    outputs=step_out.per_request_output_tensors.get(rid, {}),
+                )
 
     def _get_needed_labels(
         self, node_name: str, graph_walk: str,

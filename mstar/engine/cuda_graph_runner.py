@@ -55,6 +55,23 @@ MSTAR_DIRECT_FEED = os.environ.get("MSTAR_DIRECT_FEED", "0") == "1"
 # kv_cache_engine._execute_with_cuda_graph and hoisted onto NodeOutput.
 _DIRECT_FEED_KEY = "__direct_feed_sampled__"
 
+# MSTAR_MULTISTEP_DECODE=N (read by the Worker, threaded in as
+# ``_run_basic_batched(num_decode_steps=N)``): run up to N decode steps inside
+# ONE GPU-thread submission for a uniform thinker_decode BASIC_BATCHED batch,
+# amortizing the per-step main-loop cycle (await_gpu + speculate +
+# thread-outputs + submit + prepare/plan/copy) over N replays. Default 1 (OFF,
+# byte-identical). Only BASIC_BATCHED decode with MSTAR_DIRECT_FEED active is
+# eligible; step s>0's input is built from step s-1's sampled tokens exactly as
+# DIRECT_FEED feeds the next speculation. See CudaGraphRunner._run_basic_batched
+# and Worker._eligible_multistep_decode.
+
+# Sentinel key carrying the SECOND (and later) decode step's per-rid output
+# maps out of the runner. _run_basic_batched stashes a list of extra-step
+# dicts here; kv_cache_engine._execute_with_cuda_graph pops it and hoists each
+# onto its own NodeOutput so the worker can postprocess the steps sequentially.
+# Absent unless multistep actually ran >1 step this submission.
+_MULTISTEP_EXTRA_KEY = "__multistep_extra_steps__"
+
 
 DEFAULT_AR_CAPTURE_BATCH_SIZES = [1, 2, 4, 8, 16, 32, 64]
 
@@ -1157,6 +1174,7 @@ class CudaGraphRunner:
         advance_event: "object | None" = None,
         launch_started_event: "object | None" = None,
         exec_timings: ExecTimings | None = None,
+        num_decode_steps: int = 1,
     ) -> dict:
         """Look up the matching captured graph and dispatch on config type.
 
@@ -1212,6 +1230,7 @@ class CudaGraphRunner:
                 advance_event=advance_event,
                 launch_started_event=launch_started_event,
                 exec_timings=exec_timings,
+                num_decode_steps=num_decode_steps,
             )
         if cfg_type == CudaGraphConfigType.FLASH_INFER_PACKED:
             return self._run_flashinfer_packed(
@@ -1235,6 +1254,7 @@ class CudaGraphRunner:
         advance_event: "object | None" = None,
         launch_started_event: "object | None" = None,
         exec_timings: ExecTimings | None = None,
+        num_decode_steps: int = 1,
     ) -> dict:
         """Decode-style replay. Pads real inputs to padded_bs by cloning the capture
         template, then routes through submodule.preprocess (which re-plans attention
@@ -1244,6 +1264,22 @@ class CudaGraphRunner:
         ``slot_data`` is the chosen double-buffer slot (graph + persistent
         wrappers + cache_manager). Same logic as before — we just look up the
         slot's graph/cm instead of reading flat fields off ``graph_data``.
+
+        ``num_decode_steps`` (MSTAR_MULTISTEP_DECODE): when > 1, run that many
+        decode steps back-to-back inside this single call on the SAME slot's
+        graph + wrappers. Steps s>0 build their input from step s-1's sampled
+        tokens (the DIRECT_FEED mechanism, applied inline) and re-plan+re-replay
+        the same captured graph — exactly what the main loop does across
+        iterations, just without the round-trip. The state swap (Step 1) and
+        restore (Step 7) bracket ALL steps: the real states stay aliased onto
+        the dummy slots for the whole sequence, so each step's advance_seq_lens
+        moves the real states forward and the next step's plan sees the updated
+        seq_lens. Only step 0 is byte-identical to the single-step path; the
+        multistep loop is entered only when the caller (worker) has confirmed
+        eligibility (uniform thinker_decode, DIRECT_FEED on, no in-graph
+        penalty, >=num_decode_steps tokens remaining per rid). Returns step 0's
+        per-rid map (plus the DIRECT_FEED sentinel) with later steps' maps
+        stashed under _MULTISTEP_EXTRA_KEY.
         """
         real_bs = len(request_ids)
         padded_bs = key.bs
@@ -1259,6 +1295,15 @@ class CudaGraphRunner:
         capture_template = static["capture_template"]
         config_labels = graph_data.config.labels
 
+        # Multistep is a same-slot double-replay; it is only ever requested for
+        # a uniform thinker_decode batch with DIRECT_FEED on (worker gate). The
+        # in-graph seen-token penalty forces single-step: its per-step mask
+        # would need a between-step update the inline loop doesn't do, so refuse
+        # here too (defensive — the worker also gates on it). Clamp to >=1.
+        num_steps = max(1, int(num_decode_steps))
+        if graph_data.applied_penalty_in_graph:
+            num_steps = 1
+
         # Swap-and-restore must be paired: if any step between swap and restore
         # raises (e.g., submodule.preprocess hitting an insufficient-KV alloc
         # failure), the dummy slots are still aliased to real RequestState
@@ -1266,8 +1311,12 @@ class CudaGraphRunner:
         # on failure since the captured forward never replayed.
         swapped = False
         success = False
+        # Extra-step per-rid maps (steps 1..num_steps-1). Empty for single-step.
+        extra_step_outputs: list[dict] = []
         try:
             # --- Step 1: Swap real request states onto dummy slots ---
+            # Runs ONCE for the whole multistep sequence — real states stay
+            # aliased across every inline replay below.
             if self.enable_nvtx:
                 mark("gpu_thread.preprocess_start")
                 range_push("gpu_thread.preprocess", synchronize=False)
@@ -1290,140 +1339,190 @@ class CudaGraphRunner:
             if self.enable_nvtx:
                 range_pop(synchronize=False)
 
-            # --- Step 2: Pad inputs to padded_bs and re-plan via preprocess ---
-            if self.enable_nvtx:
-                range_push("cg.preprocess_replan", synchronize=False)
-            if self.enable_nvtx:
-                range_push("cg.preprocess_replan.pad_inputs", synchronize=False)
-            real_inputs = list(inputs)
-            # Padding slots reuse the capture_template so submodule.preprocess sees the
-            # same input shape it saw at capture time and doesn't crash on missing keys.
-            for _i in range(real_bs, padded_bs):
-                real_inputs.append(capture_template.clone())
-            if self.enable_nvtx:
-                range_pop(synchronize=False)
+            # ``step_inputs`` is the real per-request ARNodeInputs list for the
+            # current step; step 0 uses the caller's ``inputs``, step s>0
+            # rebuilds it from step s-1's sampled tokens below. ``prev_step_out``
+            # is the previous step's _sample_and_remap dict (carries the
+            # DIRECT_FEED sentinel we feed forward).
+            step_inputs = inputs
+            outputs: dict = {}
+            prev_step_out: dict = {}
+            for step in range(num_steps):
+                is_first = step == 0
+                is_last = step == num_steps - 1
 
-            if self.enable_nvtx:
-                range_push("cg.preprocess_replan.metadata", synchronize=False)
-            real_metadata = self._build_replay_metadata(
-                dummy_rids, request_ids, real_bs,
-                per_request_info, static["dummy_metadata"],
-            )
-            # Stage the live seen-token masks into master before the gather so
-            # the per-step buffer reflects the request's accumulated tokens for
-            # the in-graph penalty. Gated per-config; no-op for non-penalty graphs.
-            if graph_data.applied_penalty_in_graph:
-                self.sampler_buffer.stage_seen_token_masks(
-                    request_ids,
-                    [self.sampler._seen_token_mask[rid] for rid in request_ids],
+                # --- Step 2a (s>0 only): build this step's input from the
+                # previous step's sampled tokens. DIRECT_FEED, inline: the
+                # loop-back token for iter s IS the token sampled at iter s-1.
+                # ``prepare_inputs_batched`` reads each real state's
+                # post-advance position_id_start (advanced by the previous
+                # iter's Step 5), so pos-ids track the sequence correctly.
+                if not is_first:
+                    prev_sampled = prev_step_out.get(_DIRECT_FEED_KEY)
+                    step_inputs = self._build_next_decode_inputs(
+                        submodule=submodule,
+                        graph_walk=key.graph_walk,
+                        request_ids=request_ids,
+                        prev_sampled=prev_sampled[0] if prev_sampled else None,
+                    )
+
+                # --- Step 2: Pad inputs to padded_bs and re-plan via preprocess ---
+                if self.enable_nvtx:
+                    range_push("cg.preprocess_replan", synchronize=False)
+                if self.enable_nvtx:
+                    range_push("cg.preprocess_replan.pad_inputs", synchronize=False)
+                real_inputs = list(step_inputs)
+                # Padding slots reuse the capture_template so submodule.preprocess sees the
+                # same input shape it saw at capture time and doesn't crash on missing keys.
+                for _i in range(real_bs, padded_bs):
+                    real_inputs.append(capture_template.clone())
+                if self.enable_nvtx:
+                    range_pop(synchronize=False)
+
+                if self.enable_nvtx:
+                    range_push("cg.preprocess_replan.metadata", synchronize=False)
+                real_metadata = self._build_replay_metadata(
+                    dummy_rids, request_ids, real_bs,
+                    per_request_info, static["dummy_metadata"],
                 )
-            engine_inputs = ModelInputsFromEngine(
-                request_ids=dummy_rids,
-                per_request_info=real_metadata,
-                cache_manager=static_cm,
-                sampler=self._get_sampler(
-                    per_request_info=per_request_info,
+                # Stage the live seen-token masks into master before the gather so
+                # the per-step buffer reflects the request's accumulated tokens for
+                # the in-graph penalty. Gated per-config; no-op for non-penalty graphs.
+                # (num_steps is forced to 1 when this gate is on, so this only ever
+                # runs on the single-step path.)
+                if graph_data.applied_penalty_in_graph:
+                    self.sampler_buffer.stage_seen_token_masks(
+                        request_ids,
+                        [self.sampler._seen_token_mask[rid] for rid in request_ids],
+                    )
+                engine_inputs = ModelInputsFromEngine(
+                    request_ids=dummy_rids,
+                    per_request_info=real_metadata,
+                    cache_manager=static_cm,
+                    sampler=self._get_sampler(
+                        per_request_info=per_request_info,
+                        request_ids=request_ids,
+                        padded_bs=padded_bs,
+                        gather_seen_tokens=graph_data.applied_penalty_in_graph,
+                    )
+                )
+                if self.enable_nvtx:
+                    range_pop(synchronize=False)
+                    range_push("cg.preprocess_replan.submodule_preprocess", synchronize=False)
+                real_inputs = submodule.preprocess(
+                    graph_walk=key.graph_walk,
+                    engine_inputs=engine_inputs,
+                    inputs=real_inputs,
+                )
+                if self.enable_nvtx:
+                    range_pop(synchronize=False)
+                if self.enable_nvtx:
+                    range_pop(synchronize=False)
+
+                # --- Step 3: Copy real packed tensors into static buffers ---
+                if self.enable_nvtx:
+                    range_push("cg.copy_inputs", synchronize=False)
+                for k in static_input_keys:
+                    real_val = real_inputs.get(k)
+                    if real_val is None or not isinstance(real_val, torch.Tensor):
+                        continue
+                    static_buf = preprocessed[k]
+                    static_buf[:real_val.shape[0]].copy_(real_val)
+                if self.enable_nvtx:
+                    range_pop(synchronize=False)
+                    range_pop(synchronize=False)
+                    mark("gpu_thread.preprocess_end")
+
+                # --- Step 4: Replay ---
+                # If pre-plan was applied for this iter, the wrapper's
+                # static buffers were written on a side stream. Make the default
+                # stream wait on plan_done_event before replay reads them.
+                # (Only step 0 can carry a pre-plan; steps s>0 always plan
+                # inline above, and _plan_done_event stays None.)
+                plan_done_event = getattr(static_cm, "_plan_done_event", None)
+                if plan_done_event is not None:
+                    torch.cuda.default_stream(self.device).wait_event(plan_done_event)
+                    static_cm._plan_done_event = None
+                if self.enable_nvtx:
+                    mark("gpu_thread.cuda_graph_start")
+                    range_push("gpu_thread.cuda_graph", synchronize=False)
+                    range_push("cg.replay", synchronize=False)
+                # Release the main thread now that all CPU-side prep is done and
+                # we're about to enter the CUDA driver. graph.replay() drops the
+                # GIL inside C++, so main-thread postprocess can overlap. Only
+                # signal on step 0: the main thread is waiting to overlap
+                # against the FIRST replay; later replays are inline work on
+                # this GPU thread with no external waiter.
+                if is_first and launch_started_event is not None:
+                    launch_started_event.set()
+                if is_first and exec_timings is not None:
+                    exec_timings.fwd_start = time.perf_counter()
+                graph.replay()
+                if self.enable_nvtx:
+                    range_pop(synchronize=False)
+                    range_pop(synchronize=False)
+                    mark("gpu_thread.cuda_graph_end")
+
+                if graph_data.applied_penalty_in_graph:
+                    engine_inputs.sampler.sync_seen_token_masks(
+                        [self.sampler._seen_token_mask[rid] for rid in request_ids]
+                    )
+
+                # --- Step 5: Advance seq_lens on REAL request states (Python-only) ---
+                # advance_seq_lens is not captured in the graph; we call it manually so
+                # the real states (aliased onto dummy slots) move forward. In
+                # multistep this also sets up the NEXT step's plan (seq_len+1).
+                if self.enable_nvtx:
+                    mark("gpu_thread.postprocess_start")
+                    range_push("gpu_thread.postprocess", synchronize=False)
+                if self.enable_nvtx:
+                    range_push("cg.advance_seq_lens", synchronize=False)
+                for label in config_labels:
+                    static_cm.set_active_label(label)
+                    static_cm.advance_seq_lens()
+                if self.enable_nvtx:
+                    range_pop(synchronize=False)
+
+                # Signal that alloc_manager state for this submission is now
+                # post-advance. plan_executor's pre_plan(next submission) waits
+                # on this event instead of prev_future, so plan() starts ~tens
+                # of µs into the replay (overlapping remaining GPU work). Fire
+                # only after the LAST step's advance so the pre-planned NEXT
+                # submission sees the true post-submission seq_lens (not the
+                # intermediate step). Also signaled in the GPU thread's outer
+                # try/finally so a failure path still wakes plan_executor.
+                if is_last and advance_event is not None:
+                    advance_event.set()
+
+                # --- Step 6: Sample logits and remap dummy → real outputs ---
+                if self.enable_nvtx:
+                    range_push("cg.sample_and_remap", synchronize=False)
+                step_out = self._sample_and_remap(
                     request_ids=request_ids,
-                    padded_bs=padded_bs,
-                    gather_seen_tokens=graph_data.applied_penalty_in_graph,
+                    dummy_rids=dummy_rids,
+                    static_output=static_output,
+                    per_request_info=per_request_info,
+                    slot_data=slot_data,
+                    submodule=submodule,
+                    inputs=step_inputs,
+                    # Force-expose the batched sampled tensor even when the
+                    # worker-facing DIRECT_FEED flag is off, so the inline loop
+                    # can feed step s+1. Only requested for multistep (>1).
+                    force_direct_feed=num_steps > 1,
                 )
-            )
-            if self.enable_nvtx:
-                range_pop(synchronize=False)
-                range_push("cg.preprocess_replan.submodule_preprocess", synchronize=False)
-            real_inputs = submodule.preprocess(
-                graph_walk=key.graph_walk,
-                engine_inputs=engine_inputs,
-                inputs=real_inputs,
-            )
-            if self.enable_nvtx:
-                range_pop(synchronize=False)
-            if self.enable_nvtx:
-                range_pop(synchronize=False)
+                if self.enable_nvtx:
+                    range_pop(synchronize=False)
 
-            # --- Step 3: Copy real packed tensors into static buffers ---
-            if self.enable_nvtx:
-                range_push("cg.copy_inputs", synchronize=False)
-            for k in static_input_keys:
-                real_val = real_inputs.get(k)
-                if real_val is None or not isinstance(real_val, torch.Tensor):
-                    continue
-                static_buf = preprocessed[k]
-                static_buf[:real_val.shape[0]].copy_(real_val)
-            if self.enable_nvtx:
-                range_pop(synchronize=False)
-                range_pop(synchronize=False)
-                mark("gpu_thread.preprocess_end")
+                prev_step_out = step_out
+                if is_first:
+                    outputs = step_out
+                else:
+                    extra_step_outputs.append(step_out)
 
-            # --- Step 4: Replay ---
-            # If pre-plan was applied for this iter, the wrapper's
-            # static buffers were written on a side stream. Make the default
-            # stream wait on plan_done_event before replay reads them.
-            plan_done_event = getattr(static_cm, "_plan_done_event", None)
-            if plan_done_event is not None:
-                torch.cuda.default_stream(self.device).wait_event(plan_done_event)
-                static_cm._plan_done_event = None
-            if self.enable_nvtx:
-                mark("gpu_thread.cuda_graph_start")
-                range_push("gpu_thread.cuda_graph", synchronize=False)
-                range_push("cg.replay", synchronize=False)
-            # Release the main thread now that all CPU-side prep is done and
-            # we're about to enter the CUDA driver. graph.replay() drops the
-            # GIL inside C++, so main-thread postprocess can overlap.
-            if launch_started_event is not None:
-                launch_started_event.set()
-            if exec_timings is not None:
-                exec_timings.fwd_start = time.perf_counter()
-            graph.replay()
-            if self.enable_nvtx:
-                range_pop(synchronize=False)
-                range_pop(synchronize=False)
-                mark("gpu_thread.cuda_graph_end")
-
-
-            if graph_data.applied_penalty_in_graph:
-                engine_inputs.sampler.sync_seen_token_masks(
-                    [self.sampler._seen_token_mask[rid] for rid in request_ids]
-                )
-
-            # --- Step 5: Advance seq_lens on REAL request states (Python-only) ---
-            # advance_seq_lens is not captured in the graph; we call it manually so
-            # the real states (aliased onto dummy slots) move forward.
-            if self.enable_nvtx:
-                mark("gpu_thread.postprocess_start")
-                range_push("gpu_thread.postprocess", synchronize=False)
-            if self.enable_nvtx:
-                range_push("cg.advance_seq_lens", synchronize=False)
-            for label in config_labels:
-                static_cm.set_active_label(label)
-                static_cm.advance_seq_lens()
-            if self.enable_nvtx:
-                range_pop(synchronize=False)
-
-            # Signal that alloc_manager state for batch_N is now
-            # post-advance. plan_executor's pre_plan(batch_(N+1)) waits on this
-            # event instead of prev_future, so plan() starts ~tens of µs into
-            # replay(N) (overlapping with replay(N)'s remaining GPU work) rather
-            # than after replay(N) fully completes. The event is also signaled
-            # in the GPU thread's outer try/finally so a failure path still
-            # wakes plan_executor.
-            if advance_event is not None:
-                advance_event.set()
-
-            # --- Step 6: Sample logits and remap dummy → real outputs ---
-            if self.enable_nvtx:
-                range_push("cg.sample_and_remap", synchronize=False)
-            outputs = self._sample_and_remap(
-                request_ids=request_ids,
-                dummy_rids=dummy_rids,
-                static_output=static_output,
-                per_request_info=per_request_info,
-                slot_data=slot_data,
-                submodule=submodule,
-                inputs=inputs,
-            )
-            if self.enable_nvtx:
-                range_pop(synchronize=False)
+            # Attach later steps' per-rid maps under the sentinel so the engine
+            # can hoist them onto their own NodeOutputs. Only present for >1 step.
+            if extra_step_outputs:
+                outputs[_MULTISTEP_EXTRA_KEY] = extra_step_outputs
 
             success = True
             return outputs
@@ -1753,6 +1852,63 @@ class CudaGraphRunner:
         if self.enable_nvtx:
             range_pop(synchronize=False)
 
+    def _build_next_decode_inputs(
+        self,
+        submodule: ARNodeSubmodule,
+        graph_walk: str,
+        request_ids: list[str],
+        prev_sampled: "torch.Tensor | None",
+    ) -> list[ARNodeInputs]:
+        """Build the next decode step's per-request ARNodeInputs from the
+        previous step's sampled tokens (inline DIRECT_FEED for multistep).
+
+        ``prev_sampled`` is the batched ``[bs, 1]`` (or ``[bs]``) sampled-token
+        tensor produced by ``_sample_and_remap`` for the SAME ``request_ids``
+        order (it is the ``_DIRECT_FEED_KEY`` value's tensor). Each row becomes
+        the ``text_inputs`` loop-back token for its request, exactly as the
+        worker's cross-submission DIRECT_FEED path splices it — the difference
+        is only that we do it inline on the GPU thread instead of round-tripping
+        through the main loop.
+
+        Position IDs come from each real request state's current
+        ``position_id_start``, which the previous step's ``advance_seq_lens``
+        already moved forward. Uses ``prepare_inputs_batched`` (one embed +
+        one pos H2D for the batch), the same fast path ``prepare_batch`` uses.
+        """
+        if prev_sampled is None:
+            raise RuntimeError(
+                "multistep decode: previous step exposed no sampled tokens "
+                "(force_direct_feed not honored?) — cannot build next input"
+            )
+        # Per-request loop-back token views. prev_sampled rows align with
+        # request_ids (the order _sample_and_remap stashed). Each becomes a
+        # length-1 text_inputs entry, matching prepare_inputs_batched's
+        # ``inputs["text_inputs"][0].reshape(-1)[:1]`` read.
+        rows = prev_sampled.split(1)
+        inputs_list = [
+            {"text_inputs": [rows[i].reshape(-1)]}
+            for i in range(len(request_ids))
+        ]
+        # Post-advance position info per request (label "main" for thinker).
+        pos_infos = []
+        for rid in request_ids:
+            labels = self.alloc_manager.get_labels(rid)
+            pos_infos.append({
+                label: self.alloc_manager.get_state(rid, label).get_pos_info()
+                for label in labels
+            })
+        next_inputs = submodule.prepare_inputs_batched(
+            graph_walk=graph_walk,
+            inputs_list=inputs_list,
+            pos_infos=pos_infos,
+        )
+        if next_inputs is None:
+            raise RuntimeError(
+                f"multistep decode: prepare_inputs_batched returned None for "
+                f"walk={graph_walk!r} — only uniform thinker_decode is eligible"
+            )
+        return next_inputs
+
     def _sample_and_remap(
         self,
         request_ids: list[str],
@@ -1762,6 +1918,7 @@ class CudaGraphRunner:
         slot_data: CudaGraphSlot,
         submodule: ARNodeSubmodule,
         inputs: list[ARNodeInputs] | None = None,
+        force_direct_feed: bool = False,
     ) -> dict:
         """Sample logits + copy non-logit per-rid outputs, remapping dummy → real rids.
 
@@ -1811,7 +1968,7 @@ class CudaGraphRunner:
             # already-cloned tensor. Popped off before the per-rid map reaches
             # the worker (kv_cache_engine._execute_with_cuda_graph), so
             # per_request_output_tensors stays byte-identical to flag-off.
-            if MSTAR_DIRECT_FEED:
+            if MSTAR_DIRECT_FEED or force_direct_feed:
                 outputs[_DIRECT_FEED_KEY] = (sampled, list(request_ids))
 
             # Collect non-logit per-rid outputs (e.g. hidden states) only when
