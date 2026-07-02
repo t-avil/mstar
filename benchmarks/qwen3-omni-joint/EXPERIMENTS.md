@@ -364,3 +364,16 @@ allowance + spec-path per-request routing for mixed batches) — the deferred
 deep variant is now the required next step, sized ~1-2 days. All machinery
 (capture, assembly, routing, chunk plumbing, tail-merge) is validated and
 waiting for it.
+
+## W5 spec-chain fold + bucket fix — FIRST NET-POSITIVE MIXED RESULT (+3.2% i2t B32)
+Iteration trail (all measured, all committed on exp/mixed-batch-p2):
+chain-break wiring 0.912× → spec-chain fold (505c833/3c42b5d/e31f39e:
+mixed batches assembled INSIDE the speculation chain — 41 in-chain folds vs
+3 breaks at B16 probe, B1/B8 penalties erased, B32 0.944×) → bucket fix
+(62472cf: tail-merged 258-token chunks + 31 decodes = 289 tokens overflowed
+the 288 bucket by ONE token → every fold padded to 544, ~88% waste; added
+C=288 bucket → total 320) → **back-to-back B32: 6.179 vs 5.986 shipping =
++3.2%, the first positive mixed-batch number.** Remaining tuning levers:
+pre-plan support for packed spec batches (mixed step still plans inline),
+fold-rate telemetry, bucket grid. Full interleaved A/B running for the
+definitive record.
