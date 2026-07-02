@@ -25,6 +25,21 @@ class ResultTensors:
 
 
 @dataclass
+class ResultTensorsBatch:
+    """Coalesced inline emit_to_client results for one decode step.
+
+    Carries the qualifying inline-emit ``ResultTensors`` of a single step
+    across all requests in the batch, sent as ONE APIServerMessage instead
+    of one per request (see MSTAR_BATCH_EMIT). Every item MUST be an
+    inline-values result (no transported SHM tensors), so the api-server
+    discard path stays a no-op per item. Items can have different
+    request_ids and different rid-status on the api side, so each is routed
+    individually — this is purely a transport-level fan-in / fan-out.
+    """
+    items: list[ResultTensors] = field(default_factory=list)
+
+
+@dataclass
 class RequestComplete:
     """Signals that a request has finished processing."""
     request_id: str
@@ -42,8 +57,8 @@ class RequestComplete:
 @dataclass
 class APIServerMessage:
     """Envelope for messages received by the API server."""
-    message_type: str  # "result_tensors" | "request_complete" | "setup_done"
-    body: ResultTensors | RequestComplete | None = None  # None for setup_done message
+    message_type: str  # "result_tensors" | "result_tensors_batch" | "request_complete" | "setup_done"
+    body: ResultTensors | ResultTensorsBatch | RequestComplete | None = None  # None for setup_done message
 
 
 @dataclass

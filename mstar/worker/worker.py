@@ -12,7 +12,7 @@ from time import sleep
 
 import torch
 
-from mstar.api_server.request_types import APIServerMessage, ResultTensors
+from mstar.api_server.request_types import APIServerMessage, ResultTensors, ResultTensorsBatch
 from mstar.communication.communicator import CommProtocol, ZMQCommunicator
 from mstar.communication.event import EventWakeup
 from mstar.communication.tensors import NameToTensorList, create_tensor_communication_manager
@@ -146,6 +146,18 @@ class Worker:
         # in the result_tensors message instead of via the SHM tensor
         # transport. Default OFF. See _inline_emit_uuids / _send_outputs.
         self._inline_emit = os.environ.get("MSTAR_INLINE_EMIT", "0") == "1"
+
+        # Fast path: coalesce all qualifying inline emit_to_client messages of
+        # one decode step (across every rid in the batch) into ONE
+        # result_tensors_batch APIServerMessage, fanned out on the api_server
+        # side. Default OFF. Batch implies inline: it is the single flag ruling
+        # emission for qualifying edges, so enabling it turns on inline-emit
+        # semantics for those edges even if MSTAR_INLINE_EMIT is not set.
+        # Non-qualifying edges/messages are unaffected. See _send_outputs /
+        # _postprocess_batch.
+        self._batch_emit = os.environ.get("MSTAR_BATCH_EMIT", "0") == "1"
+        if self._batch_emit:
+            self._inline_emit = True
 
         if self.device.type == "cuda" and self.device.index is not None:
             torch.cuda.set_device(self.device)
@@ -1014,7 +1026,8 @@ class Worker:
         graph_walk: str | None = None,
         partition_name: str | None = None,
         prematerialized_new_tokens: dict[str, list[int]] | None = None,
-        node_speculatively_scheduled: bool=False
+        node_speculatively_scheduled: bool=False,
+        batch_collector: list["ResultTensors"] | None = None,
     ) -> None:
         """
         Send outputs to other workers and to the conductor.
@@ -1028,6 +1041,15 @@ class Worker:
         multiple requests' new-token transfers into a single D→H to avoid
         N serialized ``cudaMemcpyAsync`` + ``cudaStreamSynchronize`` per
         step.
+
+        ``batch_collector`` (optional): when supplied (MSTAR_BATCH_EMIT), a
+        qualifying inline emit_to_client edge's ``ResultTensors`` is appended
+        to this list instead of being sent as its own result_tensors message;
+        the caller coalesces the whole step's collector into a single
+        result_tensors_batch message. ONLY inline-qualifying edges are
+        collected — every non-inline emit edge (and every other message here)
+        is sent immediately exactly as without the flag. The producer-side
+        ref release for inline uuids is unchanged: it happens here per rid.
         """
         if graph_walk is None:
             graph_walk = self.worker_graphs_manager.get_graph_walk(request_id, partition_name)
@@ -1105,17 +1127,26 @@ class Worker:
                     }
                     for info in graph_edge.tensor_info:
                         local_release[info.uuid] = local_release.get(info.uuid, 0) + 1
-                message = APIServerMessage(
-                    message_type="result_tensors",
-                    body=ResultTensors(
-                        request_id=request_id,
-                        modality=graph_edge.output_modality,
-                        graph_edge=graph_edge,
-                        loop_indices=nested_loop_indices,
-                        metadata=metadata
-                    )
+                result_tensors = ResultTensors(
+                    request_id=request_id,
+                    modality=graph_edge.output_modality,
+                    graph_edge=graph_edge,
+                    loop_indices=nested_loop_indices,
+                    metadata=metadata
                 )
-                self.communicator.send("api_server", message)
+                if batch_collector is not None and edge_inline:
+                    # Coalesced path: defer to a single result_tensors_batch
+                    # message built by the caller after the rid loop. Only
+                    # inline edges are collected — non-inline edges below still
+                    # send their own message, byte-identical to the flag-off
+                    # path.
+                    batch_collector.append(result_tensors)
+                else:
+                    message = APIServerMessage(
+                        message_type="result_tensors",
+                        body=result_tensors,
+                    )
+                    self.communicator.send("api_server", message)
 
             # Release the producer-side ref for inline uuids now: no
             # TENSOR_RECEIVED ack will ever arrive for them (they were never
@@ -1938,6 +1969,14 @@ class Worker:
                 batch_N.node_batch.request_ids,
                 batch_N.node_batch.exec_timings,
             )
+        # MSTAR_BATCH_EMIT: collect every rid's qualifying inline emit results
+        # into one list and send them as a single result_tensors_batch message
+        # after the loop, instead of one result_tensors message per rid. When
+        # off, batch_collector stays None and each rid sends its own messages
+        # exactly as before (byte-identical).
+        batch_collector: list[ResultTensors] | None = (
+            [] if self._batch_emit else None
+        )
         for rid, routing in routing_per_request.items():
             self._send_outputs(
                 rid, routing,
@@ -1945,7 +1984,16 @@ class Worker:
                 graph_walk=batch_N.graph_walk,
                 partition_name=batch_N.partition,
                 prematerialized_new_tokens=prem_per_request[rid],
-                node_speculatively_scheduled=batch_N.batch.node_objects[rid]._speculatively_scheduled
+                node_speculatively_scheduled=batch_N.batch.node_objects[rid]._speculatively_scheduled,
+                batch_collector=batch_collector,
+            )
+        if batch_collector:
+            self.communicator.send(
+                "api_server",
+                APIServerMessage(
+                    message_type="result_tensors_batch",
+                    body=ResultTensorsBatch(items=batch_collector),
+                ),
             )
 
         if self.enable_nvtx:

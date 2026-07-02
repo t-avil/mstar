@@ -22,7 +22,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from mstar.api_server.data_worker import PreprocessWorker
-from mstar.api_server.request_types import APIServerMessage, PreprocessInput, ResultChunk
+from mstar.api_server.request_types import APIServerMessage, PreprocessInput, ResultChunk, ResultTensors
 from mstar.communication.communicator import CommProtocol, ZMQCommunicator
 from mstar.model.registry import HF_MODELS
 from mstar.profile.display import pretty_print_profile
@@ -330,6 +330,29 @@ class APIServer:
             self.preprocess_worker.cleanup_request(rid)
             self.recently_completed.pop(rid, None)
 
+    def _route_result_tensors(self, body: "ResultTensors") -> None:
+        """Route one ResultTensors by its own request_id status.
+
+        Caller MUST hold ``self.request_lock``. Shared by the single
+        result_tensors message and each item of a coalesced
+        result_tensors_batch (MSTAR_BATCH_EMIT), so the two paths stay
+        identical per item: pending -> new_result_tensors; recently-completed
+        or unknown -> discard_result_tensors (a no-op for inline-values items).
+        """
+        rid = body.request_id
+        if rid in self.pending_requests:
+            logger.debug(
+                "Got new tensors of %s modality for request %s",
+                body.modality, rid
+            )
+            self.preprocess_worker.new_result_tensors(body)
+        elif rid in self.recently_completed:
+            logger.debug("Late result_tensors for completed %s", rid)
+            self.preprocess_worker.discard_result_tensors(body)
+        else:
+            logger.warning("result_tensors for unknown request %s", rid)
+            self.preprocess_worker.discard_result_tensors(body)
+
     def _process_messages(self) -> None:
         """Drain the ZMQ pull socket and route results to pending requests."""
         while self.running:
@@ -343,18 +366,27 @@ class APIServer:
                         logger.warning("Unexpected message type: %s", type(message))
                         continue
 
+                    if message.message_type == "result_tensors_batch":
+                        # Coalesced inline emit results for one decode step
+                        # (MSTAR_BATCH_EMIT). Each item is an independent
+                        # ResultTensors with its own request_id and rid-status,
+                        # so route each exactly as a standalone result_tensors
+                        # message. Items are inline-values only, so the discard
+                        # path is a per-item no-op. One lock acquisition covers
+                        # the whole step's fan-out (same granularity intent as
+                        # the single-message path: one lock per received
+                        # message).
+                        with self.request_lock:
+                            for item in message.body.items:
+                                self._route_result_tensors(item)
+                        continue
+
                     rid = message.body.request_id
 
                     with self.request_lock:
                         if rid in self.pending_requests:
                             if message.message_type == "result_tensors":
-                                logger.debug(
-                                    "Got new tensors of %s modality for request %s",
-                                    message.body.modality, rid
-                                )
-                                self.preprocess_worker.new_result_tensors(
-                                    message.body
-                                )
+                                self._route_result_tensors(message.body)
                             elif message.message_type == "request_complete":
                                 logger.info("API server received %s done", rid)
                                 self.recently_completed[rid] = time.time()
