@@ -1449,6 +1449,35 @@ class Worker:
             key = (batch.node_name, batch.graph_walk)
             self._walk_stats[key] = self._walk_stats.get(key, 0) + 1
             self._walk_stats_step += 1
+            # Classify standalone prefill steps: chunked (clen bucket) vs
+            # unchunked (raw span bucket from the widest input tensor) — sizes
+            # the two mixable-gate misses (no chunk metadata / C too big).
+            if batch.graph_walk.startswith("prefill_"):
+                for rid in node_batch.request_ids:
+                    fi = node_batch.per_request_info.get(rid)
+                    clen = None
+                    if fi is not None:
+                        md = getattr(fi, "step_metadata", None)
+                        if md:
+                            clen = md.get("prefill_chunk_len")
+                    if clen is None:
+                        span = 0
+                        for tl in node_batch.per_request_input_tensors.get(
+                            rid, {}
+                        ).values():
+                            for t in tl:
+                                if hasattr(t, "shape") and len(t.shape) >= 1:
+                                    span = max(span, int(t.shape[0]))
+                        ck = f"_pf_unchunked_{batch.graph_walk[8:]}_" + (
+                            "le256" if span <= 256 else
+                            "le512" if span <= 512 else "gt512"
+                        )
+                    else:
+                        ck = f"_pf_chunk_{batch.graph_walk[8:]}_" + (
+                            "le256" if int(clen) <= 256 else
+                            "le512" if int(clen) <= 512 else "gt512"
+                        )
+                    self._walk_stats[ck] = self._walk_stats.get(ck, 0) + 1
             if self._walk_stats_step % 200 == 0:
                 logger.warning(
                     "WALK_STATS step=%d %s",
