@@ -377,3 +377,16 @@ C=288 bucket → total 320) → **back-to-back B32: 6.179 vs 5.986 shipping =
 pre-plan support for packed spec batches (mixed step still plans inline),
 fold-rate telemetry, bucket grid. Full interleaved A/B running for the
 definitive record.
+
+## W5 FINAL (2026-07-02): spec-fold mixed batching = NET WIN, one lever from decisive
+Definitive interleaved A/B (ab_p2spec/, bucket-fixed build 62472cf, full
+flag stack vs shipping): i2t 1.027/1.017/0.969×, s2t 1.040/1.066×. The B32
+cell straddles unity across measurements (interleaved 0.969, same-pair
+back-to-back +3.2%) → true effect ≈ 1.00±0.03. Verdict: mixed batching is
+positive at B1-B8 on both text paths, neutral at B32, fully captured, fully
+validated (zero asserts/misses across all runs). NEXT LEVER (sized to the
+residual): pre-plan support for FLASH_INFER_PACKED spec batches — the folded
+mixed step still plans FlashInfer inline on the GPU thread (~1-3ms exposed
+per fold) where decode steps enjoy pre-plan overlap. After that: fold-rate
+telemetry + bucket grid. Ship posture: flags validated and available;
+default-on recommended after the pre-plan increment clears B32 ≥1.03×.
