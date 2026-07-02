@@ -787,22 +787,38 @@ class KVCacheEngine(BaseEngine):
         node_inputs: list[ARNodeInputs] = []
         if self.enable_nvtx:
             range_push("kv_cache.prepare_inputs")
+        pos_infos = []
         for rid in batch.request_ids:
             labels = cache_mgmt.alloc_manager.get_labels(rid)
-            pos_info = {
+            pos_infos.append({
                 label: cache_mgmt.alloc_manager.get_state(
                     rid, label
                 ).get_pos_info() for label in labels
-            }
-            node_inputs.append(
-                submodule.prepare_inputs(
-                    graph_walk=batch.graph_walk,
-                    fwd_info=batch.per_request_info[rid],
-                    inputs=batch.per_request_input_tensors[rid],
-                    pos_info=pos_info,
-                    seen_token_mask=submod_mgmt.sampler.get_token_mask(rid)
-                )
+            })
+        prep_batched = getattr(submodule, "prepare_inputs_batched", None)
+        batched_inputs = None
+        if prep_batched is not None and len(batch.request_ids) > 1:
+            batched_inputs = prep_batched(
+                graph_walk=batch.graph_walk,
+                inputs_list=[
+                    batch.per_request_input_tensors[rid]
+                    for rid in batch.request_ids
+                ],
+                pos_infos=pos_infos,
             )
+        if batched_inputs is not None:
+            node_inputs = batched_inputs
+        else:
+            for rid, pos_info in zip(batch.request_ids, pos_infos):
+                node_inputs.append(
+                    submodule.prepare_inputs(
+                        graph_walk=batch.graph_walk,
+                        fwd_info=batch.per_request_info[rid],
+                        inputs=batch.per_request_input_tensors[rid],
+                        pos_info=pos_info,
+                        seen_token_mask=submod_mgmt.sampler.get_token_mask(rid)
+                    )
+                )
         if self.enable_nvtx:
             range_pop(synchronize=False)
 

@@ -511,6 +511,46 @@ class ThinkerSubmodule(ARNodeSubmodule):
             self._vision_eos_embed
         ], dim=0)
 
+    def prepare_inputs_batched(
+        self,
+        graph_walk: str,
+        inputs_list: list[NameToTensorList],
+        pos_infos: list[dict[str, PositionInfo]],
+        **kwargs,
+    ) -> list[ARNodeInputs] | None:
+        """Batched thinker_decode input prep: one token cat + ONE
+        embed_tokens launch + one pos-ids H2D for the whole batch, instead
+        of per-request embed_tokens (+ per-request tiny H2D) — at B32 that
+        is 32 embedding launches -> 1. Returns per-request zero-copy views
+        so everything downstream (preprocess, capture padding) is
+        unchanged. Returns None for other walks (engine falls back to the
+        per-request path).
+        """
+        if graph_walk != "thinker_decode":
+            return None
+        device = self.get_device()
+        toks = []
+        for inputs in inputs_list:
+            t = inputs["text_inputs"][0]
+            toks.append(t.reshape(-1)[:1])
+        token_ids = torch.cat(toks).to(device)          # (bs,)
+        embeds = self.model.model.embed_tokens(token_ids)  # (bs, hidden)
+        starts = [
+            pi.get("main", PositionInfo()).position_id_start for pi in pos_infos
+        ]
+        pos = torch.tensor(starts, dtype=torch.float).to(device, non_blocking=True)
+        pos3 = pos.unsqueeze(0).expand(3, -1)            # (3, bs)
+        mask = self._get_decode_thinker_mask(device)
+        return [
+            ARNodeInputs(
+                input_seq_len=1,
+                input_embeds=embeds[i:i + 1],
+                custom_pos_ids=pos3[:, i:i + 1],
+                tensor_inputs={"masks_for_talker": mask},
+            )
+            for i in range(len(inputs_list))
+        ]
+
     def prepare_inputs(
         self,
         graph_walk: str,

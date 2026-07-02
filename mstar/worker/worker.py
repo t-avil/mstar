@@ -1800,11 +1800,35 @@ class Worker:
                 batch_N.node_batch.exec_timings,
             )
         for rid, routing in routing_per_request.items():
+            # Reuse check_stop's side-stream D→H copies for the new-token
+            # ints. Without this, buffer_new_tokens does a per-rid
+            # ``get_tensor().cpu()`` — a default-stream sync per request per
+            # step (32/step at B32) that also serializes against the
+            # in-flight speculative step's kernels on the default stream.
+            prem: dict[str, list[int]] | None = None
+            rid_cpu = cpu_output.per_request_output_tensors.get(rid)
+            if isinstance(rid_cpu, dict):
+                prem = {}
+                for name, tensors in rid_cpu.items():
+                    if (
+                        isinstance(tensors, list)
+                        and tensors
+                        and all(
+                            torch.is_tensor(t)
+                            and not t.is_cuda
+                            and not t.is_floating_point()
+                            for t in tensors
+                        )
+                    ):
+                        prem[name] = [
+                            int(v) for t in tensors for v in t.flatten().tolist()
+                        ]
             self._send_outputs(
                 rid, routing,
                 nested_loop_indices=per_req_nested_idxs[rid],
                 graph_walk=batch_N.graph_walk,
                 partition_name=batch_N.partition,
+                prematerialized_new_tokens=prem,
                 node_speculatively_scheduled=batch_N.batch.node_objects[rid]._speculatively_scheduled
             )
 
