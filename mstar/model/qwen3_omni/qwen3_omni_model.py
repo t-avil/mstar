@@ -1235,12 +1235,18 @@ class Qwen3OmniModel(Model):
                 edge.tensor_info = list(infos)
                 edges.append(edge)
             # image_grid_thw / video_second_per_grid ride on the Thinker entry's
-            # tensor_dict (conductor-known inputs, not encoder outputs).
+            # tensor_dict (conductor-known inputs, not encoder outputs). ALWAYS
+            # emit the edge — with empty tensor_info when absent (image
+            # requests have no video_second_per_grid) — because the node
+            # declares the name in input_names and readiness requires every
+            # declared name to arrive (empty payload still marks it ready;
+            # this mirrors the original Sequential walk's behavior).
             for key in ("image_grid_thw", "video_second_per_grid"):
-                if key in tensor_dict:
-                    edge = GraphEdge(next_node="Thinker", name=key)
-                    edge.tensor_info = [tensor_dict[key]]
-                    edges.append(edge)
+                edge = GraphEdge(next_node="Thinker", name=key)
+                edge.tensor_info = (
+                    [tensor_dict[key]] if key in tensor_dict else []
+                )
+                edges.append(edge)
             return edges
 
         # Determine the target node — for audio/vision, the first node in
@@ -1348,14 +1354,17 @@ class Qwen3OmniModel(Model):
         if not chunked_prefill_v2_vision_enabled():
             return None
         if metadata.kwargs.get("audio_output", True):
+            logger.debug("VCHUNK gate: audio_output kwargs=%s", metadata.kwargs.get("audio_output"))
             return None
         walk = schedule[step][0]
         if walk != "prefill_vision":
             return None
         if persist_signals is None:
+            logger.debug("VCHUNK gate: persist_signals None")
             return None
         infos = persist_signals.get("vision_embeds", [])
         if not infos:
+            logger.debug("VCHUNK gate: no vision_embeds persist; keys=%s", list(persist_signals.keys()))
             return None
         dims = getattr(infos[0], "dims", None)
         if not dims:
