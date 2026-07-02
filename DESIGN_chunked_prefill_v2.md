@@ -89,22 +89,23 @@ chunk must apply the full remaining `mrope_pos_advance` jump via
 `set_custom_pos_advance`; non-last chunks advance by their `chunk_len`. (See the
 vision implementation spec below.)
 
-## Scope: what landed vs. what is specced for GPU implementation
+## Scope: text (MSTAR_CHUNKED_PREFILL_V2) + vision (MSTAR_CHUNKED_PREFILL_V2_VISION)
 
-**Landed (commit `feat(qwen3_omni): chunked Thinker TEXT prefill`)**: text-prefill
-chunking, fully wired, tested (CPU scheduler test), flag-off byte-identical.
+**Text chunking** (`MSTAR_CHUNKED_PREFILL_V2`): fully wired, CPU-tested, flag-off
+byte-identical. Alone it does NOT move i2t — for i2t the text prompt is tiny (~7
+tokens) and the prefill mega-step is the image's vision tokens.
 
-**Specced but NOT implemented — vision chunking (the i2t B32 win)**: For i2t the
-text prompt is tiny (~7 tokens, "Please describe this image in detail") and the
-prefill is dominated by the image's vision tokens (258+; up to thousands for
-video). So the ~27.5ms mega-step that stalls decoders is the **vision** Thinker
-prefill, and hitting the 0.77x->0.85-0.90x target requires chunking it — text
-chunking alone does not move i2t. This piece needs the encoder-split + staged
-window slicing + per-chunk MRoPE advance, all of which are silent-wrong-on-error
-and require GPU validation to land safely; it is specced below, not written, and
-gated `MSTAR_CHUNKED_PREFILL_V2_VISION` (default OFF within V2) when built.
+**Vision chunking** (`MSTAR_CHUNKED_PREFILL_V2_VISION`, default OFF within V2):
+IMPLEMENTED per the spec below. This is the i2t B32 win — the ~27.5ms mega-step
+that stalls decoders is the **vision** Thinker prefill (258+ vision tokens; up to
+thousands for video). Gated OFF by default because the staged window slicing +
+per-chunk MRoPE advance are silent-wrong-on-error and need GPU parity validation
+(bit-exact vs unchunked first token + decode positions) before turning on. The
+CPU scheduler test covers the conductor split + chunk cursor; the submodule
+staging/slice math is unit-verified on paper (seq_len and position_id_start both
+sum to the unchunked values for every vision length) but not yet GPU-run.
 
-### Vision implementation spec (GPU-required)
+### Vision implementation (matches the code)
 
 1. **Graph split** (`_get_thinker_graph_walks`, gate on `chunked_prefill_v2_vision
    _enabled()`): replace `prefill_vision = Sequential([vision_encoder, Thinker])`

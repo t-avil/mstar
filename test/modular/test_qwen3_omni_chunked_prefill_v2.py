@@ -73,6 +73,7 @@ class _Shim:
     _walk_span_tokens = Qwen3OmniModel._walk_span_tokens
     _log_first_chunk = Qwen3OmniModel._log_first_chunk
     _assert_walk_span = Qwen3OmniModel._assert_walk_span
+    _vision_chunk_bounds = Qwen3OmniModel._vision_chunk_bounds
     _get_thinker_forward = Qwen3OmniModel._get_thinker_forward
     _get_thinker_prefill_inputs = Qwen3OmniModel._get_thinker_prefill_inputs
 
@@ -217,4 +218,86 @@ def test_assert_hook_passes_on_valid_span(monkeypatch):
     persist = {"text_inputs": [schedule[0][1]["text_inputs"]]}
     # Should not raise: the summed committed offset matches span - last_chunk.
     steps = _drive(_Shim(), meta, persist)
+    assert steps[-1].get("decode") is True
+
+
+# --- chunked vision (encoder-split) conductor loop -------------------------
+def _drive_vision(shim, meta, persist, max_steps=50):
+    """Like _drive but the schedule leads with encode_vision (encoder-only, not
+    chunked) then a chunked prefill_vision whose span comes from the persisted
+    vision_embeds dims. Describes step 0 from the initial metadata."""
+    steps = []
+    schedule = meta.kwargs["prefill_schedule"]
+    walk0 = schedule[0][0]
+    bounds = shim._chunk_bounds(meta, schedule, 0, persist)
+    is_last = (len(schedule) == 1)
+    if bounds is not None:
+        off, ln, done = bounds
+        is_last = is_last and done
+        steps.append({"walk": walk0, "offset": off, "len": ln,
+                      "is_last_prefill": is_last})
+    else:
+        steps.append({"walk": walk0, "offset": 0, "len": None,
+                      "is_last_prefill": is_last})
+    for _ in range(max_steps):
+        fwd = shim._get_thinker_forward(meta, persist)
+        meta = fwd.full_metadata
+        meta.kwargs.update(fwd.step_metadata)
+        if not meta.is_prefill:
+            steps.append({"walk": meta.graph_walk, "decode": True})
+            break
+        sm = fwd.step_metadata
+        steps.append({
+            "walk": meta.graph_walk,
+            "offset": sm.get("prefill_chunk_offset"),
+            "len": sm.get("prefill_chunk_len"),
+            "is_last_prefill": sm.get("is_last_prefill"),
+            "unpersist": len(fwd.unpersist_tensors),
+        })
+    return steps
+
+
+def test_vision_chunk_bounds_reads_persist(monkeypatch):
+    monkeypatch.setenv("MSTAR_CHUNKED_PREFILL_V2", "1")
+    monkeypatch.setenv("MSTAR_CHUNKED_PREFILL_V2_VISION", "1")
+    monkeypatch.setenv("MSTAR_PREFILL_CHUNK_TOKENS", "512")
+    # 600 vision tokens => span 602 (+2 sentinels) => 512, 90.
+    schedule = [("prefill_vision", {})]
+    meta = _make_meta(schedule, audio_output=False)
+    persist = {"vision_embeds": [_tpi(600, "v0")]}
+    assert _Shim()._vision_chunk_bounds(meta, schedule, 0, persist) == (0, 512, False)
+    meta.kwargs["prefill_chunk_offset"] = 512
+    assert _Shim()._vision_chunk_bounds(meta, schedule, 0, persist) == (512, 90, True)
+
+
+def test_vision_chunk_bounds_gated_off_without_flag(monkeypatch):
+    monkeypatch.setenv("MSTAR_CHUNKED_PREFILL_V2", "1")
+    monkeypatch.delenv("MSTAR_CHUNKED_PREFILL_V2_VISION", raising=False)
+    schedule = [("prefill_vision", {})]
+    meta = _make_meta(schedule, audio_output=False)
+    persist = {"vision_embeds": [_tpi(600, "v0")]}
+    assert _Shim()._vision_chunk_bounds(meta, schedule, 0, persist) is None
+
+
+def test_encode_vision_then_chunked_vision(monkeypatch):
+    monkeypatch.setenv("MSTAR_CHUNKED_PREFILL_V2", "1")
+    monkeypatch.setenv("MSTAR_CHUNKED_PREFILL_V2_VISION", "1")
+    monkeypatch.setenv("MSTAR_PREFILL_CHUNK_TOKENS", "512")
+    # encode_vision (not chunked) then prefill_vision (600 -> span 602 -> 512,90).
+    schedule = [
+        ("encode_vision", {"pixel_values": _tpi(9999, "px"),
+                           "image_grid_thw": _tpi(3, "grid")}),
+        ("prefill_vision", {"image_grid_thw": _tpi(3, "grid")}),
+    ]
+    meta = _make_meta(schedule, audio_output=False)
+    # vision_embeds appears in persist after encode_vision runs.
+    persist = {"vision_embeds": [_tpi(600, "v0")], "deepstack": [_tpi(600, "d0")]}
+    steps = _drive_vision(_Shim(), meta, persist)
+    walks = [s["walk"] for s in steps if not s.get("decode")]
+    # encode_vision, then two prefill_vision chunks.
+    assert walks == ["encode_vision", "prefill_vision", "prefill_vision"]
+    prefill_vision = [s for s in steps
+                      if not s.get("decode") and s["walk"] == "prefill_vision"]
+    assert [(s["offset"], s["len"]) for s in prefill_vision] == [(0, 512), (512, 90)]
+    assert [s["is_last_prefill"] for s in prefill_vision] == [False, True]
     assert steps[-1].get("decode") is True

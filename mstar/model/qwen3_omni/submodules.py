@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import dataclass
 from typing import Any, Optional
 
 import torch
@@ -40,6 +41,28 @@ from mstar.model.submodule_base import ARNodeInputs, ARNodeSubmodule, ModelInput
 from mstar.utils.sampling import CudaGraphableSampler, SeenTokenMask
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _VisionPrefillStage:
+    """Staged full-span vision Thinker prefill, computed once on chunk 0 and
+    sliced per chunk (MSTAR_CHUNKED_PREFILL_V2_VISION).
+
+    ``wrapped_embeds`` (total_len, hidden) = vision_bos + vision tokens +
+    vision_eos. ``pos_ids`` (3, total_len) are the absolute 3D MRoPE positions
+    computed from the ORIGINAL ``start_pos`` (never recomputed from an advanced
+    start, so intra-block positions stay exact under chunking). ``deepstack`` is
+    the per-layer (total_len, hidden) scatter (sentinels zeroed). ``mm_mask``
+    (total_len,) marks vision (True) vs sentinel (False). ``total_len`` = span,
+    ``mrope_pos_advance`` = full 3D-grid span jump (> total_len), ``start_pos`` =
+    the request's position_id_start at walk entry (for the assert)."""
+    wrapped_embeds: torch.Tensor
+    pos_ids: torch.Tensor
+    deepstack: list[torch.Tensor]
+    mm_mask: torch.Tensor
+    total_len: int
+    mrope_pos_advance: int
+    start_pos: float
 
 
 # ===================================================================
@@ -412,6 +435,17 @@ class ThinkerSubmodule(ARNodeSubmodule):
         self._vision_bos_embed: torch.Tensor | None = None
         self._vision_eos_embed: torch.Tensor | None = None
 
+        # Chunked-vision prefill staging (MSTAR_CHUNKED_PREFILL_V2_VISION):
+        # rid -> _VisionPrefillStage. The full wrapped embeds / 3D pos_ids /
+        # per-layer deepstack are computed ONCE on the first chunk of a
+        # prefill_vision walk and sliced per chunk. Purged by cleanup_request.
+        self._vision_stage: dict[str, "_VisionPrefillStage"] = {}
+
+    def cleanup_request(self, request_id: str) -> None:
+        """Free any per-request chunked-vision staging (large GPU tensors) when
+        the request finishes or is aborted."""
+        self._vision_stage.pop(request_id, None)
+
     def _get_inv_freq(self, device: torch.device) -> torch.Tensor:
         """Lazy-initialize and cache inverse frequencies."""
         if self._inv_freq is None or self._inv_freq.device != device:
@@ -685,86 +719,187 @@ class ThinkerSubmodule(ARNodeSubmodule):
             )
 
         if graph_walk == "prefill_vision":
-            vision_embeds = inputs["vision_embeds"][0].to(device)
-            vision_len = vision_embeds.shape[0]
-
-            mm_mask = torch.ones(vision_len + 2, dtype=torch.bool, device=device)
-            mm_mask[[0, -1]] = 0
-            masks_for_talker = torch.stack([
-                mm_mask,
-                ~mm_mask
-            ])
-
-            wrapped_embeds = self._wrap_vision_input(vision_embeds)
-            total_len = vision_len + 2
-            # Vision tokens use spatial 3D positions (temporal constant,
-            # h/w from the spatial grid after merging).  If a proper
-            # ``image_grid_thw`` is available, use ``get_rope_index_vision``;
-            # otherwise fall back to a 1-D sequence (test path without
-            # AutoImageProcessor).
-            grid_thw = inputs.get("image_grid_thw", [None])[0]
-            seconds_per_grid = inputs.get("video_second_per_grid", [])
-            seconds_per_grid = seconds_per_grid[0].item() if seconds_per_grid else None
-            # Keep grid_thw on CPU: get_rope_index_vision only reads scalar grid
-            # values (now CPU no-ops) and builds every tensor with device=device,
-            # so the .to(device) here only induced GPU->CPU .item() syncs in rope.
-            vision_pos_ids = get_rope_index_vision(
-                grid_thw,
-                start_pos + 1,  # leave room for the BOS token
-                position_id_per_seconds=self.config.thinker.position_id_per_seconds,
-                device=device,
-                spatial_merge_size=self.config.vision.spatial_merge_size,
-                seconds_per_grid=seconds_per_grid
-            )
-
-            # Sentinel token positions (text-like).
-            start_pos_ids = get_rope_index_text(1, start_pos, device)
-            # Derive end_pos_base from the CPU grid (avoids a GPU max-reduction sync);
-            # mirrors get_rope_index_vision's spatial/temporal max.
-            vstart = start_pos + 1
-            sms = self.config.vision.spatial_merge_size
-            _grid = grid_thw if grid_thw.dim() == 2 else grid_thw.unsqueeze(0)
-            _max_pos = float("-inf")
-            for _row in _grid:
-                gt, gh, gw = int(_row[0]), int(_row[1]), int(_row[2])
-                spatial_max = max(gh // sms, gw // sms) - 1 + vstart
-                if seconds_per_grid is None:
-                    temporal_max = vstart
-                else:
-                    temporal_max = (
-                        (gt - 1) * seconds_per_grid
-                        * self.config.thinker.position_id_per_seconds
-                    )
-                _max_pos = max(_max_pos, spatial_max, temporal_max)
-            end_pos_base = float(_max_pos) + 1
-            end_pos_ids = get_rope_index_text(1, end_pos_base, device)
-
-            pos_ids = torch.cat(
-                [start_pos_ids, vision_pos_ids, end_pos_ids], dim=1
-            )
-
-            # Next MRoPE position after this vision block is ``end_pos_base
-            # + 1`` (one past the EOS token).  ``advance_seq_lens`` by
-            # default advances ``position_id_start`` by ``seq_len``, which
-            # for vision (= vision_len + 2) is typically smaller than the
-            # 3D-grid span.  Emit the correct per-request advance so the
-            # Thinker forward can pass ``pos_id_ns`` through.
-            mrope_pos_advance = int(end_pos_base + 1 - start_pos)
+            # Chunked-vision (MSTAR_CHUNKED_PREFILL_V2_VISION): stage the full
+            # wrapped embeds / pos_ids / deepstack on the first chunk (offset 0),
+            # then slice per chunk. Absent chunk metadata (flag off) => single
+            # full-span step, byte-identical to the unchunked path below.
+            chunk_len = fwd_info.step_metadata.get("prefill_chunk_len")
+            if chunk_len is not None:
+                return self._vision_chunk_inputs(
+                    fwd_info, inputs, start_pos, device,
+                )
+            full = self._build_vision_full(inputs, start_pos, device)
+            mm_mask = full.mm_mask
+            masks_for_talker = torch.stack([mm_mask, ~mm_mask])
             tensor_inputs: dict[str, torch.Tensor] = {
                 "masks_for_talker": masks_for_talker,
             }
-            for i, deepstack_inp in enumerate(inputs["deepstack"]):
-                full_deepstack = torch.zeros_like(wrapped_embeds)
-                full_deepstack[mm_mask, :] = deepstack_inp
-                tensor_inputs[f"deepstack_{i}"] = full_deepstack
-
+            for i, ds in enumerate(full.deepstack):
+                tensor_inputs[f"deepstack_{i}"] = ds
             return ARNodeInputs(
-                input_seq_len=total_len,
-                input_embeds=wrapped_embeds,
-                custom_pos_ids=pos_ids,
+                input_seq_len=full.total_len,
+                input_embeds=full.wrapped_embeds,
+                custom_pos_ids=full.pos_ids,
                 tensor_inputs=tensor_inputs,
-                kwargs={"mrope_pos_advance": mrope_pos_advance},
+                kwargs={"mrope_pos_advance": full.mrope_pos_advance},
             )
+
+    def _build_vision_full(
+        self, inputs: NameToTensorList, start_pos: float, device,
+    ) -> "_VisionPrefillStage":
+        """Compute the full-span vision Thinker prefill tensors once: wrapped
+        embeds, 3D MRoPE pos_ids, per-layer deepstack scatter, mm_mask, and the
+        full 3D-grid MRoPE advance. Extracted verbatim from the single-shot
+        prefill_vision path so flag-off stays byte-identical."""
+        vision_embeds = inputs["vision_embeds"][0].to(device)
+        vision_len = vision_embeds.shape[0]
+
+        mm_mask = torch.ones(vision_len + 2, dtype=torch.bool, device=device)
+        mm_mask[[0, -1]] = 0
+
+        wrapped_embeds = self._wrap_vision_input(vision_embeds)
+        total_len = vision_len + 2
+        grid_thw = inputs.get("image_grid_thw", [None])[0]
+        seconds_per_grid = inputs.get("video_second_per_grid", [])
+        seconds_per_grid = seconds_per_grid[0].item() if seconds_per_grid else None
+        vision_pos_ids = get_rope_index_vision(
+            grid_thw,
+            start_pos + 1,  # leave room for the BOS token
+            position_id_per_seconds=self.config.thinker.position_id_per_seconds,
+            device=device,
+            spatial_merge_size=self.config.vision.spatial_merge_size,
+            seconds_per_grid=seconds_per_grid,
+        )
+
+        start_pos_ids = get_rope_index_text(1, start_pos, device)
+        vstart = start_pos + 1
+        sms = self.config.vision.spatial_merge_size
+        _grid = grid_thw if grid_thw.dim() == 2 else grid_thw.unsqueeze(0)
+        _max_pos = float("-inf")
+        for _row in _grid:
+            gt, gh, gw = int(_row[0]), int(_row[1]), int(_row[2])
+            spatial_max = max(gh // sms, gw // sms) - 1 + vstart
+            if seconds_per_grid is None:
+                temporal_max = vstart
+            else:
+                temporal_max = (
+                    (gt - 1) * seconds_per_grid
+                    * self.config.thinker.position_id_per_seconds
+                )
+            _max_pos = max(_max_pos, spatial_max, temporal_max)
+        end_pos_base = float(_max_pos) + 1
+        end_pos_ids = get_rope_index_text(1, end_pos_base, device)
+
+        pos_ids = torch.cat(
+            [start_pos_ids, vision_pos_ids, end_pos_ids], dim=1
+        )
+        mrope_pos_advance = int(end_pos_base + 1 - start_pos)
+
+        deepstack: list[torch.Tensor] = []
+        for deepstack_inp in inputs["deepstack"]:
+            full_deepstack = torch.zeros_like(wrapped_embeds)
+            full_deepstack[mm_mask, :] = deepstack_inp
+            deepstack.append(full_deepstack)
+
+        return _VisionPrefillStage(
+            wrapped_embeds=wrapped_embeds,
+            pos_ids=pos_ids,
+            deepstack=deepstack,
+            mm_mask=mm_mask,
+            total_len=total_len,
+            mrope_pos_advance=mrope_pos_advance,
+            start_pos=start_pos,
+        )
+
+    def _vision_chunk_inputs(
+        self,
+        fwd_info: CurrentForwardPassInfo,
+        inputs: NameToTensorList,
+        start_pos: float,
+        device,
+    ) -> ARNodeInputs:
+        """One chunk of a chunked vision Thinker prefill.
+
+        On the first chunk (offset 0) build + stash the full staged tensors;
+        every chunk slices [off:off+C] from the stage. The forward uses the
+        STAGED pos_ids (absolute positions from the walk's original start_pos),
+        so intra-block 3D positions are exact regardless of how position_id_start
+        has advanced across chunks.
+
+        Per-chunk MRoPE advance: KV seq_len advances by C automatically
+        (plan_attention). position_id_start must end at start_pos +
+        mrope_pos_advance (the full 3D-grid span). So non-last chunks advance by
+        C; the last chunk advances by the remaining span
+        (mrope_pos_advance - committed_C) so the running position lands exactly
+        on the unchunked post-vision value.
+        """
+        rid = fwd_info.request_id
+        off = int(fwd_info.step_metadata.get("prefill_chunk_offset", 0))
+        clen = int(fwd_info.step_metadata["prefill_chunk_len"])
+
+        if off == 0:
+            stage = self._build_vision_full(inputs, start_pos, device)
+            self._vision_stage[rid] = stage
+            logger.debug(
+                "chunked_prefill_v2 vision: rid=%s span=%d C=%d start_pos=%s",
+                rid, stage.total_len, clen, start_pos,
+            )
+        else:
+            stage = self._vision_stage.get(rid)
+            if stage is None:
+                # Should not happen (chunk 0 always stages first); fail loud so a
+                # dropped stage can't silently corrupt positions.
+                raise RuntimeError(
+                    f"chunked vision prefill: missing stage for rid={rid} at "
+                    f"offset={off}"
+                )
+
+        end = off + clen
+        walk_done = end >= stage.total_len
+
+        embeds = stage.wrapped_embeds[off:end]
+        pos_ids = stage.pos_ids[:, off:end]
+        mm_mask_chunk = stage.mm_mask[off:end]
+        masks_for_talker = torch.stack([mm_mask_chunk, ~mm_mask_chunk])
+        tensor_inputs: dict[str, torch.Tensor] = {
+            "masks_for_talker": masks_for_talker,
+        }
+        for i, ds in enumerate(stage.deepstack):
+            tensor_inputs[f"deepstack_{i}"] = ds[off:end]
+
+        if walk_done:
+            # Land position_id_start exactly on the unchunked post-vision value.
+            pos_advance = stage.mrope_pos_advance - off
+            if self._vision_prefill_assert_enabled():
+                # After this chunk: seq_len += (prior off) + clen == total_len;
+                # position_id_start += off + pos_advance == mrope_pos_advance.
+                assert off + clen == stage.total_len, (
+                    f"vision chunk span mismatch rid={rid}: off={off} C={clen} "
+                    f"total={stage.total_len}"
+                )
+                assert off + pos_advance == stage.mrope_pos_advance, (
+                    f"vision MRoPE advance mismatch rid={rid}: off={off} "
+                    f"pos_advance={pos_advance} full={stage.mrope_pos_advance}"
+                )
+            self._vision_stage.pop(rid, None)
+        else:
+            # Non-last chunk: advance position by the chunk length (keeps
+            # position_id_start and seq_len in step; the forward uses staged
+            # absolute pos_ids so this value never feeds a chunk's positions).
+            pos_advance = clen
+
+        return ARNodeInputs(
+            input_seq_len=clen,
+            input_embeds=embeds,
+            custom_pos_ids=pos_ids,
+            tensor_inputs=tensor_inputs,
+            kwargs={"mrope_pos_advance": pos_advance},
+        )
+
+    @staticmethod
+    def _vision_prefill_assert_enabled() -> bool:
+        return os.environ.get("MSTAR_CHUNKED_PREFILL_V2_ASSERT", "").strip().lower() \
+            in ("1", "true", "yes", "on")
 
     def preprocess(
         self,

@@ -656,6 +656,50 @@ class Qwen3OmniModel(Model):
             ),
         ])
 
+        # Chunked-vision variant (MSTAR_CHUNKED_PREFILL_V2_VISION): split the
+        # Sequential above into a standalone encoder walk (encode_vision, which
+        # persists vision_embeds + deepstack so the conductor can read the
+        # vision token count from vision_embeds.dims and re-emit the Thinker
+        # walk in chunks) followed by a Thinker-only prefill_vision walk that
+        # consumes them from persist (image_grid_thw rides on the Thinker
+        # schedule entry). Mirrors the June audio encoder-split (af836ee). Only
+        # registered when the flag is ON, so flag-off keeps the Sequential above
+        # byte-identical.
+        encode_vision = GraphNode(
+            name="vision_encoder",
+            input_names=["pixel_values", "image_grid_thw"],
+            outputs=[
+                GraphEdge(
+                    next_node=EMPTY_DESTINATION, name="vision_embeds", persist=True,
+                ),
+                GraphEdge(
+                    next_node=EMPTY_DESTINATION, name="deepstack", persist=True,
+                ),
+            ],
+        )
+        prefill_vision_chunked = GraphNode(
+            name="Thinker",
+            input_names=["vision_embeds", "deepstack", "video_second_per_grid", "image_grid_thw"],
+            outputs=[
+                GraphEdge(
+                    next_node=EMIT_TO_CLIENT,
+                    name="new_token",
+                    output_modality="text",
+                    persist=True,
+                ),
+                StreamingGraphEdge(
+                    next_node="Talker",
+                    name="thinker_states",
+                    target_partition="Talker",
+                ),
+                StreamingGraphEdge(
+                    next_node="Talker",
+                    name="thinker_mask",
+                    target_partition="Talker",
+                ),
+            ],
+        )
+
         # -- Thinker decode: produces new_token (persist) + thinker_states
         #    (streaming to Talker) --
         thinker_decode = Loop(
@@ -760,7 +804,7 @@ class Qwen3OmniModel(Model):
             ],
         )
 
-        return {
+        walks = {
             "prefill_text": prefill_text,
             "prefill_audio": prefill_audio,
             "prefill_vision": prefill_vision,
@@ -770,6 +814,13 @@ class Qwen3OmniModel(Model):
             "talker_decode": talker_decode,
             "code2wav_chunk": code2wav_chunk,
         }
+        if chunked_prefill_v2_vision_enabled():
+            # Replace the Sequential prefill_vision with the encoder-split pair
+            # so the conductor can chunk the Thinker portion. flag-off keeps the
+            # Sequential registered above.
+            walks["encode_vision"] = encode_vision
+            walks["prefill_vision"] = prefill_vision_chunked
+        return walks
 
     # -----------------------------------------------------------------------
     # Partition API: 3-partition streaming topology
@@ -782,6 +833,9 @@ class Qwen3OmniModel(Model):
                 graph_walks={
                     "prefill_text", "prefill_audio",
                     "prefill_vision", "thinker_decode",
+                    # encode_vision is registered as a Thinker-partition walk
+                    # only when chunked vision is on; harmless to always list.
+                    *(("encode_vision",) if chunked_prefill_v2_vision_enabled() else ()),
                 },
                 initial_walk="prefill_text",
                 producer_partitions=[],
@@ -904,10 +958,14 @@ class Qwen3OmniModel(Model):
                     # into prefix+suffix around the audio, producing an extra
                     # prefill_text walk; deriving the count from the real
                     # schedule keeps the Talker's last-prefill detection aligned.
-                    "num_thinker_prefill_steps": len(
-                        self._build_thinker_prefill_schedule(
+                    # Count only walks that reach the Thinker (produce
+                    # thinker_states). encode_vision (chunked-vision encoder
+                    # split) is encoder-only and must be excluded so the
+                    # Talker's last-prefill detection stays aligned.
+                    "num_thinker_prefill_steps": sum(
+                        1 for walk, _ in self._build_thinker_prefill_schedule(
                             input_modalities, input_signals,
-                        )
+                        ) if walk != "encode_vision"
                     ),
                     "prefill_chunks_processed": 0,
                     "voice": model_kwargs.get("voice", "Ethan"),
@@ -1024,6 +1082,31 @@ class Qwen3OmniModel(Model):
             },
         )
 
+    def _append_vision_schedule(self, schedule: list, entry: dict) -> None:
+        """Append the vision prefill schedule entries.
+
+        Flag off: one ``prefill_vision`` walk (the encoder+Thinker Sequential).
+        Flag on (MSTAR_CHUNKED_PREFILL_V2_VISION): split into ``encode_vision``
+        (encoder, persists vision_embeds+deepstack) then a Thinker-only
+        ``prefill_vision`` that the conductor can chunk. The encoder entry keeps
+        the feature tensors; the Thinker entry carries image_grid_thw (for
+        get_rope_index_vision) and video_second_per_grid (vision_embeds /
+        deepstack come from persist).
+        """
+        if not chunked_prefill_v2_vision_enabled():
+            schedule.append(("prefill_vision", entry))
+            return
+        schedule.append(("encode_vision", entry))
+        # The Thinker chunk walk keeps image_grid_thw (needed by
+        # get_rope_index_vision) and video_second_per_grid; vision_embeds /
+        # deepstack come from the encoder's persist output.
+        thinker_entry: dict = {}
+        if "image_grid_thw" in entry:
+            thinker_entry["image_grid_thw"] = entry["image_grid_thw"]
+        if "video_second_per_grid" in entry:
+            thinker_entry["video_second_per_grid"] = entry["video_second_per_grid"]
+        schedule.append(("prefill_vision", thinker_entry))
+
     def _build_thinker_prefill_schedule(
         self,
         input_modalities: list[str],
@@ -1095,7 +1178,7 @@ class Qwen3OmniModel(Model):
                     entry = {"pixel_values": pixel_values[vision_idx]}
                     if vision_idx < len(image_grid_thws):
                         entry["image_grid_thw"] = image_grid_thws[vision_idx]
-                    schedule.append(("prefill_vision", entry))
+                    self._append_vision_schedule(schedule, entry)
                     vision_idx += 1
             elif mod == "video":
                 # Video uses pixel_values_videos + video_grid_thw, but the
@@ -1107,7 +1190,7 @@ class Qwen3OmniModel(Model):
                         entry["image_grid_thw"] = video_grid_thws[video_idx]
                     if video_idx < len(video_second_per_grid):
                         entry["video_second_per_grid"] = video_second_per_grid[video_idx]
-                    schedule.append(("prefill_vision", entry))
+                    self._append_vision_schedule(schedule, entry)
                     video_idx += 1
 
         # Robustness guard: an empty user prompt (e.g. greedy T2S/I2S/A2S with no
@@ -1137,24 +1220,55 @@ class Qwen3OmniModel(Model):
         step = metadata.kwargs["prefill_step"]
         walk_name, tensor_dict = schedule[step]
 
+        # Chunked-vision (MSTAR_CHUNKED_PREFILL_V2_VISION): the encoder-split
+        # replaces the prefill_vision Sequential with encode_vision (encoder,
+        # inputs from tensor_dict) + a Thinker-only prefill_vision that reads
+        # vision_embeds / deepstack / image_grid_thw from persist_signals.
+        if chunked_prefill_v2_vision_enabled() and walk_name == "prefill_vision":
+            edges: list[GraphEdge] = []
+            # vision_embeds / deepstack come from the encode_vision persist.
+            for name in ("vision_embeds", "deepstack"):
+                infos = input_signals.get(name, [])
+                if not infos:
+                    continue
+                edge = GraphEdge(next_node="Thinker", name=name)
+                edge.tensor_info = list(infos)
+                edges.append(edge)
+            # image_grid_thw / video_second_per_grid ride on the Thinker entry's
+            # tensor_dict (conductor-known inputs, not encoder outputs).
+            for key in ("image_grid_thw", "video_second_per_grid"):
+                if key in tensor_dict:
+                    edge = GraphEdge(next_node="Thinker", name=key)
+                    edge.tensor_info = [tensor_dict[key]]
+                    edges.append(edge)
+            return edges
+
         # Determine the target node — for audio/vision, the first node in
-        # the Sequential walk is the encoder (not the Thinker).
+        # the Sequential walk is the encoder (not the Thinker). encode_vision
+        # (chunked path) is encoder-only, same routing as the Sequential head.
         if walk_name == "prefill_text":
             target_node = "Thinker"
         elif walk_name == "prefill_audio":
             target_node = "audio_encoder"
-        elif walk_name == "prefill_vision":
+        elif walk_name in ("prefill_vision", "encode_vision"):
             target_node = "vision_encoder"
         else:
             raise ValueError(f"Unrecognized prefill walk: {walk_name}")
 
-        edges: list[GraphEdge] = []
+        edges = []
         for input_name, tensor_info in tensor_dict.items():
             if input_name == "video_second_per_grid":
                 continue # goes directly to Thinker
             edge = GraphEdge(next_node=target_node, name=input_name)
             edge.tensor_info = [tensor_info]
             edges.append(edge)
+
+        if walk_name == "encode_vision":
+            # Encoder-only step: image_grid_thw already routed to the encoder
+            # above (it's in tensor_dict and not video_second_per_grid); the
+            # encoder persists it for the following Thinker chunk walk. No
+            # Thinker edges from this step.
+            return edges
 
         if walk_name == "prefill_vision":
             for key in ["image_grid_thw", "video_second_per_grid"]:
@@ -1183,9 +1297,9 @@ class Qwen3OmniModel(Model):
         Chunking applies ONLY when:
           * ``MSTAR_CHUNKED_PREFILL_V2`` is ON, and
           * the walk is ``prefill_text`` (its token count is known up-front from
-            the input tensor's ``dims``; audio/vision lengths are only known
-            after the encoder runs and need the encoder-split walk, gated
-            separately under ``MSTAR_CHUNKED_PREFILL_V2_VISION``), and
+            the input tensor's ``dims``; vision length is only known after the
+            encoder runs and is handled by ``_vision_chunk_bounds`` via the
+            encoder-split walk, gated under ``MSTAR_CHUNKED_PREFILL_V2_VISION``), and
           * ``audio_output`` is False, i.e. the Talker is NOT conditioned. When
             the Talker runs it consumes one ``thinker_states`` chunk per WALK;
             chunking a walk would emit one per token-chunk and drift the Talker's
@@ -1215,6 +1329,45 @@ class Qwen3OmniModel(Model):
         chunk_len, walk_done = plan
         return offset, chunk_len, walk_done
 
+    def _vision_chunk_bounds(
+        self,
+        metadata: "CurrentForwardConductorMetadata",
+        schedule: list,
+        step: int,
+        persist_signals: dict[str, list["TensorPointerInfo"]] | None,
+    ) -> tuple[int, int, bool] | None:
+        """Resolve this step's chunk window for chunked VISION Thinker prefill.
+
+        Requires the encoder-split (MSTAR_CHUNKED_PREFILL_V2_VISION): the walk
+        is the Thinker-only ``prefill_vision`` and the vision token count comes
+        from the persisted ``vision_embeds`` (the encode_vision output). The
+        Thinker span is ``vision_len + 2`` (vision_bos / vision_eos sentinels,
+        matching ThinkerSubmodule vision wrap). Same audio_output=False gate as
+        text.
+        """
+        if not chunked_prefill_v2_vision_enabled():
+            return None
+        if metadata.kwargs.get("audio_output", True):
+            return None
+        walk = schedule[step][0]
+        if walk != "prefill_vision":
+            return None
+        if persist_signals is None:
+            return None
+        infos = persist_signals.get("vision_embeds", [])
+        if not infos:
+            return None
+        dims = getattr(infos[0], "dims", None)
+        if not dims:
+            return None
+        span = int(dims[0]) + 2  # + vision_bos / vision_eos sentinels
+        offset = int(metadata.kwargs.get("prefill_chunk_offset", 0))
+        plan = plan_prefill_chunk(span, offset, prefill_chunk_tokens())
+        if plan is None:
+            return None
+        chunk_len, walk_done = plan
+        return offset, chunk_len, walk_done
+
     def _chunk_bounds(
         self,
         metadata: "CurrentForwardConductorMetadata",
@@ -1222,15 +1375,14 @@ class Qwen3OmniModel(Model):
         step: int,
         persist_signals: dict[str, list["TensorPointerInfo"]] | None = None,
     ) -> tuple[int, int, bool] | None:
-        """Unified chunk-bounds resolver.
-
-        P1 chunks text only. Vision/audio chunking (which needs the
-        encoder-split walk + staged embeds/pos_ids/deepstack) lands behind
-        ``MSTAR_CHUNKED_PREFILL_V2_VISION`` in a follow-up; this resolver is the
-        single seam it will extend. Returns ``(offset, chunk_len, walk_done)``
-        or ``None``.
+        """Unified chunk-bounds resolver: text first, then vision (encoder-split,
+        gated MSTAR_CHUNKED_PREFILL_V2_VISION). Returns ``(offset, chunk_len,
+        walk_done)`` or ``None``.
         """
-        return self._text_chunk_bounds(metadata, schedule, step)
+        bounds = self._text_chunk_bounds(metadata, schedule, step)
+        if bounds is not None:
+            return bounds
+        return self._vision_chunk_bounds(metadata, schedule, step, persist_signals)
 
     def _walk_span_tokens(
         self, schedule: list, step: int,
