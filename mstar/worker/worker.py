@@ -283,7 +283,8 @@ class Worker:
 
         self.scheduler = MicroScheduler(
             self.engine_manager,
-            tp_rank_zero_nodes=self.tp_rank_zero_nodes
+            tp_rank_zero_nodes=self.tp_rank_zero_nodes,
+            tp_nodes=self.tp_nodes,
         )
 
         # Determine store write policy based on worker graph topology
@@ -2156,10 +2157,19 @@ class Worker:
                 req_info=batch_N.node_batch.per_request_info[rid],
                 last_node_run=batch_N.node_name
             )
+            # W5-P2 mixed batch: record the stop under the rid's OWN walk, not
+            # the batch-level "thinker_mixed", so the speculative overstay
+            # dedup (which matches PendingLoopStop.graph_walk against a later
+            # batch's real walk) can find it. Non-mixed batches are unchanged
+            # (per-request walk == batch walk). Mixed batches are themselves
+            # non-speculative, so this only matters for a later spec iter.
+            stop_walk = batch_N.graph_walk
+            if stop_walk == "thinker_mixed":
+                stop_walk = batch_N.node_batch.per_request_info[rid].graph_walk
             self._pending_loop_stops.update([
                 PendingLoopStop(
                     rid=rid,
-                    graph_walk=batch_N.graph_walk,
+                    graph_walk=stop_walk,
                     loop_name=name
                 ) for name in loop_names
             ])
@@ -2194,6 +2204,18 @@ class Worker:
         routing_per_request: dict[str, NodeOutputRouting] = {}
         per_request_uuids: dict[str, set[str]] = {}
         for rid, wg_id in batch_N.batch.request_to_worker_graph.items():
+            # W5-P2 mixed batch: outputs must be stored + routed under each
+            # request's OWN walk (thinker_decode / prefill_text), not the
+            # batch-level "thinker_mixed". Tensor storage keys graph edges by
+            # walk, and process_node_outputs looks up the next node's worker
+            # graph via ``walk_node_to_worker_graph_id[(walk, next_node)]`` — a
+            # "thinker_mixed" key doesn't exist, so routing would silently
+            # misfire (edges treated as external, the decode/chunk loop never
+            # advances). For every non-mixed batch this is byte-identical:
+            # per_request_info[rid].graph_walk == batch_N.graph_walk.
+            effective_walk = batch_N.graph_walk
+            if effective_walk == "thinker_mixed":
+                effective_walk = batch_N.node_batch.per_request_info[rid].graph_walk
             # Store output tensors before marking the node as complete so that
             # loop outputs can be buffered properly.
             req_output_tensors = output.per_request_output_tensors.get(rid)
@@ -2210,7 +2232,7 @@ class Worker:
                             tensors=req_output_tensors,
                             graph_edges=node.outputs,
                             node_name=node.name,
-                            graph_walk=batch_N.graph_walk,
+                            graph_walk=effective_walk,
                         )
                     )
                 else:
@@ -2219,7 +2241,7 @@ class Worker:
                         tensors=req_output_tensors,
                         graph_edges=node.outputs,
                         node_name=node.name,
-                        graph_walk=batch_N.graph_walk,
+                        graph_walk=effective_walk,
                         skip_cuda_sync=True,
                         skip_ref_count=True,
                     )
@@ -2234,7 +2256,7 @@ class Worker:
 
             routing_per_request[rid] = self.worker_graphs_manager.process_node_outputs(
                 rid, node_name=batch_N.node_name,
-                outputs=real_outputs, graph_walk=batch_N.graph_walk
+                outputs=real_outputs, graph_walk=effective_walk
             )
 
             if rid in per_request_uuids:
@@ -2258,6 +2280,11 @@ class Worker:
         # per-step overhead (their outputs route via streaming edges, never
         # via buffer_new_tokens/inline emit) and measurably regressed the
         # audio paths at batch (i2s B32 −17% flag-off, qb_queue1.log probes).
+        # NOTE (W5-P2): a thinker_mixed batch does NOT take this fast inline
+        # new-token emit — its decode rows still emit correctly via the normal
+        # buffer path, just without the SHM-skip optimization. Extending prem to
+        # the mixed batch's decode rows (chunk row has no new token unless last)
+        # is a P3 perf follow-up; correctness is unaffected.
         if batch_N.graph_walk == "thinker_decode":
             prem_per_request: dict[str, dict[str, list[int]] | None] = {
                 rid: self._prematerialized_new_tokens(cpu_output, rid)

@@ -57,6 +57,7 @@ class MicroScheduler:
         sched_type=SchedulingType.ROUND_ROBIN,
         tp_rank_zero_nodes: set[str] | None = None,
         max_consec_tp_follower_batches: int = 1,
+        tp_nodes: set[str] | None = None,
     ):
         self.engine_manager = engine_manager
         self.batch_number = 0
@@ -64,6 +65,13 @@ class MicroScheduler:
 
         # tensor parallel
         self.tp_rank_zero_nodes = tp_rank_zero_nodes
+        # Nodes with TP world_size > 1 (distinct from tp_rank_zero_nodes, which
+        # also includes every non-TP node since those are rank 0). Used to keep
+        # W5-P2 mixed-batch assembly off TP nodes: a mixed batch's per-request
+        # walks are heterogeneous and TP fan-out (ScheduleTPNode / sharding
+        # group lookup) is keyed by a single batch walk, so a "thinker_mixed"
+        # TP batch has no sharding group. TP mixed is P3.
+        self.tp_nodes = tp_nodes or set()
         self.tp_batches_pending_schedule = deque()
         self.num_consec_tp_follower_batches = 0
         self.max_consec_tp_follower_batches = max_consec_tp_follower_batches
@@ -231,6 +239,8 @@ class MicroScheduler:
             return None
 
         for node_name, entries in node_name_to_requests.items():
+            if node_name in self.tp_nodes:
+                continue  # TP mixed batches are P3 (see __init__ note)
             decode_entries = [
                 e for e in entries if e.graph_walk == self._MIXED_DECODE_WALK
             ]
