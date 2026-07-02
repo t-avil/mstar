@@ -978,6 +978,20 @@ class KVCacheEngine(BaseEngine):
                 result[rid] = stops
         return result
 
+    @staticmethod
+    def _mixed_preplan_params(batch: NodeBatch) -> dict | None:
+        """Return the packed pre-plan params the worker stashed at fold time,
+        or ``None`` for a non-mixed batch (or when MSTAR_MIXED_PREPLAN is off).
+
+        The worker sets ``batch.metadata['mixed_preplan'] = {'num_tokens': ...,
+        'seq_lens': [1]*n_decode + [C]}`` ONLY when it folds a chunk into a
+        thinker_mixed spec step under the flag. Its presence is the sole switch
+        that routes the reserve / pre-plan / reset trio to the packed runner
+        methods; absent (the default and every non-mixed batch), the trio keeps
+        its BASIC_BATCHED-only behavior byte-identical.
+        """
+        return batch.metadata.get("mixed_preplan")
+
     def reserve_replay_slot(self, batch: NodeBatch) -> int | None:
         """Allocate the next double-buffer slot for this batch and stash it
         on ``batch.metadata['cuda_graph_slot']``.
@@ -986,6 +1000,11 @@ class KVCacheEngine(BaseEngine):
         BEFORE submitting both pre-plan and replay so they target the same
         slot (and the OPPOSITE slot from the in-flight replay). Returns the
         slot index, or ``None`` if no captured graph matches (eager path).
+
+        For a chain-folded thinker_mixed batch (MSTAR_MIXED_PREPLAN — detected
+        via ``mixed_preplan`` metadata) the reservation goes through the packed
+        runner surface, which keys on num_tokens (the token bucket) rather than
+        the BASIC_BATCHED-only key lookup.
         """
         runner = self.submodule_management[batch.node_name].cuda_graph_runner
         if runner is None or not runner.graphs:
@@ -994,15 +1013,24 @@ class KVCacheEngine(BaseEngine):
             info.requires_cfg for info in batch.per_request_info.values()
         )
         bs = len(batch.request_ids)
-        # Don't pass num_tokens — the runner derives it from the captured
-        # BASIC_BATCHED config. Non-decode (prefill) batches don't speculate
-        # and don't pre-reserve, so they go through ``run`` which advances
-        # the per-key counter itself.
-        slot = runner.reserve_slot(
-            graph_walk=batch.graph_walk,
-            requires_cfg=has_cfg,
-            batch_size=bs,
-        )
+        mixed = self._mixed_preplan_params(batch)
+        if mixed is not None:
+            slot = runner.reserve_packed_slot(
+                graph_walk=batch.graph_walk,
+                requires_cfg=has_cfg,
+                batch_size=bs,
+                num_tokens=mixed["num_tokens"],
+            )
+        else:
+            # Don't pass num_tokens — the runner derives it from the captured
+            # BASIC_BATCHED config. Non-decode (prefill) batches don't speculate
+            # and don't pre-reserve, so they go through ``run`` which advances
+            # the per-key counter itself.
+            slot = runner.reserve_slot(
+                graph_walk=batch.graph_walk,
+                requires_cfg=has_cfg,
+                batch_size=bs,
+            )
         if slot is not None:
             batch.metadata["cuda_graph_slot"] = slot
         return slot
@@ -1012,6 +1040,10 @@ class KVCacheEngine(BaseEngine):
         targeted for this batch. Used to recover from speculation drops
         or pre-plan failures without disturbing other slots' valid
         pre-plan state. No-op if no captured graph matches.
+
+        Routes to the packed reset for a chain-folded thinker_mixed batch
+        (``mixed_preplan`` metadata present), matching how the reserve /
+        pre-plan targeted it.
         """
         runner = self.submodule_management[batch.node_name].cuda_graph_runner
         if runner is None or not runner.graphs:
@@ -1021,12 +1053,22 @@ class KVCacheEngine(BaseEngine):
         )
         bs = len(batch.request_ids)
         slot = batch.metadata.get("cuda_graph_slot")
-        runner.reset_pre_plan_state_for_slot(
-            graph_walk=batch.graph_walk,
-            requires_cfg=has_cfg,
-            batch_size=bs,
-            slot=slot,
-        )
+        mixed = self._mixed_preplan_params(batch)
+        if mixed is not None:
+            runner.reset_packed_pre_plan_for_slot(
+                graph_walk=batch.graph_walk,
+                requires_cfg=has_cfg,
+                batch_size=bs,
+                num_tokens=mixed["num_tokens"],
+                slot=slot,
+            )
+        else:
+            runner.reset_pre_plan_state_for_slot(
+                graph_walk=batch.graph_walk,
+                requires_cfg=has_cfg,
+                batch_size=bs,
+                slot=slot,
+            )
 
     def pre_plan_for_batch(
         self,
@@ -1042,6 +1084,13 @@ class KVCacheEngine(BaseEngine):
         We forward it to the runner so plan() targets the inactive slot's
         wrapper (the one replay(N) is NOT using).
 
+        For a chain-folded thinker_mixed batch (``mixed_preplan`` metadata) the
+        packed pre-plan runs instead: it needs num_tokens (the bucket) and the
+        reconstructed per-row seq_lens ([1]*n_decode + [C]), both stashed by the
+        worker at fold time — the seq_lens can't be re-derived here without the
+        prepared inputs, and the decode rows' KV length depends on advance(N)
+        having run, which the worker's advance_event gate guarantees.
+
         Returns True if pre-planning was applied (caller's GPU thread should
         wait on the plan future before running this batch). False if no
         captured graph matches, in which case the GPU thread plans inline.
@@ -1053,6 +1102,20 @@ class KVCacheEngine(BaseEngine):
             info.requires_cfg for info in batch.per_request_info.values()
         )
         slot = batch.metadata.get("cuda_graph_slot")
+        mixed = self._mixed_preplan_params(batch)
+        if mixed is not None:
+            if slot is None:
+                # Reservation didn't match a captured packed graph (eager
+                # fallback). Nothing to pre-plan; GPU thread runs inline.
+                return False
+            return runner.pre_plan_packed_batch(
+                graph_walk=batch.graph_walk,
+                requires_cfg=has_cfg,
+                request_ids=list(batch.request_ids),
+                seq_lens=list(mixed["seq_lens"]),
+                num_tokens=mixed["num_tokens"],
+                slot=slot,
+            )
         return runner.pre_plan_for_batch(
             graph_walk=batch.graph_walk,
             requires_cfg=has_cfg,
