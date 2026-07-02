@@ -307,3 +307,12 @@ embeds staged once per request (~2MB). Phasing: P1 chunked-prefill-only
 forward (~5-7d, →~0.90-0.95×+) → P3 grid/tuning (~3-4d). Risks table incl.
 deferred mark_node_complete (Loop, E9), deepstack chunk alignment, MRoPE
 pos_advance handling — all with token-identity gates.
+
+## W8 — denser prefill token buckets (exp/prefill-buckets, 08e7123) — inconclusive standalone, adopted into W5-P1
+Quick-bench on a different GPU pair than its reference (forced by a bursty
+foreign user on 4,5): i2t B32 5.646 vs 5.910 ref — within cross-pair drift,
+unresolvable at triage scale. TTFT signal positive: i2t B1 p50 0.187 vs
+0.240 ref, B32 0.603 vs 0.645 (−22%/−7%, cross-pair caveat). Denser buckets'
+real value is chunk-size granularity for W5-P1 (chunks are sized from
+PREFILL_TOKEN_BUCKETS); the branch merges into exp/chunked-prefill-v2 when
+P1 lands rather than shipping alone.
