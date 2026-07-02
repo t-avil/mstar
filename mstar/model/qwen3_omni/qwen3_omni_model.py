@@ -112,6 +112,106 @@ def vllm_audio_sentinels_enabled() -> bool:
     return _envflag("MSTAR_VLLM_AUDIO_SENTINELS")
 
 
+def chunked_prefill_v2_enabled() -> bool:
+    """W5-P1 chunked Thinker prefill. When ON, a long Thinker prefill walk is
+    split into <=C-token chunks run as separate normal prefill steps, so the
+    worker round-robin interleaves them with decode steps instead of stalling
+    every decoder for one ~27.5ms mega-step. Default OFF -> flag-off is
+    byte-identical (no schedule split, no chunk metadata emitted).
+
+    Gated to ``audio_output=False`` requests (i2t/t2t): when the Talker is
+    conditioned the per-walk ``thinker_states`` accounting forbids splitting a
+    walk. See DESIGN_chunked_prefill_v2.md.
+    """
+    return _envflag("MSTAR_CHUNKED_PREFILL_V2")
+
+
+def chunked_prefill_v2_vision_enabled() -> bool:
+    """Secondary gate (within V2) for chunking the **vision** (and audio)
+    Thinker prefill, which requires the encoder-split walk + staged
+    embeds/pos_ids/deepstack window slicing. Default OFF so text chunking can
+    ship independently while the deepstack/mm_mask window alignment gets GPU
+    validation. No-op unless ``MSTAR_CHUNKED_PREFILL_V2`` is also ON.
+    """
+    return _envflag("MSTAR_CHUNKED_PREFILL_V2_VISION")
+
+
+def chunked_prefill_v2_assert() -> bool:
+    """DEBUG validation for chunked prefill: after the last chunk of a walk,
+    assert the conductor's summed chunk tokens equal the unchunked walk span.
+    Cheap conductor-side check; default OFF.
+    """
+    return _envflag("MSTAR_CHUNKED_PREFILL_V2_ASSERT")
+
+
+def prefill_chunk_tokens() -> int:
+    """Cap on chunk size C for chunked prefill. The planner picks the largest
+    ``ThinkerSubmodule.PREFILL_TOKEN_BUCKETS`` entry <= min(remaining, this cap),
+    floored at 128. Default 512.
+    """
+    import os as _os
+
+    raw = _os.environ.get("MSTAR_PREFILL_CHUNK_TOKENS")
+    if raw is None:
+        return 512
+    try:
+        v = int(raw.strip())
+    except ValueError:
+        return 512
+    return v if v > 0 else 512
+
+
+# Chunk-size buckets: mirror ThinkerSubmodule.PREFILL_TOKEN_BUCKETS so a chunk
+# step lands on an already-captured prefill CUDA-graph config. Kept as a
+# module-level copy so the pure planner below does not import the submodule.
+_PREFILL_CHUNK_BUCKETS = [128, 256, 512, 1024, 2048]
+
+
+def plan_prefill_chunk(
+    span: int, offset: int, cap: int,
+) -> tuple[int, bool] | None:
+    """Pure planner for one chunk of a resumable chunked Thinker prefill.
+
+    ``span`` is the full token count the Thinker sees for this walk (already
+    including any sentinel tokens). ``offset`` is how many tokens of that span
+    prior chunks already consumed. ``cap`` is ``MSTAR_PREFILL_CHUNK_TOKENS``.
+
+    Returns ``(chunk_len, walk_done)`` for the chunk starting at ``offset``, or
+    ``None`` when the walk should NOT be chunked (span fits in a single chunk),
+    so callers fall back to the byte-identical single-shot path.
+
+    Chunk size = largest ``_PREFILL_CHUNK_BUCKETS`` entry <= min(remaining, cap),
+    floored at 128, but never past the end of the span. ``walk_done`` is True
+    when this chunk reaches the end of the span.
+    """
+    if span <= 0:
+        return None
+    offset = max(0, int(offset))
+    remaining = span - offset
+    if remaining <= 0:
+        return None
+    # First-chunk decision: if the whole span fits in one capped bucket-sized
+    # chunk, don't chunk at all (single-shot, byte-identical to flag-off).
+    if offset == 0 and span <= max(128, min(cap, _PREFILL_CHUNK_BUCKETS[-1])):
+        # Only skip chunking when a single chunk actually covers the span,
+        # i.e. span <= cap and span <= the largest bucket. Otherwise fall
+        # through and chunk.
+        if span <= cap:
+            return None
+    limit = min(cap, remaining)
+    # Largest bucket <= limit, floored at 128.
+    chunk_len = 128
+    for b in _PREFILL_CHUNK_BUCKETS:
+        if b <= limit:
+            chunk_len = b
+        else:
+            break
+    # Never exceed the remaining span.
+    chunk_len = min(chunk_len, remaining)
+    walk_done = (offset + chunk_len) >= span
+    return chunk_len, walk_done
+
+
 def batch_vision_prefill_enabled() -> bool:
     """When ON, allow the Thinker ``prefill_vision`` walk to batch more than
     one request per step (like ``prefill_audio`` / ``prefill_text`` already
@@ -861,7 +961,7 @@ class Qwen3OmniModel(Model):
         )
 
         first_walk = schedule[0][0] if schedule else "thinker_decode"
-        is_last_prefill = (schedule and len(schedule) == 1)
+        is_last_prefill = bool(schedule and len(schedule) == 1)
 
         full_metadata = CurrentForwardConductorMetadata(
             input_modalities=input_modalities,
@@ -872,14 +972,41 @@ class Qwen3OmniModel(Model):
                 "prefill_schedule": schedule,
                 "prefill_step": 0,
                 "audio_output": audio_output,
+                # Per-walk committed-token counter for resumable chunked prefill
+                # (MSTAR_CHUNKED_PREFILL_V2). 0 = start of the walk's span.
+                "prefill_chunk_offset": 0,
             },
         )
 
         # First walk inputs
         inputs = self._get_thinker_prefill_inputs(full_metadata, input_signals)
-        unpersist_tensors = sum(
-            [inp.tensor_info for inp in inputs], start=[]
-        )
+
+        # Resumable chunked prefill: if the first walk is a long prefill_text
+        # span and chunking applies, emit chunk 0 here and keep the input
+        # tensor alive until the walk's final chunk. Absent metadata (flag off
+        # or span short enough) => single full-span step, byte-identical.
+        chunk_step_metadata: dict = {}
+        walk_done = True
+        if schedule:
+            bounds = self._chunk_bounds(full_metadata, schedule, 0, input_signals)
+            if bounds is not None:
+                offset, chunk_len, walk_done = bounds
+                chunk_step_metadata = {
+                    "prefill_chunk_offset": offset,
+                    "prefill_chunk_len": chunk_len,
+                }
+                # Only the final chunk of the final walk samples the first token.
+                is_last_prefill = is_last_prefill and walk_done
+                self._log_first_chunk(full_metadata, first_walk, offset, chunk_len)
+
+        if walk_done:
+            unpersist_tensors = sum(
+                [inp.tensor_info for inp in inputs], start=[]
+            )
+        else:
+            # Hold the prefill input tensor alive across chunks: release it only
+            # on the chunk that finishes the walk.
+            unpersist_tensors = []
 
         return ForwardPassArgs(
             full_metadata=full_metadata,
@@ -890,7 +1017,10 @@ class Qwen3OmniModel(Model):
                 # Tell the Thinker whether to emit thinker_states.  Text only
                 # requests skip it to save cross-partition bandwidth.
                 "audio_output": audio_output,
-                "is_last_prefill": is_last_prefill
+                "is_last_prefill": is_last_prefill,
+                # prefill_chunk_offset / prefill_chunk_len for the submodule to
+                # slice this chunk (absent => full span, byte-identical).
+                **chunk_step_metadata,
             },
         )
 
@@ -1035,6 +1165,152 @@ class Qwen3OmniModel(Model):
         return edges
 
     # -----------------------------------------------------------------------
+    # Resumable chunked prefill (W5-P1, MSTAR_CHUNKED_PREFILL_V2)
+    # -----------------------------------------------------------------------
+
+    def _text_chunk_bounds(
+        self,
+        metadata: "CurrentForwardConductorMetadata",
+        schedule: list,
+        step: int,
+    ) -> tuple[int, int, bool] | None:
+        """Resolve this step's chunk window for resumable chunked TEXT prefill.
+
+        Returns ``(offset, chunk_len, walk_done)`` when the current prefill walk
+        is a ``prefill_text`` span that should be streamed in chunks, or ``None``
+        to fall back to the single-shot (byte-identical) path.
+
+        Chunking applies ONLY when:
+          * ``MSTAR_CHUNKED_PREFILL_V2`` is ON, and
+          * the walk is ``prefill_text`` (its token count is known up-front from
+            the input tensor's ``dims``; audio/vision lengths are only known
+            after the encoder runs and need the encoder-split walk, gated
+            separately under ``MSTAR_CHUNKED_PREFILL_V2_VISION``), and
+          * ``audio_output`` is False, i.e. the Talker is NOT conditioned. When
+            the Talker runs it consumes one ``thinker_states`` chunk per WALK;
+            chunking a walk would emit one per token-chunk and drift the Talker's
+            ``num_thinker_prefill_steps`` accounting. Text-output requests
+            (S2T / I2T / T2T) skip thinker_states entirely, so chunking them is
+            safe and exact.
+
+        ``offset`` is the per-walk committed-token counter carried across steps
+        in ``metadata.kwargs['prefill_chunk_offset']``.
+        """
+        if not chunked_prefill_v2_enabled():
+            return None
+        if metadata.kwargs.get("audio_output", True):
+            return None
+        walk, tensor_dict = schedule[step]
+        if walk != "prefill_text":
+            return None
+        ti = tensor_dict.get("text_inputs")
+        dims = getattr(ti, "dims", None)
+        if not dims:
+            return None
+        span = int(dims[0])
+        offset = int(metadata.kwargs.get("prefill_chunk_offset", 0))
+        plan = plan_prefill_chunk(span, offset, prefill_chunk_tokens())
+        if plan is None:
+            return None
+        chunk_len, walk_done = plan
+        return offset, chunk_len, walk_done
+
+    def _chunk_bounds(
+        self,
+        metadata: "CurrentForwardConductorMetadata",
+        schedule: list,
+        step: int,
+        persist_signals: dict[str, list["TensorPointerInfo"]] | None = None,
+    ) -> tuple[int, int, bool] | None:
+        """Unified chunk-bounds resolver.
+
+        P1 chunks text only. Vision/audio chunking (which needs the
+        encoder-split walk + staged embeds/pos_ids/deepstack) lands behind
+        ``MSTAR_CHUNKED_PREFILL_V2_VISION`` in a follow-up; this resolver is the
+        single seam it will extend. Returns ``(offset, chunk_len, walk_done)``
+        or ``None``.
+        """
+        return self._text_chunk_bounds(metadata, schedule, step)
+
+    def _walk_span_tokens(
+        self, schedule: list, step: int,
+    ) -> int | None:
+        """The full token count the Thinker sees for the walk at ``step``, or
+        None if not statically known (encoder-output walks). Text only in P1."""
+        walk, tensor_dict = schedule[step]
+        if walk != "prefill_text":
+            return None
+        ti = tensor_dict.get("text_inputs")
+        dims = getattr(ti, "dims", None)
+        if not dims:
+            return None
+        return int(dims[0])
+
+    def _log_first_chunk(
+        self, metadata, walk: str, offset: int, chunk_len: int,
+    ) -> None:
+        """DEBUG line on the first chunk of a walk: chunks planned, C, span."""
+        if offset != 0 or not logger.isEnabledFor(logging.DEBUG):
+            return
+        schedule = metadata.kwargs["prefill_schedule"]
+        step = metadata.kwargs["prefill_step"]
+        span = self._walk_span_tokens(schedule, step)
+        if span is None:
+            return
+        cap = prefill_chunk_tokens()
+        # Number of chunks the planner will emit for this walk span.
+        n, off = 0, 0
+        while True:
+            plan = plan_prefill_chunk(span, off, cap)
+            if plan is None:
+                n = 1
+                break
+            cl, done = plan
+            n += 1
+            off += cl
+            if done:
+                break
+        logger.debug(
+            "chunked_prefill_v2: walk=%s span=%d C<=%d chunks=%d (first=%d)",
+            walk, span, cap, n, chunk_len,
+        )
+
+    def _assert_walk_span(
+        self, metadata, schedule: list, step: int,
+    ) -> None:
+        """MSTAR_CHUNKED_PREFILL_V2_ASSERT: on leaving a chunked walk, verify the
+        summed committed chunk tokens equal the walk's full span. The committed
+        offset lives in ``prefill_chunk_offset`` and was advanced by exactly
+        ``chunk_len`` per chunk; the final chunk (walk_done) did NOT advance it,
+        so at walk exit offset == span - last_chunk_len. Recompute the expected
+        total and compare. Cheap conductor-side check; no GPU state read."""
+        if not chunked_prefill_v2_assert():
+            return
+        span = self._walk_span_tokens(schedule, step)
+        if span is None:
+            return
+        # Replay the planner to get the committed-before-final-chunk offset.
+        cap = prefill_chunk_tokens()
+        off = 0
+        while True:
+            plan = plan_prefill_chunk(span, off, cap)
+            if plan is None:
+                # Not chunked: single full-span step.
+                committed_before_final = 0
+                break
+            cl, done = plan
+            if done:
+                committed_before_final = off
+                break
+            off += cl
+        actual_off = int(metadata.kwargs.get("prefill_chunk_offset", 0))
+        assert actual_off == committed_before_final, (
+            f"chunked_prefill_v2 span mismatch: walk step={step} span={span} "
+            f"expected committed offset {committed_before_final} before final "
+            f"chunk, got {actual_off}"
+        )
+
+    # -----------------------------------------------------------------------
     # Model ABC: partition forward pass args (STATE MACHINE)
     # -----------------------------------------------------------------------
 
@@ -1078,18 +1354,38 @@ class Qwen3OmniModel(Model):
         """
 
         if metadata.is_prefill:
-            # Advance prefill schedule
-            step = metadata.kwargs["prefill_step"] + 1
             schedule = metadata.kwargs["prefill_schedule"]
+            cur_step = metadata.kwargs["prefill_step"]
 
-            if step < len(schedule):
-                # More prefill steps remaining
-                metadata.kwargs["prefill_step"] = step
-                metadata.graph_walk = schedule[step][0]
-            else:
-                # All prefill done -- transition to thinker_decode
-                metadata.is_prefill = False
-                metadata.graph_walk = "thinker_decode"
+            # Resumable chunked prefill: if the chunk that just completed did
+            # NOT consume the final token of the current walk's span, re-emit
+            # the SAME walk next step with an advanced offset (do not advance
+            # the schedule). Only once the walk's span is fully consumed do we
+            # fall through to the normal schedule advance.
+            rechunk = False
+            bounds = self._chunk_bounds(metadata, schedule, cur_step, persist_signals)
+            if bounds is not None:
+                offset, chunk_len, walk_done = bounds
+                if not walk_done:
+                    metadata.kwargs["prefill_chunk_offset"] = offset + chunk_len
+                    metadata.graph_walk = schedule[cur_step][0]
+                    rechunk = True
+
+            if not rechunk:
+                # Leaving the current walk -> reset the per-walk chunk counter,
+                # run the assert hook (summed chunk tokens == walk span), and
+                # advance the schedule.
+                self._assert_walk_span(metadata, schedule, cur_step)
+                metadata.kwargs["prefill_chunk_offset"] = 0
+                step = cur_step + 1
+                if step < len(schedule):
+                    # More prefill steps remaining
+                    metadata.kwargs["prefill_step"] = step
+                    metadata.graph_walk = schedule[step][0]
+                else:
+                    # All prefill done -- transition to thinker_decode
+                    metadata.is_prefill = False
+                    metadata.graph_walk = "thinker_decode"
 
         elif metadata.graph_walk == "thinker_decode":
             # if the decode loop returns to conductor, the thinker is fully done
@@ -1110,17 +1406,45 @@ class Qwen3OmniModel(Model):
             schedule = metadata.kwargs["prefill_schedule"]
             step = metadata.kwargs["prefill_step"]
             is_last_prefill = (step == len(schedule) - 1)
+            walk_done = True
+            chunk_step_metadata: dict = {}
             inputs = self._get_thinker_prefill_inputs(metadata, persist_signals)
+
+            # Resumable chunked prefill window for this step.
+            bounds = self._chunk_bounds(metadata, schedule, step, persist_signals)
+            if bounds is not None:
+                offset, chunk_len, walk_done = bounds
+                chunk_step_metadata = {
+                    "prefill_chunk_offset": offset,
+                    "prefill_chunk_len": chunk_len,
+                }
+                # Only the FINAL chunk of the FINAL walk is the true last
+                # prefill (samples first-token logits + returns new_token once).
+                is_last_prefill = is_last_prefill and walk_done
+                if offset == 0:
+                    self._log_first_chunk(
+                        metadata, schedule[step][0], offset, chunk_len,
+                    )
         else:
             # Decode: previous token feeds back as text_inputs
             is_last_prefill = False
+            walk_done = True
+            chunk_step_metadata = {}
             edge = GraphEdge(next_node="Thinker", name="text_inputs")
             edge.tensor_info = persist_signals.get("new_token", [])
             inputs = [edge]
 
-        unpersist_tensors = sum(
-            [inp.tensor_info for inp in inputs], start=[]
-        )
+        # Hold the prefill input tensor alive across chunks: release it only on
+        # the chunk that finishes the walk (``walk_done``) or on non-chunked /
+        # decode steps. Re-sending the same persisted pointer each chunk
+        # accumulates the conductor ref-count, drained by the single unpersist
+        # on the final chunk. ``walk_done`` is True for every non-chunked step.
+        if not walk_done:
+            unpersist_tensors = []
+        else:
+            unpersist_tensors = sum(
+                [inp.tensor_info for inp in inputs], start=[]
+            )
 
         step_metadata = {
             "is_prefill": metadata.is_prefill,
@@ -1129,6 +1453,9 @@ class Qwen3OmniModel(Model):
             # the submodule can gate thinker_states emission.  Default True
             # for backwards compatibility with callers that never set it.
             "audio_output": metadata.kwargs.get("audio_output", True),
+            # prefill_chunk_offset / prefill_chunk_len for the submodule to
+            # slice this chunk (absent => full span, byte-identical).
+            **chunk_step_metadata,
         }
 
         return ForwardPassArgs(

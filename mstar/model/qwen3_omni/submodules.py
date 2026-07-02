@@ -588,7 +588,18 @@ class ThinkerSubmodule(ARNodeSubmodule):
             )
 
         if graph_walk == "prefill_text":
-            text_ids = inputs["text_inputs"][0].to(device)  # (seq_len,)
+            text_ids = inputs["text_inputs"][0].to(device)  # (full_span,)
+
+            # Resumable chunked prefill (MSTAR_CHUNKED_PREFILL_V2): the conductor
+            # re-emits this walk with a per-chunk ``prefill_chunk_offset`` /
+            # ``prefill_chunk_len`` window. Slice the full text span to this
+            # chunk. Absent metadata (flag off, or a walk short enough not to
+            # chunk) => full span, byte-identical to the unchunked path.
+            chunk_off = int(fwd_info.step_metadata.get("prefill_chunk_offset", 0))
+            chunk_len = fwd_info.step_metadata.get("prefill_chunk_len")
+            if chunk_len is not None:
+                text_ids = text_ids[chunk_off:chunk_off + int(chunk_len)]
+
             embeds = self.model.model.embed_tokens(text_ids)
             seq_len = text_ids.shape[0]
 
@@ -600,8 +611,10 @@ class ThinkerSubmodule(ARNodeSubmodule):
             # per-modality helper instead of the full HF parser.
             #
             # ``start_pos`` is the next MRoPE position for this request,
-            # carried forward across walks by ``state.position_id_start``
-            # (advanced post-forward by ``advance_seq_lens``).
+            # carried forward across walks (and across chunks) by
+            # ``state.position_id_start`` (advanced post-forward by
+            # ``advance_seq_lens``). For a chunk it already reflects the
+            # tokens consumed by prior chunks, so positions stay contiguous.
             pos_ids = get_rope_index_text(seq_len, start_pos, device)
             masks_for_talker = torch.stack([
                 torch.zeros(text_ids.shape, dtype=torch.bool, device=device), # multimodal
