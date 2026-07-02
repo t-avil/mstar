@@ -1239,7 +1239,11 @@ class ThinkerSubmodule(ARNodeSubmodule):
     # path walks only real_num_tokens (see _run_flashinfer_packed). Grid
     # expansion (more bs / C buckets) is P3.
     MIXED_BATCH_BS = 32
-    MIXED_BATCH_CHUNK_SIZES = [256, 512]
+    # 288 covers tail-merged chunks (C=256+tail<=32, e.g. the ubiquitous
+    # 258-token vision span): 31 decodes + 258 = 289 tokens overflowed the
+    # 288 bucket by ONE token and padded to 544 (~88% waste) — measured as
+    # the main cost of the first spec-fold A/B at B32.
+    MIXED_BATCH_CHUNK_SIZES = [256, 288, 512]
 
     # prefill_vision buckets are larger than text/audio because video
     # produces many vision tokens per request (UCF101 ≈ 1k–4k tokens; 8192
