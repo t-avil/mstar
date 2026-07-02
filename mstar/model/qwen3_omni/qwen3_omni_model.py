@@ -189,6 +189,31 @@ def mixed_batch_spec_enabled() -> bool:
     return _envflag("MSTAR_MIXED_SPEC") and mixed_batch_enabled()
 
 
+def mixed_batch_preplan_enabled() -> bool:
+    """W5-P2 residual: pre-plan a chain-folded ``thinker_mixed`` step's packed
+    FlashInfer attention on the plan_executor thread, exactly like decode
+    pre-plan, so the GPU thread's mixed submission finds the prefill wrapper
+    already planned and skips its inline plan.
+
+    Without this, a folded mixed batch reserves NO slot and gets NO pre-plan
+    (``reserve_replay_slot`` / ``pre_plan_for_batch`` both key on the
+    BASIC_BATCHED-only ``_get_basic_batched_key_for``, which returns None for
+    FLASH_INFER_PACKED). So the packed prefill-wrapper plan (~0.75-1.5ms for a
+    32-row bucket: qo_indptr + paged indices + CUB scan) plus the packed input
+    prep run INLINE on the GPU thread between replay(N) and the mixed replay —
+    a serial bubble the uniform decode chain otherwise hides via plan_executor
+    overlap. This is the ~unity i2t B32 residual (measured 0.969-1.032 band).
+
+    When ON, the mixed fold reserves a packed slot at fold time and dispatches
+    the packed plan on plan_executor gated on N's advance_event, mirroring
+    decode pre-plan. Default OFF -> flag-off is byte-identical (the packed
+    reserve / pre-plan / reset surfaces all short-circuit). Implies
+    ``MSTAR_MIXED_SPEC`` (there is no chain-folded mixed step to pre-plan
+    without it).
+    """
+    return _envflag("MSTAR_MIXED_PREPLAN") and mixed_batch_spec_enabled()
+
+
 def mixed_batch_vision_enabled() -> bool:
     """W5-P3-lite: allow a VISION prefill chunk (not just ``prefill_text``) to
     ride a captured ``thinker_mixed`` step. When ON, the scheduler may pick a
