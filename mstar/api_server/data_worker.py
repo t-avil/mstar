@@ -375,6 +375,12 @@ class PreprocessWorkerThread:
         self, result: ResultTensors
     ):
         result.graph_edge.name = f"{result.modality}_output"
+        # Inline fast path: token values arrived in the message metadata, so
+        # there is no SHM tensor to fetch and no producer ack to send. The
+        # producer already released its tensor_store ref locally.
+        if result.metadata and "inline_values" in result.metadata:
+            self._emit_inline_result(result)
+            return
         self.tensor_manager.start_read_tensors(
             request_id=result.request_id,
             graph_edges=[result.graph_edge],
@@ -385,9 +391,50 @@ class PreprocessWorkerThread:
             self.tensor_uuid_to_metadata_per_request[result.request_id][
                 tensor_info.uuid] = result.metadata
 
+    def _emit_inline_result(self, result: ResultTensors):
+        """Produce ResultChunk(s) directly from inline token values.
+
+        Mirrors _process_read_tensors' emission but skips the transport
+        fetch: one chunk per tensor_info entry (so per_request_reading_tensors,
+        bumped by len(tensor_info) in new_result_tensors, balances exactly),
+        each reconstructed as a byte-identical tensor from the inline ints
+        using the tensor_info dtype/shape and run through the same postprocess.
+        """
+        modality = result.graph_edge.name.replace("_output", "")
+        # The producer keys inline_values by the pre-rename edge name; there is
+        # exactly one entry (this edge). Fall back to the single value list.
+        inline_map: dict = result.metadata["inline_values"]
+        values = next(iter(inline_map.values())) if inline_map else []
+        chunk_metadata = {
+            k: v for k, v in (result.metadata or {}).items()
+            if k != "inline_values"
+        }
+        for tensor_info in result.graph_edge.tensor_info:
+            n = 1
+            for d in tensor_info.dims:
+                n *= int(d)
+            ints = values[:n]
+            values = values[n:]
+            tensor = torch.tensor(ints, dtype=tensor_info.dtype).reshape(
+                tensor_info.dims
+            )
+            postprocessed = self.model.postprocess(tensor, modality)
+            self.out_queue.put(ResultChunk(
+                request_id=result.request_id,
+                modality=modality,
+                data=postprocessed,
+                metadata=chunk_metadata,
+            ))
+
     def _discard_result_tensor(
         self, result: ResultTensors
     ):
+        # Inline messages carry no transported tensors: the producer never
+        # registered them for send and already released its ref locally, so
+        # there is nothing to ack. Acking would deref uuids the producer
+        # doesn't hold — make discard a no-op for inline-only messages.
+        if result.metadata and "inline_values" in result.metadata:
+            return
         # The request is gone, so don't start a read — just ack the tensors back
         # to the producing worker so it can free the source buffers.
         self.tensor_manager.ack_unread_tensors(

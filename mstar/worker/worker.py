@@ -142,6 +142,11 @@ class Worker:
         self.enable_prof = enable_prof
         self.profile_info = WorkerProfileInfo()
 
+        # Fast path: send tiny integer new-token emit_to_client tensors inline
+        # in the result_tensors message instead of via the SHM tensor
+        # transport. Default OFF. See _inline_emit_uuids / _send_outputs.
+        self._inline_emit = os.environ.get("MSTAR_INLINE_EMIT", "0") == "1"
+
         if self.device.type == "cuda" and self.device.index is not None:
             torch.cuda.set_device(self.device)
 
@@ -908,19 +913,75 @@ class Worker:
     # ------------------------------------------------------------------
     # Output handling
     # ------------------------------------------------------------------
+    def _inline_emit_uuids(
+        self,
+        routing: NodeOutputRouting,
+        prematerialized_new_tokens: dict[str, list[int]] | None,
+    ) -> set[str]:
+        """UUIDs of emit_to_client tensors eligible for the inline fast path.
+
+        A uuid qualifies only when (a) the inline-emit flag is on, (b) its
+        edge is a tiny integer new-token tensor already prematerialized to
+        CPU ints (present in ``prematerialized_new_tokens``), and (c) the
+        uuid is used ONLY by qualifying emit_to_client edges. Condition (c)
+        is essential: the same produced tensor's uuid can also feed a
+        persist / loop-back (to_workers) / streaming edge, which still need
+        the SHM transport — skipping their SHM write would break the
+        consumer's read. So we exclude any uuid that appears on a
+        non-inline edge.
+        """
+        if not self._inline_emit or not prematerialized_new_tokens:
+            return set()
+
+        inline_candidates: set[str] = set()
+        for edge in routing.emit_to_client:
+            if edge.name not in prematerialized_new_tokens:
+                continue
+            # Only integer new-token edges are prematerialized; audio /
+            # multimodal edges are never in the prem dict, so they never
+            # reach here.
+            inline_candidates.update(info.uuid for info in edge.tensor_info)
+
+        if not inline_candidates:
+            return set()
+
+        # Any uuid also referenced by a non-inline consumer must keep its
+        # SHM write; drop it from the inline set.
+        non_inline_uuids: set[str] = set()
+        for edge in (
+            routing.persist +
+            sum(routing.to_workers.values(), start=[]) +
+            sum(routing.streaming_to_workers.values(), start=[]) +
+            routing.streaming_local +
+            routing.routed_to_this_worker_graph
+        ):
+            non_inline_uuids.update(info.uuid for info in edge.tensor_info)
+
+        return inline_candidates - non_inline_uuids
+
     def _register_outputs(
         self,
         batch: ScheduledBatch,
         routing_per_request: dict[str, NodeOutputRouting],
+        prematerialized_per_request: dict[str, dict[str, list[int]] | None] | None = None,
     ):
         """
         For outputs going to other workers: register tensors for RDMA send
         and populate tensor_info on the GraphEdges.
         For outputs staying local: store tensors in tensor_manager.
         Returns the output edges per request (with tensor_info filled in).
+
+        ``prematerialized_per_request`` (optional): per-rid prematerialized
+        new-token ints, used to identify emit_to_client uuids that will be
+        sent inline (see ``_inline_emit_uuids``). Inline uuids are NOT
+        registered for send — no SHM file is written for them.
         """
         for request_id, _node in batch.node_objects.items():
             routing = routing_per_request[request_id]
+            prem = (
+                (prematerialized_per_request or {}).get(request_id)
+            )
+            inline_uuids = self._inline_emit_uuids(routing, prem)
             uuids = set()
             for edge in (
                 routing.persist +
@@ -931,6 +992,10 @@ class Worker:
                 uuids.update([
                     info.uuid for info in edge.tensor_info
                 ])
+            # Inline-emit uuids skip SHM registration entirely: no file
+            # write, no remote fetch, no ack. Their producer-side ref is
+            # released locally in _send_outputs instead.
+            uuids -= inline_uuids
             self.tensor_manager.register_for_send(
                 request_id=request_id, uuids=uuids,
                 skip_cuda_sync=True,
@@ -1012,11 +1077,34 @@ class Worker:
             self.worker_graphs_manager.buffer_output_signals(
                 request_id, outputs.emit_to_client
             )
+            inline_uuids = self._inline_emit_uuids(
+                outputs, prematerialized_new_tokens
+            )
+            # uuids we release locally, weighted by how many emit tensor_info
+            # entries reference each (mirrors the per-tensor_info ack count
+            # the data worker would have sent via TENSOR_RECEIVED).
+            local_release: dict[str, int] = {}
             for graph_edge in outputs.emit_to_client:
                 self.worker_graphs_manager.register_output_loop_indices(
                     request_id=request_id, loop_indices=nested_loop_indices,
                     output_name=graph_edge.name
                 )
+                metadata: dict = {}
+                edge_inline = self._inline_emit and bool(graph_edge.tensor_info) and all(
+                    info.uuid in inline_uuids for info in graph_edge.tensor_info
+                )
+                if edge_inline:
+                    # Carry the token values inline; the consumer skips the
+                    # SHM fetch entirely. dtype/shape come from tensor_info
+                    # on the (still-attached) graph_edge, so the consumer
+                    # reconstructs a byte-identical tensor for postprocess.
+                    metadata = {
+                        "inline_values": {
+                            graph_edge.name: prematerialized_new_tokens[graph_edge.name]
+                        }
+                    }
+                    for info in graph_edge.tensor_info:
+                        local_release[info.uuid] = local_release.get(info.uuid, 0) + 1
                 message = APIServerMessage(
                     message_type="result_tensors",
                     body=ResultTensors(
@@ -1024,10 +1112,17 @@ class Worker:
                         modality=graph_edge.output_modality,
                         graph_edge=graph_edge,
                         loop_indices=nested_loop_indices,
-                        metadata={}
+                        metadata=metadata
                     )
                 )
                 self.communicator.send("api_server", message)
+
+            # Release the producer-side ref for inline uuids now: no
+            # TENSOR_RECEIVED ack will ever arrive for them (they were never
+            # registered for send in _register_outputs), so this stands in
+            # for the ack's dereference and prevents a tensor_store leak.
+            for uuid, n in local_release.items():
+                self.tensor_manager.dereference(request_id, uuid, n=n)
 
         # Handle streaming edges
         # Local streaming: route to StreamBuffer
@@ -1600,6 +1695,39 @@ class Worker:
             node.ready_signals.clear()
 
 
+    def _prematerialized_new_tokens(
+        self, cpu_output, rid: str,
+    ) -> dict[str, list[int]] | None:
+        """Extract prematerialized new-token ints for ``rid`` from check_stop's
+        CPU output.
+
+        Reuses check_stop's side-stream D→H copies for the new-token ints.
+        Without this, buffer_new_tokens does a per-rid ``get_tensor().cpu()``
+        — a default-stream sync per request per step (32/step at B32) that
+        also serializes against the in-flight speculative step's kernels on
+        the default stream. Only integer, non-CUDA tensors qualify; audio /
+        multimodal (float / large) outputs are never included.
+        """
+        rid_cpu = cpu_output.per_request_output_tensors.get(rid)
+        if not isinstance(rid_cpu, dict):
+            return None
+        prem: dict[str, list[int]] = {}
+        for name, tensors in rid_cpu.items():
+            if (
+                isinstance(tensors, list)
+                and tensors
+                and all(
+                    torch.is_tensor(t)
+                    and not t.is_cuda
+                    and not t.is_floating_point()
+                    for t in tensors
+                )
+            ):
+                prem[name] = [
+                    int(v) for t in tensors for v in t.flatten().tolist()
+                ]
+        return prem
+
     def _postprocess_batch(
         self, batch_N: PendingBatch,
         output: NodeOutput,
@@ -1774,10 +1902,21 @@ class Worker:
                     rid, per_request_uuids[rid], routed_edges
                 )
 
+        # Build the prematerialized new-token ints once, before register_outputs,
+        # so both the SHM-skip decision (register_outputs) and the inline send
+        # (_send_outputs) see the same per-rid prem dict.
+        prem_per_request: dict[str, dict[str, list[int]] | None] = {
+            rid: self._prematerialized_new_tokens(cpu_output, rid)
+            for rid in routing_per_request
+        }
+
         if self.enable_nvtx:
             range_pop(synchronize=False)
             range_push("worker.postprocess.register_outputs", synchronize=False)
-        self._register_outputs(batch_N.batch, routing_per_request)
+        self._register_outputs(
+            batch_N.batch, routing_per_request,
+            prematerialized_per_request=prem_per_request,
+        )
 
         # send outputs
         if self.enable_nvtx:
@@ -1800,35 +1939,12 @@ class Worker:
                 batch_N.node_batch.exec_timings,
             )
         for rid, routing in routing_per_request.items():
-            # Reuse check_stop's side-stream D→H copies for the new-token
-            # ints. Without this, buffer_new_tokens does a per-rid
-            # ``get_tensor().cpu()`` — a default-stream sync per request per
-            # step (32/step at B32) that also serializes against the
-            # in-flight speculative step's kernels on the default stream.
-            prem: dict[str, list[int]] | None = None
-            rid_cpu = cpu_output.per_request_output_tensors.get(rid)
-            if isinstance(rid_cpu, dict):
-                prem = {}
-                for name, tensors in rid_cpu.items():
-                    if (
-                        isinstance(tensors, list)
-                        and tensors
-                        and all(
-                            torch.is_tensor(t)
-                            and not t.is_cuda
-                            and not t.is_floating_point()
-                            for t in tensors
-                        )
-                    ):
-                        prem[name] = [
-                            int(v) for t in tensors for v in t.flatten().tolist()
-                        ]
             self._send_outputs(
                 rid, routing,
                 nested_loop_indices=per_req_nested_idxs[rid],
                 graph_walk=batch_N.graph_walk,
                 partition_name=batch_N.partition,
-                prematerialized_new_tokens=prem,
+                prematerialized_new_tokens=prem_per_request[rid],
                 node_speculatively_scheduled=batch_N.batch.node_objects[rid]._speculatively_scheduled
             )
 
