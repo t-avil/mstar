@@ -267,3 +267,13 @@ they generate (ranked by win × feasibility at OUR bottlenecks):
   Rust/C++ scheduler rewrite (TRT-LLM's C++ executor — wrong cost/benefit for
   us given W3 exists in pure Python). Spec-decode for MoE/multimodal and MoE
   kernel claims did not survive adversarial verification — treat as unproven.
+
+## W2 — decode-step transaction (`MSTAR_STEP_TXN`, commit b98de66 on exp/step-txn) — CORRECT but WASH
+Full memoized replay of the per-rid graph-walk bookkeeping (3-4× fewer Python
+ops on the routing slice), validated by a shadow-verify mode with ZERO
+prediction mismatches over thousands of B8/B32 steps. Perf: i2t B32 0.995×,
+B8 0.96×, s2t B8 1.00× — flat. Combined with E9/E10 this closes the case:
+postprocess-side Python is NOT the binding serial chain at B32 (it overlaps
+GPU); the residual is the submit gap (await→result→thread→submit, W3) and
+prefill serialization (W5). NOT merged into the shipping branch — kept on
+its branch as validated infrastructure if the balance shifts.
