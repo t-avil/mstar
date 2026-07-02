@@ -18,3 +18,9 @@ branch `exp/mixed-batch-p2` (final: 62472cf). Narrative + verdicts:
 
 Methodology: interleaved A/Bs (both servers preloaded, per-cell
 back-to-back); probes are single-server quick-bench (triage only).
+
+## preplan/ (2026-07-02 late addendum)
+MSTAR_MIXED_PREPLAN shootout, same pair back-to-back: off 6.141 / on+asserts
+5.465 / on-clean 3.083 req/s — clean run exposes a plan_stream concurrency
+defect the assert's blocking masked. REJECTED pending stream-race debug
+(EXPERIMENTS.md). ab_p2spec/ now carries the complete 6-cell final A/B.
