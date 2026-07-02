@@ -202,13 +202,6 @@ class Worker:
         )
         self._walk_stats_step = 0
 
-    def _ws_inc(self, key: str) -> None:
-        """MSTAR_WALK_STATS: bump a named diagnostic counter (no-op when off).
-        Counters ride the same dict as the per-walk step counts and are logged
-        by the same every-200-steps WARNING line."""
-        if self._walk_stats is not None:
-            self._walk_stats[key] = self._walk_stats.get(key, 0) + 1
-
         # W5-P2 residual (MSTAR_MIXED_PREPLAN): pre-plan a chain-folded
         # thinker_mixed step's packed attention on the plan_executor thread
         # (implies MSTAR_MIXED_SPEC). Read once via the model flag helper so
@@ -1322,6 +1315,13 @@ class Worker:
     # Speculation scope (currently): AR engine only, intra-worker, 1-deep,
     # for rids whose loop is still continuing.
     # ------------------------------------------------------------------
+
+    def _ws_inc(self, key: str) -> None:
+        """MSTAR_WALK_STATS: bump a named diagnostic counter (no-op when off).
+        Counters ride the same dict as the per-walk step counts and are logged
+        by the same every-200-steps WARNING line."""
+        if self._walk_stats is not None:
+            self._walk_stats[key] = self._walk_stats.get(key, 0) + 1
 
     def _pre_plan_for_speculative_batch(
         self,
