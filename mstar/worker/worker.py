@@ -189,6 +189,18 @@ class Worker:
             in ("1", "true", "yes", "on")
         )
 
+        # W5-P2 residual (MSTAR_MIXED_PREPLAN): pre-plan a chain-folded
+        # thinker_mixed step's packed attention on the plan_executor thread
+        # (implies MSTAR_MIXED_SPEC). Read once via the model flag helper so
+        # the implication is enforced in one place. Static for the process.
+        from mstar.model.qwen3_omni.qwen3_omni_model import (
+            mixed_batch_preplan_enabled as _mixed_batch_preplan_enabled,
+        )
+        self.mixed_batch_preplan = _mixed_batch_preplan_enabled()
+        # Counters for the INFO summary of preplanned-vs-inline mixed steps.
+        self._mixed_preplan_count = 0
+        self._mixed_inline_count = 0
+
         if self.device.type == "cuda" and self.device.index is not None:
             torch.cuda.set_device(self.device)
 
@@ -2103,6 +2115,13 @@ class Worker:
         spec_batch.request_to_worker_graph[chunk_rid] = chunk_wg_id
         spec_batch.graph_walk = "thinker_mixed"
 
+        # n_decode = the continuation size BEFORE the chunk row is appended.
+        # Every continuation row is a thinker_decode row (1 new token), so the
+        # mixed batch's per-row plan seq_lens are [1]*n_decode + [C] in exactly
+        # the request_ids order below (decode rows first, chunk row last) —
+        # matching what the packed preprocess builds from the ARNodeInputs.
+        n_decode = len(spec_node_batch.request_ids)
+
         spec_node_batch.graph_walk = "thinker_mixed"
         spec_node_batch.request_ids = list(spec_node_batch.request_ids) + [chunk_rid]
         spec_node_batch.per_request_input_tensors[chunk_rid] = chunk_inputs
@@ -2113,6 +2132,21 @@ class Worker:
             spec_node_batch.final_stream_rids = set(
                 spec_node_batch.final_stream_rids
             ) | {chunk_rid}
+
+        # MSTAR_MIXED_PREPLAN: stash the packed pre-plan params so the engine's
+        # reserve / pre-plan / reset trio routes to the packed runner surface.
+        # num_tokens picks the token bucket (n_decode 1-token rows + the C-token
+        # chunk); seq_lens is the per-row plan list the packed pre-plan pads and
+        # feeds to plan_attention. Set ONLY under the flag, so flag-off (and the
+        # non-preplan mixed path) never carries this key and the trio stays on
+        # its BASIC_BATCHED-only behavior. chunk_len can be None if the chunk
+        # carried no prefill_chunk_len metadata (shouldn't happen for a mixable
+        # chunk) — guard so we don't stash a broken bucket.
+        if self.mixed_batch_preplan and chunk_len is not None:
+            spec_node_batch.metadata["mixed_preplan"] = {
+                "num_tokens": n_decode + int(chunk_len),
+                "seq_lens": [1] * n_decode + [int(chunk_len)],
+            }
 
         # Validation hook: distinguish a chain-RIDING mixed assembly from a
         # chain-BREAK assembly (micro_scheduler's "mixed batch:" log). n_decode
@@ -3170,6 +3204,51 @@ class Worker:
                                 speculation.plan_future.result()
                                 self._reset_skip_plan_flags(speculation.node_batch)
                                 speculation.plan_future = None
+
+                            # MSTAR_MIXED_PREPLAN validation + counter. A folded
+                            # mixed step is preplanned when its pre-plan future
+                            # survived (not reset by the drop path above) AND a
+                            # packed slot was reserved; otherwise it plans inline
+                            # (no slot match, or dropped membership). Under the
+                            # assert flag, a live pre-plan future MUST report
+                            # applied=True — a False there means the packed
+                            # reserve/pre-plan silently missed and the run path
+                            # will inline-plan without us noticing, which is the
+                            # exact regression this hook guards against.
+                            if (
+                                self.mixed_batch_preplan
+                                and spec_node_batch.metadata.get("mixed_preplan")
+                                is not None
+                            ):
+                                slot_reserved = (
+                                    "cuda_graph_slot" in spec_node_batch.metadata
+                                )
+                                if (
+                                    speculation.plan_future is not None
+                                    and slot_reserved
+                                ):
+                                    self._mixed_preplan_count += 1
+                                    if self.mixed_batch_assert:
+                                        applied = speculation.plan_future.result()
+                                        assert applied, (
+                                            "MIXED_PREPLAN: pre-plan future "
+                                            "returned not-applied for a folded "
+                                            "mixed step that reserved a packed "
+                                            "slot — run path will inline-plan"
+                                        )
+                                else:
+                                    self._mixed_inline_count += 1
+                                if (
+                                    self._mixed_preplan_count
+                                    + self._mixed_inline_count
+                                ) % 200 == 0:
+                                    logger.info(
+                                        "Worker %s mixed-preplan: preplanned=%d "
+                                        "inline=%d",
+                                        self.worker_id,
+                                        self._mixed_preplan_count,
+                                        self._mixed_inline_count,
+                                    )
 
                             # Attach a fresh advance_event to this batch so
                             # the NEXT iter's plan_executor can gate on
