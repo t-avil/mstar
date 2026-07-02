@@ -194,8 +194,12 @@ class Worker:
         # (not just yield boundaries). Read once; static for the process.
         from mstar.model.qwen3_omni.qwen3_omni_model import (
             mixed_single_chunk_enabled as _msce,
+            mixed_split_attn_enabled as _msae,
         )
         self.mixed_single_chunk = _msce()
+        # Static for the process — capture bakes the split layout, so this
+        # must NOT follow dynflags flips (_refresh_dynamic_flags skips it).
+        self.mixed_split_attn = _msae()
 
         # Diagnostics (MSTAR_WALK_STATS): count executed steps per
         # (node, graph_walk) and log every 200 steps at WARNING (visible under
@@ -2227,7 +2231,15 @@ class Worker:
         # its BASIC_BATCHED-only behavior. chunk_len can be None if the chunk
         # carried no prefill_chunk_len metadata (shouldn't happen for a mixable
         # chunk) — guard so we don't stash a broken bucket.
-        if self.mixed_batch_preplan and chunk_len is not None:
+        if (
+            self.mixed_batch_preplan
+            and chunk_len is not None
+            and not self.mixed_split_attn
+        ):
+            # Split-attention replays (MSTAR_MIXED_SPLIT_ATTN) use the
+            # fixed-region padded shape [1]*(bs-1)+[C]; this stash's real-row
+            # shape would plan the wrong layout. Pre-plan is default-off and
+            # measured neutral — inline planning under split.
             spec_node_batch.metadata["mixed_preplan"] = {
                 "num_tokens": n_decode + int(chunk_len),
                 "seq_lens": [1] * n_decode + [int(chunk_len)],

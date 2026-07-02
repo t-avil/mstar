@@ -237,6 +237,20 @@ def mixed_batch_vision_enabled() -> bool:
     )
 
 
+def mixed_split_attn_enabled() -> bool:
+    """W5 split attention (MSTAR_MIXED_SPLIT_ATTN): captured thinker_mixed
+    steps plan their decode rows on a tensor-core DECODE wrapper and the chunk
+    row on its own prefill wrapper instead of one BatchPrefill plan over the
+    whole mixed shape. In-graph microbench (mb_split_attn.py): 6.11 -> 1.84 ms
+    of attention per 48-layer forward (4.27 ms per mixed step) — the single
+    mixed-shape PLAN is what's slow, not the kernel (the decode wrapper is
+    tensor-core = prefill kernel inside; plain decode kernel rejects GQA
+    group 7). Requires the fixed-region row layout in _run_flashinfer_packed
+    (real decode rows, then qo=1 dummies, chunk row last). Default OFF.
+    """
+    return _envflag("MSTAR_MIXED_SPLIT_ATTN")
+
+
 def mixed_single_chunk_enabled() -> bool:
     """W5 fold-rate: let a prefill span that FITS in one chunk still take the
     chunked path as a single chunk, so it carries ``prefill_chunk_len``
