@@ -288,3 +288,22 @@ residual is the result→thread→submit inter-thread hop (≤~1ms/step);
 projected ceiling 1.00-1.05× at B32, likely flat per E9/E10 precedent.
 Not worth the implementation risk. All remaining B32 leverage concentrates
 in W5 (prefill-stall elimination via token-budget mixed batching).
+
+## W5 design (2026-07-02) — the B32 endgame, variant (c): CAPTURED mixed batches
+Key code-verified finding (w5-design): M*'s prefill attention is FlashInfer's
+PAGED-KV BatchPrefillWithPagedKVCacheWrapper, which already accepts a mixed
+qo_indptr (N decode rows len-1 + one prefill-chunk row len-C); the split
+between decode/prefill is literally one `all(sl==1)` check (cache_manager.py:
+337). And M* already CUDA-graphs this wrapper via FlashInferPackedCudaGraph
+machinery — the static-addressing problem that forces vLLM to run mixed
+attention EAGER is already solved in our engine. So the mixed step can be
+captured end-to-end: no eager (the June/E7 killer), no FA3 (fallback only),
+no piecewise (the in-tree "PiecewiseCudaGraphRunner" is a V-JEPA2 helper,
+not a GEMM/attention splitter). Causality is uniformly causal=True via
+FlashInfer bottom-right alignment. Bucket grid bs×C ≈ 15 captures ≈ ~4GB
+(affordable post-fp8). MRoPE resume = slice a staged (3,total) grid; vision
+embeds staged once per request (~2MB). Phasing: P1 chunked-prefill-only
+(~4-5d, expected 0.77→~0.85-0.90×, shippable alone) → P2 mixed captured
+forward (~5-7d, →~0.90-0.95×+) → P3 grid/tuning (~3-4d). Risks table incl.
+deferred mark_node_complete (Loop, E9), deepstack chunk alignment, MRoPE
+pos_advance handling — all with token-identity gates.
