@@ -190,8 +190,10 @@ def fused_experts_fp8(
         config = {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 128,
                   "GROUP_SIZE_M": 1, "num_warps": 4, "num_stages": 3}
     else:
-        config = {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 128,
-                  "GROUP_SIZE_M": 1, "num_warps": 4, "num_stages": 3}
+        # Prefill-M tile sweep on H200 (in-graph, real weights, M=2048/4096):
+        # BLOCK_M=64 + GROUP=8 is 1.63x over the previous BLOCK_M=32 config.
+        config = {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 128,
+                  "GROUP_SIZE_M": 8, "num_warps": 4, "num_stages": 3}
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
         topk_ids, config["BLOCK_SIZE_M"], E)
 
