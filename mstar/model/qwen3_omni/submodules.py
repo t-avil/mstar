@@ -957,14 +957,28 @@ class ThinkerSubmodule(ARNodeSubmodule):
         extra_inputs = {}
         # W5-P2 mixed batch: the concatenation above already produces the mixed
         # [decode embeds (n,H); chunk embeds (C,H)] layout and the
-        # ``seq_lens=[1]*n+[C]`` that plan_attention needs — no walk-specific
-        # code required, because the mixed capture bucket uses the text-packed
-        # tensor signature (input_embeds + cos_3d + sin_3d only). The P2 mixed
-        # chunk row is therefore restricted to ``prefill_text`` at assembly
-        # time (mstar/worker/micro_scheduler.py): audio needs the MRoPE
-        # ``mrope_pos_advance`` side-channel and vision needs deepstack tensors,
-        # neither of which the text-signature capture carries. Those are P3.
+        # ``seq_lens=[1]*n+[C]`` that plan_attention needs. For a TEXT chunk row
+        # nothing further is required — the packed tensor signature is
+        # input_embeds + cos_3d + sin_3d only, so decode + prefill_text rows
+        # concatenate byte-identically to a plain prefill step.
+        #
+        # W5-P3-lite (MSTAR_MIXED_BATCH_VISION): a VISION chunk row additionally
+        # carries per-layer ``deepstack_<i>`` tensor_inputs and a
+        # ``mrope_pos_advance`` kwarg (built by ``_vision_chunk_inputs``). Two
+        # things then differ from the text case:
+        #   * Deepstack: assemble packed (total_tokens, hidden) per-layer
+        #     tensors exactly like ``prefill_vision`` below — the chunk row's
+        #     (C, hidden) slice occupies its row span [n:n+C); decode rows have
+        #     no deepstack key and are zero-filled (a no-op additive splice).
+        #   * MRoPE advance: ``advance_seq_lens`` consumes ``custom_pos_advance``
+        #     all-or-nothing per plan-state, so once the vision chunk needs a
+        #     custom advance EVERY row must supply one. Decode/text rows fall
+        #     back to their ``input_seq_len`` (=1 per decode token), the vision
+        #     chunk supplies its 3D-grid span, padding rows supply 0.
         if graph_walk == "thinker_mixed":
+            from mstar.model.qwen3_omni.qwen3_omni_model import (
+                mixed_batch_vision_enabled,
+            )
             # Structure of a mixed batch: n decode rows (seq_len 1) followed by
             # exactly one chunk row (seq_len C > 1). Padding rows (seq_len 0)
             # appended by the runner sit AFTER the real rows; count only real
@@ -974,12 +988,21 @@ class ThinkerSubmodule(ARNodeSubmodule):
             n_decode = sum(1 for sl in real_lens if sl == 1)
             chunk_lens = [sl for sl in real_lens if sl > 1]
             total = sum(real_lens)
+            # A vision chunk row is one carrying deepstack tensor_inputs.
+            has_vision_chunk = any(
+                any(k.startswith("deepstack_") for k in inp.tensor_inputs)
+                for inp in inputs
+            )
+            vision_capture = mixed_batch_vision_enabled()
             logger.debug(
-                "thinker_mixed step: n_decode=%d C=%s total_tokens=%d bucket=%d",
+                "thinker_mixed step: n_decode=%d C=%s total_tokens=%d bucket=%d "
+                "vision_chunk=%s vision_capture=%s",
                 n_decode,
                 chunk_lens[0] if chunk_lens else None,
                 total,
                 len(input_embeds),
+                has_vision_chunk,
+                vision_capture,
             )
             if self._mixed_batch_assert_enabled():
                 assert len(chunk_lens) == 1, (
@@ -989,14 +1012,70 @@ class ThinkerSubmodule(ARNodeSubmodule):
                 assert n_decode == len(real_lens) - 1, (
                     f"mixed batch: non decode/chunk row in seq_lens={seq_lens}"
                 )
-                for inp in inputs:
-                    assert not any(
-                        k.startswith("deepstack_") for k in inp.tensor_inputs
-                    ), (
-                        "mixed batch got a vision chunk (deepstack tensors "
-                        "present); P2 mixed capture is text-signature only — "
-                        "assembly must gate the chunk row to prefill_text."
-                    )
+                if not vision_capture:
+                    for inp in inputs:
+                        assert not any(
+                            k.startswith("deepstack_") for k in inp.tensor_inputs
+                        ), (
+                            "mixed batch got a vision chunk (deepstack tensors "
+                            "present) but MSTAR_MIXED_BATCH_VISION is off — the "
+                            "text-signature capture cannot splice deepstack; "
+                            "assembly must gate the chunk row to prefill_text."
+                        )
+            # When the vision-capture flag is on, the ONE thinker_mixed capture
+            # carries per-layer ``deepstack_<i>`` statics for every replay (see
+            # get_cuda_graph_configs). ``static_input_keys`` therefore includes
+            # them, and the runner's replay copy skips any key preprocess does
+            # not re-emit — leaving a STALE deepstack buffer from a prior vision
+            # step. So under the flag we must emit deepstack on EVERY mixed step,
+            # zero-filled when the chunk row is text (a no-op additive splice),
+            # so the copy overwrites the static buffer to zeros. With the flag
+            # off there are no deepstack statics and this block never runs.
+            if vision_capture:
+                # Packed per-layer deepstack, identical shape to prefill_vision:
+                # concat each row's (input_seq_len, hidden) contribution. Decode
+                # rows (and a text chunk row) contribute zeros; a vision chunk
+                # row contributes its (C, hidden) slice at its row span. Only
+                # real rows (seq_len>0) produce nonzero deepstack; zero-length
+                # padding rows add empty (0, hidden) slices, so the packed
+                # length == total real tokens.
+                num_deepstack = len(self.config.vision.deepstack_visual_indexes)
+                for i in range(num_deepstack):
+                    layer_tensors: list[torch.Tensor] = []
+                    for inp in inputs:
+                        t = inp.tensor_inputs.get(f"deepstack_{i}")
+                        if t is None:
+                            t = torch.zeros(
+                                (inp.input_seq_len, self.config.thinker_hidden_size),
+                                dtype=input_embeds.dtype, device=device,
+                            )
+                        layer_tensors.append(t)
+                    extra_inputs[f"deepstack_{i}"] = torch.cat(layer_tensors, dim=0)
+                # Per-request position advance. Decode/text rows advance by their
+                # token count (input_seq_len), which equals the default seq_len
+                # advance; a vision chunk supplies its explicit 3D-grid
+                # ``mrope_pos_advance``; padding rows -> 0. ``advance_seq_lens``
+                # consumes ``custom_pos_advance`` all-or-nothing per plan-state,
+                # so once ANY row needs a custom advance every row must supply
+                # one — hence the full list even on a text-chunk mixed step.
+                mixed_pos_advance = [
+                    inp.kwargs.get("mrope_pos_advance", inp.input_seq_len)
+                    for inp in inputs
+                ]
+                if self._mixed_batch_assert_enabled():
+                    for inp in inputs:
+                        clen = inp.input_seq_len
+                        for i in range(num_deepstack):
+                            t = inp.tensor_inputs.get(f"deepstack_{i}")
+                            if t is not None:
+                                assert t.shape[0] == clen, (
+                                    f"mixed vision chunk deepstack_{i} slice "
+                                    f"len {t.shape[0]} != chunk C {clen}"
+                                )
+                extra_inputs["mrope_pos_advance"] = mixed_pos_advance
+                cache_manager.set_custom_pos_advance(
+                    mixed_pos_advance, label="main",
+                )
         if graph_walk == "prefill_vision":
             from mstar.model.qwen3_omni.qwen3_omni_model import (
                 batch_vision_prefill_enabled,
@@ -1303,6 +1382,7 @@ class ThinkerSubmodule(ARNodeSubmodule):
         from mstar.model.qwen3_omni.qwen3_omni_model import (
             batch_vision_prefill_enabled,
             mixed_batch_enabled,
+            mixed_batch_vision_enabled,
         )
         prefill_vision_capture_bs = (
             self.PREFILL_VISION_BATCH_CAPTURE_BATCH_SIZES
@@ -1415,19 +1495,59 @@ class ThinkerSubmodule(ARNodeSubmodule):
         # (no extra captures, no ``thinker_mixed`` graph in the runner's table,
         # so the scheduler could never route to it even if it tried).
         #
-        # The post-preprocess tensor signature of a mixed batch is IDENTICAL to
-        # prefill_text/audio (``input_embeds`` + ``cos_3d`` + ``sin_3d``): the
-        # decode rows and the chunk row both contribute only these three packed
-        # tensors after ``preprocess`` concatenates them, so we synthesize the
-        # capture inputs with the same ``_build_prefill_text_packed`` helper.
-        # The token buckets are ``MIXED_BATCH_BS + C`` (see MIXED_BATCH_* above).
+        # The post-preprocess tensor signature of a text-only mixed batch is
+        # IDENTICAL to prefill_text/audio (``input_embeds`` + ``cos_3d`` +
+        # ``sin_3d``): the decode rows and a ``prefill_text`` chunk row both
+        # contribute only these three packed tensors after ``preprocess``
+        # concatenates them, so we synthesize the capture inputs with the same
+        # ``_build_prefill_text_packed`` helper. The token buckets are
+        # ``MIXED_BATCH_BS + C`` (see MIXED_BATCH_* above).
+        #
+        # W5-P3-lite (MSTAR_MIXED_BATCH_VISION): to let a ``prefill_vision``
+        # chunk ride the mixed step, the SAME captured bucket must additionally
+        # carry per-layer ``deepstack_<i>`` statics (shape (num_tokens, hidden))
+        # so ``preprocess``'s replay-time deepstack assembly has a static buffer
+        # to copy into. Because ``static_input_keys`` is fixed at capture time,
+        # the deepstack statics must be present on the ONE thinker_mixed capture
+        # regardless of whether a given replay's chunk row is text or vision; a
+        # text-chunk mixed step simply fills those buffers with zeros (a no-op
+        # additive splice, see thinker._deepstack_process). So when the vision
+        # flag is on we build the mixed buckets with the vision packed builder
+        # (adds deepstack_<i>) and the vision-shaped zero_padding_input.
         if mixed_batch_enabled():
+            mixed_vision = mixed_batch_vision_enabled()
+            build_mixed_packed = (
+                self._build_prefill_vision_packed
+                if mixed_vision
+                else self._build_prefill_text_packed
+            )
             mixed_packed = {
-                self.MIXED_BATCH_BS + c: self._build_prefill_text_packed(
+                self.MIXED_BATCH_BS + c: build_mixed_packed(
                     self.MIXED_BATCH_BS + c, device,
                 )
                 for c in self.MIXED_BATCH_CHUNK_SIZES
             }
+            # Zero-length padding row. Its tensor_inputs must declare the same
+            # keys the real chunk row can carry so ``preprocess``'s per-row
+            # concat sees consistent shapes; deepstack rows are zero-filled by
+            # ``preprocess`` when absent, but padding rows still get explicit
+            # (0, hidden) deepstack slices + the mrope_pos_advance kwarg under
+            # the vision flag to mirror the prefill_vision padding contract.
+            mixed_zero_padding_tensor_inputs: dict[str, torch.Tensor] = {
+                "masks_for_talker": torch.zeros(
+                    (2, 0), dtype=torch.float, device=device,
+                ),
+            }
+            mixed_zero_padding_kwargs: dict[str, Any] = {}
+            if mixed_vision:
+                for i in range(num_deepstack):
+                    mixed_zero_padding_tensor_inputs[f"deepstack_{i}"] = (
+                        torch.zeros(
+                            (0, self.config.thinker_hidden_size),
+                            dtype=torch.bfloat16, device=device,
+                        )
+                    )
+                mixed_zero_padding_kwargs["mrope_pos_advance"] = 0
             configs.append(
                 FlashInferPackedCudaGraphConfig(
                     capture_graph_walk="thinker_mixed",
@@ -1449,13 +1569,8 @@ class ThinkerSubmodule(ARNodeSubmodule):
                             dtype=torch.float,
                             device=device,
                         ),
-                        tensor_inputs={
-                            "masks_for_talker": torch.zeros(
-                                (2, 0),
-                                dtype=torch.float,
-                                device=device,
-                            )
-                        },
+                        tensor_inputs=mixed_zero_padding_tensor_inputs,
+                        kwargs=mixed_zero_padding_kwargs,
                     ),
                 )
             )
