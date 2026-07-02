@@ -20,13 +20,17 @@ import pytest
 
 torch = pytest.importorskip("torch")  # module import pulls torch transitively
 
-from mstar.model.qwen3_omni.qwen3_omni_model import mixed_batch_vision_enabled
+from mstar.model.qwen3_omni.qwen3_omni_model import (
+    mixed_batch_spec_enabled,
+    mixed_batch_vision_enabled,
+)
 from mstar.worker.micro_scheduler import MicroScheduler, ReadyNodeEntry
 
 # --- flag gating -------------------------------------------------------------
 _FLAG_ENV = (
     "MSTAR_MIXED_BATCH_VISION",
     "MSTAR_MIXED_BATCH",
+    "MSTAR_MIXED_SPEC",
     "MSTAR_CHUNKED_PREFILL_V2_VISION",
 )
 
@@ -208,9 +212,23 @@ class _PeekQueue:
     def __init__(self, ready_by_rid):
         # rid -> set of ready node names
         self._ready = ready_by_rid
+        self.popped = []  # (rid, node_name) actually popped
 
     def get_ready_node_names(self):
         return {rid: set(names) for rid, names in self._ready.items()}
+
+    def pop_ready_nodes(self, request_id, node_names):
+        # Mirror WorkerGraphQueues.pop_ready_nodes: discard the ready mark and
+        # return a node object. Returns [] if the rid has no such ready name
+        # (simulates a raced removal).
+        out = []
+        ready = self._ready.get(request_id, set())
+        for name in node_names:
+            if name in ready:
+                ready.discard(name)
+                self.popped.append((request_id, name))
+                out.append(_FakeNode(name))
+        return out
 
 
 def _peek_scheduler():
@@ -260,3 +278,72 @@ def test_has_mixed_opportunity_false_unchunked_prefill(clean_flags):
         fwd_by_rid={"c0": _FakeFwdInfo(None)},      # unchunked
     )
     assert not sched.has_mixed_opportunity(wgm, ("Thinker", "thinker_decode"))
+
+
+# --- MSTAR_MIXED_SPEC flag gating -------------------------------------------
+def test_mixed_spec_flag_requires_mixed_batch(clean_flags):
+    # MSTAR_MIXED_SPEC implies MSTAR_MIXED_BATCH: the spec-chain fold has nothing
+    # to fold in without mixed steps, so it stays off unless BOTH are set.
+    _set()
+    assert not mixed_batch_spec_enabled()
+    _set(MSTAR_MIXED_SPEC="1")            # spec on, mixed off -> still off
+    assert not mixed_batch_spec_enabled()
+    _set(MSTAR_MIXED_BATCH="1")           # mixed on, spec off -> still off
+    assert not mixed_batch_spec_enabled()
+    _set(MSTAR_MIXED_BATCH="1", MSTAR_MIXED_SPEC="1")  # both -> on
+    assert mixed_batch_spec_enabled()
+
+
+# --- pop_mixed_chunk_for_spec (mid-chain chunk pop) -------------------------
+# The worker calls this DURING a live decode spec chain to obtain the single
+# chunk row to fold into the next speculative (thinker_mixed) batch. Only the
+# chunk is popped; the decode rids are mid-chain and continue via speculation.
+def test_pop_mixed_chunk_for_spec_pops_only_chunk(clean_flags):
+    _set(MSTAR_MIXED_BATCH="1", MSTAR_MIXED_SPEC="1")
+    sched = _peek_scheduler()
+    wgm = _PeekWGM(
+        "Thinker",
+        ready_by_rid={"c0": {"Thinker"}},          # only the chunk is ready
+        walk_by_rid={"c0": "prefill_text"},
+        fwd_by_rid={"c0": _FakeFwdInfo(256)},
+    )
+    got = sched.pop_mixed_chunk_for_spec(wgm, ("Thinker", "thinker_decode"))
+    assert got is not None
+    node, rid, wg_id, chunk_len = got
+    assert rid == "c0"
+    assert wg_id == "wg0"
+    assert chunk_len == 256
+    assert node.name == "Thinker"
+    # The chunk node was actually removed from the ready queue.
+    assert wgm.queues["wg0"].popped == [("c0", "Thinker")]
+    assert "Thinker" not in wgm.queues["wg0"].get_ready_node_names()["c0"]
+
+
+def test_pop_mixed_chunk_for_spec_none_when_spec_flag_off(clean_flags):
+    # MSTAR_MIXED_BATCH on but MSTAR_MIXED_SPEC off: the mid-chain pop is
+    # unreachable (0cc7c71 break-the-chain behavior stays intact). Nothing pops.
+    _set(MSTAR_MIXED_BATCH="1")
+    sched = _peek_scheduler()
+    wgm = _PeekWGM(
+        "Thinker",
+        ready_by_rid={"c0": {"Thinker"}},
+        walk_by_rid={"c0": "prefill_text"},
+        fwd_by_rid={"c0": _FakeFwdInfo(256)},
+    )
+    assert sched.pop_mixed_chunk_for_spec(wgm, ("Thinker", "thinker_decode")) is None
+    assert wgm.queues["wg0"].popped == []          # queue untouched
+
+
+def test_pop_mixed_chunk_for_spec_none_on_unchunked(clean_flags):
+    # A full unchunked prefill fails the chunk gates -> no chunk to fold, queue
+    # untouched so the normal path still schedules the prefill.
+    _set(MSTAR_MIXED_BATCH="1", MSTAR_MIXED_SPEC="1")
+    sched = _peek_scheduler()
+    wgm = _PeekWGM(
+        "Thinker",
+        ready_by_rid={"c0": {"Thinker"}},
+        walk_by_rid={"c0": "prefill_text"},
+        fwd_by_rid={"c0": _FakeFwdInfo(None)},      # unchunked
+    )
+    assert sched.pop_mixed_chunk_for_spec(wgm, ("Thinker", "thinker_decode")) is None
+    assert wgm.queues["wg0"].popped == []

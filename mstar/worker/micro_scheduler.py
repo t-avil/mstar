@@ -455,6 +455,89 @@ class MicroScheduler:
             request_to_worker_graph=request_to_worker_graph,
         )
 
+    def pop_mixed_chunk_for_spec(
+        self,
+        worker_graphs_manager: WorkerGraphsManager,
+        decode_target: tuple[str, str],
+    ) -> "tuple[GraphNode, str, str, int | None] | None":
+        """Pop ONLY the mixable chunk node for a mid-chain mixed speculation
+        (MSTAR_MIXED_SPEC).
+
+        Unlike ``_pop_mixed_batch``, this does NOT touch the decode rows: during
+        a live decode spec chain the decode rids are ``_speculatively_scheduled``
+        and absent from the ready queue — they continue via the worker's
+        speculation machinery (registry nodes made ready by
+        ``ingest_for_speculation``), NOT via the ready queue. The worker builds
+        the decode continuation itself and calls this to obtain the single chunk
+        row to fold in.
+
+        Scans exactly like ``has_mixed_opportunity`` (same gates, via
+        ``_chunk_entry_passes_gates``) and pops the FIRST passing chunk node on
+        ``decode_target``'s node. Returns
+        ``(chunk_node, request_id, worker_graph_id, prefill_chunk_len)`` or None
+        when the flag is off / no mixable chunk is ready / the pop races a
+        removal. The caller injects the returned node into the speculative
+        ScheduledBatch under ``graph_walk="thinker_mixed"``.
+
+        Guarded by ``mixed_batch_spec_enabled`` so the whole path is unreachable
+        (and thus byte-identical) unless MSTAR_MIXED_SPEC is on.
+        """
+        from mstar.model.qwen3_omni.qwen3_omni_model import (
+            mixed_batch_spec_enabled,
+        )
+        if not mixed_batch_spec_enabled():
+            return None
+
+        decode_node_name, decode_walk = decode_target
+        if decode_walk != self._MIXED_DECODE_WALK:
+            return None
+        if decode_node_name in self.tp_nodes:
+            return None  # TP mixed batches are P3
+
+        chunk_walks = self._mixed_chunk_walks()
+        node_partition = worker_graphs_manager.get_partition_for_node(
+            decode_node_name
+        )
+        now = time.monotonic()
+        for wg_id, queue in worker_graphs_manager.queues.items():
+            ready_map = queue.get_ready_node_names()
+            # Snapshot the rids so popping mid-iteration can't mutate the map we
+            # are scanning.
+            for request_id, node_names in list(ready_map.items()):
+                if request_id not in worker_graphs_manager.per_request_info:
+                    continue
+                if request_id in self.pending_removes:
+                    continue
+                if request_id in self.held_until and self.held_until[request_id] > now:
+                    continue
+                if decode_node_name not in node_names:
+                    continue
+                if decode_node_name not in self.tp_rank_zero_nodes:
+                    continue
+                walk = worker_graphs_manager.get_graph_walk(
+                    request_id, node_partition,
+                )
+                if walk not in chunk_walks:
+                    continue
+                fwd_info = worker_graphs_manager.get_fwd_info(
+                    request_id, node_partition,
+                )
+                engine = self.engine_manager.get_engine(decode_node_name)
+                if not engine.check_ready(decode_node_name, request_id, fwd_info):
+                    continue
+                entry = ReadyNodeEntry(request_id, wg_id, walk)
+                if not self._chunk_entry_passes_gates(
+                    worker_graphs_manager, decode_node_name, node_partition, entry,
+                ):
+                    continue
+                chunk_len = fwd_info.step_metadata.get("prefill_chunk_len")
+                popped = queue.pop_ready_nodes(request_id, [decode_node_name])
+                if not popped:
+                    continue  # raced a removal; keep scanning
+                assert len(popped) == 1
+                return popped[0], request_id, wg_id, chunk_len
+        return None
+
     def get_next_batch(
         self,
         worker_graphs_manager: WorkerGraphsManager,
