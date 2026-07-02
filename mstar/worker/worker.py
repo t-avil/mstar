@@ -1923,6 +1923,49 @@ class Worker:
         side = self._d2h_stream
         side.wait_event(output.completion_event)
 
+        # Fast path: the common AR-decode shape is exactly one small
+        # same-shaped tensor per rid under one key (new_token). Batch the
+        # whole step into a single cat + one pinned D2H instead of a
+        # per-rid copy loop (32 tiny copies/step at B32).
+        per_rid = output.per_request_output_tensors
+        rids = list(per_rid.keys())
+        uniform_key: str | None = None
+        if rids and all(
+            isinstance(per_rid[r], dict)
+            and len(per_rid[r]) == 1
+            and isinstance(next(iter(per_rid[r].values())), list)
+            and len(next(iter(per_rid[r].values()))) == 1
+            and torch.is_tensor(next(iter(per_rid[r].values()))[0])
+            and next(iter(per_rid[r].values()))[0].is_cuda
+            and next(iter(per_rid[r].values()))[0].numel() == 1
+            for r in rids
+        ):
+            keys = {next(iter(per_rid[r].keys())) for r in rids}
+            dtypes = {next(iter(per_rid[r].values()))[0].dtype for r in rids}
+            if len(keys) == 1 and len(dtypes) == 1:
+                uniform_key = next(iter(keys))
+        if uniform_key is not None:
+            with torch.cuda.stream(side):
+                flat_gpu = torch.cat(
+                    [next(iter(per_rid[r].values()))[0].reshape(1) for r in rids]
+                )
+                flat_cpu = self._get_pinned_d2h_buffer(
+                    "check_stop_flat", flat_gpu.shape, flat_gpu.dtype,
+                )
+                flat_cpu.copy_(flat_gpu, non_blocking=True)
+            side.synchronize()
+            cpu_fast: dict = {
+                r: {uniform_key: [flat_cpu[i:i + 1]]}
+                for i, r in enumerate(rids)
+            }
+            return NodeOutput(
+                per_request_output_tensors=cpu_fast,
+                allocation_failed=output.allocation_failed,
+                alloc_pages_short=output.alloc_pages_short,
+                alloc_failed_request_id=output.alloc_failed_request_id,
+                completion_event=output.completion_event,
+            )
+
         cpu_per_rid: dict = {}
         buffer_indices: dict[tuple[str, torch.dtype, tuple[int, ...]], int] = defaultdict(int)
         with torch.cuda.stream(side):
