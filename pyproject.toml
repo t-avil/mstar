@@ -171,6 +171,8 @@ ignore = [
 "mstar/graph/graph_io.py" = ["F403", "F405"]
 # Imports are deliberately placed after a module-level pytest.skip().
 "test/modular/test_phase1.py" = ["E402"]
+# Imports follow a module-level ``pytest.importorskip("torch")`` guard.
+"test/modular/test_qwen3_omni_mixed_batch_vision.py" = ["E402"]
 
 [tool.ruff.format]
 quote-style = "double"

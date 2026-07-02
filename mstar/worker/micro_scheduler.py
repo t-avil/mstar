@@ -201,6 +201,11 @@ class MicroScheduler:
     # does not import the model submodule. If those change, change these.
     _MIXED_DECODE_WALK = "thinker_decode"
     _MIXED_CHUNK_WALK = "prefill_text"
+    # W5-P3-lite: a VISION prefill chunk may also serve as the mixed step's
+    # single chunk row when MSTAR_MIXED_BATCH_VISION is on. Same C caps; the
+    # Thinker's mixed capture then carries deepstack statics + the MRoPE
+    # side-channel (see ThinkerSubmodule.preprocess / get_cuda_graph_configs).
+    _MIXED_VISION_CHUNK_WALK = "prefill_vision"
     _MIXED_MAX_DECODE = 31          # padded_bs 32 = up to 31 decode + 1 chunk row
     _MIXED_MAX_CHUNK_TOKENS = 512   # largest captured chunk bucket (C in {256,512})
 
@@ -234,9 +239,20 @@ class MicroScheduler:
             when any rep-penalty is active, which would corrupt the chunk
             request's penalty state. Decode rows are unaffected. (design D gate)
         """
-        from mstar.model.qwen3_omni.qwen3_omni_model import mixed_batch_enabled
+        from mstar.model.qwen3_omni.qwen3_omni_model import (
+            mixed_batch_enabled,
+            mixed_batch_vision_enabled,
+        )
         if not mixed_batch_enabled():
             return None
+
+        # W5-P3-lite: allow a prefill_vision chunk row alongside prefill_text
+        # when the vision flag is on. A vision chunk carries deepstack + the
+        # MRoPE side-channel, which only the vision-capable mixed capture can
+        # replay; with the flag off the chunk row stays prefill_text (P2).
+        chunk_walks = {self._MIXED_CHUNK_WALK}
+        if mixed_batch_vision_enabled():
+            chunk_walks.add(self._MIXED_VISION_CHUNK_WALK)
 
         for node_name, entries in node_name_to_requests.items():
             if node_name in self.tp_nodes:
@@ -245,7 +261,7 @@ class MicroScheduler:
                 e for e in entries if e.graph_walk == self._MIXED_DECODE_WALK
             ]
             chunk_entries = [
-                e for e in entries if e.graph_walk == self._MIXED_CHUNK_WALK
+                e for e in entries if e.graph_walk in chunk_walks
             ]
             if not decode_entries or not chunk_entries:
                 continue
