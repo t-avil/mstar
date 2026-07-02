@@ -168,6 +168,29 @@ def mixed_batch_assert() -> bool:
     return _envflag("MSTAR_MIXED_BATCH_ASSERT")
 
 
+def mixed_batch_vision_enabled() -> bool:
+    """W5-P3-lite: allow a VISION prefill chunk (not just ``prefill_text``) to
+    ride a captured ``thinker_mixed`` step. When ON, the scheduler may pick a
+    ``prefill_vision`` chunk row as the mixed batch's single chunk row, and the
+    Thinker's mixed capture carries per-layer ``deepstack_<i>`` statics + the
+    per-request MRoPE ``mrope_pos_advance`` side-channel so the vision chunk's
+    deepstack splice and 3D-grid position advance run inside the captured graph.
+
+    Default OFF, and a strict extension of ``MSTAR_MIXED_BATCH``: with this
+    flag off the mixed capture stays text-signature only and the scheduler
+    gates the chunk row to ``prefill_text`` (P2 behavior, byte-identical).
+    Only meaningful when BOTH ``MSTAR_MIXED_BATCH`` (produces mixed steps) and
+    ``MSTAR_CHUNKED_PREFILL_V2_VISION`` (produces vision chunk rows via the
+    encoder-split walk + staged embeds/pos_ids/deepstack) are also ON; with
+    either off there are no vision chunk rows to mix, so this is a no-op.
+    """
+    return (
+        _envflag("MSTAR_MIXED_BATCH_VISION")
+        and mixed_batch_enabled()
+        and chunked_prefill_v2_vision_enabled()
+    )
+
+
 def prefill_chunk_tokens() -> int:
     """Cap on chunk size C for chunked prefill. The planner picks the largest
     ``ThinkerSubmodule.PREFILL_TOKEN_BUCKETS`` entry <= min(remaining, this cap),
