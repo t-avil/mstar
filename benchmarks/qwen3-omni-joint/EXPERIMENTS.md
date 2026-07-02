@@ -277,3 +277,14 @@ postprocess-side Python is NOT the binding serial chain at B32 (it overlaps
 GPU); the residual is the submit gap (await→result→thread→submit, W3) and
 prefill serialization (W5). NOT merged into the shipping branch — kept on
 its branch as validated infrastructure if the balance shifts.
+
+## W3 — future-token run-ahead — SKIPPED BY DESIGN ANALYSIS (do not implement)
+The design audit (w3-design, 2026-07-02) corrected its own premises: the
+decode GPU-thread path is ALREADY host-sync-free end-to-end (sampler is
+deterministic flashinfer + fused triton, no .item()/sync; future.result()
+returns near SUBMIT of N, not completion), so M* already holds the
+SGLang-overlap win via speculation + double-buffer + pre-plan. The only
+residual is the result→thread→submit inter-thread hop (≤~1ms/step);
+projected ceiling 1.00-1.05× at B32, likely flat per E9/E10 precedent.
+Not worth the implementation risk. All remaining B32 leverage concentrates
+in W5 (prefill-stall elimination via token-budget mixed batching).
