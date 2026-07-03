@@ -707,3 +707,11 @@ projection); B2 1.167 (0.75x raw, ~0.83x projection). B2/B4 are now the
 weakest i2t cells — low-concurrency, TTFT-dominated (vision prefill);
 batching levers don't reach them. TTFT work (N2 helps; V5 encoder cache;
 prefill speed) is their lever, distinct from the B32 endgame.
+
+## Final-stack i2t B32 series (5 cells, one server, pair 0,1, no co-location)
+5.533 / 5.893 / 6.372 / 6.646 / 4.935 — median 5.89, healthy-band
+5.9-6.6, one host-load dip. Combined with the A/B-era cells (6.44 mean,
+6.894 best), the robust handicapped-pair estimate is ~5.9-6.6; canonical
+projection ~6.5-7.3 vs vLLM 8.21 (0.79-0.89x steady, ~0.92x best). The
+canonical sweep (claim-and-sweep watcher armed) supersedes all of this
+when it lands.
