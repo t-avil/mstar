@@ -29,6 +29,8 @@ if [ -z "${LAB_NUMA_NODE:-}" ]; then
   case "$LAB_NUMA_NODE" in ''|-1) LAB_NUMA_NODE=1;; esac
 fi
 
+echo "$LAB_NUMA_NODE" > "$OUT/numa_node"   # lab_ab pins its client to the same node
+
 export CUDA_VISIBLE_DEVICES=$GPUS
 log "LAB $NAME: boot $WT on $GPUS:$PORT numa=$LAB_NUMA_NODE ttl=${HOURS}h dynflags=$FLAGS_FILE"
 setsid bash -c "cd $WT && PATH='$SVENV/bin:/usr/local/cuda/bin:'\$PATH CUDA_HOME=/usr/local/cuda PYTHONPATH=$WT HF_HOME=$HF_HOME $FLAGS MSTAR_DYNFLAGS=$FLAGS_FILE \

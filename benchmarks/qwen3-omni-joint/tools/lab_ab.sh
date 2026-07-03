@@ -13,6 +13,12 @@ BENCH=/m-coriander/coriander/tim/bench-v2
 LABDIR=/m-coriander/coriander/tim/lab_$LAB
 FLAGS_FILE="$LABDIR/dynflags.json"
 [ -f "$FLAGS_FILE" ] || { echo "no lab '$LAB' (missing $FLAGS_FILE)"; exit 1; }
+# dynflags applies ONLY keys present in the JSON — a '{}' side would leave the
+# other side's values sticky (this bug invalidated a night of decompositions).
+# Require identical key sets in both sides, with explicit values everywhere.
+KEYSA=$(python3 -c "import json,sys;print(sorted(json.loads(sys.argv[1]).keys()))" "$FA" 2>/dev/null)
+KEYSB=$(python3 -c "import json,sys;print(sorted(json.loads(sys.argv[1]).keys()))" "$FB" 2>/dev/null)
+[ -n "$KEYSA" ] && [ "$KEYSA" = "$KEYSB" ] || { echo "REFUSED: flagsA/flagsB must be valid JSON with IDENTICAL key sets (explicit 0/1 per key; no '{}' vs keyed). A=$KEYSA B=$KEYSB"; exit 1; }
 curl -sf "http://127.0.0.1:$PORT/v1/models" >/dev/null || { echo "lab server not responding on $PORT"; exit 1; }
 OUT="$LABDIR/ab_$EXP"; mkdir -p "$OUT"
 log(){ echo "[$(date -u +%H:%M:%S)] $*"; }
@@ -21,9 +27,14 @@ declare -A DS=( [i2t]=food101 [s2t]=libri [i2s]=food101 [s2s]=libri )
 declare -A CACHE=( [i2t]=/m-coriander/coriander/hf [s2t]=/home/tim/tmp/libri_wavs [i2s]=/m-coriander/coriander/hf [s2s]=/home/tim/tmp/libri_wavs )
 nfor(){ [ -n "$NOVR" ] && { echo $NOVR; return; }; case $1 in 1) echo 12;; 8) echo 48;; 32) echo 96;; *) echo $((3*$1));; esac; }
 
+# Pin the bench client to the lab server's NUMA node (unpinned clients float
+# across nodes and add cross-node noise when multiple labs run concurrently).
+NUMAPFX=""
+if [ -f "$LABDIR/numa_node" ]; then NUMAPFX="numactl --cpunodebind=$(cat "$LABDIR/numa_node") --membind=$(cat "$LABDIR/numa_node")"; fi
+
 run_cell(){ local side=$1 s=$2 b=$3 n; n=$(nfor $3)
   local od="$OUT/${side}_${s}_B${b}_r${ROUND}"; mkdir -p "$od"
-  PYTHONPATH=$BENCH timeout 1200 "$CVENV/bin/python" -m benchmark.runner --url "http://127.0.0.1:$PORT" \
+  PYTHONPATH=$BENCH timeout 1200 $NUMAPFX "$CVENV/bin/python" -m benchmark.runner --url "http://127.0.0.1:$PORT" \
     --model qwen3omni --request-type "${P[$s]}" --dataset "${DS[$s]}" --profiling-type closed_loop \
     --max-concurrency "$b" --num-requests "$n" --num-warmup 2 --inference-system ours \
     --local-cache "${CACHE[$s]}" --output-dir "$od" > "$od/run.log" 2>&1

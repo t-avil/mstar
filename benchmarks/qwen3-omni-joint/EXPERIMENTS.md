@@ -800,3 +800,165 @@ INTERLEAVED RATIOS ONLY (contention ~cancels within adjacent pairs); absolute
 /scoreboard numbers require a solo-lab or quiet box. The warm-coverage
 absolutes are NOT scoreboard-grade; scoreboard refresh re-queued for a solo
 window.
+
+## Decomposition FINAL (6 rounds/flag, cross-pair pooled) — the flippable-flag space is closed
+FAST_ROUTE off/on pooled: 0.958/0.864/1.001 (lab2) + 0.941/1.093/1.060 (lab1)
+= geomean -1.7%, spread 0.86-1.09 — NOT cleanly converting post-sidecar (the
+single-lab -6.1% was one hot round). cache+checkstop pooled: -1.1% for off.
+VERDICT: on the sidecar stack every individually-flippable flag measures
+0-3%, below the box's practical resolution (adjacent rounds still spread
+±10%). All flags stay ON (small positive direction, zero harm). The
+compound stack vs pristine base remains hugely positive; the marginal
+decompositions are noise. PROTOCOL: stop micro-probing; only effects
+predicted >=5% get e2e rounds from here. NEXT: V1 async scheduling (est.
++5-10%, resolvable) — the last structural mechanism vLLM has that we lack.
+Late-evening box drift note: absolute cells sank 7.0-7.4 -> 5.2-6.4 band
+across the evening (both labs); ratios unaffected, absolutes not
+scoreboard-grade.
+
+## Warm-protocol official sweep (solo box) — ABORTED by priority change
+Booted the opt/sched-pack shipping stack warm on GPUs 6,7 (solo box, numa=1,
+port 8299) and started the rounds=2 official scoreboard sweep. User priority
+change: no absolute-number sweeps until the experiment queue is exhausted, so
+the sweep was aborted mid-run and the warm server was HANDED OVER (not killed)
+for ratio A/Bs. Only i2t completed round 1: B32 7.287/7.205, B16 5.360/5.710,
+B8 4.089/3.974, B4 pair (8 cell-runs, A+B x 4 cells). i2t B2/B1, s2t, s2s, i2s
+and round 2 never ran. i2t B32 mean ~7.25 sits in the earlier 7.0-7.4 band
+(not the evening 5.2-6.4 drift band). Partial cells in lab_sweep/ab_official/
+are TRIAGE-GRADE ONLY — not scoreboard numbers.
+
+## MSTAR_MIXED_SINGLE_CHUNK at mid-batch (scmid, sloppy POC) — WASH, hypothesis dead
+Warm-lab i2t B2/B4 x2 rounds: B2 0.952/1.004, B4 1.009/1.040, geomean 1.00.
+Eager folding does NOT flip positive at low batch — the B2-B4 deficit is
+admission latency + fixed host floor (V1/V2 levers), not fold policy. Closed
+at POC depth per sloppy-fast mode.
+
+## #24 MoE grouped-GEMM bake-off (mb_moe_bakeoff/, GPU 2, in-graph) — CLOSED: shipped Triton kernel wins every M
+In-graph per E1 law, Qwen3-Omni MoE shapes (E=128 top_k=8 H=2048 I=768),
+random weights (timing only). Pure-GEMM lever (2 grouped GEMMs, ~90% of the
+MoE forward): Triton fp8 w8a8 beats DeepGEMM masked at every decode M
+(dg/tri 1.10-1.20x — DeepGEMM REGRESSES). Structural: DeepGEMM masked has a
+64-row-per-active-expert tile floor; at decode nearly all 128 experts are
+active with 2-8 real tokens each, so it pays ~E_active x 64 rows vs Triton's
+token-sorted ~M x 8. It's an EP/large-batch kernel, wrong for dense low-M
+decode. Tile sweep at the new 24/28 buckets: shipped BLOCK_M=16 already
+optimal (best gain found 1.7% sub-gate). Inventory: sgl_kernel/flashinfer
+full-fused MoE ops exist but are not drop-in GEMM swaps; the one worth a
+follow-up is flashinfer trtllm_fp8_block_scale_moe (launch-fused low-latency
+decode MoE) — queued. Node note: persistence_mode reads Enabled on 2/3,
+PRE-EXISTING, untouched (no admin).
+
+## Speech bundle #15 build + a premise correction (opt/speech-floor)
+Item A DONE (55faf29): MSTAR_FAST_CHECKSTOP_TALKER — batched talker stop
+check (one flat D2H of layer0_codes + int compares), walk-gated,
+dynflags-refreshable, WALK_STATS counter, CPU parity test green; bonus: skips
+the embed/codec_tokens D2H entirely (verified safe — talker routes
+codec_tokens via streaming edges from GPU output, never off cpu_output).
+GPU A/B queued (s2s:8/i2s:8).
+Item B PREMISE CORRECTED: the default qwen3omni_2gpu.yaml ALREADY colocates
+Talker+Code2Wav on rank 0 (one process per rank), and
+_divide_into_worker_graphs forces every streaming consumer into its own
+worker graph — no yaml can fuse the codec edge. taco.yaml decomposes
+byte-identically to default (verified by building worker graphs). The
+paper-§4.2 "colocate to kill per-frame IPC" is ALREADY the deployed state;
+PLAN_BEAT_VLLM_V4 #15(b) and the miner-agent claim behind it were wrong.
+Remaining real lever on the codec edge: intra-process per-frame overhead —
+batch the 25-frame chunk handoff (one put per chunk, not per frame) and/or
+fuse talker->code2wav in one walk (bigger code task).
+
+## PREFILL_CHUNK_TOKENS 128 vs 256 (chunk128, warm lab, sloppy POC) — 128 REJECTED
+A=256 vs B=128, i2t B32/B4 x2 rounds: B32 0.884/0.867 (-12%), B4 0.949/0.985.
+Halving the chunk doubles per-chunk overhead (admission bookkeeping + bucket
+padding) without a compensating stall win. 256 confirmed as floor; 512 arm
+pending.
+
+## V1 async scheduling (opt/async-sched 0750145..18b1244) — smoke round 1: mechanism PROVEN, one real bug caught+fixed
+First live run of MSTAR_ASYNC_SCHED (deferred-postprocess-by-one-iteration on
+the spec chain, requires DIRECT_FEED): counters engaged (async_sched_steps=993,
+late_stop_trims=239) and the blocking sampled-token wait COLLAPSED ~1-3ms ->
+~108µs/step. Smoke caught a real race: REMOVE_REQUEST tearing down a rid
+whose postprocess was still deferred (KeyError in _run_deferred_postprocess;
+corrupted tok/req to 200). Fix 18b1244: _remove_request guard extended to
+defer removal of _deferred_pp rids + regression test. Re-smoke in flight;
+then stage-2 reboot A/B. (Ops note: a server collision on 4,5:8305 — two
+boots, mine and the builder's — cost one boot cycle; rule reaffirmed: one
+owner per GPU pair.)
+
+## INVALIDATION: dynflags-'{}' baseline bug in lab_ab A/Bs (caught by speech-builder agent)
+dynflags.maybe_refresh applies only keys PRESENT in the JSON — so lab_ab
+sides using '{}' left side-B's values ACTIVE for every round after r1. All
+'{}'-baseline A/Bs tonight compared identical configs from r2 onward:
+r2lite_directfeed, cache_sanity, checkstop_decomp, route_decomp(+swap),
+pair_off(+swap), scmid. CONSEQUENCES: (1) the "Decomposition FINAL /
+every flag 0-3%" entry is RETRACTED-AS-ARTIFACT — dilution toward 1.00 was
+built in; (2) clean r1-only readings: FAST_ROUTE-off 0.958/0.941 (-4..-6%),
+cache+checkstop-off 0.941/0.908 (-6..-9%) — the flag wins LIKELY STILL REAL
+post-sidecar (consistent with their original deltas); the "+7-10% retracted"
+note is itself withdrawn — status now "supported by clean cells, full
+re-decomposition deferred" (no shipping decision hinges on it: flags stay ON
+either way); (3) scmid and r2lite verdicts stand direction-wise but on r1
+evidence only. FIX: lab_ab.sh now requires identical key sets in both JSONs
+(refuses '{}' vs keyed), and the convention is explicit 0/1 for every
+touched key. Lesson: a runtime flag-file protocol needs explicit-unset
+semantics; silence is sticky.
+
+## PREFILL_CHUNK_TOKENS 512 (chunk512, valid explicit-key A/B) — FIRST POSITIVE POC: +3-5% at B32
+A=256 vs B=512, warm lab 6,7: B32 1.049/1.031 (B wins both rounds, jct also
+better 4268 vs 4510), B4 1.018/0.977 (wash). Mechanism: fewer, larger chunks
+amortize per-admission overhead at high batch; at B4 fewer folds are
+in flight so it washes. CAVEATS before shipping: closed-loop results.json
+carries no TTFT (None) — larger chunks lengthen the mixed-step tail so a
+TTFT check (streaming mode or B1 jct proxy) is REQUIRED; and 768 escalation
+queued to find the knee. Candidate for the integration stack as
+MSTAR_PREFILL_CHUNK_TOKENS=512.
+
+## PREFILL_CHUNK_TOKENS 768 (chunk768) — no knee past 512; STAY AT 512
+A=512 vs B=768, i2t B32 x2: 0.950/1.080 — mixed signs, geomean ~1.01. The
+consistent-sign win was 256->512; 768 adds nothing resolvable. Integration
+candidate remains 512 (pending the B1 latency proxy, in flight).
+
+## V1 async-sched stage 1 (fixed build 18b1244) — CORRECTNESS PASS; wait-collapse REGIME-DEPENDENT
+~4800 decode steps, zero tracebacks; async_sched_steps fires every spec step;
+late_stop_trims working (409). Honest mechanism reading (windowed
+async_d2h_wait_us): a few windows collapse to ~50µs/step, but MOST read
+0.8-1.9ms/step — the one-step deferral hides the sampled-token wait only when
+the main-thread iteration outruns the GPU step. This is the predicted "V1
+pays only where main-thread Python > GPU time" regime; best case = B32
+steady-state. tok/req is stochastic at cell level (166-197 for identical
+config) so byte-identity rides the stage-2 OFF-vs-ON compare. Stage-2 A/B
+(i2t B32, warm ON cells then OFF reboot) in flight on 4,5.
+
+## V1 stage-2 interim — ON cells show SYSTEMATIC tok/req inflation (186-199 vs 177 band)
+4/4 clean async-ON i2t B32 cells: req/s 6.17-6.62 (mean 6.37), tok/req
+186.7-199.2 — all above the tight 176-179 baseline band. In tok/s terms ON
+~= baseline (~1229), so as-built V1 = no throughput win + NON-IDENTICAL
+outputs (fails its own byte-identity bar). Hypotheses handed to the builder:
+(a) late-stop trim leaking overrun tokens into the stream, or (b) deferred
+postprocess shifting SAMPLING state (rep-penalty/stop bookkeeping one step
+late -> legitimately longer generations). OFF cells + per-request diff will
+decompose. Fix direction if (b): defer only transport/emit, keep
+penalty/stop state synchronous.
+
+## torch.compile — ALREADY ON for the whole text path (user-requested investigation)
+Finding: cuda_graph_runner.py:609/2476 wraps forward_batched in
+torch.compile(mode="max-autotune-no-cudagraphs", fullgraph=False,
+dynamic=False) BEFORE capture whenever the graph config sets compile=True —
+and qwen3_omni's submodules set compile=True for thinker decode, prefill_text,
+prefill_vision, thinker_mixed, and ALL talker walks (submodules.py:1455-2467);
+only code2wav_chunk is compile=False. So M* already runs the exact vLLM
+pattern (Inductor-fused kernels inside FULL CUDA graph captures) for this
+model; production evidence = the E1 fp8 bug was CAUSED by dynamo re-tracing
+during a Qwen3-Omni bucket capture. CONSEQUENCES: (1) the "compile gap" vs
+vLLM is ONLY the scheduling glue (uncompilable control flow) — already the
+campaign's target via sidecar/V1; (2) grid doc §1.1 corrected; (3) the #21
+hand-fusion pack is LIKELY MOOT (Inductor already fuses norm/rope/act chains
+inside the compiled region) — verify via kernel count in an existing nsys
+trace before any fusion work; (4) remaining compile levers are small:
+fullgraph=False graph-break audit, Inductor option tuning, code2wav compile
+(speech - stopped by user directive). CUDA-graph health check same pass:
+zero capture failures/eager fallbacks in all of tonight's server logs.
+
+## tokenspeed (github lightseekorg/tokenspeed) — NOT used by vLLM-Omni
+User lead checked: separate serving engine (C++ control-plane scheduler,
+static compilation, Blackwell MLA kernels). Zero references in vllm-omni
+source, deps, or venv. Its C++-scheduler idea = the option we scoped out.
