@@ -380,15 +380,25 @@ class CudaGraphRunner:
 
         return plan_states
 
-    @staticmethod
-    def _config_uses_split_attn(config: CudaGraphConfig) -> bool:
+    _split_attn_env_snapshot: bool | None = None
+
+    @classmethod
+    def _config_uses_split_attn(cls, config: CudaGraphConfig) -> bool:
         """True when this capture config is a thinker_mixed packed config AND
         MSTAR_MIXED_SPLIT_ATTN is on. Split applies ONLY to the mixed walk —
-        plain prefill packed configs keep the single prefill wrapper."""
-        from mstar.model.qwen3_omni.qwen3_omni_model import (
-            mixed_split_attn_enabled,
-        )
-        if not mixed_split_attn_enabled():
+        plain prefill packed configs keep the single prefill wrapper.
+
+        The env is snapshotted on first call (process-static): capture bakes
+        the fixed-region layout into the graphs, so a runtime flag flip (e.g.
+        via MSTAR_DYNFLAGS) must NOT change bucket selection afterwards — a
+        desynced OFF-flip would route a 258-token fold back to the 288 bucket
+        and overflow the split wrapper's 257-token chunk window."""
+        if cls._split_attn_env_snapshot is None:
+            from mstar.model.qwen3_omni.qwen3_omni_model import (
+                mixed_split_attn_enabled,
+            )
+            cls._split_attn_env_snapshot = mixed_split_attn_enabled()
+        if not cls._split_attn_env_snapshot:
             return False
         if config.get_config_type() != CudaGraphConfigType.FLASH_INFER_PACKED:
             return False
