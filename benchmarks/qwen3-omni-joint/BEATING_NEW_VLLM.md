@@ -98,6 +98,15 @@ bench-merge (docs/numbers).
 - nsys profile scripts: prof_winner.sh pattern (nvtx_sum + cuda_api_sum +
   the indexed sqlite queries in the session log).
 - ab_*.sh family — two-server interleave when both pairs are free.
+- WARMUP (measured, INFO probe 2026-07-03): ready=204s = load/precompute
+  ~116s + 34 Thinker captures 70s (the tail; Talker 24 caps + codec run
+  parallel on rank 0). Triage trim: MSTAR_DECODE_BUCKETS=24,28,32
+  MSTAR_PREFILL_BUCKETS=256,512 (~-50s; largest bucket mandatory, guard
+  enforces; NEVER for committed sweeps). CUDA graphs CANNOT migrate across
+  GPUs (device-bound cudaGraphExec) — pre-warming on another pair is
+  physically out; the pattern is WARM-STANDBY: after claiming a pair,
+  start one server and keep it for the whole session; every A/B flips via
+  MSTAR_DYNFLAGS (all winning-stack flags runtime-refreshable @ fbe4b1c).
 
 ## 6. What's next (sized; full designs in EXPERIMENTS.md option board)
 IMMEDIATE (blocked only on free GPUs):
