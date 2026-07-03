@@ -801,6 +801,23 @@ class KVCacheEngine(BaseEngine):
         runner = submod_mgmt.cuda_graph_runner
         for rid, info in batch.per_request_info.items():
             sampling_config = info.sampling_config.get(batch.node_name)
+            # Change-detect BEFORE set_config: this loop runs per rid per
+            # step, and set_config both rebuilds the SamplingConfig (two
+            # asdicts + ctor, ~14µs/rid) AND clears the sampler's
+            # _batch_cfg_cache — which structurally prevented
+            # MSTAR_SAMPLER_CFG_CACHE from ever hitting at steady state
+            # (every prior cache A/B measured a dead cache). Dataclass ==
+            # is ~1µs and covers the vocab_size mask-realloc case; configs
+            # are static per request at steady state, so the eq path is the
+            # common one. Byte-identical behavior on change.
+            if (
+                sampling_config is not None
+                and submod_mgmt.sampler._sampling_config.get(rid)
+                == sampling_config
+            ):
+                if runner is not None:
+                    runner.update_request_config(rid, sampling_config)
+                continue
             sampling_kwargs = {} if sampling_config is None else asdict(sampling_config)
             submod_mgmt.sampler.set_config(rid, **sampling_kwargs)
             # Mirror into the cuda-graph runner's master GPU buffers.

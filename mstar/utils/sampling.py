@@ -349,8 +349,15 @@ class Sampler(BaseSampler):
 
     def set_config(self, request_id: str, **kwargs):
         # Config change with unchanged batch membership must not serve stale
-        # cached tensors (see _batch_cfg_cache in sample()).
-        self._batch_cfg_cache.clear()
+        # cached tensors (see _batch_cfg_cache in sample()). Scoped to
+        # memberships containing this rid — a global clear() combined with
+        # prepare_batch's per-step per-rid set_config calls kept the cache
+        # permanently empty (fixed in tandem with the change-detect there).
+        if self._batch_cfg_cache:
+            self._batch_cfg_cache = {
+                k: v for k, v in self._batch_cfg_cache.items()
+                if request_id not in k
+            }
         old_vocab_size = self._sampling_config[request_id].vocab_size
         curr_config = asdict(self._sampling_config[request_id])
         kwargs = {k: arg for k, arg in kwargs.items() if k in curr_config.keys()}
