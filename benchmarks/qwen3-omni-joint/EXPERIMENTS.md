@@ -475,3 +475,28 @@ _ms_thinker_mixed did NOT drop per step (33.3 -> 34.2ms): the split plans
 TWO wrappers inline on the gpu-thread (+~1-2ms CPU submit) masking the
 -4.3ms GPU attention win in that counter; e2e req/s is the arbiter.
 Ship-decision A/B (plain W5 vs +single-chunk+split) running as ship_ab.sh.
+
+## MSTAR_MIXED_SINGLE_CHUNK — CLOSED, net-negative even under split+preplan
+Three independent A/Bs converge: sc1 dyn_ab (no split) 0.947 geomean;
+ship_ab2 (split+preplan, cross-server) ~0.97; scsplit dyn_ab (split+preplan
+static, one server, adjacent cells) pairs 0.949/0.904/0.983/1.104 geomean
+0.983. Mechanism understood end-to-end: eager short-span folding trades a
+17-18ms standalone prefill + 12-13ms decode step for one ~30.4ms mixed step
+(post-split+preplan) — roughly wall-neutral per fold — but degrades decode
+occupancy ~10% (4439 chain steps vs 4012 for identical tokens; admission
+rides fold slots instead of immediate standalone prefill). The occupancy
+loss dominates. The lever's residual value was folding-at-yield-boundaries,
+which plain W5 already does. Flag stays OFF; planner/eager/floor/backoff
+code retained on exp/fold-rate for the record.
+
+## Retained from the fold-rate campaign
+- MSTAR_MIXED_SPLIT_ATTN + MSTAR_MIXED_PREPLAN cut the ORIGINAL W5
+  yield-boundary folds' mixed steps 33.1 -> 30.4 ms (measured within
+  ship_ab2 legs) — pure profit on the shipping fold pattern. Endgame A/B
+  (ship_final.sh: W5+FAST_POSTPROC ± split+preplan) decides default-on.
+- Diagnosis/velocity tooling now standard: MSTAR_WALK_STATS (+_ms, chain
+  health, peek timing), MSTAR_DYNFLAGS + dyn_ab.sh (one-server interleaved
+  A/B), split_ab/ship_ab alternation scripts.
+- MSTAR_FAST_POSTPROC=1 was MISSING from all fold-rate-era flag sets while
+  the committed v2 sweep includes it — absolute numbers tonight read ~3-7%
+  low; all deltas remain valid (both sides equally affected).
