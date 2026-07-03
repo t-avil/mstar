@@ -572,3 +572,11 @@ template snapshotted BEFORE routing). This is the first converting cut into
 the ~13ms/step main-thread Python and validates the remove-work-not-waits
 law. NEXT: stack MSTAR_SAMPLER_CFG_CACHE on top (its GIL-shade objection
 weakens as the main thread lightens), then route/check_stop memoization.
+
+## Stack test: slim + sampler-cache — cache still PARKED (wash/−1%)
+Adjacent pairs on 0,1: A(slim) 5.587/5.621, 5.873/5.639 vs B(+cache)
+5.364/5.636, 5.531/5.912. Cache regression shrank from −5-7% (pre-slim) to
+≈−1% (with slim) — the GIL-shade account tracks quantitatively: as
+main-thread Python shrinks, removing gpu-thread waits approaches breakeven.
+Re-test after FAST_ROUTE (and any further main-thread trims) land.
+Winning stack so far: W5 + FAST_POSTPROC + SLIM_EMIT.
