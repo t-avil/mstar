@@ -47,6 +47,14 @@ from mstar.utils.sampling import SamplingConfig
 
 logger = logging.getLogger(__name__)
 
+# N2: block the conductor loop on the ZMQ poller instead of sleeping 1ms
+# per iteration. Default ON; MSTAR_CONDUCTOR_POLL=0 restores the sleep.
+import os as _os
+_CONDUCTOR_POLL = _os.environ.get(
+    "MSTAR_CONDUCTOR_POLL", "1"
+).strip().lower() in ("1", "true", "yes", "on")
+
+
 
 def _req_id_to_seed(req_id: str):
     """Map a request id to a 32-bit seed.
@@ -1140,4 +1148,14 @@ class Conductor:
                 if self.enable_nvtx:
                     range_pop()
 
-            time.sleep(0.001)
+            # N2 (MSTAR_CONDUCTOR_POLL, default ON): the conductor is purely
+            # message-driven — block on the ZMQ poller instead of an
+            # unconditional 1ms sleep per loop. The sleep taxed EVERY
+            # conductor hop (one per prefill chunk, admission, WGD, stop)
+            # with an avg ~0.5-1ms tail + timer slack; chunked prompts paid
+            # it N times. 50ms timeout = safety net, identical to the
+            # worker's wait_for_work.
+            if _CONDUCTOR_POLL:
+                self.communicator.wait_for_work(timeout_ms=50)
+            else:
+                time.sleep(0.001)
