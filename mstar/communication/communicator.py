@@ -81,7 +81,10 @@ class ZMQCommunicator(BaseCommunicator):
 
     def wait_for_work(self, timeout_ms=50):
         events = dict(self.poller.poll(timeout=timeout_ms))
-        if self.event.fd in events:
+        # self.event is None unless register_event_for_poll was called (the
+        # worker registers one; the conductor doesn't) — the unguarded
+        # attribute access killed the conductor loop on N2's first smoke.
+        if self.event is not None and self.event.fd in events:
             self.event.drain()
 
     def _endpoint(self, entity_id: str) -> str:

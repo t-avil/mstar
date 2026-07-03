@@ -50,13 +50,12 @@ logger = logging.getLogger(__name__)
 # N2: block the conductor loop on the ZMQ poller instead of sleeping 1ms
 # per iteration. Default ON; MSTAR_CONDUCTOR_POLL=0 restores the sleep.
 import os as _os
-# DEFAULT OFF: first smoke WEDGED (server ready, zero requests completed —
-# some conductor work source doesn't wake the poller; suspects: messages
-# consumed via a socket outside self.poller, or loop work triggered by
-# internal state rather than an inbound message). Needs the wakeup-source
-# audit before re-enabling.
+# First smoke wedged on an unguarded self.event.fd in wait_for_work (the
+# conductor registers no EventWakeup; AttributeError at the loop tail
+# killed the conductor thread while the API server stayed "ready").
+# Fixed in communicator.wait_for_work; default back ON pending re-smoke.
 _CONDUCTOR_POLL = _os.environ.get(
-    "MSTAR_CONDUCTOR_POLL", "0"
+    "MSTAR_CONDUCTOR_POLL", "1"
 ).strip().lower() in ("1", "true", "yes", "on")
 
 
