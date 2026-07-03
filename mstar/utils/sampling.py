@@ -204,6 +204,17 @@ def fused_temperature_softmax(
     return probs
 
 
+# MSTAR_SAMPLER_CFG_CACHE (default ON): cache the per-batch device config
+# tensors in Sampler.sample keyed by batch membership. Each uncached call
+# does SIX pageable H2D copies, each forcing a cudaStreamSynchronize that
+# drains the in-flight decode pipeline (~9 ms of a ~19 ms i2t B32 step).
+# Off-switch kept for A/B only; outputs are byte-identical either way.
+import os as _os
+_SAMPLER_CFG_CACHE = _os.environ.get(
+    "MSTAR_SAMPLER_CFG_CACHE", "1"
+).strip().lower() in ("1", "true", "yes", "on")
+
+
 @dataclass
 class SamplingConfig:
     # Sizes the per-request seen-token mask for the repetition penalty. When set,
@@ -303,6 +314,9 @@ class Sampler(BaseSampler):
     # (seeded) sampling draws a fresh number each step — otherwise identical
     # (seed, offset=0) draws repeat forever and stable logits never reach EOS.
     _step_offset: dict[str, int] = field(default_factory=dict)
+    # Per-batch-membership cache of the six device config tensors (see
+    # sample()). Invalidated on set_config; bounded in sample().
+    _batch_cfg_cache: dict = field(default_factory=dict)
     tp_group: "TPCommGroup | None" = None  # noqa: F821
 
     def add_request(self, request_id: str):
@@ -326,6 +340,9 @@ class Sampler(BaseSampler):
         self._step_offset.pop(request_id, None)
 
     def set_config(self, request_id: str, **kwargs):
+        # Config change with unchanged batch membership must not serve stale
+        # cached tensors (see _batch_cfg_cache in sample()).
+        self._batch_cfg_cache.clear()
         old_vocab_size = self._sampling_config[request_id].vocab_size
         curr_config = asdict(self._sampling_config[request_id])
         kwargs = {k: arg for k, arg in kwargs.items() if k in curr_config.keys()}
@@ -352,15 +369,41 @@ class Sampler(BaseSampler):
         the hot path doesn't need.
         """
         configs = [self._sampling_config[rid] for rid in request_ids]
-        temperature = torch.tensor([c.temperature for c in configs], device=logits.device)
-        top_k = torch.tensor([c.top_k for c in configs], device=logits.device, dtype=torch.int32)
-        top_p = torch.tensor([c.top_p for c in configs], device=logits.device)
-        r_pen = torch.tensor([c.repetition_penalty for c in configs], device=logits.device)
-        seed = torch.tensor([c.seed for c in configs], device=logits.device, dtype=torch.long)
-        rand_offset = torch.tensor(
-            [self._step_offset.get(rid, 0) for rid in request_ids],
-            device=logits.device, dtype=torch.long,
+        # Per-batch config tensors. Building these from Python lists with
+        # torch.tensor(..., device=...) does a PAGEABLE H2D copy each — torch
+        # issues cudaStreamSynchronize per copy, and on the decode hot path
+        # each such sync drains the whole in-flight pipeline (measured: SIX
+        # syncs x ~1.5 ms = ~9 ms of a ~19 ms i2t B32 step; repro'd exactly
+        # with set_sync_debug_mode). Configs are static per request, so cache
+        # the FIVE static tensors keyed by batch membership; rand_offset
+        # advances by exactly 1 for every rid on every sample() call (the
+        # loop at the bottom), so the cached device tensor is add_(1)'d
+        # in-place — no H2D at steady state. Any membership change → new key
+        # → one rebuild (its syncs are amortized to churn events).
+        key = tuple(request_ids)
+        cached = (
+            self._batch_cfg_cache.get(key) if _SAMPLER_CFG_CACHE else None
         )
+        if cached is None:
+            temperature = torch.tensor([c.temperature for c in configs], device=logits.device)
+            top_k = torch.tensor([c.top_k for c in configs], device=logits.device, dtype=torch.int32)
+            top_p = torch.tensor([c.top_p for c in configs], device=logits.device)
+            r_pen = torch.tensor([c.repetition_penalty for c in configs], device=logits.device)
+            seed = torch.tensor([c.seed for c in configs], device=logits.device, dtype=torch.long)
+            rand_offset = torch.tensor(
+                [self._step_offset.get(rid, 0) for rid in request_ids],
+                device=logits.device, dtype=torch.long,
+            )
+            # Keep the cache from growing over a long server life: batch
+            # membership churn creates a new key per admission wave. Bound it.
+            if len(self._batch_cfg_cache) > 64:
+                self._batch_cfg_cache.clear()
+            self._batch_cfg_cache[key] = (
+                temperature, top_k, top_p, r_pen, seed, rand_offset,
+            )
+        else:
+            temperature, top_k, top_p, r_pen, seed, rand_offset = cached
+            rand_offset.add_(1)
 
         any_rep_pen = any(c.repetition_penalty != 1.0 for c in configs)
         any_greedy = any(c.temperature == 0 for c in configs)
