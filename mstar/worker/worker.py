@@ -2484,6 +2484,9 @@ class Worker:
                 # Structural change (rid dropped mid-step): drop any replay plan.
                 if self._fast_postproc:
                     self.tensor_manager.invalidate_populate_plan(stopped_rid)
+                # MSTAR_FAST_ROUTE2: same trigger, route-plan analogue (no-op
+                # when the plan cache is empty / flag off).
+                self.worker_graphs_manager.invalidate_route_plan(stopped_rid)
         batch_N.node_batch.request_ids = list(valid_rids)
 
         # pending stops are only needed for one iteration, so can be cleared now
@@ -2583,6 +2586,9 @@ class Worker:
             # rebuilds from the slow path.
             if self._fast_postproc:
                 self.tensor_manager.invalidate_populate_plan(rid)
+            # MSTAR_FAST_ROUTE2: a loop stop makes the next completion
+            # terminal — drop the route plan alongside the populate plan.
+            self.worker_graphs_manager.invalidate_route_plan(rid)
             self.worker_graphs_manager.stop_loops(
                 rid, partition=batch_N.partition,
                 loop_names=loop_names,
