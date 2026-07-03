@@ -824,6 +824,14 @@ class CudaGraphRunner:
         padded_bs = self._get_padded_batch_size(batch_size, config)
         if padded_bs is None:
             return None
+        if self._config_uses_split_attn(config):
+            # Fixed-region layout pads the decode side to padded_bs-1 rows of
+            # one REAL token each (not zero-length), so the bucket must hold
+            # (padded_bs-1) + C = num_tokens + (padded_bs - batch_size).
+            # Without this a tail-merged C=258 fold with 30 real decode rows
+            # picked the 288 bucket (30+258) and overflowed its 257-token
+            # chunk window (fail-fast: "chunk len 258 outside window 257").
+            num_tokens = num_tokens + (padded_bs - batch_size)
         padded_num_tokens = self._get_padded_num_tokens(num_tokens, padded_bs, config)
         if padded_num_tokens is None:
             return None
