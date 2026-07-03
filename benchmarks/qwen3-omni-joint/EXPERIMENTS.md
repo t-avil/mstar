@@ -794,3 +794,18 @@ the wall flips; (3) GPU-side work converts ~0 at 51% busy. Biggest risk:
 split-brain WGD accumulation (pending_new_tokens/current_output_chunks/
 output_loop_indices written by both paths) — mandated wholesale ownership
 transfer + full message-stream byte-identity harness before any perf cell.
+
+## Sidecar Stage 1 BUILT (ab75034, delegated agent, 4 commits) — pending GPU A/B
+Per-worker emit sidecar process: compact StepRecord (interned indices +
+ints, pickle-memoized token lists), wholesale ownership of the three WGD
+accumulators (scope fixed per rid at admission — closes the split-brain
+trap), single-FIFO ordering preserved (non-inline edges ride the record),
+HWM/death -> permanent drain-and-disable + ABORT for stranded rids (never
+blocks, never per-step fallback). 15 byte-identity tests green incl.
+real-process lifecycle. Launch: requires BATCH+SLIM+SLIM2(+FAST_SEND
+rider); STATIC flag (process spawn) -> two-server A/B armed on the claim
+watcher (baseline = same stack incl. FAST_SEND so the -3% rider cancels
+and the A/B isolates the sidecar; ship decision re-checks vs plain stack).
+Promote at geomean >=+2% over >=3 adjacent pairs; predicted +10-20%.
+NOTE: two stash entries in bench-merge hold pre-existing benchmark WIP
+(agent incident, nothing lost — do not drop).
