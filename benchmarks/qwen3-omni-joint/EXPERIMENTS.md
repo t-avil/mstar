@@ -500,3 +500,14 @@ code retained on exp/fold-rate for the record.
 - MSTAR_FAST_POSTPROC=1 was MISSING from all fold-rate-era flag sets while
   the committed v2 sweep includes it — absolute numbers tonight read ~3-7%
   low; all deltas remain valid (both sides equally affected).
+
+## Endgame A/B verdict + protocol change (2026-07-03 ~01:45)
+ship_final round 1 (FAST_POSTPROC both sides): base 6.133/5.863 vs
++split+preplan 5.758/6.229 — WASH, as arithmetic predicts: yield-boundary
+folds are ~8% of steps; 2.7ms/step saving = +0.6% e2e, below this box's
+noise floor. MSTAR_MIXED_SPLIT_ATTN / MSTAR_MIXED_PREPLAN stay OPT-IN
+(validated, harmless, sized-correct); they become valuable only if a future
+scheduler change raises fold volume without the occupancy tax. PROTOCOL:
+effect-size gate — predicted-sub-2% effects get microbenches or arithmetic,
+not e2e cells; QB_FAST=1 halves cell sizes for triage. GPU time moves to
+the ~25% residual: fresh nsys re-decomposition (prof_winner) running.
