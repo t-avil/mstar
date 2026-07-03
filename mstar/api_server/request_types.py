@@ -25,6 +25,23 @@ class ResultTensors:
 
 
 @dataclass
+class SlimResultTokens:
+    """MSTAR_SLIM_EMIT steady-state item: token values only.
+
+    After the FIRST full ``ResultTensors`` for a (request_id, name) pair has
+    been sent (the "template"), later steps of the same inline emit edge carry
+    only this — the api server synthesizes a full ``ResultTensors`` from its
+    cached template plus these values. Pickling a full GraphEdge per rid per
+    step was the bulk of the worker's send_outputs cost (~3.4 ms/step main
+    thread at i2t B32).
+    """
+    request_id: str
+    name: str
+    values: list
+    loop_indices: NestedLoopIndices
+
+
+@dataclass
 class ResultTensorsBatch:
     """Coalesced inline emit_to_client results for one decode step.
 
@@ -35,8 +52,12 @@ class ResultTensorsBatch:
     discard path stays a no-op per item. Items can have different
     request_ids and different rid-status on the api side, so each is routed
     individually — this is purely a transport-level fan-in / fan-out.
+
+    With MSTAR_SLIM_EMIT, items may also be ``SlimResultTokens`` — the
+    consumer synthesizes the full item from its per-(rid, name) template
+    (guaranteed to precede slim items: same FIFO ZMQ stream).
     """
-    items: list[ResultTensors] = field(default_factory=list)
+    items: list = field(default_factory=list)
 
 
 @dataclass

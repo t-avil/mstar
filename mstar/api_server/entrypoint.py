@@ -22,7 +22,13 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from mstar.api_server.data_worker import PreprocessWorker
-from mstar.api_server.request_types import APIServerMessage, PreprocessInput, ResultChunk, ResultTensors
+from mstar.api_server.request_types import (
+    APIServerMessage,
+    PreprocessInput,
+    ResultChunk,
+    ResultTensors,
+    SlimResultTokens,
+)
 from mstar.communication.communicator import CommProtocol, ZMQCommunicator
 from mstar.model.registry import HF_MODELS
 from mstar.profile.display import pretty_print_profile
@@ -201,6 +207,10 @@ class APIServer:
             collections.OrderedDict()
         )
         self._recently_completed_ttl = 15.0
+        # MSTAR_SLIM_EMIT template cache: (rid, edge_name) -> first full
+        # ResultTensors seen for that pair; slim items inflate from it.
+        # Pruned with the rid in _prune_recently_completed.
+        self._slim_templates: dict = {}
         self.request_lock = threading.Lock()
         self.running = True
 
@@ -315,6 +325,10 @@ class APIServer:
             ) or (now - ts) >= self._recently_completed_ttl
         ]
         for rid in stale:
+            if self._slim_templates:
+                self._slim_templates = {
+                    k: v for k, v in self._slim_templates.items() if k[0] != rid
+                }
             # only set the event when there are no more pending chunks
             self.pending_requests[rid].event.set()
             # Snapshot the data worker's tx/rx now: the request is done (all
@@ -329,6 +343,33 @@ class APIServer:
                 profile.rx_info.extend(self.preprocess_worker.get_rx_info(rid))
             self.preprocess_worker.cleanup_request(rid)
             self.recently_completed.pop(rid, None)
+
+    def _inflate_slim_item(self, item: "SlimResultTokens"):
+        """Synthesize a full ResultTensors from the cached template.
+
+        Shallow-copies the template's graph_edge (fresh list for tensor_info)
+        so per-item consumers downstream never share mutable state across
+        steps. Returns None (warn) if no template exists — cannot happen on a
+        healthy FIFO stream, but a dropped/racing template must not crash the
+        message loop.
+        """
+        import copy as _copy
+        tmpl = self._slim_templates.get((item.request_id, item.name))
+        if tmpl is None:
+            logger.warning(
+                "SLIM_EMIT: no template for (%s, %s); dropping item",
+                item.request_id, item.name,
+            )
+            return None
+        edge = _copy.copy(tmpl.graph_edge)
+        edge.tensor_info = list(tmpl.graph_edge.tensor_info)
+        return ResultTensors(
+            request_id=item.request_id,
+            modality=tmpl.modality,
+            graph_edge=edge,
+            loop_indices=item.loop_indices,
+            metadata={"inline_values": {item.name: item.values}},
+        )
 
     def _route_result_tensors(self, body: "ResultTensors") -> None:
         """Route one ResultTensors by its own request_id status.
@@ -376,8 +417,22 @@ class APIServer:
                         # the whole step's fan-out (same granularity intent as
                         # the single-message path: one lock per received
                         # message).
+                        #
+                        # MSTAR_SLIM_EMIT: SlimResultTokens items are
+                        # synthesized into full ResultTensors from the cached
+                        # per-(rid, name) template. Full items always cache
+                        # their template first (same FIFO stream guarantees
+                        # the template precedes any slim item).
                         with self.request_lock:
                             for item in message.body.items:
+                                if isinstance(item, SlimResultTokens):
+                                    full = self._inflate_slim_item(item)
+                                    if full is not None:
+                                        self._route_result_tensors(full)
+                                    continue
+                                self._slim_templates[
+                                    (item.request_id, item.graph_edge.name)
+                                ] = item
                                 self._route_result_tensors(item)
                         continue
 

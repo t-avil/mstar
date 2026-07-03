@@ -12,7 +12,12 @@ from time import sleep
 
 import torch
 
-from mstar.api_server.request_types import APIServerMessage, ResultTensors, ResultTensorsBatch
+from mstar.api_server.request_types import (
+    APIServerMessage,
+    ResultTensors,
+    ResultTensorsBatch,
+    SlimResultTokens,
+)
 from mstar.communication.communicator import CommProtocol, ZMQCommunicator
 from mstar.communication.event import EventWakeup
 from mstar.communication.tensors import NameToTensorList, create_tensor_communication_manager
@@ -241,6 +246,15 @@ class Worker:
         # back to non-speculative decode depend on. See the block in
         # _thread_outputs_to_speculative for the exact safety conditions.
         self._direct_feed = os.environ.get("MSTAR_DIRECT_FEED", "0") == "1"
+
+        # MSTAR_SLIM_EMIT (implies/requires MSTAR_BATCH_EMIT's collector): after
+        # the first full ResultTensors per (rid, edge-name) — the api server's
+        # template — steady-state steps append SlimResultTokens (values only)
+        # to the batch, skipping the per-rid GraphEdge pickle. Default OFF.
+        self._slim_emit = (
+            os.environ.get("MSTAR_SLIM_EMIT", "0") == "1" and self._batch_emit
+        )
+        self._slim_emit_sent: set[tuple[str, str]] = set()
 
         if self.device.type == "cuda" and self.device.index is not None:
             torch.cuda.set_device(self.device)
@@ -1255,7 +1269,25 @@ class Worker:
                     # inline edges are collected — non-inline edges below still
                     # send their own message, byte-identical to the flag-off
                     # path.
-                    batch_collector.append(result_tensors)
+                    #
+                    # MSTAR_SLIM_EMIT: after the first full item for this
+                    # (rid, name) — the api server's template — send only the
+                    # token values. Skips pickling a GraphEdge per rid per
+                    # step (the bulk of send_outputs' main-thread cost).
+                    if self._slim_emit:
+                        tkey = (request_id, graph_edge.name)
+                        if tkey in self._slim_emit_sent:
+                            batch_collector.append(SlimResultTokens(
+                                request_id=request_id,
+                                name=graph_edge.name,
+                                values=metadata["inline_values"][graph_edge.name],
+                                loop_indices=nested_loop_indices,
+                            ))
+                        else:
+                            self._slim_emit_sent.add(tkey)
+                            batch_collector.append(result_tensors)
+                    else:
+                        batch_collector.append(result_tensors)
                 else:
                     message = APIServerMessage(
                         message_type="result_tensors",
@@ -2891,6 +2923,10 @@ class Worker:
         to_apply = [r for r in self._pending_removes if r not in held]
         for rid in to_apply:
             self._pending_removes.discard(rid)
+            if self._slim_emit and self._slim_emit_sent:
+                self._slim_emit_sent = {
+                    k for k in self._slim_emit_sent if k[0] != rid
+                }
             self._remove_request(RemoveRequest(request_id=rid, source=MessageSource.SELF))
 
     def run(self) -> None:
