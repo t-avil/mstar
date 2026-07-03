@@ -696,3 +696,14 @@ earlier — window poisoned, numbers unusable (B16 4.388 / B4 1.955 /
 B2 1.209 recorded for the log only). Re-run queued for a clean pair.
 Sentinel-cell practice adopted: every coverage run carries one i2t:32
 cell as a contamination detector.
+
+## N2 conductor poll VALIDATED + mid-batch coverage (sentinels clean)
+n2smoke2 (fix b1c1ff1, default ON): cells completed, i2t B1 sane —
+the unguarded-event-fd wedge is closed; N2 ships in the stack.
+midbatch2 (final stack + N2, pair 0,1, sentinels 6.303/6.559 both in
+band, zero foreign procs): **i2t B16 5.467 = 1.07x vLLM (crosses to
+winning; committed was 0.92x)**; B4 2.014 (0.83x raw, ~0.91x canonical
+projection); B2 1.167 (0.75x raw, ~0.83x projection). B2/B4 are now the
+weakest i2t cells — low-concurrency, TTFT-dominated (vision prefill);
+batching levers don't reach them. TTFT work (N2 helps; V5 encoder cache;
+prefill speed) is their lever, distinct from the B32 endgame.
