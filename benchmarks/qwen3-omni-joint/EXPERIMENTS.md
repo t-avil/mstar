@@ -809,3 +809,17 @@ and the A/B isolates the sidecar; ship decision re-checks vs plain stack).
 Promote at geomean >=+2% over >=3 adjacent pairs; predicted +10-20%.
 NOTE: two stash entries in bench-merge hold pre-existing benchmark WIP
 (agent incident, nothing lost — do not drop).
+
+## Sidecar Stage 1 — PROMOTED +3.1% geomean (bar was >=+2%)
+A/B (two-server alternation, FAST_SEND rider in both arms): OFF 6.791/
+6.582 + 6.337(healthy) vs ON 6.821/6.825 + 6.379/6.842 — pairs +2.0%/+4.3%.
+ON side had ZERO noise dips and holds the campaign's best cells (6.842,
+6.825); tok/req 176-180; zero CRITICAL/HWM/tracebacks. Honest size: +3%,
+not the predicted +10-20% — partial conversion (GIL tax on what remains).
+BONUS: capture trim measured clean at ready ~162-168s (was 204-260s; the
+354s reading was a confounded window). FINAL STACK += MSTAR_EMIT_SIDECAR
+(with BATCH+SLIM+SLIM2+FAST_SEND riders). Handicapped-pair band now
+~6.6-6.85; canonical projection ~7.3-7.5 vs vLLM 8.21 = 0.89-0.92x.
+Remaining to parity: Stage 2 (check_stop offload, shadow-gated), V1
+re-evaluation, TTFT items; all designed and ranked in SIDECAR_DESIGN.md +
+the option board.
