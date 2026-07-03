@@ -647,3 +647,22 @@ void (dead cache). cache4 live A/B: pair 1 +4.5% (contains the night's
 best cell 6.507) but pair 2 hit a deep degraded window (4.03, jct 7.2s) —
 no verdict under this noise. Cache stays flag-parked with the mechanism
 proven; definitive A/B bundled with N1 in a quieter window / on 6,7.
+
+## FINAL STACK LOCKED (2026-07-03 ~06:00) — cache+checkstop +10.5% sealed; night total +31% at i2t B32
+Decisive 3-round A/B (0,1, full cells, N3 change-detect in code both sides):
+locked stack 5.69/5.89/5.70 vs +MSTAR_SAMPLER_CFG_CACHE+MSTAR_FAST_CHECKSTOP
+6.57/6.57/5.97 — pairs +15.4%/+11.6%/+4.7%, geomean +10.5%, tok/req 176.9
+exact, zero errors. The void-verdict saga resolved: with N3 the cache is
+LIVE (6 pipeline-drain syncs -> 0) and finally converts; N1-lean batched
+check_stop rides along. FINAL STACK: MSTAR_MOE_FP8 + MSTAR_BATCH_EMIT +
+MSTAR_FAST_POSTPROC + chunked-prefill-v2(+vision) + MSTAR_MIXED_BATCH
+(+vision,+spec) + MSTAR_SLIM_EMIT + MSTAR_FAST_ROUTE +
+MSTAR_SAMPLER_CFG_CACHE + MSTAR_FAST_CHECKSTOP, encoff config.
+Night progression at i2t B32 on the (cross-NUMA-handicapped) 0,1 pair:
+~5.0 -> ~6.4 avg, best cells 6.894/6.787 (+31%). Projection to canonical
+6,7 (base band 6.0-6.2): ~7.5-7.9 req/s vs vLLM 8.21 = ~0.92-0.96x, from
+0.77x at session start. Full coverage sweep of the final stack running;
+canonical-pair sweep queued behind the foreign job on GPU 6.
+Remaining options to close the last ~5-8%: board of 2026-07-03 (V1 async
+sched / GPU-resident ids is the headliner; N1-full register/route caching;
+N2 latency hops; V2 budgeted interleave policy).
