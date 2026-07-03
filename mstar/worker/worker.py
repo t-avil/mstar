@@ -2234,15 +2234,13 @@ class Worker:
         # its BASIC_BATCHED-only behavior. chunk_len can be None if the chunk
         # carried no prefill_chunk_len metadata (shouldn't happen for a mixable
         # chunk) — guard so we don't stash a broken bucket.
-        if (
-            self.mixed_batch_preplan
-            and chunk_len is not None
-            and not self.mixed_split_attn
-        ):
-            # Split-attention replays (MSTAR_MIXED_SPLIT_ATTN) use the
-            # fixed-region padded shape [1]*(bs-1)+[C]; this stash's real-row
-            # shape would plan the wrong layout. Pre-plan is default-off and
-            # measured neutral — inline planning under split.
+        if self.mixed_batch_preplan and chunk_len is not None:
+            # Under MSTAR_MIXED_SPLIT_ATTN the engine pads this real-row shape
+            # to the fixed-region layout inside pre_plan_packed_batch (and
+            # _get_key_for adds the dummy-row tokens), so the stash stays in
+            # real-row terms either way. With split, the pre-plan is SIZED:
+            # each folded step otherwise plans TWO wrappers inline on the
+            # gpu thread (~3-5ms x ~500 folds/cell at i2t B32).
             spec_node_batch.metadata["mixed_preplan"] = {
                 "num_tokens": n_decode + int(chunk_len),
                 "seq_lens": [1] * n_decode + [int(chunk_len)],

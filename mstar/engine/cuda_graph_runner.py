@@ -1346,9 +1346,28 @@ class CudaGraphRunner:
         saved_request_ids = static_cm.request_ids
         saved_active_labels = static_cm.active_labels
         config_labels = config.labels
-        padded_seq_lens = list(seq_lens) + [0] * (len(saved_request_ids) - real_bs)
+        _ps0 = static_cm._plan_states.get(config_labels[0])
+        from mstar.utils.flashinfer_utils import FlashInferSplitMixedWrapper
+        if _ps0 is not None and isinstance(_ps0.wrapper, FlashInferSplitMixedWrapper):
+            # Fixed-region layout (MSTAR_MIXED_SPLIT_ATTN): real decode rows,
+            # then seq_len=1 DUMMY decode rows, chunk rid at slot padded_bs-1
+            # — mirrors _run_flashinfer_packed's slot_map so the pre-plan
+            # writes exactly the buffers the replay reads. Dummy rows alloc a
+            # page each; the replay's restore frees non-real slots.
+            n_dec = real_bs - 1
+            padded_request_ids = (
+                list(request_ids[:n_dec])
+                + saved_request_ids[n_dec : padded_bs - 1]
+                + [request_ids[n_dec]]
+            )
+            padded_seq_lens = [1] * (padded_bs - 1) + [int(seq_lens[-1])]
+        else:
+            padded_request_ids = list(request_ids) + saved_request_ids[real_bs:]
+            padded_seq_lens = list(seq_lens) + [0] * (
+                len(saved_request_ids) - real_bs
+            )
         try:
-            static_cm.request_ids = list(request_ids) + saved_request_ids[real_bs:]
+            static_cm.request_ids = padded_request_ids
             # plan_attention takes label explicitly, so _plan_attention_impl
             # keys _get_state off that arg, not active_labels — but set the
             # active label over the full (real + dummy) request_ids anyway so
