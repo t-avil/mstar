@@ -24,7 +24,7 @@ import matplotlib.pyplot as plt
 
 plt.style.use("../benchmarks/chartstyle.mplstyle")
 
-BLUE, LBLUE, GREEN = "#1f77b4", "#7fb3d8", "#2ca02c"
+BLUE, GREY, GREEN = "#1f77b4", "#8a8f94", "#2ca02c"
 PATHS = ["audio_to_text", "image_to_text", "audio_to_speech", "image_to_speech"]
 SHORT = {"audio_to_text": "s2t", "image_to_text": "i2t",
          "audio_to_speech": "s2s", "image_to_speech": "i2s"}
@@ -56,7 +56,7 @@ def series(path):
     return [
         ("M* new", merged_current(path), BLUE, "-", 2.6),
         ("M* new (previous)", plain("mstar_new"), BLUE, ":", 1.6),
-        ("M* old", plain("mstar_old"), LBLUE, "-.", 1.4),
+        ("M* old", plain("mstar_old"), GREY, "-.", 1.4),
         ("vLLM-Omni", plain("vllm_022"), GREEN, "-", 2.6),
         ("vLLM-Omni (previous)", plain("vllm_021"), GREEN, ":", 1.6),
     ]
@@ -66,6 +66,8 @@ METRICS = [("req_s", "requests / s", "throughput"),
            ("ttft_p50", "TTFT p50 (s)", "TTFT p50 (lower is better)"),
            ("itl_mean", "ITL mean (s)", "ITL mean (lower is better)"),
            ("rtf_p50", "RTF p50", "RTF p50 (lower = faster than realtime)")]
+# Speech paths chart the AUDIO stream's TTFT/ITL (complete for every
+# system and era); text paths chart the text stream.
 
 
 def main():
@@ -86,7 +88,10 @@ def main():
             ax.set_xticklabels([str(b) for b in BATCHES])
             ax.set_xlabel("concurrency (closed loop)")
             ax.set_ylabel(ylabel)
-            ax.set_title(title, fontsize=10)
+            t = title
+            if speech and mk in ("ttft_p50", "itl_mean"):
+                t = t.replace("p50", "p50, audio stream").replace("mean", "mean, audio stream")
+            ax.set_title(t, fontsize=10)
         axes[0].legend(fontsize=8)
         fig.suptitle(f"{SHORT[path]} ({path})", y=1.03, fontsize=13)
         fig.tight_layout()
