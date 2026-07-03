@@ -375,11 +375,17 @@ class SidecarState:
         # happen on a healthy Stage-1 stream; belt for future flip paths).
         self.edge_templates: dict[tuple[int, int], object] = {}
 
-        # Mechanism-alive counters (design §8 validation recipe 3).
+        # Mechanism-alive counters (design §8 validation recipe 3). The
+        # drain size per poll is the observable proxy for queue depth (ZMQ
+        # doesn't expose it): >1 means the sidecar fell behind the producer
+        # within a poll interval.
         self.steps = 0
         self.items_seen = 0
         self.wgd_sent = 0
         self.batch_msgs = 0
+        self.drain_max = 0
+        self.drain_sum = 0
+        self.drain_polls = 0
 
     # ------------------------------------------------------------------
     # Record dispatch
@@ -540,11 +546,23 @@ class SidecarState:
 
         self.steps += 1
         if self.steps % 2000 == 0:
+            mean_drain = (
+                self.drain_sum / self.drain_polls if self.drain_polls else 0.0
+            )
             logger.info(
-                "%s: steps=%d items=%d wgd=%d batch_msgs=%d rids_live=%d",
+                "%s: steps=%d items=%d wgd=%d batch_msgs=%d rids_live=%d "
+                "drain_max=%d drain_mean=%.2f",
                 self.worker_id + "_sidecar", self.steps, self.items_seen,
                 self.wgd_sent, self.batch_msgs, len(self.rids),
+                self.drain_max, mean_drain,
             )
+
+    def note_drain(self, n: int) -> None:
+        """Record one poll's drained-record count (queue-depth proxy)."""
+        if n:
+            self.drain_max = max(self.drain_max, n)
+            self.drain_sum += n
+            self.drain_polls += 1
 
     def _send_wgd(self, rid_idx: int, rid: str, boundary: tuple) -> None:
         (
@@ -625,6 +643,7 @@ def run_sidecar(
     logger.info("%s ready (parent pid=%d)", sidecar_id, parent_pid)
     while True:
         messages = communicator.get_all_new_messages()
+        state.note_drain(len(messages))
         for rec in messages:
             try:
                 state.handle(rec)
