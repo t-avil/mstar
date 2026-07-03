@@ -200,6 +200,9 @@ class Worker:
         # Static for the process — capture bakes the split layout, so this
         # must NOT follow dynflags flips (_refresh_dynamic_flags skips it).
         self.mixed_split_attn = _msae()
+        # Eager-fold peek backoff state (see the fold_probe site).
+        self._peek_backoff = 0
+        self._peek_skip = 0
 
         # Diagnostics (MSTAR_WALK_STATS): count executed steps per
         # (node, graph_walk) and log every 200 steps at WARNING (visible under
@@ -3136,9 +3139,21 @@ class Worker:
                     # The occupancy floor inside has_mixed_opportunity keeps
                     # ramp-up on the standalone path either way.
                     speculate_into_mixed = False
-                    fold_probe = must_yield_away or (
-                        mixed_spec_enabled and self.mixed_single_chunk
-                    )
+                    # Eager peeks (every chain step under MSTAR_MIXED_SINGLE_
+                    # CHUNK) scan the ready queues in Python. During a long
+                    # pure-decode tail that's thousands of guaranteed-negative
+                    # scans (~3400 peeks for 508 folds measured). Exponential
+                    # backoff after negatives (1..32 steps) bounds the waste;
+                    # a fold is delayed by at most the backoff, which is no
+                    # worse than waiting for a natural yield boundary.
+                    # must_yield_away peeks always run (rare; picking fold
+                    # over yield there is the original P2 win).
+                    eager_probe = mixed_spec_enabled and self.mixed_single_chunk
+                    if eager_probe and not must_yield_away and self._peek_skip > 0:
+                        self._peek_skip -= 1
+                        eager_probe = False
+                        self._ws_inc("_n_peek_skipped")
+                    fold_probe = must_yield_away or eager_probe
                     _peek_t0 = (
                         _time.perf_counter()
                         if (fold_probe and self._walk_stats is not None)
@@ -3149,9 +3164,18 @@ class Worker:
                         (pending.node_name, pending.graph_walk),
                         n_decode=len(pending.node_batch.request_ids),
                     )
+                    if fold_probe:
+                        if _peek_hit:
+                            self._peek_backoff = 0
+                            self._peek_skip = 0
+                        else:
+                            self._peek_backoff = min(
+                                max(1, self._peek_backoff * 2), 32
+                            )
+                            self._peek_skip = self._peek_backoff
                     if _peek_t0:
-                        # Eager-fold peek cost suspect: a Python ready-queue
-                        # scan per chain step. _ms_peek/_n_peek size it.
+                        # Eager-fold peek cost: a Python ready-queue scan per
+                        # chain step. _ms_peek/_n_peek size it.
                         self._walk_stats["_ms_peek"] = self._walk_stats.get(
                             "_ms_peek", 0
                         ) + int((_time.perf_counter() - _peek_t0) * 1000)
