@@ -115,9 +115,13 @@ class ZMQCommunicator(BaseCommunicator):
 
     def send(self, entity_id: str, msg):
         # TODO: maybe serialize to JSON instead if more efficient
+        # Pass msg itself, not str(msg): %s stringifies lazily only when
+        # DEBUG is enabled, whereas str(msg) here built the full recursive
+        # dataclass repr (e.g. a whole step's ResultTensorsBatch) on every
+        # send even with logging off. Identical log output when enabled.
         logger.debug(
             "%s to send a message %s to entity %s",
-            self.my_id, str(msg), entity_id
+            self.my_id, msg, entity_id
         )
         if entity_id not in self.push_sockets:
             sock = self.context.socket(zmq.PUSH)
@@ -136,9 +140,11 @@ class ZMQCommunicator(BaseCommunicator):
                 messages.append(self.pull_socket.recv_pyobj(
                     flags=zmq.NOBLOCK
                 ))
+                # Lazy %s, same reason as in send(): no eager repr of the
+                # received message when DEBUG is off.
                 logger.debug(
                     "%s to received message %s",
-                    self.my_id, str(messages[-1])
+                    self.my_id, messages[-1]
                 )
             except zmq.Again:
                 # zmq.Again actually means no messages left to read

@@ -272,6 +272,17 @@ class Worker:
             tuple[str, str], tuple[list, tuple]
         ] = {}
 
+        # MSTAR_FAST_SEND: trim the per-rid Python around the emit path —
+        # compute _inline_emit_uuids once per rid per step (stashed on the
+        # routing object by _register_outputs, reused by _send_outputs), skip
+        # the empty-set register_for_send call (SHM impl enters a CUDA
+        # side-stream context even for a no-op), and write the manager
+        # bookkeeping (buffer_new_tokens / buffer_output_signals /
+        # register_output_loop_indices) inline against one hoisted
+        # per_request_info reference — same effects, no per-call lookups.
+        # Default OFF; the off path is byte-identical.
+        self._fast_send = os.environ.get("MSTAR_FAST_SEND", "0") == "1"
+
         # N1 (MSTAR_FAST_CHECKSTOP): batched int-compare stop check for
         # uniform thinker_decode steps (one tolist over the pinned buffer
         # instead of per-rid .item()). Default OFF.
@@ -1147,6 +1158,13 @@ class Worker:
                 (prematerialized_per_request or {}).get(request_id)
             )
             inline_uuids = self._inline_emit_uuids(routing, prem)
+            if self._fast_send:
+                # MSTAR_FAST_SEND: stash for _send_outputs — it sees the same
+                # routing object and the same prem dict later this step, so
+                # the set is identical there. Re-deriving it per rid was pure
+                # waste, and sharing one set pins the send-side inline
+                # decision to the SHM-skip decision made here.
+                routing.inline_emit_uuids = inline_uuids
             uuids = set()
             for edge in (
                 routing.persist +
@@ -1161,10 +1179,16 @@ class Worker:
             # write, no remote fetch, no ack. Their producer-side ref is
             # released locally in _send_outputs instead.
             uuids -= inline_uuids
-            self.tensor_manager.register_for_send(
-                request_id=request_id, uuids=uuids,
-                skip_cuda_sync=True,
-            )
+            # MSTAR_FAST_SEND: an empty registration is a no-op (the loop
+            # body never runs), but the SHM implementation still enters its
+            # CUDA side-stream context per call — and on the steady inline
+            # decode path the set is empty for every rid, every step. Skip
+            # the call outright.
+            if uuids or not self._fast_send:
+                self.tensor_manager.register_for_send(
+                    request_id=request_id, uuids=uuids,
+                    skip_cuda_sync=True,
+                )
 
             for edge in routing.persist:
                 for info in edge.tensor_info:
@@ -1206,6 +1230,17 @@ class Worker:
         """
         if graph_walk is None:
             graph_walk = self.worker_graphs_manager.get_graph_walk(request_id, partition_name)
+        # MSTAR_FAST_SEND: hoist the per-request info once. The manager
+        # bookkeeping below (buffer_new_tokens / buffer_output_signals /
+        # register_output_loop_indices) each re-does the per_request_info
+        # lookup behind a method call, per rid per step; on this path their
+        # effects are written inline, verbatim, against this one reference.
+        # A missing rid leaves fast_info None, so the slow-path manager call
+        # runs and raises exactly as without the flag.
+        fast_info = (
+            self.worker_graphs_manager.per_request_info.get(request_id)
+            if self._fast_send else None
+        )
         for worker_id, edges in outputs.to_workers.items():
             message = WorkerMessage(
                 message_type=WorkerMessageType.INPUT_SIGNALS,
@@ -1244,47 +1279,83 @@ class Worker:
                         new_tokens.extend(tensor.cpu().numpy().tolist())
                 name_to_new_token[signal.name] = new_tokens
 
-                self.worker_graphs_manager.buffer_new_tokens(
-                    request_id, name_to_new_token
-                )
+                if fast_info is not None:
+                    # Inline of worker_graphs_manager.buffer_new_tokens —
+                    # kept call-per-signal with the accumulated dict, exactly
+                    # like the call it replaces (the flushed pending state is
+                    # load-bearing: it rides the WORKER_GRAPHS_DONE message).
+                    pending = fast_info.pending_new_tokens
+                    for name, toks in name_to_new_token.items():
+                        if name not in pending:
+                            pending[name] = []
+                        pending[name].extend(toks)
+                else:
+                    self.worker_graphs_manager.buffer_new_tokens(
+                        request_id, name_to_new_token
+                    )
 
         if outputs.emit_to_client:
-            self.worker_graphs_manager.buffer_output_signals(
-                request_id, outputs.emit_to_client
-            )
-            inline_uuids = self._inline_emit_uuids(
-                outputs, prematerialized_new_tokens
-            )
+            if fast_info is not None:
+                # Inline of worker_graphs_manager.buffer_output_signals
+                # (load-bearing per-step accumulation, flushed on WGD).
+                fast_info.current_output_chunks += [
+                    signal.name for signal in outputs.emit_to_client
+                ]
+            else:
+                self.worker_graphs_manager.buffer_output_signals(
+                    request_id, outputs.emit_to_client
+                )
+            # MSTAR_FAST_SEND: _register_outputs already derived this set
+            # from the same (routing, prem) pair this step and stashed it on
+            # the routing object — reuse it. Recompute only when the stash is
+            # missing (flag off, or flipped between register and send).
+            inline_uuids = outputs.inline_emit_uuids
+            if not self._fast_send or inline_uuids is None:
+                inline_uuids = self._inline_emit_uuids(
+                    outputs, prematerialized_new_tokens
+                )
             # uuids we release locally, weighted by how many emit tensor_info
             # entries reference each (mirrors the per-tensor_info ack count
             # the data worker would have sent via TENSOR_RECEIVED).
             local_release: dict[str, int] = {}
             for graph_edge in outputs.emit_to_client:
-                self.worker_graphs_manager.register_output_loop_indices(
-                    request_id=request_id, loop_indices=nested_loop_indices,
-                    output_name=graph_edge.name
-                )
-                metadata: dict = {}
+                if fast_info is not None:
+                    # Inline of
+                    # worker_graphs_manager.register_output_loop_indices.
+                    fast_info.output_loop_indices[graph_edge.name] = (
+                        nested_loop_indices
+                    )
+                else:
+                    self.worker_graphs_manager.register_output_loop_indices(
+                        request_id=request_id, loop_indices=nested_loop_indices,
+                        output_name=graph_edge.name
+                    )
                 edge_inline = self._inline_emit and bool(graph_edge.tensor_info) and all(
                     info.uuid in inline_uuids for info in graph_edge.tensor_info
                 )
-                if edge_inline:
-                    # Carry the token values inline; the consumer skips the
-                    # SHM fetch entirely. dtype/shape come from tensor_info
-                    # on the (still-attached) graph_edge, so the consumer
-                    # reconstructs a byte-identical tensor for postprocess.
-                    metadata = {
-                        "inline_values": {
-                            graph_edge.name: prematerialized_new_tokens[graph_edge.name]
-                        }
-                    }
-                    for info in graph_edge.tensor_info:
-                        local_release[info.uuid] = local_release.get(info.uuid, 0) + 1
                 tkey = (request_id, graph_edge.name)
                 slim_hit = (
                     self._slim_emit and batch_collector is not None
                     and edge_inline and tkey in self._slim_emit_sent
                 )
+                metadata: dict = {}
+                inline_vals: list | None = None
+                if edge_inline:
+                    # Carry the token values inline; the consumer skips the
+                    # SHM fetch entirely. dtype/shape come from tensor_info
+                    # on the (still-attached) graph_edge, so the consumer
+                    # reconstructs a byte-identical tensor for postprocess.
+                    inline_vals = prematerialized_new_tokens[graph_edge.name]
+                    # MSTAR_FAST_SEND: on the slim steady path the metadata
+                    # dict's only consumer is the full ResultTensors, which
+                    # SLIM_EMIT2 skips below — the slim item carries
+                    # inline_vals directly. Don't build the two dicts.
+                    if not (self._fast_send and self._slim_emit2 and slim_hit):
+                        metadata = {
+                            "inline_values": {graph_edge.name: inline_vals}
+                        }
+                    for info in graph_edge.tensor_info:
+                        local_release[info.uuid] = local_release.get(info.uuid, 0) + 1
                 # MSTAR_SLIM_EMIT2: on the slim steady path the full
                 # ResultTensors below is provably unused (the hit branch
                 # appends a SlimResultTokens and the immediate-send else is
@@ -1335,10 +1406,14 @@ class Worker:
                                         nested_loop_indices.wg_fwd_pass_idx,
                                         *nested_loop_indices.loop_indices.values(),
                                     )
+                            # inline_vals is always set here: slim_hit
+                            # implies edge_inline. Same list object the
+                            # metadata dict carried before the FAST_SEND
+                            # skip, so the pickled payload is unchanged.
                             batch_collector.append(SlimResultTokens(
                                 request_id=request_id,
                                 name=graph_edge.name,
-                                values=metadata["inline_values"][graph_edge.name],
+                                values=inline_vals,
                                 loop_indices=(
                                     None if loop_key is not None
                                     else nested_loop_indices
@@ -1373,7 +1448,12 @@ class Worker:
 
         # Handle streaming edges
         # Local streaming: route to StreamBuffer
-        req_info = self.worker_graphs_manager.per_request_info[request_id]
+        # (fast_info is this same object when MSTAR_FAST_SEND found the rid;
+        # the [] lookup keeps the missing-rid KeyError behavior otherwise.)
+        req_info = (
+            fast_info if fast_info is not None
+            else self.worker_graphs_manager.per_request_info[request_id]
+        )
         for edge in outputs.streaming_local:
             stream_buf = req_info.stream_buffers[edge.name]
             for info in edge.tensor_info:
@@ -1469,6 +1549,11 @@ class Worker:
         self._fast_checkstop = (
             os.environ.get("MSTAR_FAST_CHECKSTOP", "0") == "1"
         )
+        # Safe to flip mid-run: ON stashes inline_emit_uuids on the step's
+        # routing object; OFF simply ignores the stash and recomputes. The
+        # register/send halves of one step run under one flag read each, and
+        # a flip between them degrades to a recompute (never a wrong set).
+        self._fast_send = os.environ.get("MSTAR_FAST_SEND", "0") == "1"
 
     def _ws_inc(self, key: str) -> None:
         """MSTAR_WALK_STATS: bump a named diagnostic counter (no-op when off).

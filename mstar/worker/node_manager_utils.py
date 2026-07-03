@@ -87,6 +87,13 @@ class NodeOutputRouting:
     completed_worker_graph_ids: list[str] = field(default_factory=list)
     streaming_to_workers: dict[str, list[GraphEdge]] = field(default_factory=dict)  # streaming edges to other workers
     streaming_local: list[GraphEdge] = field(default_factory=list)  # streaming edges staying on this worker
+    # MSTAR_FAST_SEND: the worker's _register_outputs stashes its
+    # _inline_emit_uuids result here so _send_outputs (same routing object,
+    # same prem dict, same step) reuses it instead of re-deriving the same
+    # set per rid — and so the send-side inline decision can never diverge
+    # from the register-side SHM-skip decision. None = not stashed (flag
+    # off): the reader recomputes.
+    inline_emit_uuids: "set[str] | None" = None
 
 
 @dataclass
