@@ -285,6 +285,23 @@ class Worker:
         # Default OFF; the off path is byte-identical.
         self._fast_send = os.environ.get("MSTAR_FAST_SEND", "0") == "1"
 
+        # MSTAR_SCHED_PACK: scheduler/loop-shell micro-cuts bundle —
+        # (a) the two sum(routing.*.values(), start=[]) flattens per rid per
+        # step are computed once in _inline_emit_uuids and stashed on the
+        # routing object for _register_outputs (same step, same object;
+        # recomputed if absent, so a mid-step dynflags flip degrades to the
+        # old behavior, never a wrong set); (b) the per-chain-step fairness
+        # peek (has_ready_excluding — a full ready-scan) backs off
+        # exponentially after consecutive negative peeks (cap
+        # MSTAR_SCHED_PACK_PEEK_CAP steps, default 8) — same bounded-
+        # staleness argument as the fold-peek backoff: a fairness yield (and
+        # therefore a fold boundary) is delayed by at most the cap. Default
+        # OFF; both sub-cuts byte-identical when off.
+        self._sched_pack = os.environ.get("MSTAR_SCHED_PACK", "0") == "1"
+        self._sched_pack_peek_cap = int(
+            os.environ.get("MSTAR_SCHED_PACK_PEEK_CAP", "8")
+        )
+
         # N1 (MSTAR_FAST_CHECKSTOP): batched int-compare stop check for
         # uniform thinker_decode steps (one tolist over the pinned buffer
         # instead of per-rid .item()). Default OFF.
@@ -1205,11 +1222,18 @@ class Worker:
 
         # Any uuid also referenced by a non-inline consumer must keep its
         # SHM write; drop it from the inline set.
+        tw_flat = sum(routing.to_workers.values(), start=[])
+        stw_flat = sum(routing.streaming_to_workers.values(), start=[])
+        if self._sched_pack:
+            # MSTAR_SCHED_PACK (a): _register_outputs walks the same two
+            # flattened lists for the same routing object later this step —
+            # stash them so it doesn't rebuild the concatenations per rid.
+            routing.sched_pack_flats = (tw_flat, stw_flat)
         non_inline_uuids: set[str] = set()
         for edge in (
             routing.persist +
-            sum(routing.to_workers.values(), start=[]) +
-            sum(routing.streaming_to_workers.values(), start=[]) +
+            tw_flat +
+            stw_flat +
             routing.streaming_local +
             routing.routed_to_this_worker_graph
         ):
@@ -1247,12 +1271,24 @@ class Worker:
                 # waste, and sharing one set pins the send-side inline
                 # decision to the SHM-skip decision made here.
                 routing.inline_emit_uuids = inline_uuids
+            # MSTAR_SCHED_PACK (a): reuse the flattens stashed by
+            # _inline_emit_uuids above (same step, same object). POP, don't
+            # get: FAST_ROUTE replays clone the routing object per step and a
+            # copied stash could go stale if a later step early-returns from
+            # _inline_emit_uuids before re-stashing — consuming it here makes
+            # cross-step reuse impossible.
+            flats = routing.__dict__.pop("sched_pack_flats", None)
+            if self._sched_pack and flats is not None:
+                tw_flat, stw_flat = flats
+            else:
+                tw_flat = sum(routing.to_workers.values(), start=[])
+                stw_flat = sum(routing.streaming_to_workers.values(), start=[])
             uuids = set()
             for edge in (
                 routing.persist +
-                sum(routing.to_workers.values(), start=[]) +
+                tw_flat +
                 routing.emit_to_client +
-                sum(routing.streaming_to_workers.values(), start=[])
+                stw_flat
             ):
                 uuids.update([
                     info.uuid for info in edge.tensor_info
@@ -1861,6 +1897,10 @@ class Worker:
         # register/send halves of one step run under one flag read each, and
         # a flip between them degrades to a recompute (never a wrong set).
         self._fast_send = os.environ.get("MSTAR_FAST_SEND", "0") == "1"
+        # Safe to flip mid-run: (a) the flatten stash falls back to a
+        # recompute when absent; (b) the peek-backoff state lives in run-loop
+        # locals and simply stops being consulted when the flag turns off.
+        self._sched_pack = os.environ.get("MSTAR_SCHED_PACK", "0") == "1"
         # MSTAR_EMIT_SIDECAR is deliberately NOT refreshed: the sidecar is a
         # process spawned at init, so the flag is static (see __init__).
         # Sidecar-scoped construction is likewise pinned to the slim stack,
@@ -3654,6 +3694,12 @@ class Worker:
         mixed_spec_enabled = _mixed_batch_spec_enabled()
         consecutive_spec_steps = 0
         yield_away_from_target: tuple[str, str] | None = None
+        # MSTAR_SCHED_PACK (b): fairness-peek exponential backoff state
+        # (mirrors the fold-peek backoff — doubling skip window after
+        # consecutive negative peeks, capped, reset on any positive peek or
+        # fresh chain).
+        fair_peek_skip = 0
+        fair_peek_backoff = 0
 
         def _set_pending(p: PendingBatch):
             nonlocal pending
@@ -3760,14 +3806,48 @@ class Worker:
                     # another (node, walk) actually ready to schedule on
                     # this worker. On single-walk workers (Orpheus LLM,
                     # Orpheus SNAC) this returns False and we always speculate.
-                    must_yield_for_fairness = (
-                        spec_peek_for_fairness
-                        and consecutive_spec_steps >= 1
-                        and self.scheduler.has_ready_excluding(
-                            self.worker_graphs_manager,
-                            (pending.node_name, pending.graph_walk),
+                    if consecutive_spec_steps <= 1:
+                        # Fresh chain (right after a break / admission) —
+                        # contention is most likely here; always peek and
+                        # restart the backoff ladder.
+                        fair_peek_skip = 0
+                        fair_peek_backoff = 0
+                    if (
+                        self._sched_pack
+                        and spec_peek_for_fairness
+                        and fair_peek_skip > 0
+                    ):
+                        # MSTAR_SCHED_PACK (b): during backoff the full
+                        # ready-scan peek is skipped; a fairness yield (and
+                        # any fold boundary it would trigger) is delayed by
+                        # at most MSTAR_SCHED_PACK_PEEK_CAP steps.
+                        fair_peek_skip -= 1
+                        self._ws_inc("fair_peek_skip")
+                        must_yield_for_fairness = False
+                    else:
+                        must_yield_for_fairness = (
+                            spec_peek_for_fairness
+                            and consecutive_spec_steps >= 1
+                            and self.scheduler.has_ready_excluding(
+                                self.worker_graphs_manager,
+                                (pending.node_name, pending.graph_walk),
+                            )
                         )
-                    )
+                        if (
+                            self._sched_pack
+                            and spec_peek_for_fairness
+                            and consecutive_spec_steps >= 1
+                        ):
+                            if must_yield_for_fairness:
+                                fair_peek_backoff = 0
+                                fair_peek_skip = 0
+                            else:
+                                fair_peek_backoff = min(
+                                    max(1, fair_peek_backoff * 2),
+                                    self._sched_pack_peek_cap,
+                                )
+                                fair_peek_skip = fair_peek_backoff
+                                self._ws_inc("fair_peek_neg")
                     must_yield_away = (
                         consecutive_spec_steps >= max_consecutive_spec
                         or must_yield_for_fairness
