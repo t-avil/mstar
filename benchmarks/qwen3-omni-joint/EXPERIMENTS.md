@@ -677,3 +677,14 @@ s2s B8 7.497 + 32.53 audio-s/s (−5%/−13% vs committed — NUMA + audio path
 untouched by tonight's text opts; audio-optimal alt config unaffected).
 i2s B8 1.250 / 56.15 audio-s/s (parity). No path broken; text paths up
 across the board. Canonical 6,7 sweep queued behind the foreign 129GB job.
+
+## N2-lean (conductor blocking poll) — WEDGED on first smoke; default OFF
+Replacing the conductor's unconditional per-loop time.sleep(0.001) with
+communicator.wait_for_work(50ms) brought the server up but completed ZERO
+requests — some conductor work source doesn't wake its poller (suspects:
+a socket consumed outside self.poller, or state-driven work with no
+inbound message; the 50ms safety timeout should still have made progress,
+so the gap may be deeper — possibly wait_for_work draining/eating a wakeup
+another path needed). MSTAR_CONDUCTOR_POLL kept (default 0) pending a
+wakeup-source audit. The latency win stands as designed; the execution
+needs the audit first. (4a19bbb, exp/overlap-sched)
