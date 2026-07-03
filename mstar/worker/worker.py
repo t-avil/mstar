@@ -256,6 +256,14 @@ class Worker:
         )
         self._slim_emit_sent: set[tuple[str, str]] = set()
 
+        # N1 (MSTAR_FAST_CHECKSTOP): batched int-compare stop check for
+        # uniform thinker_decode steps (one tolist over the pinned buffer
+        # instead of per-rid .item()). Default OFF.
+        self._fast_checkstop = (
+            os.environ.get("MSTAR_FAST_CHECKSTOP", "0") == "1"
+        )
+        self._thinker_eos_id: int | None = None
+
         if self.device.type == "cuda" and self.device.index is not None:
             torch.cuda.set_device(self.device)
 
@@ -2521,7 +2529,37 @@ class Worker:
         cpu_output = self._prematerialize_for_check_stop(
             output, batch_fast=(batch_N.graph_walk == "thinker_decode"),
         )
-        new_stops = engine.check_stop_for_batch(batch_N.node_batch, cpu_output)
+        flat = getattr(cpu_output, "_checkstop_flat", None)
+        if self._fast_checkstop and flat is not None:
+            # N1 fast path: uniform thinker_decode new-token batch. Semantics
+            # identical to ThinkerSubmodule.check_stop (token == im_end and
+            # not ignore_eos, or iter+1 >= max_tokens), but one tolist()
+            # covers the whole batch and the compares are pure ints.
+            tokens = flat.tolist()
+            eos_id = self._thinker_eos_id
+            if eos_id is None:
+                submod = engine.submodule_management[
+                    batch_N.node_name
+                ].submodule
+                eos_id = self._thinker_eos_id = submod.config.im_end_token_id
+            new_stops = {}
+            per_info = batch_N.node_batch.per_request_info
+            for i, rid in enumerate(cpu_output._checkstop_rids):
+                info = per_info.get(rid)
+                if info is None:
+                    continue
+                if (
+                    (
+                        int(tokens[i]) == eos_id
+                        and not info.sampling_config["Thinker"].ignore_eos
+                    )
+                    or info.dynamic_loop_iter_counts.get(
+                        "thinker_decode_loop", 0
+                    ) + 1 >= info.max_tokens
+                ):
+                    new_stops[rid] = {"thinker_decode_loop"}
+        else:
+            new_stops = engine.check_stop_for_batch(batch_N.node_batch, cpu_output)
 
         if self.enable_nvtx:
             range_pop(synchronize=False)
@@ -2863,13 +2901,20 @@ class Worker:
                 r: {uniform_key: [flat_cpu[i:i + 1]]}
                 for i, r in enumerate(rids)
             }
-            return NodeOutput(
+            out = NodeOutput(
                 per_request_output_tensors=cpu_fast,
                 allocation_failed=output.allocation_failed,
                 alloc_pages_short=output.alloc_pages_short,
                 alloc_failed_request_id=output.alloc_failed_request_id,
                 completion_event=output.completion_event,
             )
+            # N1 (MSTAR_FAST_CHECKSTOP): stash the flat pinned buffer + rid
+            # order so check_stop can do ONE tolist() + int compares instead
+            # of a per-rid .item() (+ attr chains) x bs.
+            if uniform_key == "new_token":
+                out._checkstop_flat = flat_cpu
+                out._checkstop_rids = rids
+            return out
 
         cpu_per_rid: dict = {}
         buffer_indices: dict[tuple[str, torch.dtype, tuple[int, ...]], int] = defaultdict(int)
