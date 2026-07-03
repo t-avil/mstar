@@ -511,3 +511,21 @@ scheduler change raises fold volume without the occupancy tax. PROTOCOL:
 effect-size gate — predicted-sub-2% effects get microbenches or arithmetic,
 not e2e cells; QB_FAST=1 halves cell sizes for triage. GPU time moves to
 the ~25% residual: fresh nsys re-decomposition (prof_winner) running.
+
+## Sampler config-tensor cache (MSTAR_SAMPLER_CFG_CACHE) — REGRESSION; the GIL-valve insight
+nsys: cg.sample_and_remap = 10.9ms/step, 85% cudaStreamSynchronize — SIX
+syncs/step, repro'd exactly with set_sync_debug_mode: the six
+torch.tensor(list, device=...) config uploads each do pageable-H2D + stream
+sync, draining the in-flight pipeline. Cache (keyed by batch membership,
+rand_offset advanced on-device) kills all 6 syncs, token-identical, 2x
+faster in isolation (0.44 -> 0.20ms) — and LOSES ~5-7% e2e (4/4 adjacent
+pairs, i2t B32). WHY: the blocked gpu-thread RELEASED THE GIL during those
+waits; the main thread's ~10ms/step postprocess Python (route 2.5 +
+check_stop 2.0 + register 1.1 + send 3.4) ran in that shade. Remove the
+waits and the threads contend. **Architecture law: on the two-GIL-thread
+worker, removing gpu-thread waits pays ONLY after main-thread per-step
+Python shrinks or moves off-GIL.** This re-orders the roadmap: main-thread
+postprocess reduction FIRST (extend FAST_POSTPROC memoization to
+route_outputs; batch check_stop consumption; emit off-process), THEN
+de-sync sample (flag kept for that re-test), THEN defer-sample overlap.
+Default OFF (9ab0b2d, exp/overlap-sched).
