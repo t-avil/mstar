@@ -638,3 +638,12 @@ their speech loss is structural — pickle+flock+shm stage handoffs):
  V5. Encoder mm_hash cache + per-step encoder budget (batched ViT call).
  V6. Gumbel/exponential sync-free sampler + resident config tensors +
      all-greedy/no-penalty gates (multinomial forces syncs).
+
+## N3 landed + cache4 (first LIVE cache A/B) — mechanism proven, e2e verdict noise-blocked
+N3 (fddc622): change-detect set_config in prepare_batch + scoped cache
+invalidation. Repro-verified: cache persists across steps, syncs 6 -> 0,
+invalidation still fires on real config changes. ALL prior cache A/Bs are
+void (dead cache). cache4 live A/B: pair 1 +4.5% (contains the night's
+best cell 6.507) but pair 2 hit a deep degraded window (4.03, jct 7.2s) —
+no verdict under this noise. Cache stays flag-parked with the mechanism
+proven; definitive A/B bundled with N1 in a quieter window / on 6,7.
