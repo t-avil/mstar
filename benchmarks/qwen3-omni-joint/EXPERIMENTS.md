@@ -784,3 +784,13 @@ day-scale structural options: (1) postprocess/emit sidecar PROCESS (vLLM
 V4 pattern — moves construction+bookkeeping off-GIL entirely), or (2)
 V1 async-sched full form, or (3) GPU-side work. The stack A-side hit 6.62
 this window (handicapped pair) — canonical projection ~7.3 vs 8.21.
+
+## Sidecar design (docs/SIDECAR_DESIGN.md @ f0fd9e4) — Stage 1 GO
+Ranked: (1) emit+WGD sidecar process Stage 1 — net 1.3-2.0ms/step truly
+leaves the GIL (per-rid emit construction, batch pickle, accumulator
+ownership; route/check_stop/register stay), predicted +10-20% at i2t B32,
+kill criterion <+2% over 3 adjacent pairs; (2) V1 async-sched parked until
+the wall flips; (3) GPU-side work converts ~0 at 51% busy. Biggest risk:
+split-brain WGD accumulation (pending_new_tokens/current_output_chunks/
+output_loop_indices written by both paths) — mandated wholesale ownership
+transfer + full message-stream byte-identity harness before any perf cell.
