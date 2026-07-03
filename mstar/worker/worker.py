@@ -256,6 +256,22 @@ class Worker:
         )
         self._slim_emit_sent: set[tuple[str, str]] = set()
 
+        # MSTAR_SLIM_EMIT2 (requires MSTAR_SLIM_EMIT): slim items carry
+        # loop_key (plain ints) instead of a pickled NestedLoopIndices, and
+        # skip building the unused full ResultTensors on the slim hit path.
+        # loop_key is sent ONLY while the step's loop layout still matches the
+        # template step's (checked per step below); otherwise the item falls
+        # back to the full loop_indices object. Default OFF.
+        self._slim_emit2 = (
+            os.environ.get("MSTAR_SLIM_EMIT2", "0") == "1" and self._slim_emit
+        )
+        # (rid, edge_name) -> (loop_name_order list, loop_indices key tuple)
+        # captured from the template step's NestedLoopIndices — the same
+        # object the api server caches, so key order matches through pickle.
+        self._slim_emit_loop_layout: dict[
+            tuple[str, str], tuple[list, tuple]
+        ] = {}
+
         # N1 (MSTAR_FAST_CHECKSTOP): batched int-compare stop check for
         # uniform thinker_decode steps (one tolist over the pinned buffer
         # instead of per-rid .item()). Default OFF.
@@ -1264,13 +1280,26 @@ class Worker:
                     }
                     for info in graph_edge.tensor_info:
                         local_release[info.uuid] = local_release.get(info.uuid, 0) + 1
-                result_tensors = ResultTensors(
-                    request_id=request_id,
-                    modality=graph_edge.output_modality,
-                    graph_edge=graph_edge,
-                    loop_indices=nested_loop_indices,
-                    metadata=metadata
+                tkey = (request_id, graph_edge.name)
+                slim_hit = (
+                    self._slim_emit and batch_collector is not None
+                    and edge_inline and tkey in self._slim_emit_sent
                 )
+                # MSTAR_SLIM_EMIT2: on the slim steady path the full
+                # ResultTensors below is provably unused (the hit branch
+                # appends a SlimResultTokens and the immediate-send else is
+                # unreachable when batch_collector/edge_inline hold) — skip
+                # building it.
+                if self._slim_emit2 and slim_hit:
+                    result_tensors = None
+                else:
+                    result_tensors = ResultTensors(
+                        request_id=request_id,
+                        modality=graph_edge.output_modality,
+                        graph_edge=graph_edge,
+                        loop_indices=nested_loop_indices,
+                        metadata=metadata
+                    )
                 if batch_collector is not None and edge_inline:
                     # Coalesced path: defer to a single result_tensors_batch
                     # message built by the caller after the rid loop. Only
@@ -1283,16 +1312,48 @@ class Worker:
                     # token values. Skips pickling a GraphEdge per rid per
                     # step (the bulk of send_outputs' main-thread cost).
                     if self._slim_emit:
-                        tkey = (request_id, graph_edge.name)
-                        if tkey in self._slim_emit_sent:
+                        if slim_hit:
+                            # MSTAR_SLIM_EMIT2: carry the loop state as plain
+                            # ints when the step's layout (loop_name_order
+                            # content + loop_indices key ORDER) still matches
+                            # the template step's — the consumer's rebuild
+                            # from its cached template is then value-identical
+                            # (verified round-trip incl. max /
+                            # label_context_gt). Any drift: full object.
+                            loop_key = None
+                            if self._slim_emit2:
+                                layout = self._slim_emit_loop_layout.get(tkey)
+                                if (
+                                    layout is not None
+                                    and nested_loop_indices.loop_name_order
+                                    == layout[0]
+                                    and tuple(
+                                        nested_loop_indices.loop_indices.keys()
+                                    ) == layout[1]
+                                ):
+                                    loop_key = (
+                                        nested_loop_indices.wg_fwd_pass_idx,
+                                        *nested_loop_indices.loop_indices.values(),
+                                    )
                             batch_collector.append(SlimResultTokens(
                                 request_id=request_id,
                                 name=graph_edge.name,
                                 values=metadata["inline_values"][graph_edge.name],
-                                loop_indices=nested_loop_indices,
+                                loop_indices=(
+                                    None if loop_key is not None
+                                    else nested_loop_indices
+                                ),
+                                loop_key=loop_key,
                             ))
                         else:
                             self._slim_emit_sent.add(tkey)
+                            if self._slim_emit2:
+                                # Capture the template's loop layout (copies:
+                                # the NLI is fresh per step but not owned).
+                                self._slim_emit_loop_layout[tkey] = (
+                                    list(nested_loop_indices.loop_name_order),
+                                    tuple(nested_loop_indices.loop_indices.keys()),
+                                )
                             batch_collector.append(result_tensors)
                     else:
                         batch_collector.append(result_tensors)
@@ -1398,6 +1459,12 @@ class Worker:
         # back to full items; fast checkstop falls back to engine path).
         self._slim_emit = (
             os.environ.get("MSTAR_SLIM_EMIT", "0") == "1" and self._batch_emit
+        )
+        # Safe to flip mid-run: ON with a missing layout falls back to the
+        # full loop_indices object; OFF leaves in-flight loop_key items valid
+        # (the consumer decodes them independently of this flag).
+        self._slim_emit2 = (
+            os.environ.get("MSTAR_SLIM_EMIT2", "0") == "1" and self._slim_emit
         )
         self._fast_checkstop = (
             os.environ.get("MSTAR_FAST_CHECKSTOP", "0") == "1"
@@ -2986,6 +3053,13 @@ class Worker:
             if self._slim_emit and self._slim_emit_sent:
                 self._slim_emit_sent = {
                     k for k in self._slim_emit_sent if k[0] != rid
+                }
+            # MSTAR_SLIM_EMIT2 layout entries ride the same lifecycle; not
+            # nested under _slim_emit so a dynflags flip can't strand them.
+            if self._slim_emit_loop_layout:
+                self._slim_emit_loop_layout = {
+                    k: v for k, v in self._slim_emit_loop_layout.items()
+                    if k[0] != rid
                 }
             self._remove_request(RemoveRequest(request_id=rid, source=MessageSource.SELF))
 

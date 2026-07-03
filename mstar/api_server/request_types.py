@@ -34,11 +34,19 @@ class SlimResultTokens:
     cached template plus these values. Pickling a full GraphEdge per rid per
     step was the bulk of the worker's send_outputs cost (~3.4 ms/step main
     thread at i2t B32).
+
+    MSTAR_SLIM_EMIT2: ``loop_key`` replaces the per-step pickled
+    ``NestedLoopIndices`` with plain ints ``(wg_fwd_pass_idx, *values)`` —
+    valid ONLY when the sender verified the step's loop layout
+    (loop_name_order content + loop_indices key order) still matches the
+    template's, so the consumer reconstructs an equal object from the cached
+    template. Exactly one of ``loop_indices`` / ``loop_key`` is set.
     """
     request_id: str
     name: str
     values: list
-    loop_indices: NestedLoopIndices
+    loop_indices: NestedLoopIndices | None
+    loop_key: tuple | None = None
 
 
 @dataclass
