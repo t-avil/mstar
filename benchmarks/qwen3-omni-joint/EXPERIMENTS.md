@@ -710,3 +710,93 @@ a real missed-wakeup source, not just the unguarded event fd. N2 is
 RE-OPENED; the durable fix (wait_for_work inside try/except + enumerate all
 wakeup sources incl. dynflags poller) is queued, do not re-enable by default
 until a smoke passes with load.
+
+## MSTAR_SCHED_PACK (opt/sched-pack da8024e) — REGRESSION, parked
+Fairness-peek exponential backoff (cap 8) + shared routing flattens.
+Interleaved dyn_ab on canonical 6,7 (one warm server, A=off B=on, i2t B32
+x3 rounds): 7.438->6.939 (0.933), 7.353->7.000 (0.952), 4.986->5.100 (1.023,
+both cells in a degraded window) = geomean 0.969, clean pairs -5..-7%.
+Mechanism hypothesis: fairness yields are LOAD-BEARING — they are the fold/
+admission boundaries the W5 spec-fold path fires on; backing off the peek
+delays admission and taxes decode occupancy (same failure class as
+MIXED_SINGLE_CHUNK). Process note: WALK_STATS was not set, so fair_peek
+counters weren't captured; the consistent adjacent-pair delta is the
+behavioral evidence. Retry only as (a) flatten-share alone bundled into a
+bigger pack, or (b) admission-aware gating (skip peek only when the waiting
+queue is provably empty — O(1) len check). Code kept on opt/sched-pack.
+
+## Warm-server effect — dyn_ab baselines read 7.35-7.44 at i2t B32 (0.90x vs vLLM)
+The same final-stack config that fresh-boot quick_bench measures at 5.98-6.96
+req/s reads 7.35-7.44 on a warmed one-server dyn_ab (canonical pair, A-side
+cells, adjacent rounds; jct ~4.0s, tok/s ~1294). Best B32 measurements of the
+campaign = 0.90x vs vLLM 8.210. Implications: (1) committed sweep numbers
+understate steady-state (fresh boot = cold JIT/caches/allocator; sweep
+protocol starts a fresh server per config); (2) cross-run comparisons must
+hold server age constant (dyn_ab does); (3) the honest public claim is
+"0.83x fresh-boot protocol, 0.90x steady-state warm server" pending a
+warm-up-normalized sweep protocol (e.g. lengthen warmup or discard the first
+N minutes per server).
+
+## Cross-NUMA penalty — MEASURED (+15.5% B32, +6.6% B1)
+Direct same-pair A/B on GPUs 0,1 (fresh server per leg, same final stack,
+2026-07-03 20:27-20:45): node-0 binding (correct) i2t B32 6.411 / B1 0.821
+vs node-1 binding (the historical hardcoded cross-NUMA case) 5.553 / 0.770.
+Penalty = +15.5% at B32, +6.6% at B1 (single cell per leg — band caveat).
+The "+10%" folklore was real and at B32 understated. Consequences:
+(1) all historical pair-0,1 numbers (measured cross-NUMA) understate by
+~7-15%; (2) quick_bench.sh/dyn_ab.sh now DERIVE the numa node from the GPU's
+PCI bus (QB_NUMA_NODE/DYN_NUMA_NODE override) — the trap is closed;
+(3) correctly-bound 0,1 reads in the canonical 6,7 band (6.411 vs 6.38-6.96
+fresh-boot) → both pairs are now valid bench pairs, enabling true two-track
+parallelism.
+
+## Warm-server characterization (dyn_warmchar, 6,7, 8 identical final-stack cells) — protocol finding
+Same config, one server, i2t B32 cells in time order: 5.038 (first cell after
+ready) then 7.268/7.223/7.049/7.095/7.043... — first cell reads ~30% low;
+steady band 7.04-7.27 (~±1.6%). Server maturity (JIT/allocator/caches) spans
+~100+ requests, far beyond --num-warmup. Fixes landed: quick_bench.sh now runs
+a discarded warm cell per distinct path (opt-out QB_NO_WARMCELL=1);
+lab_server.sh/lab_ab.sh added — persistent warm server + dynflags A/B =
+~2-6 min signal per A/B pair (boot cost paid once per session). Honest B32
+statement: fresh-boot protocol 0.73-0.85x, warm steady-state 0.86-0.89x
+(7.04-7.27 vs 8.210). All historical fresh-boot sweep numbers (BOTH systems'
+committed baselines included — vLLM's 8.210 was also a fresh-boot protocol)
+carry this cold-cell bias in their FIRST cell only; our sweeps ran B32 first,
+vLLM's committed run order unknown — flag when comparing.
+
+## R2-lite: MSTAR_DIRECT_FEED on the sidecar stack (lab_main/ab_r2lite_directfeed) — WASH, confirmed again
+Warm-lab interleaved A/B (one server, dynflags flips confirmed in server.log,
+i2t B32 x2 rounds): 6.192->6.133 (0.990), 6.313->6.252 (0.990). E9's wash
+verdict holds on the post-sidecar stack: the token-feed hop is not the
+binding cost even with the lighter main thread. Direct-feed remains
+correctness-validated infrastructure for a future E10-class two-step decode;
+flag stays OFF. First experiment through lab_server/lab_ab: 4 full n=96
+cells in ~7 min against the standing warm server.
+
+## Cache-alone sanity on the warm lab — WASH (cache stays ON as harmless)
+lab_ab cache_sanity (A=full stack, B=same minus SAMPLER_CFG_CACHE;
+FAST_CHECKSTOP on BOTH sides): 6.258 vs 6.490 (-3.6%) then 6.534 vs 6.369
+(+2.6%) — mixed signs, ON/OFF geomean 0.995 ~= noise. The +7-10% "cache+
+checkstop" win does not decompose onto the cache alone on the current
+(sidecar) stack; either checkstop carries it, the pair interacts, or the
+original delta was window-inflated. Flag stays ON (never harmful). If the
+decomposition ever matters: 3+ rounds each of cache-only / checkstop-only /
+both on the lab.
+
+## Checkstop-alone decomposition (lab_node0, 3 rounds) — WASH; the pair-win does not decompose
+OFF/ON per round: 0.981/0.990/1.079, geomean ~1.02. With cache-alone also a
+wash (see above), NEITHER half of the historical "+7-10% cache+checkstop"
+reproduces in isolation on the sidecar stack. GIL-valve-consistent: the
+sidecar removed the main-thread Python that those gpu-thread sync-removals
+used to convert against. pair_off 3-arm (both off vs both on) queued to
+close it. Flags stay ON pending that (harmless).
+
+## Two-lab contamination caveat (protocol)
+lab1 warm-coverage absolute cells (i2t B2 1.07 / B4 1.71 / B16 4.74, s2t B8
+15.9 / B32 30.1 mean) ran CONCURRENT with lab2 boot+cells on the same box —
+same-config A/B spreads hit ±11-15% and several cells read below both
+fresh-boot and committed values. RULE: two concurrent labs are valid for
+INTERLEAVED RATIOS ONLY (contention ~cancels within adjacent pairs); absolute
+/scoreboard numbers require a solo-lab or quiet box. The warm-coverage
+absolutes are NOT scoreboard-grade; scoreboard refresh re-queued for a solo
+window.
