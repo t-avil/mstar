@@ -1,0 +1,51 @@
+model: "qwen3_omni"
+max_seq_len: 32768
+# TACO = Talker And Code2wav cOlocated. 2-GPU placement that pins Talker and
+# Code2Wav to the SAME GPU (rank 0), with Thinker + both encoders on rank 1.
+#
+# READ THIS BEFORE ASSUMING IT REMOVES IPC (it mostly cannot, by config alone):
+#
+# 1. M* spawns ONE worker PROCESS per rank (conductor._launch_workers:
+#    "Spawn one process per worker rank"). Every worker graph assigned to a rank
+#    runs inside that one process, sharing its address space and CUDA context.
+#    So "same GPU (rank)" == "same process" here.
+#
+# 2. The default qwen3omni_2gpu.yaml ALREADY places Talker and Code2Wav both on
+#    rank 0 -> they already share worker_0. This file produces a byte-identical
+#    worker-graph decomposition to qwen3omni_2gpu.yaml (verified by building
+#    get_worker_graphs for both); it merely states the colocation as ONE
+#    node_group to express intent. It is NOT a new capability over 2gpu.yaml.
+#
+# 3. A config CANNOT fuse Talker and Code2Wav into one worker GRAPH. Both are
+#    streaming consumers (consumes_stream=True: Talker consumes the Thinker
+#    stream, Code2Wav consumes Talker's codec_tokens stream), and
+#    _divide_into_worker_graphs refuses to merge any consumes_stream node into a
+#    shared worker graph (mstar/model/base.py, the `not ...consumes_stream`
+#    guards). They stay as two worker graphs regardless of node_groups.
+#
+# NET: the codec_tokens Talker->Code2Wav streaming edge is already INTRA-process
+# on this layout (and on 2gpu.yaml). Any residual per-frame cost on that edge is
+# the intra-process streaming handoff (tensor transport + ready-signal between
+# two worker graphs in worker_0), which is governed by the streaming mechanism
+# in code, not by placement. Removing it (e.g. a fused in-graph Talker->Code2Wav
+# path, or making Code2Wav non-streaming) is a CODE change, out of scope for a
+# yaml. See SMOKE.md for the A/B that actually isolates the cross-process codec
+# edge (taco vs a split layout that forces Talker and Code2Wav onto separate
+# ranks/processes).
+#
+# VRAM (H200 = 143GB/GPU): not tight. Rank 1 is the heavy GPU (Qwen3-Omni-30B-
+# A3B-Instruct Thinker MoE, ~60GB bf16 + audio/vision encoders + Thinker KV).
+# Rank 0 carries only the small Talker (hidden 1024, 20 layers) + the small
+# Code2Wav codec decoder + their KV caches -- well under 143GB. Both nodes
+# already shared rank 0, so this expresses no new rank-0 pressure.
+node_groups:
+  - node_names: [audio_encoder, vision_encoder]
+    ranks: [1]
+  - node_names: [Thinker]
+    ranks: [1]
+
+  # Talker + Code2Wav pinned to rank 0 (== one process, worker_0). Grouped as
+  # one node_group to state colocation intent; the divider still emits two
+  # worker graphs (streaming-consumer rule above), same as qwen3omni_2gpu.yaml.
+  - node_names: [Talker, Code2Wav]
+    ranks: [0]
