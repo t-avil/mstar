@@ -34,6 +34,38 @@ class CommProtocol(Enum):
     SHM = "SHM"
 
 
+def resolve_tcp_port(entity_id: str) -> int:
+    """Deterministic TCP port for an entity under MSTAR_ZMQ_TRANSPORT=TCP.
+    Module-level so senders that build their own sockets (e.g. the emit
+    sidecar's bounded PUSH) resolve the same port as ZMQCommunicator."""
+    base_port = int(os.getenv("MSTAR_ZMQ_TCP_BASE_PORT", "19000"))
+    if entity_id == "api_server":
+        return base_port
+    if entity_id == "conductor":
+        return base_port + 1
+    if entity_id == "api_server_preprocess_worker":
+        return base_port + 2
+    if entity_id.startswith("worker_"):
+        rank = entity_id.removeprefix("worker_")
+        if rank.isdigit():
+            return base_port + 100 + int(rank)
+    return base_port + 1000 + (sum(entity_id.encode("utf-8")) % 1000)
+
+
+def resolve_endpoint(
+    entity_id: str, protocol: CommProtocol, ipc_socket_path_prefix: str
+) -> str:
+    """Endpoint string for an entity's PULL socket. Module-level twin of
+    ZMQCommunicator._endpoint (which delegates here) for callers that need
+    the endpoint without constructing a full communicator."""
+    if protocol == CommProtocol.IPC:
+        return f"ipc://{ipc_socket_path_prefix}/{entity_id}.ipc"
+    if protocol == CommProtocol.TCP:
+        host = os.getenv("MSTAR_ZMQ_TCP_HOST", "127.0.0.1")
+        return f"tcp://{host}:{resolve_tcp_port(entity_id)}"
+    raise NotImplementedError(f"Protocol {protocol} not yet supported yet")
+
+
 class ZMQCommunicator(BaseCommunicator):
     def __init__(
         self,
@@ -88,27 +120,13 @@ class ZMQCommunicator(BaseCommunicator):
             self.event.drain()
 
     def _endpoint(self, entity_id: str) -> str:
-        if self.protocol == CommProtocol.IPC:
-            return f"ipc://{self.ipc_socket_path_prefix}/{entity_id}.ipc"
-        if self.protocol == CommProtocol.TCP:
-            host = os.getenv("MSTAR_ZMQ_TCP_HOST", "127.0.0.1")
-            return f"tcp://{host}:{self._tcp_port(entity_id)}"
-        raise NotImplementedError(f"Protocol {self.protocol} not yet supported yet")
+        return resolve_endpoint(
+            entity_id, self.protocol, self.ipc_socket_path_prefix
+        )
 
     @staticmethod
     def _tcp_port(entity_id: str) -> int:
-        base_port = int(os.getenv("MSTAR_ZMQ_TCP_BASE_PORT", "19000"))
-        if entity_id == "api_server":
-            return base_port
-        if entity_id == "conductor":
-            return base_port + 1
-        if entity_id == "api_server_preprocess_worker":
-            return base_port + 2
-        if entity_id.startswith("worker_"):
-            rank = entity_id.removeprefix("worker_")
-            if rank.isdigit():
-                return base_port + 100 + int(rank)
-        return base_port + 1000 + (sum(entity_id.encode("utf-8")) % 1000)
+        return resolve_tcp_port(entity_id)
 
     # def get_session_id(self) -> str:
     #     return self.session_id
