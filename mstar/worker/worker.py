@@ -324,6 +324,23 @@ class Worker:
         )
         self._talker_codec_eos_id: int | None = None
 
+        # (c) MSTAR_CODEC_CHUNK_EMIT: the Talker emits one [num_codes] codec
+        # frame per AR step onto the codec_tokens StreamingGraphEdge, so the
+        # colocated Code2Wav StreamBuffer takes ~chunk (25) individual puts +
+        # id->tensor dict churn per LeftContextChunkPolicy window. When on,
+        # local-route codec frames are STAGED and written in one batched put per
+        # chunk boundary (StreamBuffer.stage/flush_pending), leaving the buffered
+        # item sequence — and every popped window — byte-identical (coalesce at
+        # the policy's chunk granularity, so a chunk becomes ready at the same
+        # frame count; timing preserved). Edge-gated to policies that opt in via
+        # coalesce_size()>1 (only the Talker->Code2Wav codec edge does), so
+        # thinker_states/thinker_mask (chunk=1) and other streams are untouched.
+        # Default OFF. Only the local (colocated) streaming route is coalesced;
+        # remote streaming is unchanged.
+        self._codec_chunk_emit = (
+            os.environ.get("MSTAR_CODEC_CHUNK_EMIT", "0") == "1"
+        )
+
         # MSTAR_EMIT_SIDECAR — Stage 1 of docs/SIDECAR_DESIGN.md: exile emit
         # message construction, the api_server transport, the WGD-feeding
         # accumulators (pending_new_tokens / current_output_chunks /
@@ -946,6 +963,50 @@ class Worker:
 
             stream_buf.put(info.uuid, tensor.clone())
             self.tensor_manager.dereference(request_id, info.uuid)
+
+    def _route_streaming_local_edge(
+        self, request_id: str, edge: GraphEdge, stream_buf: StreamBuffer,
+    ) -> None:
+        """Register + route one local (colocated) streaming edge to its
+        StreamBuffer. Shared by the legacy and sidecar send paths.
+
+        Registration order (pre_read_register) is always per-frame, so the
+        buffered item order is unchanged. When MSTAR_CODEC_CHUNK_EMIT is on and
+        the edge's policy opts into coalescing (coalesce_size>1 — the codec
+        edge), frames are STAGED and written in one batched put per chunk
+        boundary; otherwise each frame is written immediately (and any staged
+        remainder from a just-flipped-off flag is drained first, so nothing is
+        stranded)."""
+        for info in edge.tensor_info:
+            stream_buf.pre_read_register(info.uuid)
+        if self._codec_chunk_emit and stream_buf.policy.coalesce_size() > 1:
+            self._route_streaming_tensor_coalesced(request_id, edge, stream_buf)
+        else:
+            if stream_buf.num_pending():
+                stream_buf.flush_pending()
+            self._route_streaming_tensor(request_id, edge)
+
+    def _route_streaming_tensor_coalesced(
+        self, request_id: str, edge: GraphEdge, stream_buf: StreamBuffer,
+    ) -> None:
+        """(c) MSTAR_CODEC_CHUNK_EMIT: stage arrived frames and write them to
+        the buffer in one batched put per ``coalesce_size`` boundary.
+
+        The D->H/get + clone + producer-side dereference still happen per frame
+        at arrival (frame lifetime ends here); only the buffer WRITE is
+        batched. flush_pending is byte-identical to per-frame puts, so the
+        consumer's windows are unchanged. Bumps WALK_STATS codec_chunk_emits
+        once per batched flush."""
+        size = stream_buf.policy.coalesce_size()
+        for info in edge.tensor_info:
+            tensor = self.tensor_manager.get_tensor(
+                request_id=request_id, uuid=info.uuid,
+            )
+            stream_buf.stage(info.uuid, tensor.clone())
+            self.tensor_manager.dereference(request_id, info.uuid)
+            if stream_buf.num_pending() >= size:
+                stream_buf.flush_pending()
+                self._ws_inc("codec_chunk_emits")
 
     def _pop_streaming_edge(
         self, sbuf: StreamBuffer, edge_name: str, request_id: str
@@ -1588,9 +1649,7 @@ class Worker:
         )
         for edge in outputs.streaming_local:
             stream_buf = req_info.stream_buffers[edge.name]
-            for info in edge.tensor_info:
-                stream_buf.pre_read_register(info.uuid)
-            self._route_streaming_tensor(request_id, edge)
+            self._route_streaming_local_edge(request_id, edge, stream_buf)
 
         # Remote streaming: send to destination workers
         for worker_id, edges in outputs.streaming_to_workers.items():
@@ -1783,9 +1842,7 @@ class Worker:
         req_info = self.worker_graphs_manager.per_request_info[request_id]
         for edge in outputs.streaming_local:
             stream_buf = req_info.stream_buffers[edge.name]
-            for info in edge.tensor_info:
-                stream_buf.pre_read_register(info.uuid)
-            self._route_streaming_tensor(request_id, edge)
+            self._route_streaming_local_edge(request_id, edge, stream_buf)
         for worker_id, edges in outputs.streaming_to_workers.items():
             message = WorkerMessage(
                 message_type=WorkerMessageType.INPUT_SIGNALS,
@@ -1911,6 +1968,13 @@ class Worker:
         # check_stop. Semantics-free either way (same stop set).
         self._fast_checkstop_talker = (
             os.environ.get("MSTAR_FAST_CHECKSTOP_TALKER", "0") == "1"
+        )
+        # Safe to flip mid-run: ON stages local codec frames and batches the
+        # buffer write per chunk; OFF routes each frame immediately. The
+        # per-frame route flushes any staged remainder first (see
+        # _route_streaming_local_edge), so a flip never strands pending frames.
+        self._codec_chunk_emit = (
+            os.environ.get("MSTAR_CODEC_CHUNK_EMIT", "0") == "1"
         )
         # Safe to flip mid-run: ON stashes inline_emit_uuids on the step's
         # routing object; OFF simply ignores the stash and recomputes. The

@@ -215,3 +215,83 @@ Interpretation:
 VRAM: taco's rank 0 holds only Talker + Code2Wav (small) — never tight on H200
 (143GB); rank 1 (30B-A3B Thinker MoE + encoders) is the heavy GPU. The split
 probe adds Code2Wav to the already-heavy rank 1 — watch rank 1 memory there.
+
+---
+
+## Item C — MSTAR_CODEC_CHUNK_EMIT (chunk-batched codec edge handoff)
+
+**What it does.** The Talker emits one `[16]`-code frame per AR step onto the
+`codec_tokens` StreamingGraphEdge, so the colocated Code2Wav `StreamBuffer` takes
+~25 individual `put`s + id→tensor dict churn per `LeftContextChunkPolicy(chunk=25,
+left_context=25)` window. When ON, local-route codec frames are STAGED and
+written into the buffer in ONE batched put per chunk boundary
+(`StreamBuffer.stage` + `flush_pending`). Registration (`pre_read_register`) stays
+per-frame, so the buffered item sequence — and every popped window — is byte
+identical, and coalescing at the policy's `chunk` granularity means a chunk
+becomes ready at the same frame count (first-audio timing preserved).
+
+Gating: default OFF, dynflags-refreshable, EDGE-gated via `policy.coalesce_size()>1`
+— only the codec edge (LeftContextChunkPolicy) opts in; `thinker_states`/
+`thinker_mask` (FixedChunkPolicy chunk=1) and every other stream are untouched.
+Only the LOCAL (colocated) route is coalesced; a split/remote codec edge is
+unaffected by the flag.
+
+**A/B = two servers**, flag off vs on. Focus s2s B=8 (audio path; ITL/RTF).
+
+- OFF server: `<FLAGS>` = `MSTAR_WALK_STATS=1`
+- ON  server: `<FLAGS>` = `MSTAR_CODEC_CHUNK_EMIT=1 MSTAR_WALK_STATS=1`
+
+Via the lab harness (dynflags file): add `MSTAR_CODEC_CHUNK_EMIT=1` to the ON
+lab's `$FLAGS_FILE`, run `lab_ab.sh` with the `s2s:8` cell (i2s:8 optional). Use
+the DEFAULT config (colocated) — this optimization only fires on the local codec
+edge.
+
+### Proof the mechanism fired
+
+WALK_STATS counter `codec_chunk_emits` is bumped once per batched flush (~one per
+25 codec frames per request). It must appear and climb on the ON server, never on
+OFF:
+
+```bash
+grep -o 'codec_chunk_emits[^,}]*' $SERVER_LOG_ON | tail -3
+grep -c 'codec_chunk_emits' $SERVER_LOG_OFF     # expect 0
+```
+
+Sanity on the rate: `codec_chunk_emits` should be roughly
+`(total codec frames) / 25` — i.e. far fewer than the per-frame `put` count. If it
+tracks the frame count 1:1, coalescing isn't engaging (check the edge policy /
+that the codec edge is local).
+
+### Proof of correctness (identical audio)
+
+Windows are byte-identical by construction (covered by
+`test/modular/test_codec_chunk_emit_parity.py`, which drives the real
+StreamBuffer + LeftContextChunkPolicy per-frame vs coalesced and also checks an
+independent HF-style slicing oracle). On GPU, confirm the produced audio matches
+off vs on: same `audio_seconds_throughput` / per-request audio length within
+sampling noise, and if token dumps are on, identical codec token sequences under
+a fixed seed.
+
+### Proof of win
+
+```bash
+$PY - <<'PY'
+import json
+def m(p):
+    d=json.load(open(p)); a=d.get("itl",{}).get("audio") or {}
+    return (a.get("p50",0)*1000, a.get("mean",0)*1000,
+            d.get("audio_seconds_throughput",0), d.get("jct_mean_ms",0))
+print("OFF itl_p50/mean(ms), audio_s/s, jct:", m("$ODIR_OFF/results.json"))
+print("ON  itl_p50/mean(ms), audio_s/s, jct:", m("$ODIR_ON/results.json"))
+PY
+```
+
+Honest expectation: this cuts the buffer-side per-frame `put` + dict churn (25→1
+buffer writes per chunk), NOT the per-frame edge routing/registration
+(`pre_read_register` + `get_tensor` + `clone` + `dereference` still run per frame
+at arrival). So the win is bounded by how much of the audio-path CPU floor is the
+buffer write vs the routing. If ITL/RTF barely moves, that's a real result: the
+buffer churn wasn't the bottleneck, and the larger lever is producer emit-batching
+(collapse the N routed edges per chunk into one) — a bigger change, flagged as
+follow-up, not done here. Neutral-or-better is the pass bar; any regression →
+record and flag.
