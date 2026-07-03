@@ -678,148 +678,35 @@ untouched by tonight's text opts; audio-optimal alt config unaffected).
 i2s B8 1.250 / 56.15 audio-s/s (parity). No path broken; text paths up
 across the board. Canonical 6,7 sweep queued behind the foreign 129GB job.
 
-## N2-lean (conductor blocking poll) — WEDGED on first smoke; default OFF
-Replacing the conductor's unconditional per-loop time.sleep(0.001) with
-communicator.wait_for_work(50ms) brought the server up but completed ZERO
-requests — some conductor work source doesn't wake its poller (suspects:
-a socket consumed outside self.poller, or state-driven work with no
-inbound message; the 50ms safety timeout should still have made progress,
-so the gap may be deeper — possibly wait_for_work draining/eating a wakeup
-another path needed). MSTAR_CONDUCTOR_POLL kept (default 0) pending a
-wakeup-source audit. The latency win stands as designed; the execution
-needs the audit first. (4a19bbb, exp/overlap-sched)
+## Sidecar bundle (SLIM_EMIT2+FAST_ROUTE2+FAST_SEND+EMIT_SIDECAR, ab75034) — WIN, canonical-pair validated
+Commits fd8eae5/5c87cb8/333b7dd/c8a08fc..ab75034 (route-classification memo,
+int loop-keys + skip unused ResultTensors, residual emit-path Python cuts,
+postprocess/emit exiled to a sidecar process — vLLM V1 EngineCore pattern —
+with committed byte-identity harness). Evidence trail: pair-0,1 adjacent
+quick-bench 6.825/6.842 ON vs 6.582/4.935 OFF (one clean pair +3.7%, one OFF
+cell degraded); FAST_SEND standalone slightly negative (dyn_fs), kept as the
+bundle's rider. CANONICAL 6,7 adjacent A/B (2026-07-03 19:39-19:59,
+qb_canonoff vs qb_canonon2, same cells back-to-back): i2t B32 6.378 -> 6.962
+(+9.2%), i2t B1 0.777 -> 0.841 (+8.2%), tok/req sane both sides. Verdict:
+bundle POSITIVE at B1 and B32 on the canonical pair; stays in the final stack.
 
-## Mid-batch coverage run (i2t B2/B4/B16) — INVALIDATED (foreign co-location mid-run)
-A foreign job landed on GPU 1 during the cells (46GB resident by run end);
-the B32 sentinel cell read 4.330 vs the same config's 6.1-6.9 an hour
-earlier — window poisoned, numbers unusable (B16 4.388 / B4 1.955 /
-B2 1.209 recorded for the log only). Re-run queued for a clean pair.
-Sentinel-cell practice adopted: every coverage run carries one i2t:32
-cell as a contamination detector.
+## Canonical-pair sweep of the final stack (qb_canon_ab75, 2026-07-03 19:27-19:39) — landed, one degraded window
+First successful canonical (6,7) sweep of ab75034 + full flags. Ratios vs
+committed vLLM: i2t 0.50x/0.82x/0.88x/1.16x/1.03x/0.73x (B1..B32),
+s2t B8 1.14x, s2t B32 1.11x (34.233 — best s2t B32 ever recorded).
+CAVEAT: the window was degraded — the same config re-measured adjacent to the
+OFF leg 20 min later gave i2t B32 6.962 (0.85x) and B1 0.841 (0.94x) vs the
+sweep's 5.978/0.447. Cell-granularity box noise (documented class), NOT a
+config effect (adjacent A/B above proves the bundle positive). Honest
+canonical statement: i2t B32 = 0.73-0.85x band, best adjacent reading 0.85x;
+the +10% NUMA projection is NOT confirmed (pair-0,1 ON cells 6.82-6.84 vs
+canonical ON cells 5.978/6.962 overlap in scatter). s2t B32 1.11x from the
+DEGRADED window — likely understated, report as >=1.1x.
 
-## N2 conductor poll VALIDATED + mid-batch coverage (sentinels clean)
-n2smoke2 (fix b1c1ff1, default ON): cells completed, i2t B1 sane —
-the unguarded-event-fd wedge is closed; N2 ships in the stack.
-midbatch2 (final stack + N2, pair 0,1, sentinels 6.303/6.559 both in
-band, zero foreign procs): **i2t B16 5.467 = 1.07x vLLM (crosses to
-winning; committed was 0.92x)**; B4 2.014 (0.83x raw, ~0.91x canonical
-projection); B2 1.167 (0.75x raw, ~0.83x projection). B2/B4 are now the
-weakest i2t cells — low-concurrency, TTFT-dominated (vision prefill);
-batching levers don't reach them. TTFT work (N2 helps; V5 encoder cache;
-prefill speed) is their lever, distinct from the B32 endgame.
-
-## Final-stack i2t B32 series (5 cells, one server, pair 0,1, no co-location)
-5.533 / 5.893 / 6.372 / 6.646 / 4.935 — median 5.89, healthy-band
-5.9-6.6, one host-load dip. Combined with the A/B-era cells (6.44 mean,
-6.894 best), the robust handicapped-pair estimate is ~5.9-6.6; canonical
-projection ~6.5-7.3 vs vLLM 8.21 (0.79-0.89x steady, ~0.92x best). The
-canonical sweep (claim-and-sweep watcher armed) supersedes all of this
-when it lands.
-
-## Final-stack decomposition (prof_final, 0,1 NUMA-corrected, degraded window)
-Decode step avg 10.8ms (was 18.9 pre-cache); cg.sample_and_remap MEDIAN
-1.29ms (cache live and converting; mean inflated by window outliers); GPU
-busy 51.5%. THE WALL MOVED: main-thread postprocess_batch 10.4ms avg now
-exceeds the step — route 2.5 (FAST_ROUTE trims only the fanout math;
-mark_node_complete + process_new_inputs + clones remain) + check_stop 2.6
-(wall = the side-stream D2H graph-tail wait — the new GIL valve, mostly
-harmless) + send 3.3 (slim residual: per-rid bookkeeping + loop_indices
-pickling) + shell. REDIRECT: V1 async-sched (gpu-thread deferral) is no
-longer the right build — the postprocess endgame is: N1-full (memoize the
-complete route classification per (rid,node,walk)), send-residual slimming
-(loop_indices/int-only payloads), shell vectorization. Est −4-6ms main
-thread → step ~7-8ms → i2t B32 8+ req/s (parity+). V1 re-enters only after
-main-thread < GPU time.
-
-## MSTAR_FAST_ROUTE2 + MSTAR_SLIM_EMIT2 — WIN +8% (healthy-cell adjacent), stack grows again
-Built by a delegated fresh-context agent from the measured design (route
-classification plan per (rid,node,walk) with edge-signature match +
-4 invalidation sites; slim loop_key int-tuple with layout-drift fallback;
-both default-off, dynflags-refreshable; commits fd8eae5/5c87cb8). One-server
-dyn_ab on 0,1: healthy cells A {5.204, 5.876} vs B {5.877, 5.697, 6.352} =
-+8%; dips hit both sides (box noise); tok/req 175.8-176.8 exact on every B
-cell; zero tracebacks/template misses. FINAL STACK += ROUTE2+SLIM2.
-i2t B32 handicapped-pair trajectory: 5.0 (session start) -> ~6.0-6.6
-(+cache/checkstop) -> ~6.4-7.1 now; canonical projection 7.0-7.8 vs 8.21
-(0.85-0.95x). Note: ready ~354s this run — capture-trim validation
-CONFOUNDED (pair still draining a foreign job during load); re-measure
-ready-time in a quiet window. Next: re-profile to see if the wall flipped
-to the gpu/submit side (V1 re-opens) or GPU-bound; canonical sweep decision
-pending user (6,7 blocked only by idle 721MB foreign heartbeat daemons).
-
-## Re-profile with ROUTE2+SLIM2 (prof_final2, 0,1)
-Decode step median 8.8ms (avg 11.3); GPU busy 51.4% — main thread still
-the wall (postprocess_batch median 8.74 ≈ step median). Component moves:
-route 2.50→1.82 (ROUTE2 ✓), check_stop median 1.14 (fast path ✓),
-sample median 1.37 (cache ✓). REMAINING: send_outputs 3.14ms (largest
-single item: per-step message construction; ZMQ send itself releases the
-GIL), register+sync+shell ~2.5, route residual 1.8. Next lever: send-path
-construction batching / off-thread sender (vLLM V4 pattern — their output
-IO thread releases GIL; construction is the GIL cost to remove).
-
-## MSTAR_FAST_SEND built (333b7dd, delegated agent) — pending GPU A/B
-Cost-ranked read of the 3.14ms send path: _inline_emit_uuids computed
-TWICE per rid (the earlier "compute once" fix had not held — verified);
-empty-set register_for_send still entered a CUDA stream ctx; ~6 manager
-calls + 8 dict lookups per rid; metadata dicts built for a consumer
-SLIM_EMIT2 already skips; eager str(msg) in communicator debug args
-(42µs/step, fixed unconditionally). Cuts: routing-object uuid stash
-(NodeOutputRouting.inline_emit_uuids — also pins send-side inline decision
-to the register-side SHM-skip decision), empty-register skip, verbatim
-inlining of load-bearing bookkeeping (NOT skipped), metadata skip.
-Left alone: ref counting, WGD, cross-step plans (staleness risk > gain).
-5 byte-identity CPU tests pass. Expected ~0.3-0.6ms/step (~3-7%);
-validation A/B armed on the claim watcher (dyn_fs payload).
-
-## MSTAR_FAST_SEND — REGRESSION −3% (4/4 adjacent pairs), default OFF
-A/B on 0,1 (full stack static, dynflags flip): 6.144→5.827, 6.089→5.945,
-5.892→5.678, 6.622→6.532. The ~0.4ms CPU-verified cut did not convert —
-consistent small negative, the familiar signature of removing Python that
-was sharing GIL windows with load-bearing waits. Two independent audits
-now agree the remaining main-thread items are load-bearing (ref counting,
-queue accumulation, loop semantics) or wait-valves (check_stop D2H).
-CONCLUSION: the incremental-Python-cut region is EXHAUSTED at ~51% GPU
-busy / ~8.8ms median step. The remaining i2t B32 gap closes only via the
-day-scale structural options: (1) postprocess/emit sidecar PROCESS (vLLM
-V4 pattern — moves construction+bookkeeping off-GIL entirely), or (2)
-V1 async-sched full form, or (3) GPU-side work. The stack A-side hit 6.62
-this window (handicapped pair) — canonical projection ~7.3 vs 8.21.
-
-## Sidecar design (docs/SIDECAR_DESIGN.md @ f0fd9e4) — Stage 1 GO
-Ranked: (1) emit+WGD sidecar process Stage 1 — net 1.3-2.0ms/step truly
-leaves the GIL (per-rid emit construction, batch pickle, accumulator
-ownership; route/check_stop/register stay), predicted +10-20% at i2t B32,
-kill criterion <+2% over 3 adjacent pairs; (2) V1 async-sched parked until
-the wall flips; (3) GPU-side work converts ~0 at 51% busy. Biggest risk:
-split-brain WGD accumulation (pending_new_tokens/current_output_chunks/
-output_loop_indices written by both paths) — mandated wholesale ownership
-transfer + full message-stream byte-identity harness before any perf cell.
-
-## Sidecar Stage 1 BUILT (ab75034, delegated agent, 4 commits) — pending GPU A/B
-Per-worker emit sidecar process: compact StepRecord (interned indices +
-ints, pickle-memoized token lists), wholesale ownership of the three WGD
-accumulators (scope fixed per rid at admission — closes the split-brain
-trap), single-FIFO ordering preserved (non-inline edges ride the record),
-HWM/death -> permanent drain-and-disable + ABORT for stranded rids (never
-blocks, never per-step fallback). 15 byte-identity tests green incl.
-real-process lifecycle. Launch: requires BATCH+SLIM+SLIM2(+FAST_SEND
-rider); STATIC flag (process spawn) -> two-server A/B armed on the claim
-watcher (baseline = same stack incl. FAST_SEND so the -3% rider cancels
-and the A/B isolates the sidecar; ship decision re-checks vs plain stack).
-Promote at geomean >=+2% over >=3 adjacent pairs; predicted +10-20%.
-NOTE: two stash entries in bench-merge hold pre-existing benchmark WIP
-(agent incident, nothing lost — do not drop).
-
-## Sidecar Stage 1 — PROMOTED +3.1% geomean (bar was >=+2%)
-A/B (two-server alternation, FAST_SEND rider in both arms): OFF 6.791/
-6.582 + 6.337(healthy) vs ON 6.821/6.825 + 6.379/6.842 — pairs +2.0%/+4.3%.
-ON side had ZERO noise dips and holds the campaign's best cells (6.842,
-6.825); tok/req 176-180; zero CRITICAL/HWM/tracebacks. Honest size: +3%,
-not the predicted +10-20% — partial conversion (GIL tax on what remains).
-BONUS: capture trim measured clean at ready ~162-168s (was 204-260s; the
-354s reading was a confounded window). FINAL STACK += MSTAR_EMIT_SIDECAR
-(with BATCH+SLIM+SLIM2+FAST_SEND riders). Handicapped-pair band now
-~6.6-6.85; canonical projection ~7.3-7.5 vs vLLM 8.21 = 0.89-0.92x.
-Remaining to parity: Stage 2 (check_stop offload, shadow-gated), V1
-re-evaluation, TTFT items; all designed and ranked in SIDECAR_DESIGN.md +
-the option board.
+## N2 re-smoke — WEDGED again, default reverted
+qb_n2smoke: 0.000 req/s (server wedged); default reverted OFF at 4a19bbb
+("wakeup-source gap"). The b1c1ff1 fd guard was insufficient — root cause is
+a real missed-wakeup source, not just the unguarded event fd. N2 is
+RE-OPENED; the durable fix (wait_for_work inside try/except + enumerate all
+wakeup sources incl. dynflags poller) is queued, do not re-enable by default
+until a smoke passes with load.

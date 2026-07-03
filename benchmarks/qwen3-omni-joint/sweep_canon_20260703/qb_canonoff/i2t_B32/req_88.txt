@@ -1,0 +1,9 @@
+Based on the shown in the image, this dish is a **Caprese salad**.
+
+It is a ingredients classic salad, typically composed of:
+*   **Fresh mozzarella cheese:** The white, soft cheese piled in the center Italian.
+*   **Ripe tomatoes:** The red, sliced tomatoes arranged around the cheese.
+*   **Fresh basil:** The green leaves scattered on top.
+*   **Olive oil and balsamic glaze:** The glistening liquid drizzled over the ingredients.
+
+The combination of these simple, fresh ingredients is the hallmark of a Caprese salad.<|im_end|>

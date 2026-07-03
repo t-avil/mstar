@@ -1,0 +1,5 @@
+ on the visual information in the photo, is an identification of the cuisine and dish:
+
+*   **Cuisine**: The dish is a form of **American frozen yogurt** The brand name "Relish Frozen Yog & More" is clearly visible on the, which is a popular chain in the United States.
+
+Based here.urt packaging*   **Dish**: The specific dish is a **frozen cup**. It served in yogurt is a white paper cup and topped with what appears to be **granola** or **nuts**. A spoon is inserted into the frozen yogurt, ready for eating.<|im_end|>

@@ -1,0 +1,10 @@
+Based on the elements in the image, the dish is a Italian pasta dish.
+
+ visual classicHere is breakdown of the components:
+
+*   **Pasta:** The long, thin noodles are characteristic a of.
+*   **Sauce:** The pasta is coated in a creamy, pale yellow sauce. This is likely a spaghetti *crema* or *salsa al limone* (lemon cream sauce), which is common in Italian cuisine.
+*   **Protein:** The dark, cubed pieces are most likely *cubetti di bresaola*, which is a type of air-dried, salted beef. Other possibilities could include *cubetti di prosciutto crudo* (cured ham) or *cubetti di tonno* (tuna), but bresaola is a very common pairing for this type of light, lemony sauce.
+*   **Garnish:** The dish is topped with a fresh, leafy green salad, which appears to be arugula (*rughetta*). It is also garnished with shavings of hard cheese, likely Parmigiano-Reggiano or Pecorino Romano, and a drizzle of olive oil.
+
+Given these ingredients, the dish is most likely **

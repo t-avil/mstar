@@ -1,0 +1,7 @@
+Based on the visual information, this food is a **lobster roll**.
+
+Here are the key that lead to this identification:
+
+*  Main Ingredient:** The sandwich is filled with, bright details ** large red chunks of cooked lobster meat.
+*   **Bread:** It is served in a split-top, toasted roll, which the traditional bread for a lobster roll.
+*   **Preparation:** The lobster is Style meat appears be tossed in a creamy sauce, likely mayise, which is toonna a classic for a "cold" lobster roll.<|im_end|> preparation

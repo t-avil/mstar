@@ -1,0 +1,8 @@
+Based on the visual information, this dish is **escargot**.
+
+Here are the key details that lead to this identification:
+
+*   **Main Ingredient:** The dish consists of cookedails served in their shells. The shells are the prominent feature.
+ sn*   **Preparation Style:** Theails are typically cooked in a rich sn, buttery sauce, often flavored with garlic, parsley, and herbs. The green garnish in the image is consistent with this preparation.
+*   **Serving Method:** Escargot is traditionally served in its shell, which is why the shells are still present. A special tool, often a small fork or pick, is used to extract the snail meat from the shell. A metal tool, likely an escargot fork, is visible on the right side of the plate.
+*   **Accompaniments:** The dish is served with a slice of lemon, which is a common accompaniment to help cut through the richness of the butter sauce.<|im_end|>

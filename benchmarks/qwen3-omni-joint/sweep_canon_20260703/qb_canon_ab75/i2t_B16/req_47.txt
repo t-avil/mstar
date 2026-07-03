@@ -1,0 +1,11 @@
+Based on the visual characteristics of the dessert in the image, here is an identification of the cuisine and dish:
+
+*   **Cuisine**: Italian
+*   **Dish**: Tiramisu
+
+This is a classic Italian dessert. The key features that lead to this identification are:
+
+*   **Layered Structure**: The dessert is composed of distinct layers of a creamy filling and a dark, coffee-soaked sponge cake.
+*   **Topping**: The top is generously dusted with cocoa powder, a signature element of tiramisu.
+*   **Sponge Cake**: The dark, porous layers are characteristic of ladyfinger cookies (savoiardi), which are soaked in coffee and liqueur.
+*   **Creamy Filling**: The light-colored filling between the layers is typical of a mascarpone cheese cream.<|im_end|>

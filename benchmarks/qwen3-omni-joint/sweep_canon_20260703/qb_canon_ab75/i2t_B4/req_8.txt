@@ -1,0 +1,9 @@
+Based on the visual characteristics of the food in the image, this dish is most likely **spring rolls**.
+
+Here are the key details that lead to this identification:
+
+*   **Wrapping:** The rolls are encased in a thin, translucent wrapper that becomes slightly opaque and pliable when cooked or soaked. This is characteristic of rice paper, which is used to make fresh spring rolls (also known as summer rolls).
+*   **Filling:** The filling is clearly visible and consists of fresh, colorful ingredients. You can see green leafy vegetables (like lettuce or herbs), julienned orange vegetables (likely carrots), and other green vegetables. This combination of fresh, uncooked fillings is typical for fresh spring rolls.
+*   **Preparation:** The rolls are cut in half, which is a common way to serve them, allowing the vibrant filling to be displayed.
+
+While they share some similarities with other dishes like Vietnamese *gỏi cuốn* (which are a type of fresh spring roll) or Chinese *chǎo guǒ* (which are usually deep-fried), the appearance of the wrapper and the fresh, uncooked fillings strongly indicate that these are fresh spring rolls.<|im_end|>

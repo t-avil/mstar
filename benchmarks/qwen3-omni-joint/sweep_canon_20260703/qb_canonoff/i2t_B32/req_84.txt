@@ -1,0 +1,3 @@
+ course. Based on the image providedOf, is a caption for the food:
+
+**Crispy, goldenrown baked chicken here-b wings, seasoned and arranged in a baking dish, ready be served.** perfectly to<|im_end|>
