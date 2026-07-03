@@ -666,3 +666,14 @@ canonical-pair sweep queued behind the foreign job on GPU 6.
 Remaining options to close the last ~5-8%: board of 2026-07-03 (V1 async
 sched / GPU-resident ids is the headliner; N1-full register/route caching;
 N2 latency hops; V2 budgeted interleave policy).
+
+## Final-stack coverage sweep (pair 0,1 — cross-NUMA caveat; canonical will read higher)
+i2t: B32 6.134 / B8 3.936 / B1 0.844 — vs committed v2 (canonical pair):
+6.299 / 3.361 / 0.800 and vs vLLM 8.210 / 3.455 / 0.898.
+**i2t B8 now BEATS vLLM: 1.14x** (was 0.97x); B1 0.94x (was 0.89x);
+B32 at committed-parity on a worse pair (canonical projection 0.9x+).
+s2t: B32 31.219 / B8 18.471 (committed 31.565 / 17.197 — B8 +7%).
+s2s B8 7.497 + 32.53 audio-s/s (−5%/−13% vs committed — NUMA + audio path
+untouched by tonight's text opts; audio-optimal alt config unaffected).
+i2s B8 1.250 / 56.15 audio-s/s (parity). No path broken; text paths up
+across the board. Canonical 6,7 sweep queued behind the foreign 129GB job.
