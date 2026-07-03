@@ -430,9 +430,30 @@ class APIServer:
                                     if full is not None:
                                         self._route_result_tensors(full)
                                     continue
+                                # Snapshot the template BEFORE routing: the
+                                # data worker MUTATES graph_edge.name
+                                # (_read_result_tensor renames to
+                                # "<modality>_output") on its own thread, and
+                                # loop-index accounting keys on the ORIGINAL
+                                # name — caching the live object made slim
+                                # items accrue under the renamed key, so
+                                # received_final_chunks never satisfied and
+                                # every request rode the 15s TTL (measured
+                                # jct 16.5s at i2t B32).
+                                import copy as _copy
+                                _tmpl_edge = _copy.copy(item.graph_edge)
+                                _tmpl_edge.tensor_info = list(
+                                    item.graph_edge.tensor_info
+                                )
                                 self._slim_templates[
                                     (item.request_id, item.graph_edge.name)
-                                ] = item
+                                ] = ResultTensors(
+                                    request_id=item.request_id,
+                                    modality=item.modality,
+                                    graph_edge=_tmpl_edge,
+                                    loop_indices=item.loop_indices,
+                                    metadata={},
+                                )
                                 self._route_result_tensors(item)
                         continue
 
