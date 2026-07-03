@@ -589,3 +589,13 @@ pairs on 0,1: 5.402/5.717 vs 6.164/6.114 (+10.4%); 5.637/5.309 vs
 W5 + FAST_POSTPROC + SLIM_EMIT + FAST_ROUTE: pair-0,1 band 5.0 -> ~6.0
 (+20% tonight, compounding, all from main-thread Python removal — the
 remove-work law converting cleanly twice in a row).
+
+## Sampler cache round 3 (on slim+route) — WASH; trend −7% → −1% → ~0%
+Pairs: 5.79→6.02 (+4.0%) then 5.91→5.64 (−4.6%, one 5.14 noise-dip cell).
+The GIL-shade trend keeps tracking toward crossover but is not yet a
+proven win. Cache stays default OFF; re-test after the next main-thread
+trim (check_stop/register/loop-shell) lands. WINNING STACK (locked for
+the sweep): W5 + MSTAR_FAST_POSTPROC + MSTAR_SLIM_EMIT + MSTAR_FAST_ROUTE.
+NUMA note: all pair-0,1 numbers carry a cross-NUMA handicap (quick_bench
+hardcodes cpunodebind=1; GPUs 0,1 are node 0) — deltas fair, absolutes
+understated; the canonical sweep runs on 6,7.
