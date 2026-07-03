@@ -1901,6 +1901,11 @@ class Worker:
         # recompute when absent; (b) the peek-backoff state lives in run-loop
         # locals and simply stops being consulted when the flag turns off.
         self._sched_pack = os.environ.get("MSTAR_SCHED_PACK", "0") == "1"
+        # Safe to flip mid-run: per-step branch choosing which source feeds
+        # the spec batch's loop-back text_inputs; both sources carry
+        # identical values (E9 correctness record) and the registry/route
+        # path runs unchanged under either.
+        self._direct_feed = os.environ.get("MSTAR_DIRECT_FEED", "0") == "1"
         # MSTAR_EMIT_SIDECAR is deliberately NOT refreshed: the sidecar is a
         # process spawned at init, so the flag is static (see __init__).
         # Sidecar-scoped construction is likewise pinned to the slim stack,
