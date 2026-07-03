@@ -730,3 +730,19 @@ complete route classification per (rid,node,walk)), send-residual slimming
 (loop_indices/int-only payloads), shell vectorization. Est −4-6ms main
 thread → step ~7-8ms → i2t B32 8+ req/s (parity+). V1 re-enters only after
 main-thread < GPU time.
+
+## MSTAR_FAST_ROUTE2 + MSTAR_SLIM_EMIT2 — WIN +8% (healthy-cell adjacent), stack grows again
+Built by a delegated fresh-context agent from the measured design (route
+classification plan per (rid,node,walk) with edge-signature match +
+4 invalidation sites; slim loop_key int-tuple with layout-drift fallback;
+both default-off, dynflags-refreshable; commits fd8eae5/5c87cb8). One-server
+dyn_ab on 0,1: healthy cells A {5.204, 5.876} vs B {5.877, 5.697, 6.352} =
++8%; dips hit both sides (box noise); tok/req 175.8-176.8 exact on every B
+cell; zero tracebacks/template misses. FINAL STACK += ROUTE2+SLIM2.
+i2t B32 handicapped-pair trajectory: 5.0 (session start) -> ~6.0-6.6
+(+cache/checkstop) -> ~6.4-7.1 now; canonical projection 7.0-7.8 vs 8.21
+(0.85-0.95x). Note: ready ~354s this run — capture-trim validation
+CONFOUNDED (pair still draining a foreign job during load); re-measure
+ready-time in a quiet window. Next: re-profile to see if the wall flipped
+to the gpu/submit side (V1 re-opens) or GPU-bound; canonical sweep decision
+pending user (6,7 blocked only by idle 721MB foreign heartbeat daemons).
