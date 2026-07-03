@@ -457,3 +457,21 @@ verdict on single-chunk WITHOUT this fix: i2t B32 0.896/0.999/0.950 (−5%)
 ([n real decode][bs-1-n qo=1 dummies][chunk @ row bs-1][zero pads]) so the
 static graph can slice at bs-1; split wrapper plans decode part + chunk
 part separately. Flag MSTAR_MIXED_SPLIT_ATTN.
+
+## MSTAR_MIXED_SPLIT_ATTN — WIN (+4.4% i2t B32 over non-split, rescues single-chunk folding)
+Implemented on exp/fold-rate @ 827ab50 (FlashInferSplitMixedWrapper +
+fixed-region packed layout + slot permutation through metadata/logits/
+restore + bucket adjustment num_tokens += padded_bs - batch_size). A/B
+(alternating servers, single-chunk ON both sides, i2t B32 ×4 cells/side):
+OFF 5.678/5.448/5.819/5.790 (mean 5.684) vs ON 5.953/5.854(asserts ON!)/
+5.866/6.053 (mean 5.932) = +4.4%, ON never below any adjacent OFF, zero
+assert failures, tok/req sane. Fail-fast catch during bring-up: tail-merged
+C=258 fold overflowed the 288 bucket's 257-token chunk window — fixed by
+the bucket adjustment; env flag snapshotted process-static so dynflags
+can't desync bucket math from baked captures. DISPROVEN along the way: the
+eager-fold peek-cost theory (_ms_peek measured 2-4ms TOTAL per ~1500 peeks
+≈ 2µs each — 100x below the estimate; backoff kept, harmless). Note
+_ms_thinker_mixed did NOT drop per step (33.3 -> 34.2ms): the split plans
+TWO wrappers inline on the gpu-thread (+~1-2ms CPU submit) masking the
+-4.3ms GPU attention win in that counter; e2e req/s is the arbiter.
+Ship-decision A/B (plain W5 vs +single-chunk+split) running as ship_ab.sh.
