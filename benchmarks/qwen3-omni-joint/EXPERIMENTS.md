@@ -715,3 +715,18 @@ prefill speed) is their lever, distinct from the B32 endgame.
 projection ~6.5-7.3 vs vLLM 8.21 (0.79-0.89x steady, ~0.92x best). The
 canonical sweep (claim-and-sweep watcher armed) supersedes all of this
 when it lands.
+
+## Final-stack decomposition (prof_final, 0,1 NUMA-corrected, degraded window)
+Decode step avg 10.8ms (was 18.9 pre-cache); cg.sample_and_remap MEDIAN
+1.29ms (cache live and converting; mean inflated by window outliers); GPU
+busy 51.5%. THE WALL MOVED: main-thread postprocess_batch 10.4ms avg now
+exceeds the step — route 2.5 (FAST_ROUTE trims only the fanout math;
+mark_node_complete + process_new_inputs + clones remain) + check_stop 2.6
+(wall = the side-stream D2H graph-tail wait — the new GIL valve, mostly
+harmless) + send 3.3 (slim residual: per-rid bookkeeping + loop_indices
+pickling) + shell. REDIRECT: V1 async-sched (gpu-thread deferral) is no
+longer the right build — the postprocess endgame is: N1-full (memoize the
+complete route classification per (rid,node,walk)), send-residual slimming
+(loop_indices/int-only payloads), shell vectorization. Est −4-6ms main
+thread → step ~7-8ms → i2t B32 8+ req/s (parity+). V1 re-enters only after
+main-thread < GPU time.
