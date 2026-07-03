@@ -558,3 +558,17 @@ timing). Flag default OFF; code kept for the debug.
 n=48 cells show ±25% same-config spread and a different token mix
 (~110 tok/req vs 177 at n=96). Smoke/correctness only; ship decisions at
 full n=96 with multiple adjacent pairs.
+
+## MSTAR_SLIM_EMIT — WIN +15-25% i2t B32 (biggest e2e win since fp8)
+After the template-snapshot fix (b762a5d; the data worker MUTATES
+graph_edge.name on its own thread — caching the live object sent slim
+items under the renamed key, loop-index accounting missed, every request
+rode the 15s TTL): full-cell A/B on GPUs 0,1, adjacent pairs — r3 off
+5.014/4.986 vs on 5.607/6.124 (+17%); r4 off 3.700/4.479 (degraded window)
+vs on 5.311/4.962 (+26%, ON healthy through the same window). tok/req 177
+both sides. Mechanism: steady-state token emits skip the per-rid GraphEdge
+pickle (send SlimResultTokens; api server inflates from a per-(rid,name)
+template snapshotted BEFORE routing). This is the first converting cut into
+the ~13ms/step main-thread Python and validates the remove-work-not-waits
+law. NEXT: stack MSTAR_SAMPLER_CFG_CACHE on top (its GIL-shade objection
+weakens as the main thread lightens), then route/check_stop memoization.
