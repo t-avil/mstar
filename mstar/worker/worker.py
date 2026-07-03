@@ -310,6 +310,20 @@ class Worker:
         )
         self._thinker_eos_id: int | None = None
 
+        # N1-Talker (MSTAR_FAST_CHECKSTOP_TALKER): the speech-walk analogue of
+        # N1. TalkerSubmodule.check_stop does a per-request layer0_codes.item()
+        # host read every AR frame; this batches the talker stop condition the
+        # same way the thinker one is batched — one flat D→H of just the layer0
+        # code per rid + int compares against codec_eos_token_id. Separate flag
+        # from MSTAR_FAST_CHECKSTOP and WALK-GATED to talker_decode so thinker
+        # paths are untouched: unconditional worker fast paths once taxed Talker
+        # steps 17% (EXPERIMENTS.md E4b), so this stays OFF for every non-talker
+        # walk regardless of the flag. Default OFF.
+        self._fast_checkstop_talker = (
+            os.environ.get("MSTAR_FAST_CHECKSTOP_TALKER", "0") == "1"
+        )
+        self._talker_codec_eos_id: int | None = None
+
         # MSTAR_EMIT_SIDECAR — Stage 1 of docs/SIDECAR_DESIGN.md: exile emit
         # message construction, the api_server transport, the WGD-feeding
         # accumulators (pending_new_tokens / current_output_chunks /
@@ -1892,6 +1906,12 @@ class Worker:
         self._fast_checkstop = (
             os.environ.get("MSTAR_FAST_CHECKSTOP", "0") == "1"
         )
+        # Safe to flip mid-run: ON walk-gates the batched talker stop check to
+        # talker_decode steps; OFF falls straight back to the per-rid engine
+        # check_stop. Semantics-free either way (same stop set).
+        self._fast_checkstop_talker = (
+            os.environ.get("MSTAR_FAST_CHECKSTOP_TALKER", "0") == "1"
+        )
         # Safe to flip mid-run: ON stashes inline_emit_uuids on the step's
         # routing object; OFF simply ignores the stash and recomputes. The
         # register/send halves of one step run under one flag read each, and
@@ -3047,10 +3067,51 @@ class Worker:
         # Check for stops
         engine = self.engine_manager.get_engine(batch_N.node_name)
         cpu_output = self._prematerialize_for_check_stop(
-            output, batch_fast=(batch_N.graph_walk == "thinker_decode"),
+            output,
+            batch_fast=(batch_N.graph_walk == "thinker_decode"),
+            talker_fast=(
+                self._fast_checkstop_talker
+                and batch_N.graph_walk == "talker_decode"
+            ),
         )
         flat = getattr(cpu_output, "_checkstop_flat", None)
-        if self._fast_checkstop and flat is not None:
+        if (
+            self._fast_checkstop_talker
+            and batch_N.graph_walk == "talker_decode"
+            and flat is not None
+        ):
+            # N1-Talker fast path: uniform talker_decode layer0_codes batch.
+            # Semantics identical to TalkerSubmodule.check_stop (layer0 code ==
+            # codec_eos, or iter+1 >= talker_max_tokens), but one tolist() covers
+            # the batch and the compares are pure ints. No ignore_eos for the
+            # talker — codec_eos is the only valid stop signal.
+            self._ws_inc("talker_fast_checkstop_steps")
+            tokens = flat.tolist()
+            eos_id = self._talker_codec_eos_id
+            if eos_id is None:
+                submod = engine.submodule_management[
+                    batch_N.node_name
+                ].submodule
+                eos_id = self._talker_codec_eos_id = (
+                    submod.config.talker.codec_eos_token_id
+                )
+            new_stops = {}
+            per_info = batch_N.node_batch.per_request_info
+            for i, rid in enumerate(cpu_output._checkstop_rids):
+                info = per_info.get(rid)
+                if info is None:
+                    continue
+                max_tokens = info.step_metadata.get(
+                    "talker_max_tokens", info.max_tokens
+                )
+                if (
+                    (eos_id is not None and int(tokens[i]) == eos_id)
+                    or info.dynamic_loop_iter_counts.get(
+                        "talker_decode_loop", 0
+                    ) + 1 >= max_tokens
+                ):
+                    new_stops[rid] = {"talker_decode_loop"}
+        elif self._fast_checkstop and flat is not None:
             # N1 fast path: uniform thinker_decode new-token batch. Semantics
             # identical to ThinkerSubmodule.check_stop (token == im_end and
             # not ignore_eos, or iter+1 >= max_tokens), but one tolist()
@@ -3394,6 +3455,7 @@ class Worker:
         self,
         output: NodeOutput,
         batch_fast: bool = True,
+        talker_fast: bool = False,
     ) -> NodeOutput:
         """Side-stream D→H of every CUDA tensor in
         ``output.per_request_output_tensors`` so the subsequent
@@ -3474,6 +3536,52 @@ class Worker:
                 out._checkstop_flat = flat_cpu
                 out._checkstop_rids = rids
             return out
+
+        # N1-Talker (MSTAR_FAST_CHECKSTOP_TALKER): talker_decode analogue of the
+        # thinker uniform probe above. The talker's per-rid output is multi-key
+        # (talker_input_embeds + codec_tokens + layer0_codes), so the single-key
+        # probe never matches it; check_stop only needs layer0_codes, so batch
+        # JUST that scalar into one cat + one pinned D→H (the embeds/codec_tokens
+        # are routed to Code2Wav from the GPU ``output`` and are never read off
+        # this CPU copy, so we skip their D→H entirely). talker_fast is already
+        # walk-gated (talker_decode) AND flag-gated by the caller.
+        if talker_fast and rids and all(
+            isinstance(per_rid[r], dict)
+            and isinstance(per_rid[r].get("layer0_codes"), list)
+            and len(per_rid[r]["layer0_codes"]) == 1
+            and torch.is_tensor(per_rid[r]["layer0_codes"][0])
+            and per_rid[r]["layer0_codes"][0].is_cuda
+            and per_rid[r]["layer0_codes"][0].numel() == 1
+            for r in rids
+        ):
+            dtypes = {per_rid[r]["layer0_codes"][0].dtype for r in rids}
+            if len(dtypes) == 1:
+                with torch.cuda.stream(side):
+                    flat_gpu = torch.cat(
+                        [per_rid[r]["layer0_codes"][0].reshape(1) for r in rids]
+                    )
+                    flat_cpu = self._get_pinned_d2h_buffer(
+                        "check_stop_talker_flat", flat_gpu.shape, flat_gpu.dtype,
+                    )
+                    flat_cpu.copy_(flat_gpu, non_blocking=True)
+                side.synchronize()
+                # cpu_output only feeds check_stop; carry layer0_codes per rid so
+                # a fall-through to engine.check_stop_for_batch (never taken on
+                # the fast path) would still read a valid CPU token.
+                cpu_fast_t: dict = {
+                    r: {"layer0_codes": [flat_cpu[i:i + 1]]}
+                    for i, r in enumerate(rids)
+                }
+                out = NodeOutput(
+                    per_request_output_tensors=cpu_fast_t,
+                    allocation_failed=output.allocation_failed,
+                    alloc_pages_short=output.alloc_pages_short,
+                    alloc_failed_request_id=output.alloc_failed_request_id,
+                    completion_event=output.completion_event,
+                )
+                out._checkstop_flat = flat_cpu
+                out._checkstop_rids = rids
+                return out
 
         cpu_per_rid: dict = {}
         buffer_indices: dict[tuple[str, torch.dtype, tuple[int, ...]], int] = defaultdict(int)
