@@ -3139,11 +3139,24 @@ class Worker:
                     fold_probe = must_yield_away or (
                         mixed_spec_enabled and self.mixed_single_chunk
                     )
-                    if fold_probe and self.scheduler.has_mixed_opportunity(
+                    _peek_t0 = (
+                        _time.perf_counter()
+                        if (fold_probe and self._walk_stats is not None)
+                        else 0.0
+                    )
+                    _peek_hit = fold_probe and self.scheduler.has_mixed_opportunity(
                         self.worker_graphs_manager,
                         (pending.node_name, pending.graph_walk),
                         n_decode=len(pending.node_batch.request_ids),
-                    ):
+                    )
+                    if _peek_t0:
+                        # Eager-fold peek cost suspect: a Python ready-queue
+                        # scan per chain step. _ms_peek/_n_peek size it.
+                        self._walk_stats["_ms_peek"] = self._walk_stats.get(
+                            "_ms_peek", 0
+                        ) + int((_time.perf_counter() - _peek_t0) * 1000)
+                        self._ws_inc("_n_peek")
+                    if _peek_hit:
                         must_yield_away = False
                         self._ws_inc("_mix_opp")
                         if mixed_spec_enabled:
