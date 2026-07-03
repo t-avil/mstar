@@ -108,6 +108,16 @@ bench-merge (docs/numbers).
   start one server and keep it for the whole session; every A/B flips via
   MSTAR_DYNFLAGS (all winning-stack flags runtime-refreshable @ fbe4b1c).
 
+## 5b. Delegated builds (validated pattern)
+For well-scoped optimizations, hand a FRESH-context agent: the measured
+design (exact files/lines, memo keys, invalidation sites), the proven
+in-repo patterns to copy (FAST_POSTPROC / FAST_ROUTE), and the trap list
+(§4 + AST-check worker __init__ contains tp_groups after edits; flags
+default-off; no GPU work — supervisor validates). ROUTE2+SLIM2 (+8%) were
+built this way in ~15 min of agent time and passed GPU validation on the
+first try. The task descriptions in this repo's campaign are written to be
+build-ready for exactly this.
+
 ## 6. What's next (sized; full designs in EXPERIMENTS.md option board)
 IMMEDIATE (blocked only on free GPUs):
 - Canonical 6,7 sweep of §2 → official NUMBERS_V2 refresh.
