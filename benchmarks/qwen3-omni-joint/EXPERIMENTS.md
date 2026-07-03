@@ -529,3 +529,16 @@ postprocess reduction FIRST (extend FAST_POSTPROC memoization to
 route_outputs; batch check_stop consumption; emit off-process), THEN
 de-sync sample (flag kept for that re-test), THEN defer-sample overlap.
 Default OFF (9ab0b2d, exp/overlap-sched).
+
+## The i2t B32 wall, fully measured (2026-07-03 02:45, prof_winner trace)
+Step 18.9ms, GPU 46.6% busy. Main thread 13.2ms/step Python
+(postprocess_batch 9.78 = route 2.50 + check_stop 1.99 + register 1.14 +
+completion-sync 0.90 + ~3.2 loop shell; send_outputs 3.41). GPU thread
+11.1ms (sample_and_remap, 85% pipeline-drain syncs). Two GIL threads whose
+Python sums past the step time — the sync-shade overlap is what makes it
+"work" at all. Piecemeal shaving converted poorly three times tonight
+(single-chunk, split e2e, sampler cache). Next swing (task tracked):
+relocate per-token route/store/emit/check_stop off the hot threads —
+third-process SHM-ring consumer (vLLM V1 EngineCore pattern) or full
+vectorization of the per-rid loop; then re-test the sampler cache and
+defer-sample, which should both flip positive once the GIL shade is gone.
