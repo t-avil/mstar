@@ -770,3 +770,17 @@ inlining of load-bearing bookkeeping (NOT skipped), metadata skip.
 Left alone: ref counting, WGD, cross-step plans (staleness risk > gain).
 5 byte-identity CPU tests pass. Expected ~0.3-0.6ms/step (~3-7%);
 validation A/B armed on the claim watcher (dyn_fs payload).
+
+## MSTAR_FAST_SEND — REGRESSION −3% (4/4 adjacent pairs), default OFF
+A/B on 0,1 (full stack static, dynflags flip): 6.144→5.827, 6.089→5.945,
+5.892→5.678, 6.622→6.532. The ~0.4ms CPU-verified cut did not convert —
+consistent small negative, the familiar signature of removing Python that
+was sharing GIL windows with load-bearing waits. Two independent audits
+now agree the remaining main-thread items are load-bearing (ref counting,
+queue accumulation, loop semantics) or wait-valves (check_stop D2H).
+CONCLUSION: the incremental-Python-cut region is EXHAUSTED at ~51% GPU
+busy / ~8.8ms median step. The remaining i2t B32 gap closes only via the
+day-scale structural options: (1) postprocess/emit sidecar PROCESS (vLLM
+V4 pattern — moves construction+bookkeeping off-GIL entirely), or (2)
+V1 async-sched full form, or (3) GPU-side work. The stack A-side hit 6.62
+this window (handicapped pair) — canonical projection ~7.3 vs 8.21.
