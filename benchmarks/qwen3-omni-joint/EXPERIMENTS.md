@@ -580,3 +580,12 @@ Adjacent pairs on 0,1: A(slim) 5.587/5.621, 5.873/5.639 vs B(+cache)
 main-thread Python shrinks, removing gpu-thread waits approaches breakeven.
 Re-test after FAST_ROUTE (and any further main-thread trims) land.
 Winning stack so far: W5 + FAST_POSTPROC + SLIM_EMIT.
+
+## MSTAR_FAST_ROUTE — WIN +7-10% i2t B32 (267e5cf)
+Memoized replicated fanout decisions per request instance (replay = clone +
+_shard_dim/_total_fanin; sharded fanouts keep the full path). Adjacent
+pairs on 0,1: 5.402/5.717 vs 6.164/6.114 (+10.4%); 5.637/5.309 vs
+6.071/5.640 (+7.1%). Zero routing errors, tok/req 177. WINNING STACK now
+W5 + FAST_POSTPROC + SLIM_EMIT + FAST_ROUTE: pair-0,1 band 5.0 -> ~6.0
+(+20% tonight, compounding, all from main-thread Python removal — the
+remove-work law converting cleanly twice in a row).
