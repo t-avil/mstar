@@ -1226,6 +1226,29 @@ class ThinkerSubmodule(ARNodeSubmodule):
     PREFILL_TOKEN_BUCKETS = [128, 256, 512, 1024, 2048]
     PREFILL_CAPTURE_BATCH_SIZES = [1, 2, 4]
 
+    @staticmethod
+    def _env_buckets(name: str, default: list) -> list:
+        """Triage-server capture trimming (task: warmup acceleration).
+        MSTAR_DECODE_BUCKETS / MSTAR_PREFILL_BUCKETS = comma ints override
+        the capture grids. Uncaptured sizes pad UP to the next captured
+        bucket (existing lookup semantics), so a trimmed server is correct
+        for any cell — just wasteful outside its intended sizes. NEVER use
+        for committed sweeps; startup measured 204s -> ~150s with
+        24,28,32 / 256,512 for an i2t-triage server (34 Thinker captures
+        was the 70s startup tail)."""
+        import os as _os
+        raw = _os.environ.get(name, "").strip()
+        if not raw:
+            return default
+        try:
+            vals = sorted({int(x) for x in raw.split(",") if x.strip()})
+        except ValueError:
+            return default
+        if not vals or max(vals) != max(default):
+            # the largest bucket is load-bearing (everything pads up to it)
+            return default
+        return vals
+
     # W5-P2 mixed prefill+decode CAPTURED batch (MSTAR_MIXED_BATCH). Each bucket
     # is (padded_bs, total_tokens) where total_tokens = padded_bs decode-row
     # tokens (1 each) + one prefill-chunk row of C tokens minus the one row the
@@ -1377,7 +1400,9 @@ class ThinkerSubmodule(ARNodeSubmodule):
         """
         prefill_text_packed = {
             num_tokens: self._build_prefill_text_packed(num_tokens, device)
-            for num_tokens in self.PREFILL_TOKEN_BUCKETS
+            for num_tokens in self._env_buckets(
+                "MSTAR_PREFILL_BUCKETS", self.PREFILL_TOKEN_BUCKETS
+            )
         }
         prefill_vision_packed = {
             num_tokens: self._build_prefill_vision_packed(num_tokens, device)
@@ -1432,7 +1457,9 @@ class ThinkerSubmodule(ARNodeSubmodule):
                 # churns through 17-31 as requests finish/join; without 24/28
                 # every such step pads to 32 (up to ~2x wasted decode compute
                 # on the padded rows at the low end of the bucket).
-                capture_batch_sizes=[1, 2, 4, 8, 16, 24, 28, 32],
+                capture_batch_sizes=self._env_buckets(
+                    "MSTAR_DECODE_BUCKETS", [1, 2, 4, 8, 16, 24, 28, 32]
+                ),
             ),
             FlashInferPackedCudaGraphConfig(
                 capture_graph_walk="prefill_text",
