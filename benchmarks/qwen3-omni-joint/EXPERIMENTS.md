@@ -756,3 +756,17 @@ single item: per-step message construction; ZMQ send itself releases the
 GIL), register+sync+shell ~2.5, route residual 1.8. Next lever: send-path
 construction batching / off-thread sender (vLLM V4 pattern — their output
 IO thread releases GIL; construction is the GIL cost to remove).
+
+## MSTAR_FAST_SEND built (333b7dd, delegated agent) — pending GPU A/B
+Cost-ranked read of the 3.14ms send path: _inline_emit_uuids computed
+TWICE per rid (the earlier "compute once" fix had not held — verified);
+empty-set register_for_send still entered a CUDA stream ctx; ~6 manager
+calls + 8 dict lookups per rid; metadata dicts built for a consumer
+SLIM_EMIT2 already skips; eager str(msg) in communicator debug args
+(42µs/step, fixed unconditionally). Cuts: routing-object uuid stash
+(NodeOutputRouting.inline_emit_uuids — also pins send-side inline decision
+to the register-side SHM-skip decision), empty-register skip, verbatim
+inlining of load-bearing bookkeeping (NOT skipped), metadata skip.
+Left alone: ref counting, WGD, cross-step plans (staleness risk > gain).
+5 byte-identity CPU tests pass. Expected ~0.3-0.6ms/step (~3-7%);
+validation A/B armed on the claim watcher (dyn_fs payload).
