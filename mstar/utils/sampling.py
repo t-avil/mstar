@@ -210,8 +210,16 @@ def fused_temperature_softmax(
 # drains the in-flight decode pipeline (~9 ms of a ~19 ms i2t B32 step).
 # Off-switch kept for A/B only; outputs are byte-identical either way.
 import os as _os
+# DEFAULT OFF after A/B (2026-07-03): killing the syncs REGRESSED e2e ~5-7%
+# at i2t B32 (4/4 adjacent pairs) despite being 2x faster in isolation and
+# token-identical. The blocked gpu-thread RELEASED THE GIL during those
+# pipeline-drain waits, and the main thread's ~10ms of per-step postprocess
+# Python ran in that shade; without the waits the two threads contend and
+# wall time gets worse. Lesson: on this two-thread GIL architecture,
+# removing gpu-thread waits only pays if main-thread Python is removed or
+# moved off-GIL FIRST. Keep for re-test after postprocess work shrinks.
 _SAMPLER_CFG_CACHE = _os.environ.get(
-    "MSTAR_SAMPLER_CFG_CACHE", "1"
+    "MSTAR_SAMPLER_CFG_CACHE", "0"
 ).strip().lower() in ("1", "true", "yes", "on")
 
 
