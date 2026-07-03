@@ -746,3 +746,13 @@ CONFOUNDED (pair still draining a foreign job during load); re-measure
 ready-time in a quiet window. Next: re-profile to see if the wall flipped
 to the gpu/submit side (V1 re-opens) or GPU-bound; canonical sweep decision
 pending user (6,7 blocked only by idle 721MB foreign heartbeat daemons).
+
+## Re-profile with ROUTE2+SLIM2 (prof_final2, 0,1)
+Decode step median 8.8ms (avg 11.3); GPU busy 51.4% — main thread still
+the wall (postprocess_batch median 8.74 ≈ step median). Component moves:
+route 2.50→1.82 (ROUTE2 ✓), check_stop median 1.14 (fast path ✓),
+sample median 1.37 (cache ✓). REMAINING: send_outputs 3.14ms (largest
+single item: per-step message construction; ZMQ send itself releases the
+GIL), register+sync+shell ~2.5, route residual 1.8. Next lever: send-path
+construction batching / off-thread sender (vLLM V4 pattern — their output
+IO thread releases GIL; construction is the GIL cost to remove).
