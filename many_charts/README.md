@@ -20,3 +20,12 @@ canonical v2 sweeps (v3 preview latency at B32 is a closed-loop harness
 artifact — see EXPERIMENTS.md). vLLM speech charts have no TTFT/ITL —
 their harness doesn't report text-latency on speech-out paths; nothing is
 interpolated or fabricated.
+
+## Regenerating
+
+    ./make_charts.sh
+
+runs `extract_data.py` (rebuilds data/*.json from committed sources, incl.
+the git-history extractions: s2t mstar_old from d2d1983, vLLM v0.21 from
+5c27c12^) then `render_charts.py` (2x2 grids; text paths req/s+tok/s,
+speech paths req/s+RTF; TTFT/ITL per stream). No GPU, no re-benchmarking.
