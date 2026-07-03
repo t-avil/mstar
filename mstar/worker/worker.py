@@ -355,6 +355,69 @@ class Worker:
                 ),
             )
 
+        # MSTAR_ASYNC_SCHED — V1 async scheduling / GPU-resident sampled ids
+        # (option board 2026-07-03 "V1"; SIDECAR_DESIGN §0 ranked it "real
+        # value post-sidecar"). The synchronous engine blocks the main thread's
+        # step-N postprocess on step N's sampled tokens reaching CPU: the
+        # completion_event sync (worker.py ~3028) + the _prematerialize_for_
+        # check_stop side-stream D→H + side.synchronize(). V1 DEFERS the whole
+        # of step N's postprocess (check_stop / route+store / emit / WGD) by one
+        # loop iteration, so it runs only once N's tokens are already on CPU
+        # (their completion_event long-signalled by the following GPU step) —
+        # the blocking waits leave the critical path entirely.
+        #
+        # Safe because the speculative chain never depended on postprocess: the
+        # next step's loop-back token is threaded GPU-side from batch_N's output
+        # tensors (_thread_outputs_to_speculative), and speculation is already
+        # BUILT before the current step's postprocess in the baseline loop, so
+        # deferring postprocess one more iteration adds no new data dependency —
+        # it only lags the STOP decision. A rid whose GPU sampled a stop token
+        # at step N is seen one iteration later than baseline, by which point
+        # the two steps already in flight (the pending step + the just-submitted
+        # speculation) have generated up to TWO overrun tokens for it (baseline
+        # overruns by one and trims it via the single-shot _pending_loop_stops
+        # overstay dedup; V1's extra overrun step is trimmed by _async_trim).
+        # Every overrun token is trimmed before emit, so the client-visible
+        # stream is byte-identical to baseline — only wasted GPU compute,
+        # bounded at <=2 steps per completing request (the trade vLLM's async
+        # scheduler makes).
+        #
+        # Pinned to MSTAR_DIRECT_FEED (E9): the loop-back feed must ride the
+        # single GPU-side path the campaign validated. Refuse loudly otherwise,
+        # mirroring the sidecar's slim-stack precondition above — enabling async
+        # without it is a config error, not a silent fallback.
+        #
+        # Read ONCE — deliberately NOT dynflags-refreshable: it changes the
+        # per-step lifecycle STRUCTURE (which step is postprocessed this
+        # iteration), so a mid-run flip would strand a deferred step or
+        # double-process one. _refresh_dynamic_flags skips it; A/B via two
+        # servers or a restart, never dyn_ab. Default OFF; when off every path
+        # below is untouched and the emitted byte stream is identical.
+        self._async_sched = os.environ.get("MSTAR_ASYNC_SCHED", "0") == "1"
+        if self._async_sched and not self._direct_feed:
+            logger.critical(
+                "MSTAR_ASYNC_SCHED=1 requires MSTAR_DIRECT_FEED=1 (the async "
+                "loop-back token feed is pinned to the E9-validated GPU-side "
+                "batched sampled-tokens path); disabling async scheduling — "
+                "worker %s stays on the synchronous postprocess path.",
+                worker_id,
+            )
+            self._async_sched = False
+        # The postprocess owed from the previous iteration: (PendingBatch,
+        # NodeOutput). Its tokens' D→H completes during the GPU step launched
+        # after it, so consuming it one iteration later never blocks. Rolled
+        # forward on every speculative-chain step; flushed (run inline) the
+        # instant the chain breaks so registry/loop bookkeeping is current
+        # before any non-speculative schedule reads it.
+        self._deferred_pp: "tuple[PendingBatch, NodeOutput] | None" = None
+        # rids whose stop was detected in a deferred postprocess but which may
+        # still have up to two overrun steps in flight. The overstay dedup at
+        # the top of _postprocess_batch drops these from every subsequent
+        # batch's outputs — persisting across more than one step, unlike the
+        # single-shot _pending_loop_stops — so no overrun token is ever emitted.
+        # Cleared when the rid is finally removed (_remove_request).
+        self._async_trim: set[str] = set()
+
         if self.device.type == "cuda" and self.device.index is not None:
             torch.cuda.set_device(self.device)
 
@@ -770,6 +833,9 @@ class Worker:
                 if not self._sidecar_client.send(rec):
                     self._disable_sidecar("rid removal send failed")
         self._sidecar_condemned.discard(body.request_id)
+        # MSTAR_ASYNC_SCHED: the rid is fully torn down, so it can no longer
+        # have an overrun step in flight — drop its late-stop trim entry.
+        self._async_trim.discard(body.request_id)
 
         for node_name in self.engine_manager.lru_tracked_nodes():
             self._last_active.pop((body.request_id, node_name), None)
@@ -1910,6 +1976,10 @@ class Worker:
         # process spawned at init, so the flag is static (see __init__).
         # Sidecar-scoped construction is likewise pinned to the slim stack,
         # so the slim flips above only affect legacy-population rids.
+        # MSTAR_ASYNC_SCHED is likewise NOT refreshed: it changes the per-step
+        # postprocess lifecycle structure (see __init__), so a mid-run flip
+        # would strand or double-process a deferred step. A/B via two servers
+        # or a restart, never dyn_ab.
 
     def _ws_inc(self, key: str) -> None:
         """MSTAR_WALK_STATS: bump a named diagnostic counter (no-op when off).
@@ -2964,6 +3034,37 @@ class Worker:
         # If any nodes in the batch have "overstayed" their loop stop, then make
         # sure to not route their outputs
         valid_rids = set(batch_N.node_batch.request_ids)
+
+        def _drop_overstayed(stopped_rid: str) -> None:
+            # Drop a stopped rid from this batch so its (overrun) output is
+            # neither routed nor emitted. Idempotent: every mutation tolerates
+            # the rid already being gone (a rid can match both the pending-stop
+            # loop and the async-trim sweep below).
+            output.per_request_output_tensors.pop(stopped_rid, None)
+            valid_rids.discard(stopped_rid)
+            batch_N.batch.node_objects.pop(stopped_rid, None)
+            batch_N.batch.request_to_worker_graph.pop(stopped_rid, None)
+            batch_N.node_batch.per_request_info.pop(stopped_rid, None)
+            # Structural change (rid dropped mid-step): drop any replay plan.
+            if self._fast_postproc:
+                self.tensor_manager.invalidate_populate_plan(stopped_rid)
+            # MSTAR_FAST_ROUTE2: same trigger, route-plan analogue (no-op
+            # when the plan cache is empty / flag off).
+            self.worker_graphs_manager.invalidate_route_plan(stopped_rid)
+
+        # MSTAR_ASYNC_SCHED late-stop trim: with the postprocess deferred, a
+        # rid whose stop was detected a step ago can still have a SECOND overrun
+        # step in flight beyond the one the single-shot _pending_loop_stops
+        # overstay (below) covers. _async_trim persists the stopped rids across
+        # every subsequent batch until they are removed, so that extra overrun
+        # token is dropped here instead of emitted. No-op when the flag is off
+        # (_async_trim stays empty) — byte-identical.
+        if self._async_trim:
+            for stopped_rid in list(self._async_trim):
+                if stopped_rid in batch_N.batch.node_objects:
+                    _drop_overstayed(stopped_rid)
+                    self._ws_inc("late_stop_trims")
+
         if batch_N.speculative_new_iter:
             # MSTAR_MIXED_SPEC: a mixed spec batch carries batch-level walk
             # "thinker_mixed", but loop stops are recorded under the rid's OWN
@@ -2984,17 +3085,7 @@ class Worker:
                 stopped_rid = pending_stop.rid
                 if stopped_rid not in batch_N.batch.node_objects:
                     continue
-                output.per_request_output_tensors.pop(stopped_rid, None)
-                valid_rids.discard(stopped_rid)
-                batch_N.batch.node_objects.pop(stopped_rid)
-                batch_N.batch.request_to_worker_graph.pop(stopped_rid)
-                batch_N.node_batch.per_request_info.pop(stopped_rid)
-                # Structural change (rid dropped mid-step): drop any replay plan.
-                if self._fast_postproc:
-                    self.tensor_manager.invalidate_populate_plan(stopped_rid)
-                # MSTAR_FAST_ROUTE2: same trigger, route-plan analogue (no-op
-                # when the plan cache is empty / flag off).
-                self.worker_graphs_manager.invalidate_route_plan(stopped_rid)
+                _drop_overstayed(stopped_rid)
         batch_N.node_batch.request_ids = list(valid_rids)
 
         # pending stops are only needed for one iteration, so can be cleared now
@@ -3021,6 +3112,15 @@ class Worker:
 
         # Wait for batch N's completion event before proceeding
         # TODO: may need to refine this based on how it affects performance?
+        # MSTAR_ASYNC_SCHED: this sync is the wait V1 moves off the critical
+        # path — when the postprocess is deferred it fires here on an
+        # already-signalled event (near-zero). Time it under WALK_STATS so a
+        # smoke can confirm the wait collapsed.
+        _sync_t0 = (
+            _time.perf_counter()
+            if (self._async_sched and self._walk_stats is not None)
+            else 0.0
+        )
         if torch.cuda.is_available() and batch_N.batch.node_objects:
             if output.completion_event is not None:
                 if self.enable_nvtx:
@@ -3030,6 +3130,10 @@ class Worker:
                     range_pop(synchronize=False)
             else:
                 torch.cuda.default_stream().synchronize()
+        if _sync_t0:
+            self._walk_stats["async_d2h_wait_us"] = self._walk_stats.get(
+                "async_d2h_wait_us", 0
+            ) + int((_time.perf_counter() - _sync_t0) * 1_000_000)
 
         if self.enable_prof:
             batch_N.node_batch.exec_timings.fwd_end = time.perf_counter()
@@ -3084,6 +3188,15 @@ class Worker:
         if self.enable_nvtx:
             range_pop(synchronize=False)
             range_push("worker.postprocess.stop_loops", synchronize=False)
+
+        # MSTAR_ASYNC_SCHED: a stop detected here is one iteration late, so the
+        # rid may already have overrun steps in flight. Mark it for trimming so
+        # every subsequent batch drops its output until it is removed. This
+        # step's own (stop-carrying) output still routes/emits below, exactly
+        # as baseline — the token AT the stop is part of the stream. No-op when
+        # the flag is off.
+        if self._async_sched and new_stops:
+            self._async_trim.update(new_stops.keys())
 
         # Stop loops, if applicable
         for rid, loop_names in new_stops.items():
@@ -3522,8 +3635,16 @@ class Worker:
         its GPU work may still be reading/writing that rid's KV pages, so its
         REMOVE must stay deferred until the side batch is postprocessed. We
         union ``self._side_in_flight_rids`` here so every caller respects it
-        without having to thread the side set through each call site."""
+        without having to thread the side set through each call site.
+
+        MSTAR_ASYNC_SCHED: a rid whose postprocess is still DEFERRED
+        (``self._deferred_pp``) is likewise held — tearing down its engine /
+        tensor state before that owed postprocess routes its outputs would
+        drop the step. Union the deferred batch's rids so the remove reattempts
+        once the deferral is flushed."""
         held = in_flight_rids | self._side_in_flight_rids
+        if self._deferred_pp is not None:
+            held = held | set(self._deferred_pp[0].batch.node_objects.keys())
         to_apply = [r for r in self._pending_removes if r not in held]
         for rid in to_apply:
             self._pending_removes.discard(rid)
@@ -3539,6 +3660,25 @@ class Worker:
                     if k[0] != rid
                 }
             self._remove_request(RemoveRequest(request_id=rid, source=MessageSource.SELF))
+
+    def _run_deferred_postprocess(self) -> None:
+        """MSTAR_ASYNC_SCHED: run the postprocess owed from a previous
+        iteration, if any, and clear the slot.
+
+        The owed step's sampled-token D→H completed during the GPU step
+        launched after it, so the completion_event sync and
+        ``_prematerialize_for_check_stop``'s ``side.synchronize()`` inside
+        ``_postprocess_batch`` are already-signalled no-ops here — that is the
+        whole point: the blocking waits are off the critical path. The residual
+        completion-event wait is recorded there under WALK_STATS
+        (``async_d2h_wait_us``) so a GPU smoke can confirm it stays near zero;
+        the baseline it saves against is the ~1-3 ms/step prematerialize wall
+        documented in EXPERIMENTS. No-op when nothing is deferred."""
+        if self._deferred_pp is None:
+            return
+        pending, output = self._deferred_pp
+        self._deferred_pp = None
+        self._postprocess_batch(pending, output)
 
     def run(self) -> None:
         switch_interval = os.environ.get("MSTAR_PY_SWITCH_INTERVAL_SEC", "")
@@ -4222,12 +4362,39 @@ class Worker:
                     if not output.allocation_failed:
                         if self.enable_nvtx:
                             range_push("worker.postprocess_batch", synchronize=False)
-                        self._postprocess_batch(pending, output)
+                        if self._async_sched and spec_pending is not None:
+                            # V1 async scheduling: a speculative step was
+                            # submitted, so the chain continues — DEFER this
+                            # step's postprocess and run the one owed from the
+                            # previous iteration (its tokens' D→H is already
+                            # complete, so it never blocks). The blocking
+                            # completion_event/prematerialize waits thus leave
+                            # the critical path.
+                            self._run_deferred_postprocess()
+                            self._deferred_pp = (pending, output)
+                            self._ws_inc("async_sched_steps")
+                        else:
+                            # Async off, or the chain breaks this step (no
+                            # speculation submitted). Flush any owed postprocess
+                            # first so ordering + registry/loop bookkeeping are
+                            # current before the non-speculative schedule below,
+                            # then process this step inline exactly as baseline.
+                            if self._async_sched:
+                                self._run_deferred_postprocess()
+                            self._postprocess_batch(pending, output)
                         if self.enable_nvtx:
                             range_pop(synchronize=False)
+                    elif self._async_sched:
+                        # pending hit a KV-OOM: its output is invalid and never
+                        # postprocessed (baseline), and speculation was
+                        # cancelled — a chain break. Flush the owed postprocess
+                        # before the rehab-driven non-speculative reschedule
+                        # reads bookkeeping.
+                        self._run_deferred_postprocess()
 
-                    # Removes for any rid not in the in-flight spec step
-                    # are safe to apply now.
+                    # Removes for any rid not in the in-flight spec step (or a
+                    # deferred postprocess, unioned inside the helper) are safe
+                    # to apply now.
                     in_flight = set(spec_pending.batch.node_objects.keys()) if spec_pending else set()
                     self._apply_pending_removes_safe_to_drop(in_flight)
                     _set_pending(None)
@@ -4261,6 +4428,16 @@ class Worker:
 
                 # 4. Non-speculative path: no pending or speculation skipped
                 # (e.g., non-AR engine, or loop ended). Run MicroScheduler.
+                #
+                # MSTAR_ASYNC_SCHED invariant: no postprocess may remain
+                # deferred across a non-speculative schedule — get_next_batch
+                # reads the routing/loop bookkeeping the deferred postprocess
+                # produces. The chain-break paths above already flush; this is
+                # the belt-and-suspenders no-op that keeps the invariant local
+                # to this entry (e.g. the first iteration after startup, where
+                # pending was None).
+                if self._async_sched and self._deferred_pp is not None:
+                    self._run_deferred_postprocess()
                 #
                 # Chain-break drain (MSTAR_SIDE_PREFILL): the decode chain has
                 # broken, so the get_next_batch below may schedule a decode
