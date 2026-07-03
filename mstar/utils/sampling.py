@@ -223,6 +223,22 @@ _SAMPLER_CFG_CACHE = _os.environ.get(
 ).strip().lower() in ("1", "true", "yes", "on")
 
 
+def _refresh_sampler_flags() -> None:
+    """MSTAR_DYNFLAGS hook: re-read the cache flag at runtime (safe — the
+    cache is semantics-free; flipping only changes whether it's consulted)."""
+    global _SAMPLER_CFG_CACHE
+    _SAMPLER_CFG_CACHE = _os.environ.get(
+        "MSTAR_SAMPLER_CFG_CACHE", "0"
+    ).strip().lower() in ("1", "true", "yes", "on")
+
+
+try:
+    from mstar.utils import dynflags as _dynflags
+    _dynflags.register_cache_clear(_refresh_sampler_flags)
+except Exception:
+    pass
+
+
 @dataclass
 class SamplingConfig:
     # Sizes the per-request seen-token mask for the repetition penalty. When set,

@@ -1393,6 +1393,15 @@ class Worker:
         self.mixed_single_chunk = mixed_single_chunk_enabled()
         if hasattr(self.scheduler, "_mixed_min_decode_cached"):
             self.scheduler._mixed_min_decode_cached = None
+        # Winning-stack flags, made runtime-refreshable so one-server dyn_ab
+        # A/Bs cover them (each is semantics-free to flip: slim emit falls
+        # back to full items; fast checkstop falls back to engine path).
+        self._slim_emit = (
+            os.environ.get("MSTAR_SLIM_EMIT", "0") == "1" and self._batch_emit
+        )
+        self._fast_checkstop = (
+            os.environ.get("MSTAR_FAST_CHECKSTOP", "0") == "1"
+        )
 
     def _ws_inc(self, key: str) -> None:
         """MSTAR_WALK_STATS: bump a named diagnostic counter (no-op when off).

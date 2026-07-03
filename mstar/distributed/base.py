@@ -7,6 +7,22 @@ from collections import defaultdict
 _FAST_ROUTE = _os.environ.get("MSTAR_FAST_ROUTE", "0").strip().lower() in (
     "1", "true", "yes", "on",
 )
+
+
+def _refresh_route_flags() -> None:
+    """MSTAR_DYNFLAGS hook (safe: memo replay is value-identical; flipping
+    only toggles whether the memo is consulted/built)."""
+    global _FAST_ROUTE
+    _FAST_ROUTE = _os.environ.get(
+        "MSTAR_FAST_ROUTE", "0"
+    ).strip().lower() in ("1", "true", "yes", "on")
+
+
+try:
+    from mstar.utils import dynflags as _dynflags
+    _dynflags.register_cache_clear(_refresh_route_flags)
+except Exception:
+    pass
 from dataclasses import dataclass
 
 from mstar.graph.base import GraphEdge, NodeAndGraphWalk
