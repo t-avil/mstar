@@ -688,3 +688,11 @@ so the gap may be deeper — possibly wait_for_work draining/eating a wakeup
 another path needed). MSTAR_CONDUCTOR_POLL kept (default 0) pending a
 wakeup-source audit. The latency win stands as designed; the execution
 needs the audit first. (4a19bbb, exp/overlap-sched)
+
+## Mid-batch coverage run (i2t B2/B4/B16) — INVALIDATED (foreign co-location mid-run)
+A foreign job landed on GPU 1 during the cells (46GB resident by run end);
+the B32 sentinel cell read 4.330 vs the same config's 6.1-6.9 an hour
+earlier — window poisoned, numbers unusable (B16 4.388 / B4 1.955 /
+B2 1.209 recorded for the log only). Re-run queued for a clean pair.
+Sentinel-cell practice adopted: every coverage run carries one i2t:32
+cell as a contamination detector.
