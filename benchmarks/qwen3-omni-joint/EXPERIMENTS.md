@@ -599,3 +599,42 @@ the sweep): W5 + MSTAR_FAST_POSTPROC + MSTAR_SLIM_EMIT + MSTAR_FAST_ROUTE.
 NUMA note: all pair-0,1 numbers carry a cross-NUMA handicap (quick_bench
 hardcodes cpunodebind=1; GPUs 0,1 are node 0) — deltas fair, absolutes
 understated; the canonical sweep runs on 6,7.
+
+## Option board 2026-07-03 (~05:00) — 12 investigation options, three research passes
+NEW from M* code deep-read:
+ N1. check_stop+register fast-path for decode chains (batch check_stop_batched
+     over the existing pinned buffer; cache the all-inline/no-route flag per
+     (rid,node,walk); stop computing _inline_emit_uuids twice) — ~1.5-2.2ms/
+     step main-thread (~8-12%), 2-3 days.
+ N2. Kill sleep-quantized hops: conductor unconditional time.sleep(0.001)/loop
+     (conductor.py:1143) -> blocking poll; EventWakeup fd for data-worker +
+     api_server 1ms polls; asyncio.Event for SSE. Latency/tails: TTFT −6-10ms
+     on chunked prompts, jitter −3ms. 1 day.
+ N3. set_config change-detect in prepare_batch (kv_cache_engine.py:802) +
+     SCOPED cache invalidation — CRITICAL FINDING: set_config runs per rid
+     per step and calls _batch_cfg_cache.clear(), so MSTAR_SAMPLER_CFG_CACHE
+     NEVER HIT in any A/B (all three "trend" points measured a
+     structurally-dead cache). ~0.3-0.5ms/step direct + unblocks the ~9ms
+     sync lever. Half day. DO FIRST.
+RE-TESTS from execution audit:
+ R1. Sampler cache — REDO after N3 (previous verdicts void).
+ R2. E10 two-step decode + E9 direct feed, rebased onto winning stack,
+     3-arm with cache (+2-8% predicted; tested pre-every-win, self-
+     handicapped by inline step-2 syncs).
+ R3. GIL switch interval {unset,0.001,0.01} + NUM_SLOTS=3 piggyback —
+     cheap sweep, single-cell pre-slim verdicts unreliable.
+FROM vLLM-Omni source dive (their edge is 100% host-side; kernels equal;
+their speech loss is structural — pickle+flock+shm stage handoffs):
+ V1. Async scheduling / GPU-resident sampled ids (D2H off-thread via copy
+     stream + event; placeholders repaired lazily) — largest lever, up to
+     +30-60% e2e; builds on E9+N3.
+ V2. Budgeted chunked-prefill interleave POLICY into our already-captured
+     mixed graphs (decodes always scheduled, leftover budget = one prefill
+     chunk) — kills phase drain, +15-30% under arrivals.
+ V3. Persistent batch + diff application + change-triggered sampling
+     metadata (steady state = O(1) checks + 32-row pinned copies).
+ V4. Detok/serialization out of the conductor process (ZMQ IO threads
+     release GIL; one batched EngineCoreOutputs per step).
+ V5. Encoder mm_hash cache + per-step encoder budget (batched ViT call).
+ V6. Gumbel/exponential sync-free sampler + resident config tensors +
+     all-greedy/no-penalty gates (multinomial forces syncs).
