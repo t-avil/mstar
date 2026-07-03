@@ -542,3 +542,19 @@ relocate per-token route/store/emit/check_stop off the hot threads —
 third-process SHM-ring consumer (vLLM V1 EngineCore pattern) or full
 vectorization of the per-rid loop; then re-test the sampler cache and
 defer-sample, which should both flip positive once the GIL shade is gone.
+
+## MSTAR_SLIM_EMIT (afb1099, exp/overlap-sched) — REGRESSED 5x, pending api-side debug
+Steady-state token emits send SlimResultTokens (values only) after a first
+full per-(rid,name) template; api server inflates from the cached template.
+Outputs fully correct (tok/req ~170, zero errors/warnings) but i2t B32
+collapsed 5.9-7.6 -> 1.2 req/s, jct 16.5s. Worker WALK_STATS cadence stayed
+~15ms/step with intermittent stalls => the delay is DOWNSTREAM (api_server
+message loop / data-worker chunk delivery throttling the closed-loop
+client), not worker compute. Needs api-side timing instrumentation
+(template-inflate path, data worker queue latency, chunk->client event
+timing). Flag default OFF; code kept for the debug.
+
+## Protocol caveat: QB_FAST cells
+n=48 cells show ±25% same-config spread and a different token mix
+(~110 tok/req vs 177 at n=96). Smoke/correctness only; ship decisions at
+full n=96 with multiple adjacent pairs.
