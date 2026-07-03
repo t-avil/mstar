@@ -791,7 +791,22 @@ class Worker:
         # / KV pages. Queue the remove and apply it once no in-flight step
         # references the rid (see _apply_pending_removes_safe_to_drop in
         # the run loop).
-        if body.request_id in getattr(self, "_in_flight_rids", set()):
+        #
+        # MSTAR_ASYNC_SCHED: a rid whose postprocess is still DEFERRED
+        # (_deferred_pp) is likewise held — removing it now empties
+        # per_request_info before the owed postprocess reads it (KeyError in
+        # get_fwd_info). This direct path (REMOVE_REQUEST via _process_messages)
+        # needs the same deferred-rid guard the batched
+        # _apply_pending_removes_safe_to_drop path already has.
+        _deferred = getattr(self, "_deferred_pp", None)
+        _deferred_rids = (
+            set(_deferred[0].batch.node_objects.keys())
+            if _deferred is not None else set()
+        )
+        if (
+            body.request_id in getattr(self, "_in_flight_rids", set())
+            or body.request_id in _deferred_rids
+        ):
             self._pending_removes.add(body.request_id)
             return
 

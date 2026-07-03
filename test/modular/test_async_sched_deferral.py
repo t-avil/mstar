@@ -111,6 +111,30 @@ def test_remove_request_clears_async_trim():
     assert w._async_trim == {"r_other"}
 
 
+def test_remove_request_defers_a_rid_whose_postprocess_is_still_deferred():
+    # Regression: a REMOVE_REQUEST arriving via _process_messages for a rid
+    # that is still in _deferred_pp must be QUEUED, not applied — applying it
+    # empties per_request_info before the owed deferred postprocess reads it
+    # (KeyError in get_fwd_info). Caught on the first GPU smoke.
+    from mstar.worker.worker import RemoveRequest, MessageSource
+
+    w = _bare_worker()
+    w.is_tp_follower = False
+    w._in_flight_rids = set()  # NOT in the current spec batch
+    w._deferred_pp = (_batch("r_defer"), object())
+    torn_down = []
+    w.engine_manager = SimpleNamespace(
+        remove_request=lambda r: torn_down.append(r), lru_tracked_nodes=lambda: []
+    )
+
+    w._remove_request(
+        RemoveRequest(request_id="r_defer", source=MessageSource.SELF)
+    )
+    # Queued, not torn down.
+    assert "r_defer" in w._pending_removes
+    assert torn_down == []
+
+
 def test_in_flight_and_side_rids_still_held():
     w = _bare_worker()
     removed = []
