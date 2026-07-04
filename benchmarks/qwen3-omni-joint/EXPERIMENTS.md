@@ -1331,3 +1331,15 @@ starves our server below usability. Disk clean (TMPDIR hardening held).
 Item 4 re-queued for the stable window. GPU VERDICT WORK SUSPENDED until
 box conditions change (Ray release / GPU-7 return / load drop) — burning
 boots in this produces only noise entries. Watch mode: low-frequency polls.
+
+## Custom-ops perf A-B-A (2,3, sawtooth box) — POSITIVE direction; magnitude to the clean window
+OFF1 5.145/5.157/5.744/7.014 (mean 5.77, uptrend) -> ON 6.119/6.196/6.392/
+7.154 (mean 6.47, tok/req 176-179 sane) -> OFF2 5.160/4.722/4.234/4.876
+(mean 4.75, downtrend). ON exceeds BOTH bracket means and ON's worst cell
+beats every OFF2 cell — the fusion win is directionally REAL; magnitude
+unresolvable under the sawtooth (+5..20% range). Cache double-proof: ON boot
+12m28s (second datapoint, consistent with 12m44s). SHIP POSTURE:
+opt/custom-ops = strong candidate (census 41, correctness sane, boots
+cached, perf positive); the canonical-pair A/B quantifies before merge to
+integration. STABLE-WINDOW QUEUE now: canonical re-baseline (GPU-7 reset),
+custom-ops magnitude A/B, merge-config B32 read, arm-3, W2.
