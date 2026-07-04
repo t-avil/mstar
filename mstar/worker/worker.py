@@ -393,6 +393,57 @@ class Worker:
                 ),
             )
 
+        # MSTAR_SIDECAR_CHECKSTOP — Stage 2 of docs/SIDECAR_DESIGN.md (§6.2):
+        # deferred-consume of the check_stop D→H. Instead of blocking the main
+        # thread on ``side.synchronize()`` (the ~1.1-2.1 ms graph-tail wait,
+        # design §2 row 4), record an event after the side-stream copy, run the
+        # cheap per-rid Python that follows, then POLL ``event.query()`` at the
+        # consumption point. Ready => consume this step with no wait; not ready
+        # => fall back to a blocking wait (counted) so the stop DECISION is
+        # always made this step from this step's tokens. The V1 lesson holds:
+        # stop-state computation + application stay synchronous and worker-side;
+        # only the WAIT moves. max_tokens enforcement is a pure counter and
+        # never touches this D→H, so a stalled copy can never cause runaway.
+        #
+        # This is a GIL-valve removal (design §6.2 / Law 2): it converts only if
+        # the main thread is still the wall after the emit sidecar. The
+        # checkstop_deferred_consume / checkstop_sync_fallback counters make the
+        # conversion observable; if fallbacks dominate, the wait was
+        # load-bearing graph-tail and this is correctly a no-op, not a
+        # regression (the fallback path is byte-identical to flag-off).
+        #
+        # SCOPE (this build): the deferred-consume + same-step decision above,
+        # ONLY. The fuller design §6.2 offload (EOS decided in the sidecar and
+        # returned via a StopFeedback message, stops landing 2-3 steps late, a
+        # persistent multi-step overstay set) is deliberately NOT built here:
+        # it requires a sidecar->worker reverse channel that breaks the one-way
+        # data-flow invariant the design calls its central safety property
+        # (§6.1), and under the same-step-decision rule the worker still decides
+        # authoritatively so that feedback would be redundant. See the report /
+        # DESIGN notes; that path needs GPU shadow validation before it can
+        # safely replace the worker's stop authority.
+        #
+        # Read ONCE (static; no dynflags — it changes the postprocess control
+        # flow, not a tunable). Requires CUDA; on a CPU worker it is a no-op
+        # because there is no completion event to defer on.
+        self._sidecar_checkstop = (
+            os.environ.get("MSTAR_SIDECAR_CHECKSTOP", "0") == "1"
+        )
+        # Shadow mode (design §8, mandatory before any perf cell): when on, the
+        # legacy SYNCHRONOUS check_stop is recomputed alongside the deferred
+        # path and the two stop sets are asserted equal, mismatches logged at
+        # WARNING with a checkstop_shadow_mismatch counter. Legacy stays
+        # authoritative while shadowing, so a bug surfaces as a logged mismatch,
+        # never a corrupted stream.
+        self._sidecar_checkstop_shadow = (
+            self._sidecar_checkstop
+            and os.environ.get("MSTAR_SIDECAR_CHECKSTOP_SHADOW", "0") == "1"
+        )
+        # Reusable side-stream event for the deferred check_stop copy. One event
+        # suffices: each step consumes (queries or waits on) it before the next
+        # step records it again, so only one copy is ever in flight.
+        self._checkstop_event: "torch.cuda.Event | None" = None
+
         if self.device.type == "cuda" and self.device.index is not None:
             torch.cuda.set_device(self.device)
 
@@ -3152,13 +3203,12 @@ class Worker:
             range_pop(synchronize=False)
             range_push("worker.postprocess.check_stop", synchronize=False)
 
-        for rid, req_info in batch_N.node_batch.per_request_info.items():
-            new_iters = self.worker_graphs_manager.get_dynamic_loop_iters(
-                rid, partition=batch_N.partition,
-            )
-            req_info.dynamic_loop_iter_counts.update(new_iters)
-
-        # Check for stops
+        # Check for stops. MSTAR_SIDECAR_CHECKSTOP (design §6.2): enqueue the
+        # side-stream check_stop D→H WITHOUT blocking, run the cheap per-rid
+        # dynamic-loop-iter Python (overlapping the in-flight copy), then poll
+        # the copy event and decide THIS step. Flag off: prematerialize blocks
+        # inline and the two independent loops below are output-identical
+        # regardless of order.
         engine = self.engine_manager.get_engine(batch_N.node_name)
         cpu_output = self._prematerialize_for_check_stop(
             output,
@@ -3167,74 +3217,48 @@ class Worker:
                 self._fast_checkstop_talker
                 and batch_N.graph_walk == "talker_decode"
             ),
+            defer=self._sidecar_checkstop,
         )
-        flat = getattr(cpu_output, "_checkstop_flat", None)
-        if (
-            self._fast_checkstop_talker
-            and batch_N.graph_walk == "talker_decode"
-            and flat is not None
-        ):
-            # N1-Talker fast path: uniform talker_decode layer0_codes batch.
-            # Semantics identical to TalkerSubmodule.check_stop (layer0 code ==
-            # codec_eos, or iter+1 >= talker_max_tokens), but one tolist() covers
-            # the batch and the compares are pure ints. No ignore_eos for the
-            # talker — codec_eos is the only valid stop signal.
-            self._ws_inc("talker_fast_checkstop_steps")
-            tokens = flat.tolist()
-            eos_id = self._talker_codec_eos_id
-            if eos_id is None:
-                submod = engine.submodule_management[
-                    batch_N.node_name
-                ].submodule
-                eos_id = self._talker_codec_eos_id = (
-                    submod.config.talker.codec_eos_token_id
+
+        for rid, req_info in batch_N.node_batch.per_request_info.items():
+            new_iters = self.worker_graphs_manager.get_dynamic_loop_iters(
+                rid, partition=batch_N.partition,
+            )
+            req_info.dynamic_loop_iter_counts.update(new_iters)
+
+        # Same-step barrier: the stop DECISION must read this step's tokens, so
+        # poll the deferred copy (or fall back to a counted blocking wait) before
+        # computing stops. No deferred/late decision — that is the V1 identity
+        # failure the design forbids (§6.2).
+        if self._sidecar_checkstop:
+            self._await_checkstop(cpu_output)
+
+        new_stops = self._compute_new_stops(batch_N, engine, cpu_output)
+
+        # Shadow (design §8, mandatory pre-perf): recompute the stop set from a
+        # forced-synchronous D→H of the SAME GPU outputs and assert agreement.
+        # Legacy stays authoritative — a bug surfaces as a logged mismatch +
+        # counter, never a corrupted stream. A mismatch here means the deferred
+        # copy event reported ready before the copy truly landed.
+        if self._sidecar_checkstop_shadow:
+            ref_output = self._prematerialize_for_check_stop(
+                output,
+                batch_fast=(batch_N.graph_walk == "thinker_decode"),
+                talker_fast=(
+                    self._fast_checkstop_talker
+                    and batch_N.graph_walk == "talker_decode"
+                ),
+                defer=False,
+            )
+            ref_stops = self._compute_new_stops(batch_N, engine, ref_output)
+            if ref_stops != new_stops:
+                self._ws_inc("checkstop_shadow_mismatch")
+                logger.warning(
+                    "MSTAR_SIDECAR_CHECKSTOP shadow mismatch (walk=%s): "
+                    "deferred=%s reference=%s",
+                    batch_N.graph_walk, new_stops, ref_stops,
                 )
-            new_stops = {}
-            per_info = batch_N.node_batch.per_request_info
-            for i, rid in enumerate(cpu_output._checkstop_rids):
-                info = per_info.get(rid)
-                if info is None:
-                    continue
-                max_tokens = info.step_metadata.get(
-                    "talker_max_tokens", info.max_tokens
-                )
-                if (
-                    (eos_id is not None and int(tokens[i]) == eos_id)
-                    or info.dynamic_loop_iter_counts.get(
-                        "talker_decode_loop", 0
-                    ) + 1 >= max_tokens
-                ):
-                    new_stops[rid] = {"talker_decode_loop"}
-        elif self._fast_checkstop and flat is not None:
-            # N1 fast path: uniform thinker_decode new-token batch. Semantics
-            # identical to ThinkerSubmodule.check_stop (token == im_end and
-            # not ignore_eos, or iter+1 >= max_tokens), but one tolist()
-            # covers the whole batch and the compares are pure ints.
-            tokens = flat.tolist()
-            eos_id = self._thinker_eos_id
-            if eos_id is None:
-                submod = engine.submodule_management[
-                    batch_N.node_name
-                ].submodule
-                eos_id = self._thinker_eos_id = submod.config.im_end_token_id
-            new_stops = {}
-            per_info = batch_N.node_batch.per_request_info
-            for i, rid in enumerate(cpu_output._checkstop_rids):
-                info = per_info.get(rid)
-                if info is None:
-                    continue
-                if (
-                    (
-                        int(tokens[i]) == eos_id
-                        and not info.sampling_config["Thinker"].ignore_eos
-                    )
-                    or info.dynamic_loop_iter_counts.get(
-                        "thinker_decode_loop", 0
-                    ) + 1 >= info.max_tokens
-                ):
-                    new_stops[rid] = {"thinker_decode_loop"}
-        else:
-            new_stops = engine.check_stop_for_batch(batch_N.node_batch, cpu_output)
+                new_stops = ref_stops
 
         if self.enable_nvtx:
             range_pop(synchronize=False)
@@ -3545,11 +3569,130 @@ class Worker:
             )
         return buffers[index]
 
+    def _compute_new_stops(
+        self, batch_N: PendingBatch, engine, cpu_output: NodeOutput,
+    ) -> dict:
+        """Stop-state COMPUTATION (design §3.2/§6.2): pure int/counter compares
+        over the prematerialized CPU tokens. Extracted verbatim from
+        ``_postprocess_batch`` so MSTAR_SIDECAR_CHECKSTOP_SHADOW can recompute it
+        against a forced-synchronous D→H. No CUDA reads here beyond ``.tolist()``
+        on the already-copied pinned buffers — the copy must be complete before
+        this is called (the caller's barrier guarantees it)."""
+        flat = getattr(cpu_output, "_checkstop_flat", None)
+        if (
+            self._fast_checkstop_talker
+            and batch_N.graph_walk == "talker_decode"
+            and flat is not None
+        ):
+            # N1-Talker fast path: uniform talker_decode layer0_codes batch.
+            # Semantics identical to TalkerSubmodule.check_stop (layer0 code ==
+            # codec_eos, or iter+1 >= talker_max_tokens), but one tolist() covers
+            # the batch and the compares are pure ints. No ignore_eos for the
+            # talker — codec_eos is the only valid stop signal.
+            self._ws_inc("talker_fast_checkstop_steps")
+            tokens = flat.tolist()
+            eos_id = self._talker_codec_eos_id
+            if eos_id is None:
+                submod = engine.submodule_management[
+                    batch_N.node_name
+                ].submodule
+                eos_id = self._talker_codec_eos_id = (
+                    submod.config.talker.codec_eos_token_id
+                )
+            new_stops = {}
+            per_info = batch_N.node_batch.per_request_info
+            for i, rid in enumerate(cpu_output._checkstop_rids):
+                info = per_info.get(rid)
+                if info is None:
+                    continue
+                max_tokens = info.step_metadata.get(
+                    "talker_max_tokens", info.max_tokens
+                )
+                if (
+                    (eos_id is not None and int(tokens[i]) == eos_id)
+                    or info.dynamic_loop_iter_counts.get(
+                        "talker_decode_loop", 0
+                    ) + 1 >= max_tokens
+                ):
+                    new_stops[rid] = {"talker_decode_loop"}
+            return new_stops
+        if self._fast_checkstop and flat is not None:
+            # N1 fast path: uniform thinker_decode new-token batch. Semantics
+            # identical to ThinkerSubmodule.check_stop (token == im_end and
+            # not ignore_eos, or iter+1 >= max_tokens), but one tolist()
+            # covers the whole batch and the compares are pure ints.
+            tokens = flat.tolist()
+            eos_id = self._thinker_eos_id
+            if eos_id is None:
+                submod = engine.submodule_management[
+                    batch_N.node_name
+                ].submodule
+                eos_id = self._thinker_eos_id = submod.config.im_end_token_id
+            new_stops = {}
+            per_info = batch_N.node_batch.per_request_info
+            for i, rid in enumerate(cpu_output._checkstop_rids):
+                info = per_info.get(rid)
+                if info is None:
+                    continue
+                if (
+                    (
+                        int(tokens[i]) == eos_id
+                        and not info.sampling_config["Thinker"].ignore_eos
+                    )
+                    or info.dynamic_loop_iter_counts.get(
+                        "thinker_decode_loop", 0
+                    ) + 1 >= info.max_tokens
+                ):
+                    new_stops[rid] = {"thinker_decode_loop"}
+            return new_stops
+        return engine.check_stop_for_batch(batch_N.node_batch, cpu_output)
+
+    def _checkstop_barrier(
+        self, side: "torch.cuda.Stream", defer: bool,
+    ) -> "torch.cuda.Event | None":
+        """Terminate the side-stream check_stop D→H (MSTAR_SIDECAR_CHECKSTOP).
+
+        Legacy (``defer=False``): block the main thread on the copy exactly as
+        before and return None — byte-identical to the flag-off path.
+
+        Deferred (``defer=True``): record a reusable event on the side stream
+        and return it WITHOUT blocking. The caller runs the cheap per-rid Python
+        that follows (overlapping the in-flight copy) and then polls the event
+        at ``_await_checkstop`` — ready => consume with no wait, else a counted
+        blocking fallback. One event suffices: the copy is consumed before the
+        next step records it again."""
+        if not defer:
+            side.synchronize()
+            return None
+        ev = self._checkstop_event
+        if ev is None:
+            ev = self._checkstop_event = torch.cuda.Event()
+        ev.record(side)
+        return ev
+
+    def _await_checkstop(self, cpu_output: NodeOutput) -> None:
+        """Barrier before the first read of a deferred check_stop copy
+        (MSTAR_SIDECAR_CHECKSTOP). Poll the copy event: ready => consume this
+        step with no wait (checkstop_deferred_consume); not ready => block on it
+        (checkstop_sync_fallback) so the stop DECISION is still made this step
+        from this step's tokens (the same-step rule — no deferred decision, the
+        V1 identity trap). No-op when there was no deferred copy (non-CUDA path,
+        or an early return in _prematerialize_for_check_stop)."""
+        ev = getattr(cpu_output, "_checkstop_event", None)
+        if ev is None:
+            return
+        if ev.query():
+            self._ws_inc("checkstop_deferred_consume")
+        else:
+            ev.synchronize()
+            self._ws_inc("checkstop_sync_fallback")
+
     def _prematerialize_for_check_stop(
         self,
         output: NodeOutput,
         batch_fast: bool = True,
         talker_fast: bool = False,
+        defer: bool = False,
     ) -> NodeOutput:
         """Side-stream D→H of every CUDA tensor in
         ``output.per_request_output_tensors`` so the subsequent
@@ -3611,7 +3754,7 @@ class Worker:
                     "check_stop_flat", flat_gpu.shape, flat_gpu.dtype,
                 )
                 flat_cpu.copy_(flat_gpu, non_blocking=True)
-            side.synchronize()
+            ev = self._checkstop_barrier(side, defer)
             cpu_fast: dict = {
                 r: {uniform_key: [flat_cpu[i:i + 1]]}
                 for i, r in enumerate(rids)
@@ -3623,6 +3766,7 @@ class Worker:
                 alloc_failed_request_id=output.alloc_failed_request_id,
                 completion_event=output.completion_event,
             )
+            out._checkstop_event = ev
             # N1 (MSTAR_FAST_CHECKSTOP): stash the flat pinned buffer + rid
             # order so check_stop can do ONE tolist() + int compares instead
             # of a per-rid .item() (+ attr chains) x bs.
@@ -3658,7 +3802,7 @@ class Worker:
                         "check_stop_talker_flat", flat_gpu.shape, flat_gpu.dtype,
                     )
                     flat_cpu.copy_(flat_gpu, non_blocking=True)
-                side.synchronize()
+                ev = self._checkstop_barrier(side, defer)
                 # cpu_output only feeds check_stop; carry layer0_codes per rid so
                 # a fall-through to engine.check_stop_for_batch (never taken on
                 # the fast path) would still read a valid CPU token.
@@ -3673,6 +3817,7 @@ class Worker:
                     alloc_failed_request_id=output.alloc_failed_request_id,
                     completion_event=output.completion_event,
                 )
+                out._checkstop_event = ev
                 out._checkstop_flat = flat_cpu
                 out._checkstop_rids = rids
                 return out
@@ -3703,15 +3848,17 @@ class Worker:
                         else:
                             new_list.append(t)
                     cpu_per_rid[rid][name] = new_list
-        side.synchronize()
+        ev = self._checkstop_barrier(side, defer)
 
-        return NodeOutput(
+        out = NodeOutput(
             per_request_output_tensors=cpu_per_rid,
             allocation_failed=output.allocation_failed,
             alloc_pages_short=output.alloc_pages_short,
             alloc_failed_request_id=output.alloc_failed_request_id,
             completion_event=output.completion_event,
         )
+        out._checkstop_event = ev
+        return out
 
     def _apply_pending_removes_safe_to_drop(
         self, in_flight_rids: set[str]
