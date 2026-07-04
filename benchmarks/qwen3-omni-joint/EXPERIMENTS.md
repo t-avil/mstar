@@ -1450,3 +1450,64 @@ a bias, so the soft-cell REJECTION gate is load-bearing, not more rounds. Sizing
 x5 clean adjacent pairs on flagship i2t B32 (post-gate SE ~0.9%), x3 elsewhere;
 provision ~7-8 raw cells/arm at flagship to net 5 clean. Adopted as the mandatory
 gate for every A/B and the Stage-2 proof sweep.
+
+
+## MSTAR_ADMIT_JITTER A/B (lab_jit/ab_jitter_0v3) — WASH e2e AND mechanism-DEAD (guard self-suppresses at the trough)
+Admission jitter (spread synchronized arrivals across steps to de-cluster the
+wave) — the sanctioned smoothing lever (C1-C7 respected: occupancy-safe, short-
+prompt-inert). A/B jitter 0 vs 3ms, warm lab, i2t B32 x3: req/s 1.008/1.057/0.963,
+pooled 1.009, band [0.965,1.054], tok/req in band — clean WASH by ab_verdict.
+And the counters explain WHY it can't help: admit_jitter_held fired 3/480
+admissions. At closed-loop B32 the load generator refills the moment a request
+completes, so admissions arrive EXACTLY at the trough where active<=floor — the
+guard (never jitter when it would starve occupancy, C3) correctly self-suppresses
+precisely when a wave would form. This is a FUNDAMENTAL limit of jittering a
+closed-loop trough, not a tuning miss: there is no slack to delay into. Build
+parked on opt/admit-jitter (validated, occupancy-safe, inert-on-short-prompts);
+counters in server.log. Closes admission-timing as a lever for closed-loop B32.
+
+## FOLD PREMISE FALSIFIED at i2t B32 (food101) — no prefill is chunked, so there is nothing to fold
+Counter bucketing both arms, every cell: _pf_unchunked_*_le256 == the prefill
+step count (100% of prefills are short spans <=256 tok, no prefill_chunk_len),
+and _fold_ok = _mix_opp = budget_folds = 0, thinker_mixed = 0. The food101 i2t
+prompt distribution produces only short single-shot prefills; the mixable gate
+(needs a chunk length) never fires, so the entire fold/mixed-batch machinery is
+DORMANT at this cell. Consequences for the smoothing queue: Option B (adaptive
+fold floor) is INERT — nothing to fold; Option C (single-chunk short-span
+folding) is the documented graveyard (net-neg at every batch, occupancy tax).
+The fold/smoothing FAMILY is CLOSED for short-span workloads. EMERGING THESIS
+(from the profile gate, GPU 64.8% busy / main 32%): the flagship gap is no longer
+host-side postprocess — it is GPU-side SHORT-PREFILL SERIALIZATION. Each admission
+runs a full standalone short prefill step that serializes against decode; with
+100% short spans and zero folding, the lever is COALESCING — fewer, larger prefill
+steps (batch/merge multiple admissions' prefills into one GPU step) rather than
+folding prefill into decode. This re-points the campaign at prefill batching, not
+admission timing or fold policy. Prefill-batching reality being mapped now.
+
+## V2 BUDGET (MIXED_BUDGET_TOKENS=512) SUSPECT on the flagship — produces ZERO folds at i2t B32 food101
+Direct consequence of the fold-premise falsification: the banked "+7-11% at B32"
+(V2 BUDGET round-1 / FINAL) was measured on a build/window where folds fired, but
+on the current custom-ops build at i2t B32 food101 the counters read budget_folds
+= 0 — every-step budgeting has nothing to schedule when 100% of prefills are
+short unchunked spans. So the +7-11% credit is NOT reproducing here and needs
+re-decomposition: a 512-vs-0 A/B is queued on crusade to find where (if anywhere)
+V2 still converts at this cell. Separately, tonight's 512-vs-1024 sweep is a WASH
+(0.991/0.998) — no knee past 512, consistent with the chunk512/768 structural
+finding. NET: treat the V2 B32 contribution as UNCONFIRMED on the shipping build
+until the 512-vs-0 decomposition lands; it likely only converts on longer-prompt
+distributions where prefills actually chunk.
+
+## Merged-prefill B32 sentinel (pmerge, cross-pair, node-1 clean window) — POSSIBLE +6% WIN, mechanism UNPROVEN (no counters)
+Merge-config (vision-chunk flags off + MSTAR_MERGED_PREFILL=1) B32:
+8.150/8.385/7.663/7.749 vs crusade shipping clean 7.559 — merge-config reads
+~+6% at i2t B32, its first positive B32 signal (prior reads were B1/B2/B4 only,
++4-6%). COHERENT with the coalescing thesis above: the merged multimodal walk
+collapses prefill_text+prefill_vision into ONE prefill step per admission, halving
+prefill steps/admission — exactly the "fewer, larger prefill steps" direction the
+profile gate points at. CAVEATS (not scoreboard-grade yet): cross-pair comparison
+(merge and shipping on different pairs), and NO WALK_STATS on the merge run so
+merged_prefill_walks is unconfirmed at B32 (mechanism-alive law 4 unmet). SETTLE
+IT: same-pair arm2 B32 (merge vs shipping, one pair, adjacent) + a counter-
+carrying arm3 to prove the walk fires. If it holds same-pair with counters, merged
+prefill graduates from a B1-B4 small-batch config to a flagship B32 lever — the
+strongest new direction of the session.
