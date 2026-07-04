@@ -202,11 +202,18 @@ class Worker:
         from mstar.model.qwen3_omni.qwen3_omni_model import (
             mixed_single_chunk_enabled as _msce,
             mixed_split_attn_enabled as _msae,
+            mixed_budget_tokens as _mbt,
         )
         self.mixed_single_chunk = _msce()
         # Static for the process — capture bakes the split layout, so this
         # must NOT follow dynflags flips (_refresh_dynamic_flags skips it).
         self.mixed_split_attn = _msae()
+        # V2 budgeted admission (MSTAR_MIXED_BUDGET_TOKENS, 0=off): fold a ready
+        # chunk into the spec chain on EVERY step (subject to the budget + the
+        # occupancy floor) instead of only at yield boundaries. Unlike the
+        # single-chunk / split flags this bakes nothing into capture (it only
+        # changes fold TIMING), so it IS dynflags-refreshable below.
+        self._mixed_budget_tokens = _mbt()
         # Eager-fold peek backoff state (see the fold_probe site).
         self._peek_backoff = 0
         self._peek_skip = 0
@@ -1944,8 +1951,14 @@ class Worker:
         Keep in sync with the flags cached in __init__ / the scheduler."""
         from mstar.model.qwen3_omni.qwen3_omni_model import (
             mixed_single_chunk_enabled,
+            mixed_budget_tokens,
         )
         self.mixed_single_chunk = mixed_single_chunk_enabled()
+        # V2 budget: safe to flip mid-run — it only gates whether/when an
+        # already-mixable chunk folds; it bakes nothing into capture, and the
+        # bucket math (chunk C <= _MIXED_MAX_CHUNK_TOKENS) is unchanged. Reset
+        # the min-decode cache too since its default keys on the budget being on.
+        self._mixed_budget_tokens = mixed_budget_tokens()
         if hasattr(self.scheduler, "_mixed_min_decode_cached"):
             self.scheduler._mixed_min_decode_cached = None
         # Winning-stack flags, made runtime-refreshable so one-server dyn_ab
@@ -2791,7 +2804,7 @@ class Worker:
 
     def _try_fold_mixed_chunk_into_spec(
         self, speculation: Speculation
-    ) -> bool:
+    ) -> int | None:
         """MSTAR_MIXED_SPEC: fold ONE ready mixable prefill chunk row into an
         already-built decode continuation ``speculation``, turning the next
         speculative batch into a MIXED (thinker_mixed) step that rides inside the
@@ -2815,21 +2828,27 @@ class Worker:
 
         The chunk rid is deliberately NOT added to ``continuing_rids``, so
         ``_thread_outputs_to_speculative`` skips it (no loop-back from N) — same
-        as a fresh rid. Returns True if a chunk was folded in (batch is now
-        mixed), False if none was ready (leave ``speculation`` as the uniform
-        decode continuation). Only called when the flag is on and a mixed
-        opportunity was peeked, so the common case (chunk still ready) folds.
+        as a fresh rid. Returns the folded chunk's length C (the chunk row's
+        token count) if a chunk was folded in (batch is now mixed), or None if
+        none was ready (leave ``speculation`` as the uniform decode
+        continuation). Only called when the flag is on and a mixed opportunity
+        was peeked, so the common case (chunk still ready) folds.
         """
         spec_batch = speculation.scheduled_batch
         spec_node_batch = speculation.node_batch
         decode_node_name = spec_batch.node_name
 
+        # n_decode = the continuation size BEFORE the chunk row is appended; feed
+        # it + the V2 budget to the pop so it selects the same budget-fitting
+        # chunk has_mixed_opportunity approved (both scan first-fit identically).
         popped = self.scheduler.pop_mixed_chunk_for_spec(
             self.worker_graphs_manager,
             (decode_node_name, spec_batch.graph_walk),
+            n_decode=len(spec_batch.node_objects),
+            budget_tokens=self._mixed_budget_tokens,
         )
         if popped is None:
-            return False
+            return None
         chunk_node, chunk_rid, chunk_wg_id, chunk_len = popped
 
         # Guard: the chunk rid must be distinct from the continuing decode rids.
@@ -2840,7 +2859,7 @@ class Worker:
             self.worker_graphs_manager.queues[chunk_wg_id].push_back_node(
                 chunk_rid, chunk_node
             )
-            return False
+            return None
 
         # Keep the chunk node off the ready queue while it executes in the spec
         # step (same guard the decode nodes carry), so a concurrent schedule
@@ -2908,7 +2927,11 @@ class Worker:
             len(spec_batch.node_objects) - 1, chunk_len,
             decode_node_name, chunk_rid,
         )
-        return True
+        # Return the folded chunk length (C) for WALK_STATS budget accounting.
+        # chunk_len is guaranteed non-None here — the mixable gate requires
+        # prefill_chunk_len — but coerce defensively so the caller's None-check
+        # (fold happened vs not) never trips on a stray missing metadata.
+        return int(chunk_len) if chunk_len is not None else 0
 
     def _thread_outputs_to_speculative(
         self, speculation: Speculation, output_N: NodeOutput
@@ -4063,16 +4086,25 @@ class Worker:
                     # The occupancy floor inside has_mixed_opportunity keeps
                     # ramp-up on the standalone path either way.
                     speculate_into_mixed = False
-                    # Eager peeks (every chain step under MSTAR_MIXED_SINGLE_
-                    # CHUNK) scan the ready queues in Python. During a long
-                    # pure-decode tail that's thousands of guaranteed-negative
-                    # scans (~3400 peeks for 508 folds measured). Exponential
-                    # backoff after negatives (1..32 steps) bounds the waste;
-                    # a fold is delayed by at most the backoff, which is no
-                    # worse than waiting for a natural yield boundary.
-                    # must_yield_away peeks always run (rare; picking fold
-                    # over yield there is the original P2 win).
-                    eager_probe = mixed_spec_enabled and self.mixed_single_chunk
+                    # Eager peeks (every chain step under an eager policy —
+                    # MSTAR_MIXED_SINGLE_CHUNK or MSTAR_MIXED_BUDGET_TOKENS) scan
+                    # the ready queues in Python. During a long pure-decode tail
+                    # that's thousands of guaranteed-negative scans (~3400 peeks
+                    # for 508 folds measured). Exponential backoff after negatives
+                    # (1..32 steps) bounds the waste; a fold is delayed by at most
+                    # the backoff, no worse than waiting for a natural yield
+                    # boundary. must_yield_away peeks always run (rare; picking
+                    # fold over yield there is the original P2 win).
+                    # Eager (every-step) probing fires under the graveyard
+                    # single-chunk flag OR the V2 budget policy. They differ in
+                    # what makes a chunk foldable: single-chunk ALSO routes short
+                    # standalone prefills through the chunk planner (the occupancy
+                    # tax that closed it); the budget touches NOTHING on the
+                    # admission side — it only folds chunks that already exist,
+                    # capped at MSTAR_MIXED_BUDGET_TOKENS total tokens.
+                    eager_probe = mixed_spec_enabled and (
+                        self.mixed_single_chunk or self._mixed_budget_tokens > 0
+                    )
                     if eager_probe and not must_yield_away and self._peek_skip > 0:
                         self._peek_skip -= 1
                         eager_probe = False
@@ -4083,11 +4115,33 @@ class Worker:
                         if (fold_probe and self._walk_stats is not None)
                         else 0.0
                     )
+                    _n_decode_pending = len(pending.node_batch.request_ids)
                     _peek_hit = fold_probe and self.scheduler.has_mixed_opportunity(
                         self.worker_graphs_manager,
                         (pending.node_name, pending.graph_walk),
-                        n_decode=len(pending.node_batch.request_ids),
+                        n_decode=_n_decode_pending,
+                        budget_tokens=self._mixed_budget_tokens,
                     )
+                    # V2 telemetry: a budget-accelerated fold fires on a step that
+                    # was NOT a yield boundary (P2 would have stayed pure-decode).
+                    # Capture before _peek_hit clears must_yield_away below.
+                    _budget_fold = (
+                        self._mixed_budget_tokens > 0
+                        and eager_probe
+                        and not must_yield_away
+                    )
+                    # Budget peek missed because the decode side is under the
+                    # occupancy floor — the second graveyard anti-lesson, made
+                    # visible (WALK_STATS budget_skips_floor). Only computed when
+                    # WALK_STATS is on (the _mixed_min_decode read is otherwise
+                    # skipped).
+                    if (
+                        self._walk_stats is not None
+                        and _budget_fold
+                        and not _peek_hit
+                        and _n_decode_pending < self.scheduler._mixed_min_decode()
+                    ):
+                        self._ws_inc("budget_skips_floor")
                     if fold_probe:
                         if _peek_hit:
                             self._peek_backoff = 0
@@ -4132,10 +4186,23 @@ class Worker:
                         # the chunk still gets mixed, just off-chain.
                         if speculate_into_mixed:
                             if speculation is not None:
-                                folded = self._try_fold_mixed_chunk_into_spec(
+                                folded_len = self._try_fold_mixed_chunk_into_spec(
                                     speculation
                                 )
+                                folded = folded_len is not None
                                 self._ws_inc("_fold_ok" if folded else "_fold_miss")
+                                if folded and _budget_fold:
+                                    # V2 counters: folds the budget policy caused
+                                    # (would not have happened at a yield boundary)
+                                    # and the chunk tokens they admitted.
+                                    self._ws_inc("budget_folds")
+                                    if self._walk_stats is not None:
+                                        self._walk_stats["budget_fold_tokens"] = (
+                                            self._walk_stats.get(
+                                                "budget_fold_tokens", 0
+                                            )
+                                            + int(folded_len)
+                                        )
                                 if (
                                     not folded
                                     and self.mixed_batch_assert

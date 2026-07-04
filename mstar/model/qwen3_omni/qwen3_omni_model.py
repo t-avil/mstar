@@ -270,6 +270,50 @@ def mixed_single_chunk_enabled() -> bool:
     return _envflag("MSTAR_MIXED_SINGLE_CHUNK")
 
 
+def mixed_budget_tokens() -> int:
+    """V2 budgeted chunked-prefill admission (``MSTAR_MIXED_BUDGET_TOKENS``).
+
+    vLLM-style every-step chunk admission for M*'s captured-mixed machinery.
+    Today a ready prefill chunk folds into the running decode spec chain ONLY at
+    a fairness *yield boundary* (``must_yield_away`` — ~8% of steps); under
+    continuous arrivals a mixable chunk then sits idle for several steps before
+    it rides a decode step. With this budget > 0 the worker probes on EVERY spec
+    chain step (like ``MSTAR_MIXED_SINGLE_CHUNK`` did) and folds a ready chunk
+    NOW, capping the mixed step at ``budget`` total tokens (``n_decode`` 1-token
+    rows + the ``C``-token chunk) so raised fold volume never assembles an
+    oversized step. 0 (the default) disables it — flag-off is byte-identical.
+
+    CRITICAL distinction from the graveyard ``MSTAR_MIXED_SINGLE_CHUNK`` (CLOSED,
+    net-negative): that flag ALSO routed short standalone prefills through the
+    chunk planner (``allow_single_chunk``) so every short span became foldable —
+    which capped admission throughput and starved decode occupancy ~10%. This
+    budget does NOT touch ``allow_single_chunk``; the mixable gate
+    (``_chunk_entry_passes_gates`` still requires ``prefill_chunk_len``) is
+    unchanged, so ONLY genuinely-chunked long prefills — the chunks that already
+    exist in the pipeline — are accelerated. Standalone/unchunked prefill
+    admission is identical to today. The expected win is TTFT / admission
+    latency at B2-B8 and arrival-heavy patterns; a fold is roughly compute-
+    neutral (mixed ~30-36ms vs prefill+decode ~29ms replaced), so steady B32
+    closed-loop is expected ~neutral (must not regress).
+
+    Only meaningful with ``MSTAR_MIXED_SPEC`` (there is no spec-chain fold to
+    accelerate without it, and thus ``MSTAR_MIXED_BATCH``); the worker ANDs it
+    with ``mixed_batch_spec_enabled()``. Unlike the split-attn / single-chunk
+    flags this does NOT bake anything into the CUDA-graph capture (it only
+    changes WHEN an existing chunk folds), so it is safe to flip via
+    ``MSTAR_DYNFLAGS`` mid-run.
+    """
+    import os as _os
+    raw = _os.environ.get("MSTAR_MIXED_BUDGET_TOKENS")
+    if raw is None:
+        return 0
+    try:
+        v = int(raw.strip())
+    except ValueError:
+        return 0
+    return v if v > 0 else 0
+
+
 def prefill_chunk_tokens() -> int:
     """Cap on chunk size C for chunked prefill. The planner picks the largest
     ``ThinkerSubmodule.PREFILL_TOKEN_BUCKETS`` entry <= min(remaining, this cap),

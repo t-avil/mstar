@@ -217,19 +217,31 @@ class MicroScheduler:
         """Occupancy floor for chain-folding (see has_mixed_opportunity).
 
         Default 0 (no floor — preserves the measured-positive P2 behavior,
-        including small-batch s2t folds) UNLESS MSTAR_MIXED_SINGLE_CHUNK is on,
-        where every admission depends on fold slots and a small decode side
-        means folding throttles admission: default 24 there. Env
-        MSTAR_MIXED_MIN_DECODE overrides either. Cached after first read."""
+        including small-batch s2t folds) UNLESS an EAGER (every-step) fold policy
+        is on — MSTAR_MIXED_SINGLE_CHUNK or MSTAR_MIXED_BUDGET_TOKENS — where
+        every admission depends on fold slots and a small decode side means
+        folding throttles admission: default 24 there. The occupancy floor is
+        the graveyard's second anti-lesson (single-chunk starved decode ~10%),
+        so the eager budget policy inherits it.
+
+        Overrides (precedence): MSTAR_MIXED_BUDGET_MIN_DECODE (the V2 knob) wins,
+        else MSTAR_MIXED_MIN_DECODE (the general one), else the default above.
+        Cached after first read; reset by _refresh_dynamic_flags on a dynflags
+        flip so a runtime budget toggle re-derives the floor."""
         v = getattr(self, "_mixed_min_decode_cached", None)
         if v is None:
             import os
             from mstar.model.qwen3_omni.qwen3_omni_model import (
                 mixed_single_chunk_enabled,
+                mixed_budget_tokens,
             )
-            default = 24 if mixed_single_chunk_enabled() else 0
+            eager = mixed_single_chunk_enabled() or mixed_budget_tokens() > 0
+            default = 24 if eager else 0
+            raw = os.environ.get("MSTAR_MIXED_BUDGET_MIN_DECODE")
+            if raw is None:
+                raw = os.environ.get("MSTAR_MIXED_MIN_DECODE")
             try:
-                v = int(os.environ.get("MSTAR_MIXED_MIN_DECODE", str(default)))
+                v = int(raw) if raw is not None else default
             except ValueError:
                 v = default
             self._mixed_min_decode_cached = v
@@ -276,11 +288,25 @@ class MicroScheduler:
             return False  # penalty state corruption on discarded chunk sample
         return True
 
+    def _chunk_over_budget(
+        self, clen, n_decode: int | None, budget_tokens: int,
+    ) -> bool:
+        """V2 budget gate (MSTAR_MIXED_BUDGET_TOKENS): a chunk is over budget
+        when the policy is on (budget > 0) and folding it would push the mixed
+        step past ``budget`` total tokens (``n_decode`` 1-token decode rows + the
+        ``C``-token chunk). budget <= 0 (off) or an unknown decode size / chunk
+        length never binds. Shared by the peek (has_mixed_opportunity) and the
+        pop (pop_mixed_chunk_for_spec) so the two agree on which chunk folds."""
+        if budget_tokens <= 0 or n_decode is None or clen is None:
+            return False
+        return n_decode + int(clen) > budget_tokens
+
     def has_mixed_opportunity(
         self,
         worker_graphs_manager: WorkerGraphsManager,
         decode_target: tuple[str, str],
         n_decode: int | None = None,
+        budget_tokens: int = 0,
     ) -> bool:
         """Read-only peek: would a mixed batch assemble RIGHT NOW if the decode
         group named by ``decode_target`` were back in the ready queue?
@@ -306,6 +332,11 @@ class MicroScheduler:
         Standalone prefill fills the batch faster there. Gate: fold only when
         n_decode >= MSTAR_MIXED_MIN_DECODE (default 24); None skips the gate
         (non-spec assembler paths size the decode side themselves).
+
+        ``budget_tokens``: V2 per-step token budget (MSTAR_MIXED_BUDGET_TOKENS).
+        When > 0, a chunk only counts as an opportunity if n_decode + C fits the
+        budget; the scan keeps looking for a smaller chunk otherwise. 0 = off
+        (no cap), so P2 / yield-boundary behavior is byte-identical.
         """
         from mstar.model.qwen3_omni.qwen3_omni_model import mixed_batch_enabled
         if not mixed_batch_enabled():
@@ -349,10 +380,14 @@ class MicroScheduler:
                 if not engine.check_ready(decode_node_name, request_id, fwd_info):
                     continue
                 entry = ReadyNodeEntry(request_id, _wg_id, walk)
-                if self._chunk_entry_passes_gates(
+                if not self._chunk_entry_passes_gates(
                     worker_graphs_manager, decode_node_name, node_partition, entry,
                 ):
-                    return True
+                    continue
+                clen = fwd_info.step_metadata.get("prefill_chunk_len")
+                if self._chunk_over_budget(clen, n_decode, budget_tokens):
+                    continue  # over budget with this decode side; keep scanning
+                return True
         return False
 
     def _try_assemble_mixed(
@@ -499,6 +534,8 @@ class MicroScheduler:
         self,
         worker_graphs_manager: WorkerGraphsManager,
         decode_target: tuple[str, str],
+        n_decode: int | None = None,
+        budget_tokens: int = 0,
     ) -> "tuple[GraphNode, str, str, int | None] | None":
         """Pop ONLY the mixable chunk node for a mid-chain mixed speculation
         (MSTAR_MIXED_SPEC).
@@ -512,8 +549,9 @@ class MicroScheduler:
         row to fold in.
 
         Scans exactly like ``has_mixed_opportunity`` (same gates, via
-        ``_chunk_entry_passes_gates``) and pops the FIRST passing chunk node on
-        ``decode_target``'s node. Returns
+        ``_chunk_entry_passes_gates``, and the same ``n_decode`` /
+        ``budget_tokens`` V2 budget filter) and pops the FIRST passing chunk node
+        on ``decode_target``'s node. Returns
         ``(chunk_node, request_id, worker_graph_id, prefill_chunk_len)`` or None
         when the flag is off / no mixable chunk is ready / the pop races a
         removal. The caller injects the returned node into the speculative
@@ -571,6 +609,11 @@ class MicroScheduler:
                 ):
                     continue
                 chunk_len = fwd_info.step_metadata.get("prefill_chunk_len")
+                # V2 budget gate: mirror has_mixed_opportunity so pop selects the
+                # SAME first budget-fitting chunk the peek approved (else a bigger
+                # chunk could pop and blow the budget the peek respected).
+                if self._chunk_over_budget(chunk_len, n_decode, budget_tokens):
+                    continue
                 popped = queue.pop_ready_nodes(request_id, [decode_node_name])
                 if not popped:
                     continue  # raced a removal; keep scanning
