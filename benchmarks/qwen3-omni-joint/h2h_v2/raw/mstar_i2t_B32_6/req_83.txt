@@ -1,0 +1,7 @@
+ onBased the visual information, this dish is **edamame**.
+
+Here are the details that lead to this identification:
+
+*   **Appearance:** The dish consists of bright green, immature soybeans still in their pods.
+*   **Preparation:** The beans are typically boiled or steamed and served hot or cold. They are often seasoned with salt, which is consistent with the white granules sprinkled over them in the image.
+*   **Serving Style:** Edamame is a very common appetizer or side dish in Japanese cuisine. It is traditionally served in the pod, and the beans are squeezed out with the teeth to be eaten, leaving the pod behind. The lemon wedge is a common accompaniment to add a fresh, acidic flavor.<|im_end|>

@@ -1,0 +1,6 @@
+ onBased the visual evidence in the photo, the dish is a **Tiramisu**.
+
+Here is a breakdown of the identification:
+
+*   **Cuisine:** Italian. Tiramisu is a classic Italian dessert.
+*   **Dish:** Tiramisu. This is identifiable by its distinct layers, which appear to be alternating between a creamy, light-colored filling (typically made with mascarpone cheese, eggs, and sugar) and dark, coffee-soaked ladyfinger cookies (savoiardi). The entire dessert is generously dusted with cocoa powder on top, which is a hallmark of this dish.<|im_end|>

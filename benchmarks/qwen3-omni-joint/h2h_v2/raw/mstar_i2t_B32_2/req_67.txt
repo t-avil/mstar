@@ -1,0 +1,11 @@
+ onBased the visual evidence in the photo, the cuisine is **Chinese**, and the dishes are two classic preparations of **roast duck**.
+
+Here is a breakdown of the dishes:
+
+1.  **Foreground Dish: Roast Duck (Kǎo Yā - ���鸭)**
+    *   **Identification:** This is the most prominent dish. It features slices of duck with a very crispy, golden-brown, and lacquered skin, which is characteristic of Peking duck. The meat appears tender and juicy.
+    *   **Presentation:** It is served on a plate with fresh cilantro (coriander) leaves and what appear to be thin, soft pancakes or steamed rice flour wrappers, which are traditionally used to wrap the duck slices.
+
+2.  **Background Dish: Steamed Duck (Zhēng Yā - ���鸭)**
+    *   **Identification:** This dish, served on a separate plate, shows a different preparation. The duck meat is pale and appears very tender, which is typical of steaming. It is garnished with green onions.
+    *   **Presentation:** This is a common way to serve duck in Cantonese cuisine, where the focus is on the natural flavor and tenderness of the meat

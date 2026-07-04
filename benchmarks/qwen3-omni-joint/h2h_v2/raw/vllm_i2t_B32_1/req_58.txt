@@ -1,0 +1,10 @@
+Based on the components visible in the image, this dish is a **breakfast taco**.
+
+Here is a breakdown of the ingredients that lead to this conclusion:
+
+*   **Tortilla:** The entire dish is served on a soft, round tortilla, which is the base of a taco.
+*   **Fillings:** The taco is filled with scrambled eggs, melted cheese, and what appears to be black beans.
+*   **Toppings:** It is generously topped with a fresh pico de gallo (a mix of diced tomatoes, onions, and cilantro), a layer of guacamole, and a drizzle of sour cream.
+*   **Side:** A side of what looks like roasted potatoes or chorizo is served alongside the taco.
+
+This combination of a tortilla with scrambled eggs, cheese, beans, and fresh toppings is a very popular and classic breakfast taco.

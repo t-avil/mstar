@@ -1,0 +1,10 @@
+ on the visual evidence inBased the photo, the cuisine is **Chinese**, and the dishes are two classic preparations of **roast duck**.
+
+Here is a breakdown of the dishes:
+
+1.  **Foreground Dish (Roast Duck):** This is a whole roast duck that has been cooked to achieve a very crispy, golden-brown skin. It has been sliced and arranged on a plate, garnished with fresh cilantro. This is a classic preparation for serving duck in Chinese cuisine.
+
+2.  **Background Dish (Peking Duck):** This dish is identifiable as **Peking Duck**. The key indicators are:
+    *   **The Duck:** It is a whole duck that has been roasted, but the skin is not as crispy as the duck in the foreground. It appears to be served in a different style, possibly with the skin and meat separated.
+    *   **The Garnish:** The most telling clue is the garnish of **scallions (green onions)** placed directly on the duck. This is a hallmark of Peking Duck, which is traditionally served with thin pancakes, scallions, and sweet bean sauce.
+    *   **The Accompaniments:** The small bowls of dipping sauces are also typical for this dish. One appears

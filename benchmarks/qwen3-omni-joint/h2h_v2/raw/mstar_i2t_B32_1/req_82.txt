@@ -1,0 +1,6 @@
+Based on the visual information in the photo, here is an identification of the cuisine and dish:
+
+*   **Cuisine**: American
+*   **Dish**: Frozen Yogurt
+
+The dish is served in a white paper cup, which is placed inside a branded cardboard box. The logo on the box clearly reads "relish" with the tagline "FROZEN YOGURT & MORE" underneath it. This indicates the dish is frozen yogurt, a popular American dessert. The yogurt is topped with what appears to be granola or nuts.<|im_end|>

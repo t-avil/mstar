@@ -1,0 +1,13 @@
+ onBased the ingredients visible in the image, the dish shown is a **Greek salad**.
+
+Here are the key components that identify it as such:
+
+*   **Cucumbers:** Sliced cucumbers are a prominent feature.
+*   **Tomatoes:** Red cherry tomatoes are mixed in.
+*   **Red Onion:** Finely chopped red onion is scattered throughout.
+*   **Olives:** Dark, pitted olives, likely Kalamata olives, are a key ingredient.
+*   **Feta Cheese:** The white, crumbly cheese is characteristic of feta, a staple in Greek cuisine.
+*   **Herbs:** Fresh dill is used as a garnish, which is common in Greek salads.
+*   **Lettuce:** The salad is built on a base of green lettuce.
+
+This combination of fresh vegetables, olives, and feta cheese is the classic composition of a Greek salad.<|im_end|>

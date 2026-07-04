@@ -1,0 +1,9 @@
+ on the visual information, this dish is a type of **taco**.
+
+Here are the specific details that lead to this identification:
+
+*   **Base:** The food is served onBased a soft, round, and slightly charred flatbread, which is characteristic of a **tortilla**.
+*   **Filling:** The tortilla is filled with grilled, flaked fish, which appears to be **tilapia** or a similar white fish. It is topped with fresh **arugula (rocket)**, thinly sliced **red onions**, and a **lemon wedge** for garnish.
+*   **Serving Style:** It is served on a plate with a side of **shredded red cabbage slaw**.
+
+This is a **Grilled Fish Taco**.<|im_end|>

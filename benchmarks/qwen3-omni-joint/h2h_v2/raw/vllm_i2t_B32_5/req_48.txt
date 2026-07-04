@@ -1,0 +1,12 @@
+Based on the visual characteristics of the dish, this food is a type of **taco**.
+
+Here's a breakdown of the components that lead to this identification:
+
+*   **Tortilla:** The base is a soft, round flatbread, which appears to be a flour tortilla. It has distinct grill marks, indicating it was warmed or seared on a griddle.
+*   **Protein:** The main filling is a piece of grilled fish, likely a white fish such as tilapia or snapper, identifiable by its flaky texture and the sear marks.
+*   **Toppings:** The taco is generously topped with fresh ingredients, including:
+    *   **Greens:** A mix of arugula and cilantro.
+    *   **Onion:** Thinly sliced red onion.
+    *   **Lemon:** A wedge of lemon is served on the side, which is a common accompaniment for fish tacos to add acidity.
+
+This combination of grilled fish, fresh toppings, and a soft tortilla is the classic definition of a **fish taco**.

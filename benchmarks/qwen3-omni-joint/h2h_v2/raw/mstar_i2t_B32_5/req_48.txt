@@ -1,0 +1,12 @@
+Based on the visual information, this dish is a type of **taco**.
+
+Here are the specific details that lead to this identification:
+
+*   **Base:** The food is served on a soft, round, flatbread that has been grilled or seared, evident from the distinct char marks. This is characteristic of a grilled tortilla, often used in tacos.
+*   **Filling:** The main filling consists of grilled, flaked fish, which appears to be a white fish like cod or halibut. It is topped with fresh ingredients, including:
+    *   Arugula (rocket)
+    *   Thinly sliced red onions
+    *   A small amount of what looks like corn kernels
+*   **Garnish:** The dish is garnished with a wedge of lemon and a side of finely shredded red cabbage slaw.
+
+This combination of grilled fish, fresh vegetables, and a grilled tortilla base is a very common and popular style of taco, often referred to as a **Grilled Fish Taco**.<|im_end|>

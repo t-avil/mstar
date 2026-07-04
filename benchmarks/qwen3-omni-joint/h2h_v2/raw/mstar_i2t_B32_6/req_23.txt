@@ -1,0 +1,9 @@
+ on the visual characteristics of the food in the image, this dish is **Xiaolongbao** (also known as **Soup Dumplings**).
+
+Here are the key features that identify it:
+
+*   **Steamed Dumplings:** They are small, round dumplings with a thin, translucent wrapper, which is characteristic of dumplings steamed inBased a bamboo basket (a *zheng*).
+*   **Pleated Top:** The dumplings have a distinctive pleated top, which is pinched to seal in the filling.
+*   **Filling:** The shape suggests they contain a filling, which is typically minced pork. The most defining feature of Xiaolongbao is that they also contain a hot, savory soup made from the meat stock and gelatin, which melts into liquid when steamed.
+
+This dish is a famous specialty from the city of **Suzhou** in China and is also very popular in **Shanghai**.<|im_end|>
