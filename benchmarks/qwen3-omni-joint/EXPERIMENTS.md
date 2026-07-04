@@ -1511,3 +1511,44 @@ IT: same-pair arm2 B32 (merge vs shipping, one pair, adjacent) + a counter-
 carrying arm3 to prove the walk fires. If it holds same-pair with counters, merged
 prefill graduates from a B1-B4 small-batch config to a flagship B32 lever — the
 strongest new direction of the session.
+
+
+## Merge-config same-pair verdict (pair 4,5, arm1 shipping vs arm2 merge) — TOKEN-throughput win B1 +4.3% / B2 +3.0% / B4 tie / B32 +11.2%
+Same-pair sequential solo boots on 4,5 (arm1 = shipping baseline, arm2 = merge
+config: vision-chunk flags off + MSTAR_MERGED_PREFILL=1), compared on tok/s (not
+req/s) after the Law-5 length check below forced the metric. Token throughput:
+B1 +4.3%, B2 +3.0%, B4 tie, B32 +11.2%. tok/req MATCHED across arms at every cell
+except B4 (where shipping's small-n sample drew ~11% shorter, faking a req/s
+delta — resolved as a length artifact, see next entry). Mechanism: at B32 with
+folds dead (100% short prefills, budget_folds=0), chunked-vision prefill is PURE
+per-admission overhead — the merged multimodal walk collapses
+prefill_text+prefill_vision into ONE prefill step per admission, halving prefill
+steps/admission and directly attacking the GPU-side short-prefill serialization
+the profile gate identified (GPU 64.8% busy). This is the coalescing thesis
+converting: fewer, larger prefill steps, not folding. STATUS: merge-config is now
+the PRIMARY-config candidate (was documented as a B1-B4-only small-batch alt),
+PENDING three gates before a default flip — arm3 with WALK_STATS to prove
+merged_prefill_walks fires at B32 (mechanism-alive law 4, unmet on the sentinel),
+a speech regression sentinel (the config swaps vision strategy), and a live race
+vs vLLM at B32. Data pointers: lab_pmerge/ (arm1), lab_parm2/ (arm2), pmerge B32
+sentinel entry above.
+
+## Law 5 fires INSIDE an M* A/B (the B4 merge "contradiction") — length parity gate now mandatory on same-system req/s
+The merge B4 cell first read a +11.5% req/s "win" that contradicted the tok/s
+tie — resolved by audiobuilder as a Law-5 length artifact operating WITHIN one
+M*-vs-M* A/B, not just across systems: at B4 the n=12 request sample has ±~11%
+output-length variance, and one arm's window happened to draw ~11% shorter
+(shipping 172 vs merge 191 tok/req), inflating its req/s while tok/s tied
+(459 vs 456). PROCESS RULE (now enforced by ab_verdict.py): any same-system
+(lab_ab) req/s comparison must be gated on tok/req parity — if the two arms
+differ >5% in tok/req (per-pair OR arm-mean), the pair is LENGTH-CONFOUNDED, the
+req/s ratio is discarded as an artifact, and the verdict runs on the tok/s ratio
+instead. Validated on the merge cells: B1 (Δ0.6%) clean -> req/s verdict; B4
+(worst-pair Δ5.5%) flagged -> tok/s WASH (req/s had read 0.984); and it caught an
+UNEXPECTED one — B2 r2 has a genuine 9.0% tok/req gap (arm A 203.5 vs B 185.2)
+whose +7% req/s is pure length, tok/s 0.974, so B2 flags too (only its r1 pair
+was matched; the r1-only view that called B2 "clean" was incomplete). h2h stays
+on req/s by design (the vLLM ~18-20% length gap is the reason req/s is the chosen
+cross-system metric; the tool prints the gap but does not flip). Net: small-batch
+(B1-B4) same-system req/s claims are untrustworthy without the parity gate; n=12
+length variance alone can manufacture a double-digit fake delta.
