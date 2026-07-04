@@ -1600,3 +1600,70 @@ config. FINALIZES after the live small-batch race now running (arm3 vs vLLM,
 (currently gather-confounded). Ties to: GOAL build-rule (one primary + <=2
 documented per-workload configs); Merge-config same-pair verdict + ARM3 entries
 above.
+
+
+## RACE 2 — small-batch live vs vLLM (h2h_out_smallbatch2, arm3 M* side, ab_verdict n=3) — s2t small-batch WON; i2t 0.75/0.83 artifacts DEAD
+Live adjacent-pair race, arm3 config (base co-located + vision-merge + audio-merge)
+vs vLLM-Omni 0.22, 5 cells ×3, all grade A via ab_verdict (soft-gated). Results:
+- **s2t B2 WIN 3.062** (95%LB 2.970), **s2t B4 WIN 2.180** (95%LB 2.117) — the two
+  UNMEASURED matrix cells are now GREEN; the whole s2t column is GREEN.
+- **i2t B1 WASH ~0.99** (band 0.943–1.056), **i2t B2 LOSS** (UB 1.029, point ~0.98),
+  **i2t B4 WASH ~1.056** (band 1.037–1.075, borderline-green). The committed-sweep
+  0.75/0.83 are CONFIRMED ARTIFACTS — the research inconsistency call (B2<B1 is
+  structurally implausible; B1–B4 share one band) was right. True i2t small-batch
+  is ~parity, gated by the prompt-path host floor, not a 0.75 cliff.
+TWO FLAGS that gate acceptance:
+1. **arm3 i2t is OUT-OF-BAND (tok/req 185–191 vs the 172–179 identity band).**
+   Co-location implicated: encoff+merge (arm1) reads 173–180, in-band. So arm3's
+   i2t ratios are directional truth but arm3 is NOT the shippable i2t config —
+   **i2t primary candidate = encoff+merge**, live race pending (imerge lab
+   booting). Note arm3 over-generates, so its i2t req/s is if anything understated;
+   the in-band config could read at/above these. The imerge race must clear the
+   tok/req band per cell before any i2t small-batch cell is acceptance-grade.
+2. **s2t vLLM verbosity asymmetry is 2–3×, not ~20%** (vLLM 42–60 tok/req vs our
+   18.7–21.3 at B2/B4). The req/s wins (3.062/2.180) are LENGTH-DOMINATED — the
+   tok/s-equivalent is far smaller and may straddle 1.0 (B4 ≈ 2.180×21.3/[42–60] ≈
+   0.77–1.11). Real only if M* transcripts are complete/equivalent and vLLM is
+   merely verbose, NOT if M* under-transcribes (the GOAL §1 correctness gate / the
+   V1 lesson at the transcript level). A **transcript-quality spot check must ride
+   the acceptance protocol** for the s2t wins to be defensible; sample B8/B16/B32
+   too (milder ~20–25% asymmetry there). Data: h2h_out_smallbatch2/, ab_verdict
+   output; tok/req per cell in each results.json.
+
+CAMPAIGN STATE after race 2: the war is now ONLY the i2t column — B32 (RED 0.883,
++8–10% post-merge) plus four borderline cells B1 (+6%) / B2 (+7%) / B4
+(borderline-green) / B16 (+4%), all pending the in-band encoff+merge race. Speech
+2–3× done; s2t GREEN pending [TQ]. GOAL_MATRIX.md rev-2 regenerated.
+
+---
+
+## s2t TRANSCRIPT-QUALITY sweep (534 pairs, all saved s2t outputs) — PARITY PROVEN; vLLM length gap is an ANSWER-MODE correctness deficit
+Read-only forensic sweep of every saved s2t transcript pair across
+h2h_out_smallbatch2/ (B2,B4), h2h_out_p2verify/ (B16,B32), h2h_out/ (B8):
+534 (cell, req_i) pairs, byte-length ratio vllm/mstar, divergent = >2×.
+RESULT: 13 divergent pairs, and ALL 13 are the SAME clip — req_4, audio =
+"How would the papers talk about it?". M* TRANSCRIBES it (45 B, exact); vLLM
+ANSWERS it (1.2–1.4 KB essay on newspaper editorial stances) — a task-following
+failure that recurs in every one of the 13 cells (1 per cell). The other 521
+pairs match byte-for-byte modulo M*'s `<|im_end|>` marker (+10 B). Honest check of
+the M*-longer side (would expose M* over-gen or vLLM truncation — neither found):
+17 pairs at ratio 0.68–0.77 resolve to just 3 repeated clips — req_33
+(byte-identical + marker), req_70 (M* "et cetera" vs vLLM "etc.", both correct),
+and req_43 (M* minor word-order garble " answer? IAny guess not" vs vLLM's clean
+"Any answer? I guess not" — the ONLY pair favoring vLLM, one clip, non-systematic,
+still complete not truncated). ZERO M* truncations.
+
+Per-cell (n_pairs / n_divergent / who-wrong): s2t_B2 ×3 cells (6 / 1 / vLLM),
+s2t_B4 ×3 (12 / 1 / vLLM), s2t_B8 (48 / 1 / vLLM), s2t_B16 ×3 (48 / 1 / vLLM),
+s2t_B32 ×3 (96 / 1 / vLLM). Every cell: exactly one divergent pair, vLLM wrong.
+
+ACCEPTANCE PARAGRAPH: "M* transcript parity is proven on 534 s2t request pairs
+across 13 cells (B2–B32); transcripts are identical modulo M*'s end marker. vLLM's
+42–60 tok/req at s2t small-batch is ERROR-inflation: on interrogative audio it
+enters answer-mode and generates an essay instead of transcribing (13/13 cells on
+one clip). Zero M* truncations; one clip has a minor M* garble (vLLM cleaner). The
+s2t req/s wins are therefore correct wins, and the length gap is itself a vLLM
+correctness deficit." This also explains the ab_verdict JCT-skew warnings on the
+vLLM arm (the single answer-mode monster request per cell). Turns the campaign's
+biggest honesty risk into a documented vLLM deficit. Data: the req_*.txt under the
+three h2h dirs; sweep is re-runnable (byte-length ratio + read-divergent).
