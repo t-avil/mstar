@@ -2141,6 +2141,13 @@ class Worker:
             key = (batch.node_name, batch.graph_walk)
             self._walk_stats[key] = self._walk_stats.get(key, 0) + 1
             self._walk_stats_step += 1
+            # Merged multimodal prefill folds (MSTAR_MERGED_PREFILL): explicit
+            # count of text+vision walks that ran as one prefill_multimodal step
+            # instead of a separate prefill_text + prefill_vision pair.
+            if batch.graph_walk == "prefill_multimodal":
+                self._walk_stats["merged_prefill_walks"] = (
+                    self._walk_stats.get("merged_prefill_walks", 0) + 1
+                )
             # Classify standalone prefill steps: chunked (clen bucket) vs
             # unchunked (raw span bucket from the widest input tensor) — sizes
             # the two mixable-gate misses (no chunk metadata / C too big).

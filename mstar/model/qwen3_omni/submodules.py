@@ -755,6 +755,101 @@ class ThinkerSubmodule(ARNodeSubmodule):
                 kwargs={"mrope_pos_advance": full.mrope_pos_advance},
             )
 
+        if graph_walk == "prefill_multimodal":
+            return self._build_merged_multimodal_inputs(
+                fwd_info, inputs, start_pos, device, seen_token_mask,
+            )
+
+    def _build_merged_multimodal_inputs(
+        self,
+        fwd_info: CurrentForwardPassInfo,
+        inputs: NameToTensorList,
+        start_pos: float,
+        device,
+        seen_token_mask: "SeenTokenMask",
+    ) -> ARNodeInputs:
+        """Merged text+vision Thinker prefill (MSTAR_MERGED_PREFILL).
+
+        Build ONE ARNodeInputs spanning the whole prompt by concatenating the
+        text and vision spans in modality order (``merged_vision_first`` from the
+        conductor), threading the MRoPE start position across them EXACTLY as the
+        separate ``prefill_text`` / ``prefill_vision`` walks would after
+        ``advance_seq_lens`` (text advances ``position_id_start`` by ``seq_len``;
+        vision by its 3D-grid ``mrope_pos_advance``). The per-span embeds /
+        pos_ids / deepstack are computed by the SAME helpers with the SAME
+        threaded ``start_pos`` as the standalone walks, so they are bit-identical
+        — only the concatenation into one forward differs (causal attention over
+        ``[A][B]`` == B attending to A's already-resident KV, so the KV cache is
+        identical modulo kernel-tiling ULP drift). The resulting signature
+        (``input_embeds`` + pos_ids + per-layer ``deepstack_<i>`` +
+        ``mrope_pos_advance``) matches ``prefill_vision``, so this replays on the
+        ``prefill_vision`` capture (text rows zero-fill deepstack — the W5-P3
+        zero-rows pattern).
+        """
+        vision_first = bool(fwd_info.step_metadata.get("merged_vision_first"))
+        num_deepstack = len(self.config.vision.deepstack_visual_indexes)
+        hidden = self.config.thinker_hidden_size
+
+        # --- text span (verbatim from the prefill_text branch) ---
+        text_ids = inputs["text_inputs"][0].to(device)
+        text_embeds = self.model.model.embed_tokens(text_ids)
+        text_len = text_ids.shape[0]
+        seen_token_mask.add_tokens(text_ids)
+        text_talker_mask = torch.stack([
+            torch.zeros(text_ids.shape, dtype=torch.bool, device=device),
+            self._get_talker_text_mask(text_ids),
+        ])
+
+        if vision_first:
+            # vision occupies [start_pos, start_pos + mrope_pos_advance); text
+            # continues from there (== prefill_vision then prefill_text).
+            stage = self._build_vision_full(inputs, start_pos, device)
+            text_pos = get_rope_index_text(
+                text_len, start_pos + stage.mrope_pos_advance, device,
+            )
+            embeds = torch.cat([stage.wrapped_embeds, text_embeds], dim=0)
+            pos_ids = torch.cat([stage.pos_ids, text_pos], dim=1)
+            vision_talker = torch.stack([stage.mm_mask, ~stage.mm_mask])
+            masks_for_talker = torch.cat([vision_talker, text_talker_mask], dim=1)
+            text_zeros = torch.zeros(
+                (text_len, hidden), dtype=stage.wrapped_embeds.dtype, device=device,
+            )
+            deepstack = [
+                torch.cat([stage.deepstack[i], text_zeros], dim=0)
+                for i in range(num_deepstack)
+            ]
+            total_advance = stage.mrope_pos_advance + text_len
+        else:
+            # text occupies [start_pos, start_pos + text_len); vision continues
+            # from there (== prefill_text then prefill_vision).
+            text_pos = get_rope_index_text(text_len, start_pos, device)
+            stage = self._build_vision_full(inputs, start_pos + text_len, device)
+            embeds = torch.cat([text_embeds, stage.wrapped_embeds], dim=0)
+            pos_ids = torch.cat([text_pos, stage.pos_ids], dim=1)
+            vision_talker = torch.stack([stage.mm_mask, ~stage.mm_mask])
+            masks_for_talker = torch.cat([text_talker_mask, vision_talker], dim=1)
+            text_zeros = torch.zeros(
+                (text_len, hidden), dtype=stage.wrapped_embeds.dtype, device=device,
+            )
+            deepstack = [
+                torch.cat([text_zeros, stage.deepstack[i]], dim=0)
+                for i in range(num_deepstack)
+            ]
+            total_advance = text_len + stage.mrope_pos_advance
+
+        tensor_inputs: dict[str, torch.Tensor] = {
+            "masks_for_talker": masks_for_talker,
+        }
+        for i, ds in enumerate(deepstack):
+            tensor_inputs[f"deepstack_{i}"] = ds
+        return ARNodeInputs(
+            input_seq_len=embeds.shape[0],
+            input_embeds=embeds,
+            custom_pos_ids=pos_ids,
+            tensor_inputs=tensor_inputs,
+            kwargs={"mrope_pos_advance": total_advance},
+        )
+
     def _build_vision_full(
         self, inputs: NameToTensorList, start_pos: float, device,
     ) -> "_VisionPrefillStage":
@@ -1076,13 +1171,23 @@ class ThinkerSubmodule(ARNodeSubmodule):
                 cache_manager.set_custom_pos_advance(
                     mixed_pos_advance, label="main",
                 )
-        if graph_walk == "prefill_vision":
+        # prefill_multimodal (MSTAR_MERGED_PREFILL) carries the same
+        # post-preprocess signature as prefill_vision — per-layer deepstack_<i>
+        # statics + the mrope_pos_advance side-channel — so it runs the identical
+        # assembly here (single request per merged prefill, so the single-request
+        # invariant holds regardless of the vision-batch flag).
+        if graph_walk in ("prefill_vision", "prefill_multimodal"):
             from mstar.model.qwen3_omni.qwen3_omni_model import (
                 batch_vision_prefill_enabled,
             )
-            if not batch_vision_prefill_enabled():
+            if graph_walk == "prefill_vision" and not batch_vision_prefill_enabled():
                 assert len(inputs) == 1, \
                     "Batching not implemented for Thinker vision prefill"
+            if graph_walk == "prefill_multimodal":
+                # Merged prefill is one request per step (reuses the bs=1
+                # prefill_vision capture); the scheduler never packs two.
+                assert len(inputs) == 1, \
+                    "Batching not implemented for merged multimodal prefill"
             num_deepstack = len(self.config.vision.deepstack_visual_indexes)
             for i in range(num_deepstack):
                 layer_tensors: list[torch.Tensor] = []
@@ -1497,7 +1602,14 @@ class ThinkerSubmodule(ARNodeSubmodule):
             # — see ``cache_manager._PlanState.custom_pos_advance``.
             FlashInferPackedCudaGraphConfig(
                 capture_graph_walk="prefill_vision",
-                replay_graph_walks=["prefill_vision"],
+                # prefill_multimodal (MSTAR_MERGED_PREFILL) has the identical
+                # post-preprocess signature (input_embeds + cos_3d + sin_3d +
+                # per-layer deepstack_<i>; mrope_pos_advance side-channel), so it
+                # replays on this capture — no separate capture, no extra warmup.
+                # Harmless to list unconditionally: the walk is only ever
+                # scheduled when the flag registers it. The merged span (text +
+                # vision) pads up into the same vision token buckets.
+                replay_graph_walks=["prefill_vision", "prefill_multimodal"],
                 packed_seq_len_to_inputs=prefill_vision_packed,
                 requires_cfg=False,
                 labels=["main"],
@@ -1672,6 +1784,7 @@ class ThinkerSubmodule(ARNodeSubmodule):
         # ``__batched_logits__`` (n+1 rows) + ``__batched_thinker_states__``.
         is_prefill = graph_walk in (
             "prefill_text", "prefill_audio", "prefill_vision", "thinker_mixed",
+            "prefill_multimodal",
         )
         if mrope_section is None and is_prefill:
             mrope_section = self.MROPE_SECTION

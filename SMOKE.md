@@ -1,62 +1,83 @@
-# SMOKE — V2 budgeted chunked-prefill admission (opt/v2-policy)
+# SMOKE — merged multimodal prefill (`MSTAR_MERGED_PREFILL`, opt/prefill-merge)
 
-GPU A/B recipe for `MSTAR_MIXED_BUDGET_TOKENS`. **Code-only branch; no GPU was
-used to produce it.** All commands assume the standard mstar bench env (SHM
-protocol, `HF_HOME=/m-coriander/coriander/hf`, `ninja` on PATH,
-`PYTHONPATH=<this worktree>` so spawned GPU workers load THIS worktree's code —
-without it the A/B is invalid, see the worktree-PYTHONPATH trap).
+GPU A/B recipe for the merged text+vision prefill walk (old plan rows B1/B5).
+**Code-only branch; no GPU was used to produce it.** All commands assume the
+standard mstar bench env (SHM protocol, `HF_HOME=/m-coriander/coriander/hf`,
+`ninja` on PATH, `PYTHONPATH=<this worktree>` so spawned GPU workers load THIS
+worktree's code — without it the A/B is invalid, see the worktree-PYTHONPATH
+trap). Design + invariants: `DESIGN_merged_prefill.md`.
 
 ## What the flag does
 
-W5 P2 folds a ready prefill chunk into the running decode spec chain ONLY at a
-fairness *yield boundary* (`must_yield_away`, ~8% of steps). Under continuous
-arrivals a mixable chunk then sits idle for several steps before it rides a
-decode step. `MSTAR_MIXED_BUDGET_TOKENS=N` (default 0=off) makes the worker
-probe on EVERY spec chain step and fold a ready chunk NOW, capping the mixed
-step at `N` total tokens (`n_decode` 1-token rows + the `C`-token chunk).
+An i2t admission runs `prefill_text` AND `prefill_vision` as SEPARATE Thinker
+graph walks. Each walk boundary is a conductor round-trip (worker→conductor
+`WORKER_GRAPHS_DONE` → `get_partition_forward_pass_args` → conductor→worker
+`InputSignals`, `conductor.py:918-990`) on the TTFT critical path.
+`MSTAR_MERGED_PREFILL=1` collapses that exact one-text+one-vision schedule into a
+SINGLE `prefill_multimodal` walk that runs both spans in ONE Thinker forward,
+dropping the round-trip. The merged walk reuses the `prefill_vision` CUDA-graph
+capture (identical post-preprocess signature), so there is NO new capture and NO
+extra warmup.
 
-It does NOT change how standalone/unchunked prefills admit — it only accelerates
-the drain of chunks that already exist in the pipeline (long prefills the V2
-chunker split, and vision chunks under the vision stack). This is the sole
-difference from the CLOSED `MSTAR_MIXED_SINGLE_CHUNK`, which routed short
-standalone prefills through the chunk planner and starved decode occupancy ~10%.
+Numerically it is the same KV cache: the per-span embeds / positions / deepstack
+are computed by the same helpers with the same threaded MRoPE start position, and
+causal attention over the concatenated `[text][vision]` span equals each span
+attending to what precedes it — so the merged forward is equivalent to the two
+sequential walks modulo kernel-tiling ULP drift (the property accepted for
+chunked prefill).
 
-Expected value: TTFT / admission latency at **B2-B8** and arrival-heavy
-patterns. A fold is ~compute-neutral (mixed ~30-36ms vs prefill+decode ~29ms
-replaced), so **B32 closed-loop is expected ~neutral — the sentinel is
-no-regression, not a win.**
+Expected value: **i2t TTFT / JCT at B1-B4** (the round-trip is a large fraction of
+a low-batch admission). B32 is the no-regression sentinel.
+
+## Eligibility (why it is a vision-strategy SWAP, not an add-on)
+
+The merge fires only when the schedule is EXACTLY one `prefill_text` + one
+`prefill_vision` (either order), output is text (no Talker), AND
+`MSTAR_CHUNKED_PREFILL_V2_VISION` is OFF. The vision-chunking stack
+(`CHUNKED_PREFILL_V2_VISION` + `MIXED_BATCH_VISION`) rewrites the vision walk into
+`encode_vision` + a chunkable Thinker walk — a 3-entry schedule the merge does
+not match. So merged prefill is an ALTERNATIVE to the vision-fold strategy, not
+stacked on it. The A/B base therefore runs VISION as plain separate walks (vision
+chunking off) on BOTH arms, isolating the round-trip.
+
+At B1-B4 the vision-fold path has almost no decode to fold vision chunks into, so
+it degenerates toward separate walks anyway — exactly where removing the
+round-trip outright should help most.
 
 ## Fixed setup (every cell)
 
 ```bash
-WT=/m-coriander/coriander/tim/mstar-v2pol
+WT=/m-coriander/coriander/tim/mstar-pmerge
 PY=/m-coriander/coriander/tim/mstar-new/.venv/bin/python
 GPUS=${GPUS:-6,7}                 # one fixed canonical pair for the whole session
-PORT=${PORT:-8240}
-SOCK=/home/tim/tmp/sk_v2pol_${PORT}
+PORT=${PORT:-8250}
+SOCK=/home/tim/tmp/sk_pmerge_${PORT}
 LIBRI=/home/tim/tmp/libri_wavs    # reuse; do not re-download
 export PYTHONPATH=$WT HF_HOME=/m-coriander/coriander/hf
 # Confirm the devices are idle BEFORE launch (CLAUDE.md GPU-selection rule):
 nvidia-smi --query-gpu=index,utilization.gpu,memory.used --format=csv,noheader -i $GPUS
 ```
 
-**Base stack held constant on both arms** (the locked FINAL STACK, encoff
-config — this is what produces the chunks the budget accelerates; vision
-chunking is part of it, so i2t has vision chunks to fold):
+**Base stack held constant on both arms** — the locked FINAL STACK MINUS the
+vision-chunking levers (so vision runs as separate walks and the merge is
+eligible). Text chunking / mixed(text) / spec stay on; they do not touch the
+vision walk:
 
 ```bash
 BASE_FLAGS="MSTAR_MOE_FP8=1 MSTAR_BATCH_EMIT=1 MSTAR_FAST_POSTPROC=1 \
-  MSTAR_CHUNKED_PREFILL_V2=1 MSTAR_CHUNKED_PREFILL_V2_VISION=1 \
-  MSTAR_MIXED_BATCH=1 MSTAR_MIXED_BATCH_VISION=1 MSTAR_MIXED_SPEC=1 \
+  MSTAR_CHUNKED_PREFILL_V2=1 MSTAR_MIXED_BATCH=1 MSTAR_MIXED_SPEC=1 \
   MSTAR_SLIM_EMIT=1 MSTAR_FAST_ROUTE=1 MSTAR_SAMPLER_CFG_CACHE=1 \
   MSTAR_FAST_CHECKSTOP=1 MSTAR_WALK_STATS=1"
 CONFIG=configs/qwen3omni_2gpu_encoff.yaml
 ```
 
-Serve:
+`MSTAR_MERGED_PREFILL` registers a graph walk + capture at startup, so it is
+**process-static (NOT dynflags-refreshable)** — each arm needs its OWN server.
+
+Serve (per arm; `$ARM_FLAGS` is the only difference):
 
 ```bash
-setsid env CUDA_VISIBLE_DEVICES=$GPUS $BASE_FLAGS $EXTRA_FLAGS MSTAR_DYNFLAGS=$DYN \
+setsid env CUDA_VISIBLE_DEVICES=$GPUS $BASE_FLAGS $ARM_FLAGS \
   timeout 5400 $PY -m mstar.cli.main serve qwen3_omni \
     --gpus $GPUS --port $PORT --tensor-comm-protocol SHM \
     --socket-path-prefix $SOCK --config $CONFIG > $SERVER_LOG 2>&1 &
@@ -65,7 +86,7 @@ cleanup(){ kill -- -$SERVER_PID 2>/dev/null || true; }
 trap cleanup EXIT INT TERM
 ```
 
-Bench one cell (`$B` in 2,4,8,32; i2t = `image_to_text`):
+Bench one cell (`$B` in 1,2,4,32; i2t = `image_to_text`):
 
 ```bash
 timeout 1800 $PY -m benchmark.runner \
@@ -83,100 +104,79 @@ after each cell to protect `/home`.
 
 ## Arms
 
-Three arms. The budget is dynflags-refreshable (it bakes nothing into capture),
-so **off vs budget is a one-server interleaved dyn_ab**. Split-attn / preplan
-bake the capture layout and are process-static, so they need their **own
-server**.
+- **Arm A — baseline (separate walks)**: `ARM_FLAGS=""`. Each i2t admission runs
+  `prefill_text` + `prefill_vision` (the round-trip under test). Own server.
+- **Arm B — merged**: `ARM_FLAGS="MSTAR_MERGED_PREFILL=1"`. Each i2t admission
+  runs ONE `prefill_multimodal` walk. Own server.
 
-- **Arm 1 — off**: base stack, `MSTAR_MIXED_BUDGET_TOKENS` unset (=0).
-- **Arm 2 — budget-on**: base stack, `MSTAR_MIXED_BUDGET_TOKENS=512`.
-- **Arm 3 — budget + split + preplan**: base stack, `MSTAR_MIXED_BUDGET_TOKENS=512`,
-  `EXTRA_FLAGS="MSTAR_MIXED_SPLIT_ATTN=1 MSTAR_MIXED_PREPLAN=1"` (raised fold
-  volume is exactly where these two pay off; separate server).
+Because both arms are static servers, interleave at the ROUND level: A-cell,
+B-cell, A-cell, ... for >=3 rounds/cell (single cells on this box swing ±40%
+under foreign load; only interleaved deltas count). Keep both servers on the
+SAME fixed GPU pair, one benchmark at a time (never co-locate — CLAUDE.md).
 
 ### Cells
 
-- **Primary (where P2 leaves value): i2t B2, i2t B4, i2t B8.**
+- **Primary (where the round-trip dominates): i2t B1, i2t B2, i2t B4** — TTFT +
+  JCT focus.
 - **Sentinel (must not regress): i2t B32.**
-
-### Server 1 (no split/preplan) — interleaved off vs budget
-
-`EXTRA_FLAGS=""`. Point `MSTAR_DYNFLAGS=$DYN` at a JSON file and flip the budget
-between cells (no restart, adjacent cells cancel box noise):
-
-```bash
-echo '{"MSTAR_MIXED_BUDGET_TOKENS":"0"}'   > $DYN   # off cell
-# ... run B2/B4/B8/B32 ...
-echo '{"MSTAR_MIXED_BUDGET_TOKENS":"512"}' > $DYN   # budget cell (worker
-#   picks it up within ~50 iters; _refresh_dynamic_flags re-reads the budget
-#   and resets the min-decode cache)
-# ... run B2/B4/B8/B32 ... then flip back and repeat for >=3 pairs/cell.
-```
-
-### Server 2 (split+preplan baked ON) — interleaved off vs budget
-
-Restart with `EXTRA_FLAGS="MSTAR_MIXED_SPLIT_ATTN=1 MSTAR_MIXED_PREPLAN=1"`, same
-dyn_ab off-vs-budget flip. This isolates whether split+preplan turns the raised
-fold volume net-positive (the retained-lever hypothesis).
 
 ## Proof the mechanism fired (WALK_STATS, every 200 steps at WARNING)
 
-New counters in the server log — read them on the budget arm:
-
 ```bash
-grep -oE 'budget_folds[^,}]*|budget_fold_tokens[^,}]*|budget_skips_floor[^,}]*' $SERVER_LOG | tail -6
-grep -oE '_fold_ok[^,}]*|_mix_opp[^,}]*' $SERVER_LOG | tail -4
+# Arm B: the merged walk ran; the separate walks did not.
+grep -oE "merged_prefill_walks[^,}]*" $SERVER_LOG_B | tail -3      # > 0 and climbs
+grep -oE "'prefill_multimodal'[^,}]*"  $SERVER_LOG_B | tail -3      # present
+grep -oE "'prefill_vision'[^,}]*"      $SERVER_LOG_B | tail -3      # ~0
+# Arm A: the two separate walks ran; no merge.
+grep -oE "'prefill_text'[^,}]*|'prefill_vision'[^,}]*" $SERVER_LOG_A | tail -4
+grep -c  "merged_prefill_walks"        $SERVER_LOG_A                # expect 0
 ```
 
-- **`budget_folds` must be > 0 and climb on the budget arm, and stay 0 on the
-  off arm** (it is only bumped for a fold on a non-yield step). If it stays 0 on
-  the budget arm, the workload produced no chunks to accelerate — check that
-  prefills actually chunk (long text spans > `MSTAR_PREFILL_CHUNK_TOKENS`, or the
-  vision stack on); the flag is inert without chunks, which is a workload
-  finding, not a bug.
-- `_fold_ok` / `_mix_opp` (total folds / opportunities) should be **higher on the
-  budget arm than off** — that is the accelerated drain.
-- `budget_fold_tokens` sizes the chunk tokens the policy admitted.
-- `budget_skips_floor` counts steps where a chunk was ready but the decode side
-  was under the occupancy floor (the anti-lesson guard working). A large value
-  relative to `budget_folds` means ramp-up is dominated by sub-floor batches —
-  consider lowering `MSTAR_MIXED_BUDGET_MIN_DECODE` (default 24).
+- On Arm B, `merged_prefill_walks` must be > 0 and climb, and the
+  `("Thinker","prefill_multimodal")` counter must appear while
+  `("Thinker","prefill_vision")` stays ~0. If `merged_prefill_walks` is 0 on
+  Arm B, the merge never fired — check that vision chunking is OFF and the i2t
+  request really is one text + one image (multi-image / audio / video-second
+  prompts fall back by design), a workload finding, not a bug.
+- On Arm B the Thinker runs ~ONE prefill step per admission where Arm A runs
+  TWO (`prefill_text` + `prefill_vision`); the per-admission Thinker-prefill
+  step-count halving IS the removed round-trip.
 
 ## Proof of correctness (outputs unchanged)
 
-Folding only changes WHEN a chunk runs, not the math. Under a fixed seed the
-per-request token sequences must be identical off vs budget; at minimum tok/req
-and request/throughput must match within sampling noise:
+The merge changes HOW the prefill runs, not the math: same embeds at the same
+MRoPE positions, same causal KV. Under a fixed seed the first sampled token
+should match and per-request output should be semantically identical; bitwise
+divergence after a few tokens is EXPECTED and acceptable (the merged single
+forward routes through different FlashInfer split-KV / fp8 tile schedules than
+two shorter forwards, so greedy amplifies ULP drift — the same property as
+chunked prefill / vLLM chunked prefill). At minimum tok/req and request
+throughput match within sampling noise:
 
 ```bash
 $PY - <<PY
 import json
-off=json.load(open("$ODIR_OFF/results.json")); on=json.load(open("$ODIR_BUDGET/results.json"))
+a=json.load(open("$ODIR_A/results.json")); b=json.load(open("$ODIR_B/results.json"))
 for k in ("request_throughput","tokens_per_request"):
-    print(k, "off", off.get(k), "budget", on.get(k))
+    print(k, "A", a.get(k), "B", b.get(k))
 PY
 ```
 
-Run one budget cell with `MSTAR_MIXED_BATCH_ASSERT=1` (server env) and confirm
-**zero** assert failures / "fold missed a peeked chunk" warnings in the log
-(a lost fold race is tolerable but must be rare):
-
-```bash
-grep -cE 'AssertionError|fold missed a peeked chunk' $SERVER_LOG   # expect 0
-```
+Optionally dump the first-token logits on a fixed i2t prompt on each arm
+(`MSTAR_DUMP_DIR=...`) and confirm the argmax matches and the top-token gap is
+within ULP-scale drift.
 
 ## Proof of win / no-regression
 
-- **B2-B8:** TTFT / first-token latency should drop on the budget arm (a waiting
-  chunk admits sooner); request throughput flat-to-up. This is the target.
-- **B32 sentinel:** request throughput must be within noise of off (±~3% on this
-  box). A fold is ~compute-neutral, so a real B32 drop beyond noise is a
-  regression — do not ship budget-on for B32-heavy configs if it appears.
-- **Arm 3:** if split+preplan lifts the budget arm above off where Arm 2 was
-  neutral/negative, that is the retained-lever payoff at raised fold volume.
+- **B1-B4:** TTFT / first-token latency and JCT should DROP on Arm B (one fewer
+  conductor round-trip per admission); request throughput flat-to-up. This is
+  the target.
+- **B32 sentinel:** request throughput within noise of Arm A (±~3% on this box).
+  The round-trip is a smaller fraction of a full B32 admission, so B32 is
+  expected neutral-to-slightly-positive; a real drop beyond noise is a
+  regression — investigate before shipping default-on.
 
-Report per-cell deltas as geomean over >=3 interleaved pairs/cell; single cells
-on this box swing ±40% under foreign load (only interleaved dyn_ab counts).
+Report per-cell deltas as geomean over >=3 interleaved rounds/cell.
 
 ## Hard rules (CLAUDE.md) for every cell
 

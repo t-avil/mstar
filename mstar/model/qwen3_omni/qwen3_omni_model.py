@@ -418,6 +418,29 @@ def batch_vision_prefill_enabled() -> bool:
     return _envflag("MSTAR_BATCH_VISION_PREFILL")
 
 
+def merged_prefill_enabled() -> bool:
+    """Merged multimodal prefill (old plan rows B1/B5). When ON, an i2t
+    admission whose Thinker prefill schedule is exactly one ``prefill_text`` +
+    one ``prefill_vision`` (either order) collapses into a SINGLE
+    ``prefill_multimodal`` walk that runs both spans in one Thinker forward,
+    dropping the conductor round-trip between the two walks.
+
+    The merged walk is a ``Sequential[vision_encoder → Thinker]`` (the encoder
+    still runs first). Its post-preprocess tensor signature is IDENTICAL to
+    ``prefill_vision`` (``input_embeds`` + ``cos_3d`` + ``sin_3d`` +
+    per-layer ``deepstack_<i>``; ``mrope_pos_advance`` via the ``_PlanState``
+    side-channel), so it REUSES the ``prefill_vision`` CUDA-graph capture — no
+    new capture, no extra warmup. See ``DESIGN_merged_prefill.md``.
+
+    Default OFF -> flag-off is byte-identical: the walk is never registered, the
+    schedule is never collapsed, so no i2t admission can route to it. Merge is
+    gated to text output (no Talker involvement), non-chunked vision
+    (``MSTAR_CHUNKED_PREFILL_V2_VISION`` off), and the exact one-text+one-vision
+    schedule; anything else keeps the unmerged multi-walk path unchanged.
+    """
+    return _envflag("MSTAR_MERGED_PREFILL")
+
+
 def _tensor_dump_dir() -> str | None:
     """Directory for env-gated intermediate-tensor / token dumps, or None."""
     import os as _os
@@ -892,6 +915,50 @@ class Qwen3OmniModel(Model):
             ],
         )
 
+        # Merged multimodal prefill (MSTAR_MERGED_PREFILL): one walk that runs
+        # the text span AND the vision span in a single Thinker forward, dropping
+        # the conductor round-trip between prefill_text and prefill_vision.
+        # Structurally identical to the prefill_vision Sequential (encoder must
+        # still run first), but the Thinker node ALSO declares text_inputs; its
+        # prepare_inputs concatenates the per-span embeds/pos_ids/deepstack in
+        # modality order (see submodules.py). Registered only when the flag is on
+        # so flag-off keeps every walk above byte-identical.
+        prefill_multimodal = Sequential([
+            GraphNode(
+                name="vision_encoder",
+                input_names=["pixel_values", "image_grid_thw"],
+                outputs=[
+                    GraphEdge(next_node="Thinker", name="vision_embeds"),
+                    GraphEdge(next_node="Thinker", name="deepstack"),
+                ],
+            ),
+            GraphNode(
+                name="Thinker",
+                input_names=[
+                    "text_inputs", "vision_embeds", "deepstack",
+                    "video_second_per_grid", "image_grid_thw",
+                ],
+                outputs=[
+                    GraphEdge(
+                        next_node=EMIT_TO_CLIENT,
+                        name="new_token",
+                        output_modality="text",
+                        persist=True,
+                    ),
+                    StreamingGraphEdge(
+                        next_node="Talker",
+                        name="thinker_states",
+                        target_partition="Talker",
+                    ),
+                    StreamingGraphEdge(
+                        next_node="Talker",
+                        name="thinker_mask",
+                        target_partition="Talker",
+                    ),
+                ],
+            ),
+        ])
+
         # -- Thinker decode: produces new_token (persist) + thinker_states
         #    (streaming to Talker) --
         thinker_decode = Loop(
@@ -1012,6 +1079,10 @@ class Qwen3OmniModel(Model):
             # Sequential registered above.
             walks["encode_vision"] = encode_vision
             walks["prefill_vision"] = prefill_vision_chunked
+        if merged_prefill_enabled():
+            # Merged text+vision walk. Only registered under the flag so flag-off
+            # leaves the walk table byte-identical.
+            walks["prefill_multimodal"] = prefill_multimodal
         return walks
 
     # -----------------------------------------------------------------------
@@ -1028,6 +1099,8 @@ class Qwen3OmniModel(Model):
                     # encode_vision is registered as a Thinker-partition walk
                     # only when chunked vision is on; harmless to always list.
                     *(("encode_vision",) if chunked_prefill_v2_vision_enabled() else ()),
+                    # prefill_multimodal only exists under MSTAR_MERGED_PREFILL.
+                    *(("prefill_multimodal",) if merged_prefill_enabled() else ()),
                 },
                 initial_walk="prefill_text",
                 producer_partitions=[],
@@ -1215,6 +1288,16 @@ class Qwen3OmniModel(Model):
             input_modalities, input_signals,
         )
 
+        # Merged multimodal prefill (MSTAR_MERGED_PREFILL): collapse an exact
+        # [prefill_text, prefill_vision] schedule (either order) into ONE
+        # prefill_multimodal walk. merged_vision_first records the span order so
+        # the submodule concatenates in the right order. Returns the schedule
+        # unchanged (merged_vision_first=None) when the merge does not apply, so
+        # every non-eligible request keeps the byte-identical multi-walk path.
+        schedule, merged_vision_first = self._maybe_merge_prefill_schedule(
+            schedule, audio_output,
+        )
+
         first_walk = schedule[0][0] if schedule else "thinker_decode"
         is_last_prefill = bool(schedule and len(schedule) == 1)
 
@@ -1273,11 +1356,50 @@ class Qwen3OmniModel(Model):
                 # requests skip it to save cross-partition bandwidth.
                 "audio_output": audio_output,
                 "is_last_prefill": is_last_prefill,
+                # Span order for a merged prefill_multimodal walk (None otherwise;
+                # the submodule only reads it for that walk).
+                "merged_vision_first": merged_vision_first,
                 # prefill_chunk_offset / prefill_chunk_len for the submodule to
                 # slice this chunk (absent => full span, byte-identical).
                 **chunk_step_metadata,
             },
         )
+
+    def _maybe_merge_prefill_schedule(
+        self,
+        schedule: list[tuple[str, dict[str, TensorPointerInfo]]],
+        audio_output: bool,
+    ) -> tuple[list[tuple[str, dict[str, TensorPointerInfo]]], bool | None]:
+        """Collapse an exact one-text + one-vision schedule into a single
+        ``prefill_multimodal`` entry when ``MSTAR_MERGED_PREFILL`` applies.
+
+        Returns ``(schedule, merged_vision_first)``. ``merged_vision_first`` is
+        ``True``/``False`` when merged (span order), or ``None`` when the merge
+        does not apply — in which case the schedule is returned UNCHANGED so the
+        request keeps the byte-identical multi-walk path.
+
+        Eligibility (all required): flag on; text output (no Talker); non-chunked
+        vision (``MSTAR_CHUNKED_PREFILL_V2_VISION`` off, else the schedule holds
+        ``encode_vision`` + a chunkable Thinker walk, a different span model);
+        exactly two entries, one ``prefill_text`` and one ``prefill_vision``.
+        """
+        if (
+            not merged_prefill_enabled()
+            or audio_output
+            or chunked_prefill_v2_vision_enabled()
+            or len(schedule) != 2
+        ):
+            return schedule, None
+        walks = [w for w, _ in schedule]
+        if sorted(walks) != ["prefill_text", "prefill_vision"]:
+            return schedule, None
+        vision_first = walks[0] == "prefill_vision"
+        # Union the two entries' tensor dicts (their keys are disjoint:
+        # text_inputs vs pixel_values/image_grid_thw/video_second_per_grid).
+        merged_entry: dict[str, TensorPointerInfo] = {}
+        for _, tensor_dict in schedule:
+            merged_entry.update(tensor_dict)
+        return [("prefill_multimodal", merged_entry)], vision_first
 
     def _append_vision_schedule(self, schedule: list, entry: dict) -> None:
         """Append the vision prefill schedule entries.
@@ -1443,6 +1565,27 @@ class Qwen3OmniModel(Model):
                 edge.tensor_info = (
                     [tensor_dict[key]] if key in tensor_dict else []
                 )
+                edges.append(edge)
+            return edges
+
+        # Merged multimodal walk (MSTAR_MERGED_PREFILL): the encoder takes
+        # pixel_values + image_grid_thw; the Thinker additionally takes the FULL
+        # text_inputs span (plus image_grid_thw for get_rope_index_vision and
+        # video_second_per_grid). vision_embeds / deepstack reach the Thinker as
+        # the encoder's Sequential outputs (graph edges), not conductor inputs.
+        if walk_name == "prefill_multimodal":
+            edges = []
+            for name in ("pixel_values", "image_grid_thw"):
+                if name in tensor_dict:
+                    edge = GraphEdge(next_node="vision_encoder", name=name)
+                    edge.tensor_info = [tensor_dict[name]]
+                    edges.append(edge)
+            # ALWAYS emit each declared Thinker input (empty payload still marks
+            # the name ready — image requests carry no video_second_per_grid),
+            # mirroring the chunked-vision readiness contract above.
+            for name in ("text_inputs", "image_grid_thw", "video_second_per_grid"):
+                edge = GraphEdge(next_node="Thinker", name=name)
+                edge.tensor_info = [tensor_dict[name]] if name in tensor_dict else []
                 edges.append(edge)
             return edges
 
