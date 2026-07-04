@@ -203,6 +203,7 @@ class Worker:
             mixed_single_chunk_enabled as _msce,
             mixed_split_attn_enabled as _msae,
             mixed_budget_tokens as _mbt,
+            admit_jitter_ms as _ajm,
         )
         self.mixed_single_chunk = _msce()
         # Static for the process — capture bakes the split layout, so this
@@ -214,6 +215,10 @@ class Worker:
         # single-chunk / split flags this bakes nothing into capture (it only
         # changes fold TIMING), so it IS dynflags-refreshable below.
         self._mixed_budget_tokens = _mbt()
+        # MSTAR_ADMIT_JITTER_MS (0=off): admission-wave smoothing. Stamps a small
+        # held_until backoff on surplus admissions (see _add_new_request). Only
+        # changes admission TIMING, so it IS dynflags-refreshable below.
+        self._admit_jitter_ms = _ajm()
         # Eager-fold peek backoff state (see the fold_probe site).
         self._peek_backoff = 0
         self._peek_skip = 0
@@ -754,6 +759,40 @@ class Worker:
         if body.request_id in self._unprocessed_messages:
             self._process_message_list(self._unprocessed_messages[body.request_id])
             del self._unprocessed_messages[body.request_id]
+
+        # MSTAR_ADMIT_JITTER_MS: de-synchronize closed-loop admission waves.
+        # Stamp a small held_until backoff on this admission so a burst of
+        # near-simultaneous arrivals trickles in over the next few steps and
+        # folds into running decode instead of serializing as a phase-drain
+        # prefill wall (SMOOTHING_CONSTRAINTS lever (a)).
+        #
+        # STARVATION GUARD (C1/C3/C5): jitter ONLY when the free-to-run request
+        # count is already ABOVE the fold occupancy floor, so the engine always
+        # keeps >= floor requests available to schedule and no prefill that could
+        # fill a decode gap is ever held. During a wave's initial refill the
+        # first ~floor arrivals therefore admit immediately (restoring
+        # occupancy) and only the SURPLUS is staggered. The floor is the fold
+        # floor (>= 24), so jitter never engages below ~B24 concurrency — B1-B16
+        # stay byte-identical with no separate batch-size gate. held_until is
+        # honored per scan and auto-expired in get_next_batch, so a dynflags
+        # flip to 0 simply stops stamping (in-flight holds drain within the
+        # window). O(1): three len() reads (C2's sanctioned check).
+        if self._admit_jitter_ms > 0.0:
+            floor = self.scheduler._mixed_min_decode() or 24
+            active = (
+                len(self.worker_graphs_manager.per_request_info)
+                - len(self.scheduler.held_until)
+                - len(self.scheduler.pending_removes)
+            )
+            if active > floor:
+                # Deterministic per-rid fraction in [0, 1) from the rid hash —
+                # no RNG state on the admission path (rule 2). Spreads the
+                # surplus across the jitter window.
+                frac = (hash(body.request_id) & 0xFFFF) / 65536.0
+                self.scheduler.held_until[body.request_id] = (
+                    now + (self._admit_jitter_ms / 1000.0) * frac
+                )
+                self._ws_inc("admit_jitter_held")
 
 
     def _remove_request(self, body: RemoveRequest) -> None:
@@ -1952,8 +1991,12 @@ class Worker:
         from mstar.model.qwen3_omni.qwen3_omni_model import (
             mixed_single_chunk_enabled,
             mixed_budget_tokens,
+            admit_jitter_ms,
         )
         self.mixed_single_chunk = mixed_single_chunk_enabled()
+        # Admission jitter: pure timing knob (stamps held_until at admission),
+        # bakes nothing into capture — safe to flip mid-run for one-server A/B.
+        self._admit_jitter_ms = admit_jitter_ms()
         # V2 budget: safe to flip mid-run — it only gates whether/when an
         # already-mixable chunk folds; it bakes nothing into capture, and the
         # bucket math (chunk C <= _MIXED_MAX_CHUNK_TOKENS) is unchanged. Reset

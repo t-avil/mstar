@@ -314,6 +314,42 @@ def mixed_budget_tokens() -> int:
     return v if v > 0 else 0
 
 
+def admit_jitter_ms() -> float:
+    """Admission-smoothing jitter window in milliseconds (``MSTAR_ADMIT_JITTER_MS``).
+
+    Smoothing lever (a) from SMOOTHING_CONSTRAINTS.md: DE-SYNCHRONIZE arrival
+    waves. At closed-loop B32 the ~32 requests finish on a near-uniform JCT and
+    re-admit in one burst; the decode side collapses and the burst serializes as
+    standalone prefill steps (a phase-drain wall) instead of folding into running
+    decode. With this > 0 the worker stamps a small per-request ``held_until``
+    backoff (uniform in ``[0, jitter_ms)``) on the SURPLUS admissions of a burst
+    — the arrivals beyond the fold occupancy floor — so they trickle in over the
+    next few steps and fold into decode rather than clustering.
+
+    Occupancy-safe by construction (C1/C3/C5): the worker only jitters when the
+    free-to-run request count is already ABOVE the fold occupancy floor
+    (``_mixed_min_decode``, default 24), so the number of requests available to
+    keep the engine busy can never drop below the floor and no prefill that could
+    fill a decode gap is ever held. Because the floor is 24, jitter never engages
+    below B24 concurrency — B1-B16 are byte-identical, making this a B32-class
+    lever automatically (no separate batch-size gate needed).
+
+    0 (the default) disables it — flag-off is byte-identical. It changes only
+    admission TIMING (like the V2 budget it bakes nothing into capture), so it is
+    safe to flip mid-run via ``MSTAR_DYNFLAGS``; the worker re-derives the cached
+    value in ``_refresh_dynamic_flags``.
+    """
+    import os as _os
+    raw = _os.environ.get("MSTAR_ADMIT_JITTER_MS")
+    if raw is None:
+        return 0.0
+    try:
+        v = float(raw.strip())
+    except ValueError:
+        return 0.0
+    return v if v > 0.0 else 0.0
+
+
 def prefill_chunk_tokens() -> int:
     """Cap on chunk size C for chunked prefill. The planner picks the largest
     ``ThinkerSubmodule.PREFILL_TOKEN_BUCKETS`` entry <= min(remaining, this cap),
