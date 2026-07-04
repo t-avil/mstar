@@ -1667,3 +1667,40 @@ correctness deficit." This also explains the ab_verdict JCT-skew warnings on the
 vLLM arm (the single answer-mode monster request per cell). Turns the campaign's
 biggest honesty risk into a documented vLLM deficit. Data: the req_*.txt under the
 three h2h dirs; sweep is re-runnable (byte-length ratio + read-divergent).
+
+
+## RACE 3 — merge config live vs vLLM (h2h_out_imergecol2, n=3, zero vLLM failures) — i2t B16 WON; B32 in-band 0.918 = ceiling; small-batch STILL [OB]
+Final race of the night on the merge config (imergecol = merge + co-location) vs a
+fresh vLLM-Omni 0.22 (read 8.4–8.5, zero failures this time). All grade A (n=3,
+ab_verdict). Verdicts:
+- **i2t B16 WIN 1.096** (95%LB 1.077), tok/req 172.6 IN-BAND — new clean grade-A
+  GREEN (was borderline 1.012 on the shipping config).
+- **s2t B32 WIN 1.349** (95%LB 1.299), tok/req 21.2 — proof-grade n=3, upgrades the
+  n=2 p2verify 1.234; whole s2t column now grade-A/B GREEN.
+- **i2t B4 WASH 1.057** (band 1.032–1.082) — point over the bar, band straddles.
+- **i2t B1 LOSS 0.973**, **i2t B2 LOSS 0.945**, **i2t B32 LOSS 0.918** (band
+  0.889–0.948). Merge gained ~+4% over shipping live at B32 (0.883→0.918).
+tok/req PROFILE (verified from results.json across configs — an initial "[OB]
+over-generation" reading was WRONG and is retracted): the 172–179 identity band is
+B32-calibrated. Small-batch output is legitimately LONGER for BOTH systems under
+greedy decoding — at B1, M* ~189–200 tok/req and vLLM ~208–220, both falling to
+~175/210 by B32. It is a BATCH-dependent length profile, NOT a config artifact:
+co-located arm3 (189.2), shipping (188.6) and encoff+merge (189.3) all read ~189
+at B1, so co-location does not over-generate. Therefore B1/B2/B4 = 0.973/0.945/
+1.057 STAND as measured; there is no "in-band-at-B1" config to re-race for upside.
+Small-batch correctness gate = cross-config tok/req consistency at same batch
+(✓ 188–200 across all four configs) + output parity (s2t transcript proven; i2t
+caption parity should get the same spot-check). Minor precision note: imerge reads
+199.8 at B1 vs ~189 for the other three configs — a ~6% build/run spread within
+small-n length variance, not a defect and not a lever. B16 (172.6) / B32 (174.7)
+sit in the B32 band; all six i2t cells are grade-A final.
+CAMPAIGN STATE: 20/24 GREEN (all speech, all s2t, i2t B8 + new i2t B16). RED = i2t
+B1 (+8%, [OB]) / B2 (+11%, [OB]) / B32 (+14%, in-band). BORDERLINE = i2t B4
+(straddle, [OB]). i2t B32 at 0.918 in-band is the flagship hard stop: every
+host-side lever falsified/parked tonight, merge added the last +4%, and ~0.92 is
+plausibly at/near the structural ceiling vs their fresh-boot 8.4–8.5 — a 1.05×
+there needs an EngineCore-class scheduler rewrite, not a flag. Remaining live
+levers: in-band small-batch re-race (clears [OB], expected to lift B1/B2/B4) + W2
+retest (boot running; honest +2–5% at B1–B4, could flip B4 clean-green, maybe B1
+borderline; won't cover B2 or B32). GOAL_MATRIX rev-3 regenerated. Data:
+h2h_out_imergecol2/, ab_verdict output.

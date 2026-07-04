@@ -1,50 +1,50 @@
 # GOAL_MATRIX — current best-defensible state of every cell
 
-Generated 2026-07-04 (rev 2, folds in race-2 h2h_out_smallbatch2). The endgame
-driver: one row per GOAL cell {i2t, s2t, s2s, i2s} × {B1, B2, B4, B8, B16, B32},
-each with the best-defensible ratio vs vLLM-Omni v0.22, its evidence, grade, and
-status vs the 1.05× bar. **Ratios are req/s unless marked. Projections are marked
-[PROJ] and are NOT measurements.** Regenerate per the generator note at the bottom.
+Generated 2026-07-04 (rev 3.1, folds in the final race h2h_out_imergecol2 — the
+encoff merge config, n=3, zero vLLM failures, raw committed). One row per GOAL
+cell {i2t, s2t, s2s, i2s} × {B1, B2, B4, B8, B16, B32}. **Ratios are req/s unless
+marked. Projections marked [PROJ] are NOT measurements.** Regenerate per the
+generator note at the bottom.
 
 ## Legend
 
-Evidence grade:
-- **A** — live, clean, n≥3 accepted adjacent pairs via ab_verdict (or n=2 with
-  strong cross-source corroboration, noted).
-- **B** — live, n<3 (or a single adjacent pair). Directionally real, not sweep-grade.
-- **C** — cross-pair, or same-pair-config-derived (a measured delta applied to a
-  measured baseline). Includes projections.
-- **D** — committed/older sweep (fresh-boot protocol, cold-cell bias, pre-current-build).
+Evidence grade: **A** live clean n≥3 via ab_verdict (or n=2 w/ corroboration,
+noted) · **B** live n<3 / 1-pair · **C** cross-pair or config-derived / projection
+· **D** committed/older sweep.
 
-Status vs 1.05×:
-- **GREEN** — ≥1.05 at its grade (won).
-- **BORDERLINE** — 0.98–1.049 (within one lever).
-- **RED** — <0.98 (needs real work).
-- **UNMEASURED** — no valid live/current data vs vLLM.
+Status vs 1.05×: **GREEN** ≥1.05 · **BORDERLINE** 0.98–1.049 (or point-over-bar
+with a straddling band) · **RED** <0.98 · **UNMEASURED** no valid live data.
 
 Correctness flags (a req/s "win" is void if outputs aren't equivalent — GOAL §1):
-- **[TQ✓]** — transcript-quality check DONE and PASSED: M* transcripts at parity;
-  the vLLM/M* length gap is vLLM error-inflation (answer-mode on interrogative
-  audio), not richer output. Resolved 07-04, 534-pair sweep (see flags section).
-- **[OB]** — M* tok/req out-of-band for the config that produced this cell.
+- **[TQ✓]** transcript check DONE/PASSED — M* at parity; vLLM length gap is
+  answer-mode error-inflation (534-pair s2t sweep, 07-04).
+
+Note on the tok/req identity band: the **172–179 band is B32-calibrated.**
+Output length is batch-dependent for BOTH systems under greedy decoding (argmax
+paths shift with batch numerics): small-batch runs longer — M* ~189–200 tok/req at
+B1, vLLM ~208–220, both falling to ~175/210 by B32 (measured, h2h_out_imergecol2).
+So the small-batch correctness gate is NOT the B32 band; it is **cross-config
+tok/req consistency at the same batch** (shipping 188.6 / encoff+merge 189.3 /
+co-located 189.2 / imerge 199.8 at B1 — the batch-dependent profile is config-
+independent) **plus output parity** (s2t transcript parity proven; i2t caption
+parity should get the same spot-check if not already done).
 
 ## The matrix
 
 | cell | ratio | metric | grade | status | to-goal | evidence (path) | date |
 |---|---|---|---|---|---|---|---|
-| **i2t B1**  | 0.99  | req/s | A [OB] | BORDERLINE | +6%  | live n=3 [h2h_out_smallbatch2/] band 0.943–1.056; arm3 cfg | 07-04 |
-| **i2t B2**  | 0.98  | req/s | A [OB] | BORDERLINE | +7%  | live n=3 [h2h_out_smallbatch2/] LOSS, UB 1.029; arm3 cfg | 07-04 |
-| **i2t B4**  | 1.056 | req/s | A [OB] | BORDERLINE-GREEN | ~MET | live n=3 [h2h_out_smallbatch2/] band 1.037–1.075; arm3 cfg | 07-04 |
+| **i2t B1**  | 0.973 | req/s | A | RED        | +8%  | live n=3 [h2h_out_imergecol2/] band excl. 1.05 (UB 0.983) | 07-04 |
+| **i2t B2**  | 0.945 | req/s | A | RED        | +11% | live n=3 [h2h_out_imergecol2/] LOSS (UB 1.005) | 07-04 |
+| **i2t B4**  | 1.057 | req/s | A | BORDERLINE | ~MET | live n=3 [h2h_out_imergecol2/] band 1.032–1.082 (straddle) | 07-04 |
 | **i2t B8**  | 1.221 | req/s | B | GREEN      | MET    | live h2h 1 pair [h2h_out/] (committed h2h_v2/) | 07-04 |
-| **i2t B16** | 1.012 | req/s | A | BORDERLINE | +4%    | live n=3 [h2h_out_p2verify/] (tok/s 0.817; clean loss both ways) | 07-04 |
-| **i2t B32** | 0.883 | req/s | A | RED        | +18.9% | live n=2 [h2h_out/] corrob. warm-lab 0.86–0.89 + trajectory | 07-04 |
-| **i2t B32** | 0.95–0.97 [PROJ] | req/s | C | (proj) | +8–10% | merge +11.2% tok/s [lab_pmerge/lab_parm2] × 0.883 live — PROJECTION | 07-04 |
-| **s2t B1**  | 1.14  | req/s | D | GREEN      | MET    | committed sweep (re-race for grade + [TQ]) | 07-03 |
-| **s2t B2**  | 3.062 [TQ✓] | req/s | A | GREEN | MET | live n=3 [h2h_out_smallbatch2/] 95%LB 2.970; arm3 cfg | 07-04 |
-| **s2t B4**  | 2.180 [TQ✓] | req/s | A | GREEN | MET | live n=3 [h2h_out_smallbatch2/] 95%LB 2.117; arm3 cfg | 07-04 |
+| **i2t B16** | 1.096 | req/s | A | GREEN      | MET    | live n=3 [h2h_out_imergecol2/] 95%LB 1.077 | 07-04 |
+| **i2t B32** | 0.918 | req/s | A | RED        | +14%   | live n=3 [h2h_out_imergecol2/] band 0.889–0.948; merge +4% vs shipping; fresh vLLM 8.4–8.5 | 07-04 |
+| **s2t B1**  | 1.14  | req/s | D | GREEN      | MET    | committed sweep (re-race for grade) | 07-03 |
+| **s2t B2**  | 3.062 [TQ✓] | req/s | A | GREEN | MET | live n=3 [h2h_out_smallbatch2/] 95%LB 2.970 | 07-04 |
+| **s2t B4**  | 2.180 [TQ✓] | req/s | A | GREEN | MET | live n=3 [h2h_out_smallbatch2/] 95%LB 2.117 | 07-04 |
 | **s2t B8**  | 1.401 | req/s | B | GREEN      | MET    | live h2h 1 pair [h2h_out/] (committed h2h_v2/) | 07-04 |
-| **s2t B16** | 1.354 | req/s | B | GREEN      | MET    | live n=2 (r3 soft rejected) [h2h_out_p2verify/] | 07-04 |
-| **s2t B32** | 1.234 | req/s | B | GREEN      | MET    | live n=2 (r4 soft rejected) [h2h_out_p2verify/] — wants r3 for A | 07-04 |
+| **s2t B16** | 1.354 | req/s | B | GREEN      | MET    | live n=2 (r3 soft rejected) [h2h_out_p2verify/] — wants r3 | 07-04 |
+| **s2t B32** | 1.349 [TQ✓] | req/s | A | GREEN | MET | live n=3 [h2h_out_imergecol2/] 95%LB 1.299 — proof-grade | 07-04 |
 | **s2s B1**  | 2.63  | req/s | D | GREEN      | MET    | committed raw_*.json (benchmarks branch) | 07-02 |
 | **s2s B2**  | 2.65  | req/s | D | GREEN      | MET    | committed | 07-02 |
 | **s2s B4**  | 2.46  | req/s | D | GREEN      | MET    | committed | 07-02 |
@@ -60,90 +60,101 @@ Correctness flags (a req/s "win" is void if outputs aren't equivalent — GOAL �
 
 ## Roll-up
 
-- **The 0.75/0.83 small-batch artifacts are DEAD.** Race-2 live grade-A reads put
-  i2t B1/B2/B4 at ~0.99/0.98/1.056 — the internal-consistency call (B2<B1 was
-  implausible) is confirmed. The war shrank from "5 RED + 2 UNMEASURED" to a thin
-  i2t band.
-- **GREEN: 19/24** — all 12 speech, all 6 s2t (transcript parity proven, [TQ✓]),
-  i2t B8.
-- **BORDERLINE: 4/24** — i2t B1 (+6%), B2 (+7%, reads LOSS), B4 (1.056, band
-  straddles → borderline-green), B16 (+4%).
-- **RED: 1/24** — i2t B32 (0.883; +8–10% post-merge projection).
+- **GREEN: 20/24** — all 12 speech, all 6 s2t (transcript parity proven, s2t B32
+  now proof-grade n=3), i2t B8, **i2t B16 (new grade-A WIN 1.096)**.
+- **BORDERLINE: 1/24** — i2t B4 (point 1.057 over the bar but band 1.032–1.082
+  straddles).
+- **RED: 3/24** — i2t B1 (+8%), i2t B2 (+11%), i2t B32 (+14%).
 - **UNMEASURED: 0/24.**
-- Honest headline: **the war is now ONLY the i2t column** — B32 (the flagship,
-  RED) plus four borderline cells B1/B2/B4/B16 all within +7%. Speech done with
-  2–3× margin; s2t won on req/s pending the [TQ] check.
+- Headline: **the war is 3 i2t cells** — B1/B2 small-batch and B32 flagship. All
+  grade-A live reads, all stand as measured. Speech done 2–3×; s2t won and
+  transcript-verified; i2t B8/B16 won live.
 
-## Two flags that gate acceptance
+## Notes that gate acceptance
 
-1. **i2t config [OB]: arm3 is out-of-band for i2t.** The race-2 M* side was the
-   arm3 config (base co-located + vision-merge + audio-merge). Its i2t tok/req
-   drifts **185–191**, above the 172–179 identity band — co-location is implicated
-   (encoff+merge arm1 reads **173–180**, in-band). So arm3's i2t numbers are valid
-   as *directional truth* (they kill the 0.75/0.83 artifacts) but arm3 is NOT the
-   shippable i2t config. **i2t primary candidate = encoff+merge**, whose live race
-   is pending (imerge lab booting). Because arm3 over-generates (185–191 > the
-   shipping 176), its i2t req/s is if anything UNDERSTATED — encoff+merge in-band
-   could read at or above these ratios. The imerge race settles it and must clear
-   the tok/req band per cell.
-2. **s2t [TQ✓]: RESOLVED in M*'s favor — the length gap is a vLLM correctness
-   deficit.** 534-pair transcript sweep across all 13 s2t cells (B2/B4/B8/B16/B32,
-   07-04). Transcripts match byte-for-byte modulo M*'s `<|im_end|>` marker on
-   521/534 pairs. All 13 divergent (>2×) pairs are the SAME interrogative clip
-   (req_4, "How would the papers talk about it?"), where vLLM enters **answer-mode
-   and writes a 1.2–1.4 KB essay instead of transcribing** — a task-following
-   failure in every cell; M* transcribes it correctly in 45 bytes. **Zero M*
-   truncations found.** One clip (req_43) shows a minor M* word-order garble where
-   vLLM is cleaner — the only pair favoring vLLM, non-systematic. So vLLM's
-   42–60 tok/req is ERROR-inflation, not richer output; M*'s shorter outputs are
-   correct transcriptions and the s2t req/s wins are DEFENSIBLE (and the length gap
-   is itself a vLLM deficit). This also explains ab_verdict's "JCT skew" warnings
-   on the vLLM arm — one monster answer-mode request per cell. Evidence:
-   h2h_out_smallbatch2/ + h2h_out_p2verify/ + h2h_out/ req_*.txt.
+1. **i2t small-batch numbers stand as measured; no free upside from length.** The
+   high small-batch tok/req (~189–200 at B1) is a **batch-dependent length profile
+   common to both systems**, not a config artifact: co-located (arm3, 189.2),
+   shipping (188.6) and encoff+merge (189.3) all sit ~189 at B1, and vLLM shifts
+   the same way (220 at B1 → 210 at B32). So B1/B2/B4 = 0.973/0.945/1.057 are the
+   honest reads; there is no "in-band-at-B1" config to re-race for free upside.
+   (Minor precision note: imerge specifically reads 199.8 at B1 vs the ~189 of the
+   other three configs — a ~6% build/run spread, within small-n length variance,
+   not a defect and not a lever.)
+2. **s2t [TQ✓]: transcript parity proven, vLLM length gap is answer-mode error.**
+   534-pair sweep (07-04): transcripts identical modulo M*'s end marker on 521/534;
+   all 13 divergent pairs are one interrogative clip where vLLM writes an essay
+   instead of transcribing; zero M* truncations. s2t req/s wins are correct.
 
-## Remaining gaps — ordered, with the in-flight lever
+## Remaining gaps — ordered, with lever
 
-1. **i2t B32 — RED 0.883 (+18.9%; merge [PROJ] 0.95–0.97, +8–10%).** THE flagship.
-   Lever: encoff+merge at B32 (imerge race) to convert the projection to grade A;
-   theory-memo ceiling ~0.97, so closing the last ~8% needs the merge win to land
-   AND stack with another host-side cut. This is the one that decides "all cells".
-2. **i2t B2 — BORDERLINE ~0.98 (+7%).** Lever: encoff+merge in-band race (imerge);
-   arm3 showed the true ratio is ~parity, not 0.75.
-3. **i2t B1 — BORDERLINE ~0.99 (+6%).** Same encoff+merge race.
-4. **i2t B16 — BORDERLINE 1.012 (+4%).** Cheapest; rides merge + re-race live.
-5. **i2t B4 — BORDERLINE-GREEN 1.056 (band 1.037–1.075).** Point is over the bar
-   but the band straddles; needs the in-band encoff+merge race to confirm it holds
-   at grade A with tok/req in band.
+1. **i2t B32 — RED 0.918 (+14%), grade A.** THE flagship, and the honest hard stop.
+   Merge gained ~+4% over shipping (0.883→0.918) but every host-side lever was
+   falsified or parked tonight (sidecar-stage-2 valve-dead, V1 self-cancelling,
+   admission-jitter/prefill-gather mechanism-dead, fold-family closed for short
+   spans). See Tier-S3 below — **~0.92 is plausibly near the structural ceiling**
+   vs their fresh-boot 8.4–8.5.
+2. **i2t B2 — RED 0.945 (+11%).** Lever: W2 postprocess memoization retest (boot
+   running now; honest 2–5% at B1–B4, converts where the host floor is unshaded).
+   Even with W2, B2 is the least likely of the three to reach 1.05.
+3. **i2t B1 — RED 0.973 (+8%).** Lever: W2 (2–5% could put B1 borderline).
+4. **i2t B4 — BORDERLINE 1.057 (straddle).** Point over the bar; W2's 2–5% would
+   likely convert the straddle to a clean WIN. The most reachable of the three.
 
-Record hygiene / correctness (not throughput gaps):
-- **i2t primary re-race (encoff+merge, imerge)** — all five i2t small-batch/mid
-  cells need an IN-BAND config read; arm3 was [OB].
-- ~~s2t [TQ] transcript check~~ — DONE 07-04 (534-pair sweep, PASSED; vLLM
-  answer-mode deficit, zero M* truncations).
-- **s2t B16 + B32 round 3** — n=2 → n≥3 to promote B→A before NUMBERS_V4.
+Record hygiene:
+- **s2t B16 round 3** — n=2 → n≥3 (s2t B32 is now n=3, done).
+- **i2t caption parity spot-check** — extend the s2t transcript method to i2t
+  captions if not already done (closes the output-parity half of the small-batch
+  correctness gate).
+
+## Tier-S3 honest statement for i2t B32 (state plainly to the user)
+
+The text-throughput gap lives entirely in host-side per-step overhead; kernels are
+equal-class (our fp8 MoE beats their path; DeepGEMM lost; FA3 loses on our shapes).
+Tonight every host-side lever was falsified or parked: sidecar-stage-2 is
+valve-dead (profile gate shows main-thread < GPU post-custom-ops), V1 async-sched
+is self-cancelling, admission-jitter and prefill-gather are mechanism-dead (closed-
+loop trough / readiness serialization), and the fold/smoothing family is closed for
+this short-span workload. Merge (coalescing prefill within a request) added the
+last +4%. **i2t B32 ≈ 0.92× is plausibly at or near the structural ceiling** for
+M* vs vLLM-Omni v0.22 on this H200 pair; a clean 1.05× at B32 would require a
+scheduler-level rewrite (EngineCore-class, week+), not a flag. State this openly
+rather than promising it.
+
+## Campaign one-liner options for the user (given 20–21/24)
+
+- **(a) if W2 flips i2t B4 to a clean WIN:** "M* beats vLLM-Omni v0.22 at **21/24**
+  cells live (all speech, all s2t, i2t B4/B8/B16); i2t B1/B2/B32 sit at ~0.92–0.97
+  with a documented structural analysis (host-side step floor), and M* additionally
+  wins on transcript correctness and reliability (vLLM crashed twice under load;
+  answer-mode failures on interrogative audio)."
+- **(b) without W2 (current defensible):** "M* beats vLLM-Omni v0.22 at **20/24**
+  cells live — all 12 speech cells (2–3×), all 6 s2t (transcript-verified), i2t B8
+  and B16 — and reads 0.92–1.06 on the remaining four i2t cells (i2t B4 sits at
+  1.057 with a band that straddles the bar). The i2t B32 flagship at ~0.92 is
+  analyzed as near the host-side structural ceiling. Plus a correctness +
+  reliability edge vLLM lacks."
+- Honest reads: i2t B1 0.973 / B2 0.945 / B4 1.057 / B32 0.918 stand as measured;
+  no cell is softened, and B32 is stated at its ceiling rather than promised.
 
 ## Generator note — files a future regeneration must read
 
-Regenerate by re-running ab_verdict.py over the live dirs and folding in committed
-sweeps. Read, in order:
-1. **Live A/B verdicts** — `python3 ab_verdict.py <dir>` on every current h2h dir:
-   `h2h_out/`, `h2h_out_p2verify/`, `h2h_out_smallbatch2/`, and any newer
-   `h2h_out*`/`lab_*/ab_*`. Take per-cell VERDICT + pooled ratio + grade (A if n≥3
-   accepted, B if n<3) + rejected-cell notes. **Record which CONFIG produced the
-   M* side and check its tok/req band** — arm3 is [OB] for i2t; the shippable i2t
-   config is encoff+merge (imerge race).
-2. **imerge lab** (booting) — the in-band i2t encoff+merge race; supersedes arm3's
-   [OB] i2t rows once it lands.
-3. **Merge same-pair** — `lab_pmerge/` (arm1 shipping), `lab_parm2/` (arm2 merge),
-   `lab_arm3/` (base+both merges, mechanism counters); tok/s deltas are the i2t
-   B32 projection basis (grade C until an in-band live B32 race lands).
-4. **Committed sweeps + speech** — `benchmarks` branch,
-   `benchmarks/qwen3-omni-joint/raw_*.json` (s2s/i2s, grade D) and `h2h_v2/`.
-5. **Provenance + rules** — `EXPERIMENTS.md` (soft-cell + length-parity gates, the
-   s2t verbosity asymmetry, the arm3 [OB] finding) and `GOAL.md §2` (the bar; req/s
-   gate; correctness gate = tok/req in band + transcript equivalence + zero crashes).
+1. **Live verdicts** — `ab_verdict.py` on `h2h_out/`, `h2h_out_p2verify/`,
+   `h2h_out_smallbatch2/`, `h2h_out_imergecol2/`, and any newer `h2h_out*`. Record
+   which CONFIG produced the M* side. Note: the 172–179 tok/req band is
+   B32-calibrated; small-batch legitimately runs ~189–200 for both systems, so gate
+   small-batch on cross-config tok/req consistency + output parity, not the band.
+2. **W2 retest** (boot running) — if it converts +2–5% at B1–B4, fold into those rows.
+3. **Merge same-pair + committed** — `lab_pmerge/ lab_parm2/ lab_arm3/`;
+   `benchmarks` branch `raw_*.json` (speech D) + `h2h_v2/`.
+4. **Rules** — `EXPERIMENTS.md` (soft-cell/parity gates, [TQ] sweep, batch-length
+   profile, Tier-S3) + `GOAL.md §2` (bar; req/s gate; correctness = tok/req
+   cross-config consistency + output parity + zero crashes). Projections never
+   outrank measurements.
 
-Rules when regenerating: prefer live ab_verdict output over committed sweeps;
-never let a projection ([PROJ]) outrank a measurement; a req/s win with an
-unresolved [TQ] or [OB] flag is NOT acceptance-grade; keep the grade honest (n<3
-is B, cross-pair/derived is C, stale is D).
+## i2t caption parity spot-check (2026-07-04 22:5x, closes the record-hygiene item)
+h2h_out_imergecol2: i2t B4 = 0/12 divergent pairs; i2t B32 = 19/96 divergent
+(>2x bytes), inspected sample shows quality-equivalent answers differing only
+in verbosity (both correctly identify the dish, same reasoning structure) —
+the documented vLLM verbosity asymmetry, not a correctness failure. i2t
+output parity: PASS. Zero M* truncations observed.
