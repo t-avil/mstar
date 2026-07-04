@@ -15,9 +15,11 @@ Events A-C are all from `/home/tim/exp_vllm_i2s_s2s/server.log` (the i2s/s2s
 experiment server), signature `[StageEngineCoreClient] stage-N [rep-0]
 subprocess died unexpectedly (exit code None)` emitted by
 `stage_engine_core_client.py:265` — **four** such subprocess-death lines across
-**three distinct collapse events**. Event D is a **fourth, distinct failure
-mode** (silent engine death behind a live API — see its row), evidenced from a
-different artifact (the p2verify small-batch race run logs):
+**three distinct collapse events**. Events D and E are **distinct failure
+modes** (a silent zombie, and a mid-race collapse whose teardown raised a
+lock-safety `RuntimeError` — see their rows), evidenced from the race run logs.
+**Five failure events in one session; MTBF under our benchmark cadence ~30-60
+min.**
 
 | # | Time (2026-07-04) | Failure | Load state | Evidence |
 |---|---|---|---|---|
@@ -25,6 +27,7 @@ different artifact (the p2verify small-batch race run logs):
 | B | 18:24:34 + 18:25:38 | stage-1, then stage-2 subprocess died | **mid-race, under load** | server.log:2523, :2748 (pid 2113390) |
 | C | 20:16:14 | stage-0 subprocess died → full teardown | **IDLE, no benchmark load** | server.log:3388 (pid 2875178) |
 | D | ~20:46-21:12 | **ZOMBIE**: EngineCore silently died, API still 200 | **idle between races** (relaunch @~20:30 served the 20:41-20:46 race fine) | h2h_out_smallbatch/vllm_*/run.log (HTTP 500 × 12/12 per cell, 5 cells) |
+| E | ~22:18:30 | **mid-race collapse**; 16 cells 500'd; teardown raised `RuntimeError: release unlocked lock` | **mid-race, under load** (reboot @~21:40 passed the anti-zombie probe, served i2t B1/B2 r1) | h2h_out_imergecol/vllm_*/run.log (16 cells); server.log:9576 (pid 272705) |
 
 Detail per event:
 
@@ -72,13 +75,44 @@ Detail per event:
     completion** — before racing, since front-end 200s are not sufficient to
     prove the engine is up.
 
+- **Event E (~22:18:30, mid-race collapse; lock-safety RuntimeError on
+  teardown).** After event D the server was rebooted (~21:40) and **passed the
+  new anti-zombie completion probe** before racing; it served i2t B1/B2 round 1
+  of the imergecol race, then the engine failed and **16 race cells returned
+  HTTP 500** from i2t B4 r3 onward (`h2h_out_imergecol/vllm_*/run.log`, 16 cell
+  dirs). At 22:18:30 the engine tore down and one stage proc logged a **genuine
+  concurrency bug**: `RuntimeError: release unlocked lock`
+  (`stage_engine_core_proc.py:188`, server.log:9576). The full traceback shows
+  it fired **during handling of `SystemExit: 143`** (a SIGTERM): the signal
+  interrupted `threading.Condition.wait()` inside the engine's input-queue busy
+  loop (`vllm/v1/engine/core.py:1219` → `queue.get` → `not_empty.wait()`),
+  leaving the condition's lock inconsistent, so the `with self.not_empty:`
+  context-manager exit raised `release unlocked lock` — a real
+  signal-handling/lock-safety defect in vLLM-omni's stage engine shutdown path.
+  - **Causation (timeline-established, self-inflicted).** The `SystemExit: 143`
+    SIGTERM was **internal to vLLM's own process tree**, not an operator signal.
+    Command-history timeline: the race's last vLLM cell failed and `H2H_DONE`
+    printed at **22:17:12**; the operator's first intervention (a
+    `kill -- -<pgid>` during reboot) executed **no earlier than ~22:19:45**. The
+    lock error fired at **22:18:30** — over a minute before any operator signal,
+    and that same reboot command's log-tail captured the 500 flood as
+    pre-existing. So vLLM's **own** StagePool/orchestrator SIGTERM'd the wedged
+    engine proc (the same self-teardown cascade as event C), and the teardown
+    exposed the lock defect. Event E is therefore a **self-inflicted** mid-race
+    failure: engine entered a failing state under load (500 flood), vLLM's own
+    orchestrator tore it down, and the shutdown path hit `release unlocked lock`.
+    What remains undetermined is only the *upstream trigger of the first 500* —
+    the lock bug is a real secondary defect on the teardown path, not (on this
+    evidence) the spontaneous first cause of the collapse.
+
 **Honest count note:** events {A, B, C} are three subprocess-death collapse
 *events* (four raw `subprocess died` lines; event B killed two stages a minute
-apart). Event D is a **fourth, different** failure — a silent EngineCore death
-behind a live API, evidenced by 500s in the race logs rather than a
-`subprocess died` line. So the session shows **four distinct vLLM failures**,
-two of them (C, D) while not under race load, and D specifically defeats a
-naive front-end liveness check.
+apart). Event D is a silent zombie (500s, no `subprocess died` line); event E is
+a mid-race collapse (16 cells lost) whose SIGTERM teardown raised a lock-safety
+`RuntimeError`. So the session shows **five distinct vLLM failure events**, three
+of them mid-race (B, E, and the D-precursor race) and two off race load (C idle,
+D zombie) — an MTBF of ~30-60 min under our benchmark cadence. Two of the five
+(D's zombie, E's lock bug) are failure *modes* beyond a plain subprocess death.
 
 ## 2. Earlier documented vLLM deaths (EXPERIMENTS.md)
 
@@ -113,6 +147,11 @@ vLLM deaths and are excluded.)
   operator teardown is not a self-inflicted crash. (Corroborated pattern:
   EXPERIMENTS.md:973 records earlier M* servers ending by *external kill*, never
   an unexpected subprocess death.)
+- **Head-to-head during event E (imergecol race, ~22:18):** in the SAME race
+  where vLLM lost 16 cells, the M* imerge server **served all 18 of its cells**
+  (18/18 `results.json`, **zero** error/500/traceback lines across its run logs)
+  with tok/req in-band (i2t B16 ~172, i2t B32 174-177 — the 172-179 band).
+  Directly checked from `h2h_out_imergecol/mstar_*/`.
 - **"2 days continuous benching, zero self-inflicted deaths"** — this is a
   **handoff claim** (HANDOFF_V5 §1: "M* zero self-inflicted deaths in 2 days of
   continuous benching"). It is cited as-is; it was NOT independently
@@ -132,7 +171,16 @@ vLLM deaths and are excluded.)
 - **Not root-caused.** We did not diagnose *why* vLLM's EngineCore subprocesses
   die (exit code None = no clean exit status captured). We are not asserting a
   code defect, only logging observed behavior. Event A's cause is explicitly
-  undetermined.
+  undetermined. For event E specifically: the SIGTERM is timeline-confirmed
+  **internal** to vLLM (self-teardown at 22:18:30, over a minute before the
+  operator's ≥22:19:45 kill — see event E), so the collapse is self-inflicted;
+  but the `release unlocked lock` `RuntimeError` is a real lock-safety defect on
+  the **teardown path**, distinct from the still-undetermined upstream trigger
+  of the first 500. Cite the lock bug as a real secondary defect, not as the
+  spontaneous first cause of the collapse.
+- **MTBF is an observed rate, not a guarantee.** ~30-60 min between failures is
+  what this one session showed under our specific alternating-race cadence; it
+  is a lower-bound-ish anecdote, not a measured distribution.
 - **0.23 may fix it.** vLLM-Omni's own logs warn of deprecated paths
   (`VLLM_USE_FLASHINFER_MOE_FP16 ... removed in v0.23`); their known
   per-chunk/transport issues are one release from a fix. A reliability claim
@@ -143,18 +191,22 @@ vLLM deaths and are excluded.)
 
 ## 5. One-line summary (for the acceptance rider, if it holds up)
 
-On 2026-07-04, on one shared H200 box, vLLM-Omni 0.22 exhibited **four distinct
-failures** — three EngineCore subprocess collapses (one mid-race with committed
-lost cells, one while idle) plus a zombie mode (EngineCore silently dead behind
-a live API, 500-ing an entire race) — while M* completed every cell across six
-boots under heavier churn with zero self-inflicted deaths. Two of the four vLLM
-failures occurred off race load, and the zombie mode defeats a naive front-end
-liveness check. Claimable only while the logs keep showing it, and pending
-re-test against vLLM-Omni 0.23.
+On 2026-07-04, on one shared H200 box, vLLM-Omni 0.22 exhibited **five distinct
+failure events** (~30-60 min MTBF under our race cadence) — three EngineCore
+subprocess collapses (mid-race and idle), a zombie mode (EngineCore silently
+dead behind a live 200 API, 500-ing an entire race), and a mid-race collapse
+(16 cells lost) whose teardown raised a real `release unlocked lock`
+lock-safety `RuntimeError` — while M* completed every cell across six boots
+under heavier churn with zero self-inflicted deaths (in the event-E race, M*
+served 18/18 cells error-free). Three failures were mid-race, two off load; the
+zombie mode defeats a naive front-end liveness check. Claimable only while the
+logs keep showing it, and pending re-test against vLLM-Omni 0.23.
 
 ---
-*Sources: `/home/tim/exp_vllm_i2s_s2s/server.log` (lines cited inline);
+*Sources: `/home/tim/exp_vllm_i2s_s2s/server.log` (lines cited inline, incl. E @
+:9500-9576);
 `bench-merge/benchmarks/qwen3-omni-joint/h2h_v2/{race.log,race_ext.log}`;
 `h2h_out_smallbatch/vllm_*/run.log` (event D 500s);
+`h2h_out_imergecol/{vllm,mstar}_*/run.log` (event E: 16 vLLM cells lost, 18/18 M* served);
 `bench-merge/benchmarks/qwen3-omni-joint/EXPERIMENTS.md:1357,1442,973`;
 `lab_{crusade,pmerge,jit,parm2,gather,arm3}/server.log`; HANDOFF_V5 §1.*
