@@ -1200,3 +1200,13 @@ lean, unresolvable at the ≥8% bar on the makeshift 0,6 pair under a 4x92GB
 foreign job. Chain STOPPED before the jemalloc arm (effect-size gate).
 Code kept (c879884+, default OFF, gate lines now WARNING) — cheap retest in
 the clean window alongside jemalloc/mimalloc LD_PRELOAD (both on box).
+
+## Custom-op crusade step 1 (opt/custom-ops b7fb94e) — breaks 816 -> 438, boot healthy
+mstar::run_attention torch.library custom op (vLLM forward-context pattern:
+plain tensors + explicit layer_idx, manager via active-manager global) kills
+both the thinker attention-wrapper break (~48) AND set_layer_idx (~48) plus
+cascade — census halved to 438 with zero recompile storm (contrast: the
+disable-removal attempts wedged). CPU trace-proof: 1 break/2 graphs -> 0
+breaks/1 graph. Remaining 438 = talker-side sites + tail; step 2 = extend
+the op to the Talker's two construction sites (pre-approved). Perf cells
+pending. Trajectory: 1617 -> 816 (norm fix, +4.5% e2e) -> 438 (step 1).
