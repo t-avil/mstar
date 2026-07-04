@@ -135,3 +135,39 @@ def _fused_experts_fp8_fake(
     return hidden_states.new_empty(
         (hidden_states.shape[0], topk_ids.shape[1], hidden_states.shape[1])
     )
+
+
+# --------------------------------------------------------------------------
+# mstar::apply_rope -- FlashInfer 1D llama3.1 RoPE (Talker / code-predictor).
+#
+# Wraps BatchedCacheManager.apply_rope (the @torch.compiler.disable base
+# _apply_rope path used by non-MRoPE attention). Same forward-context idea as
+# run_attention: pos_ids live on the active manager, so the op takes only q/k +
+# the scalar rope params. The manager's apply_rope mutates q/k in place, so the
+# op clones its inputs first and rotates the clones -- the op itself reports no
+# input mutation (mutates_args=()) and returns fresh tensors, which keeps the
+# custom-op aliasing contract clean. Rope params are always concrete here
+# (ParallelAttention defaults 1.0/1.0/8192), so the llama3.1 branch is taken.
+# --------------------------------------------------------------------------
+@torch.library.custom_op("mstar::apply_rope", mutates_args=())
+def apply_rope(
+    q: torch.Tensor, k: torch.Tensor,
+    rope_theta: float, rope_scale: float,
+    low_freq_factor: float, high_freq_factor: float, old_context_len: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return get_active_manager().apply_rope(
+        q.clone(), k.clone(),
+        rope_theta=rope_theta, rope_scale=rope_scale,
+        low_freq_factor=low_freq_factor, high_freq_factor=high_freq_factor,
+        old_context_len=old_context_len,
+    )
+
+
+@apply_rope.register_fake
+def _apply_rope_fake(
+    q: torch.Tensor, k: torch.Tensor,
+    rope_theta: float, rope_scale: float,
+    low_freq_factor: float, high_freq_factor: float, old_context_len: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # apply_rope returns q/k rotated at the input dtype/shape.
+    return torch.empty_like(q), torch.empty_like(k)
