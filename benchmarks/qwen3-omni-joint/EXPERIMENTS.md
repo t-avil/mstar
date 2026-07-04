@@ -1066,3 +1066,29 @@ SEQUENTIALLY one lab at a time: (1) norm compile fix (opt/compile-fix
 integration test (opt/integration-v4: chunk-512 default + speech bundle);
 (3) V2 budgeted admission policy = the main open build (raises fold volume,
 unlocks banked split-attn, targets B2-B4 + TTFT).
+
+## Norm compile fix — WIN +4.5% i2t B32 (clean sequential same-pair A/B); NEW CAMPAIGN BEST 7.443
+Sequential solo-lab protocol on 6,7 (arm 1 base mstar-p2: 6.593/6.975/7.088/
+6.976 mean 6.908; arm 2 cfix: 7.211/7.153/7.080/7.443 mean 7.222) = +4.5%,
+3/4 cfix cells above every base cell, tok/req 176-178 sane (pure-torch norm
+ULP drift harmless). Best cell 7.443 = 0.907x vs vLLM 8.210 — campaign
+record. Mechanism: pure-torch RMSNorm under torch.compile removes ~800 graph
+breaks (1617->816), letting Inductor fuse norm->residual->proj chains inside
+the captured graphs. Cherry-picked to opt/integration-v4 (7aebb1d). NEXT
+break targets (round 2): thinker.py:225 layer-loop (~48 breaks),
+moe.py:478; attention breaks stay (natural piecewise boundary). Boot cost:
++~2min one-time Inductor compile.
+
+## STACKED INTEGRATION TEST — +6.3%; wins COMPOSE; i2t B32 = 0.89x mean / 0.93x best
+opt/integration-v4 @ 7aebb1d (sched-pack base + speech bundle + norm compile
+fix) with PREFILL_CHUNK_TOKENS=512 + FAST_CHECKSTOP_TALKER=1 +
+CODEC_CHUNK_EMIT=1, solo sequential protocol on 6,7: i2t B32
+7.123/7.593/7.559/7.084 mean 7.340 (+6.3% vs same-protocol base 6.908),
+tok/req 174-179 sane. vs vLLM 8.210: 0.894x mean, 0.925x best cell. s2t B8
+18.16/20.45/19.94/19.43 mean 19.49 = 1.23x vs vLLM (best 1.29x) — also +6%
+over the prior band. Composition arithmetic checks out (norm fix +4.5% +
+chunk-512 ~+2%). Campaign trajectory at i2t B32: 0.53x (v0.22 release) ->
+0.77x (v2) -> 0.83-0.85x (sidecar) -> 0.89x mean / 0.93x best (integrated).
+NEXT: graph-break round 2 (thinker.py:225 layer-loop ~48 breaks, moe.py:478),
+V2 budgeted admission policy (B2-B4 + TTFT + unlocks split-attn), then the
+canonical warm+512 re-baseline sweep.
