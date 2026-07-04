@@ -32,6 +32,11 @@ _FLAG_ENV = (
     "MSTAR_MIXED_BATCH",
     "MSTAR_MIXED_SPEC",
     "MSTAR_CHUNKED_PREFILL_V2_VISION",
+    # V2 budgeted admission knobs.
+    "MSTAR_MIXED_BUDGET_TOKENS",
+    "MSTAR_MIXED_BUDGET_MIN_DECODE",
+    "MSTAR_MIXED_MIN_DECODE",
+    "MSTAR_MIXED_SINGLE_CHUNK",
 )
 
 
@@ -347,3 +352,126 @@ def test_pop_mixed_chunk_for_spec_none_on_unchunked(clean_flags):
     )
     assert sched.pop_mixed_chunk_for_spec(wgm, ("Thinker", "thinker_decode")) is None
     assert wgm.queues["wg0"].popped == []
+
+
+# --- V2 budgeted admission (MSTAR_MIXED_BUDGET_TOKENS) -----------------------
+# The budget is a per-step token cap on the mixed step (n_decode 1-token rows +
+# the C-token chunk). It gates only chunks that ALREADY exist (unchunked spans
+# are still excluded by the mixable gate); it never routes short prefills
+# through the chunk path (that was the closed MSTAR_MIXED_SINGLE_CHUNK). The
+# peek and the pop must apply the SAME cap so they fold the same chunk.
+from mstar.model.qwen3_omni.qwen3_omni_model import mixed_budget_tokens
+
+
+def test_mixed_budget_tokens_parse(clean_flags):
+    _set()
+    assert mixed_budget_tokens() == 0            # unset -> off
+    _set(MSTAR_MIXED_BUDGET_TOKENS="512")
+    assert mixed_budget_tokens() == 512
+    _set(MSTAR_MIXED_BUDGET_TOKENS="0")
+    assert mixed_budget_tokens() == 0            # explicit 0 -> off
+    _set(MSTAR_MIXED_BUDGET_TOKENS="-5")
+    assert mixed_budget_tokens() == 0            # negative -> off
+    _set(MSTAR_MIXED_BUDGET_TOKENS="junk")
+    assert mixed_budget_tokens() == 0            # unparseable -> off
+
+
+def _budget_wgm(chunk_len):
+    return _PeekWGM(
+        "Thinker",
+        ready_by_rid={"c0": {"Thinker"}},
+        walk_by_rid={"c0": "prefill_text"},
+        fwd_by_rid={"c0": _FakeFwdInfo(chunk_len)},
+    )
+
+
+def test_budget_peek_fits(clean_flags):
+    # n_decode + C <= budget -> opportunity. Floor disabled so only the budget
+    # cap is under test.
+    _set(
+        MSTAR_MIXED_BATCH="1", MSTAR_MIXED_SPEC="1",
+        MSTAR_MIXED_BUDGET_TOKENS="512", MSTAR_MIXED_BUDGET_MIN_DECODE="0",
+    )
+    sched = _peek_scheduler()
+    assert sched.has_mixed_opportunity(
+        _budget_wgm(256), ("Thinker", "thinker_decode"),
+        n_decode=8, budget_tokens=512,
+    )  # 8 + 256 = 264 <= 512
+
+
+def test_budget_peek_over_budget(clean_flags):
+    # n_decode + C > budget -> no opportunity (the chunk is too big for this
+    # decode side this step; a later, smaller decode side folds it).
+    _set(
+        MSTAR_MIXED_BATCH="1", MSTAR_MIXED_SPEC="1",
+        MSTAR_MIXED_BUDGET_TOKENS="200", MSTAR_MIXED_BUDGET_MIN_DECODE="0",
+    )
+    sched = _peek_scheduler()
+    assert not sched.has_mixed_opportunity(
+        _budget_wgm(256), ("Thinker", "thinker_decode"),
+        n_decode=8, budget_tokens=200,
+    )  # 8 + 256 = 264 > 200
+
+
+def test_budget_off_ignores_cap(clean_flags):
+    # budget_tokens=0 (off) -> the cap never binds; a huge chunk still folds
+    # (P2 / yield-boundary behavior unchanged).
+    _set(MSTAR_MIXED_BATCH="1", MSTAR_MIXED_SPEC="1")
+    sched = _peek_scheduler()
+    assert sched.has_mixed_opportunity(
+        _budget_wgm(512), ("Thinker", "thinker_decode"),
+        n_decode=8, budget_tokens=0,
+    )
+
+
+def test_budget_pop_mirrors_peek(clean_flags):
+    # The pop applies the SAME budget cap as the peek: over budget -> None and
+    # the queue is untouched; within budget -> the chunk pops.
+    _set(
+        MSTAR_MIXED_BATCH="1", MSTAR_MIXED_SPEC="1",
+        MSTAR_MIXED_BUDGET_TOKENS="200", MSTAR_MIXED_BUDGET_MIN_DECODE="0",
+    )
+    sched = _peek_scheduler()
+    wgm = _budget_wgm(256)
+    assert sched.pop_mixed_chunk_for_spec(
+        wgm, ("Thinker", "thinker_decode"), n_decode=8, budget_tokens=200,
+    ) is None                                    # 264 > 200
+    assert wgm.queues["wg0"].popped == []        # queue untouched
+
+    wgm2 = _budget_wgm(256)
+    got = sched.pop_mixed_chunk_for_spec(
+        wgm2, ("Thinker", "thinker_decode"), n_decode=8, budget_tokens=512,
+    )
+    assert got is not None and got[3] == 256     # 264 <= 512 -> pops
+
+
+def test_budget_enables_occupancy_floor(clean_flags):
+    # The budget policy inherits the single-chunk occupancy floor (default 24):
+    # a small decode side is skipped even when a chunk is ready, so ramp-up
+    # admits on the standalone path instead of throttling on fold slots.
+    _set(MSTAR_MIXED_BATCH="1", MSTAR_MIXED_SPEC="1",
+         MSTAR_MIXED_BUDGET_TOKENS="4096")
+    sched = _peek_scheduler()
+    assert not sched.has_mixed_opportunity(
+        _budget_wgm(256), ("Thinker", "thinker_decode"),
+        n_decode=8, budget_tokens=4096,
+    )  # 8 < 24 floor
+    sched2 = _peek_scheduler()
+    assert sched2.has_mixed_opportunity(
+        _budget_wgm(256), ("Thinker", "thinker_decode"),
+        n_decode=24, budget_tokens=4096,
+    )  # 24 >= floor, 24 + 256 <= 4096
+
+
+def test_min_decode_override_precedence(clean_flags):
+    # BUDGET_MIN_DECODE wins over MIXED_MIN_DECODE wins over the eager default.
+    _set(MSTAR_MIXED_BATCH="1", MSTAR_MIXED_BUDGET_TOKENS="512",
+         MSTAR_MIXED_MIN_DECODE="10", MSTAR_MIXED_BUDGET_MIN_DECODE="5")
+    assert _peek_scheduler()._mixed_min_decode() == 5
+    _set(MSTAR_MIXED_BATCH="1", MSTAR_MIXED_BUDGET_TOKENS="512",
+         MSTAR_MIXED_MIN_DECODE="10")
+    assert _peek_scheduler()._mixed_min_decode() == 10
+    _set(MSTAR_MIXED_BATCH="1", MSTAR_MIXED_BUDGET_TOKENS="512")
+    assert _peek_scheduler()._mixed_min_decode() == 24   # eager default
+    _set(MSTAR_MIXED_BATCH="1")                          # no eager policy
+    assert _peek_scheduler()._mixed_min_decode() == 0
