@@ -1253,3 +1253,14 @@ flight (one boot-collision between main and crusader resolved — main's
 parasite killed; clean boot-3 if timing tainted). Branch opt/custom-ops
 @ 12ce776 (4 steps). DEFERRED to clean window: MSTAR_CUSTOM_OPS ON/OFF perf
 A/B (compile-time flag, two-server or sequential), integration decision.
+
+## CRUSADE MISSION CLOSED — full report banked (see branch opt/custom-ops, 4 commits)
+Final analysis from the mission report: the compiled Thinker/Talker forward
+is now effectively ONE fused graph from embed through the layer stack —
+breaks remain only at the natural head (sampler: data-dependent, wall by
+design, vLLM identical) and tail (advance_seq_lens: post-compute, ~0 fusion
+payoff, convertible-but-not-worth-it). Steps 1-3 GPU-validated end-to-end
+(6.325 req/s serving through the ops — capture works). Optional polish:
+step 5 = talker dense-cache decode_attn_nhd op (9 breaks). Clean-window
+items: MSTAR_CUSTOM_OPS ON/OFF perf A/B (the fusion speedup is
+unquantified), cache-proof warm time (clean boot running, fired 09:08:41).
