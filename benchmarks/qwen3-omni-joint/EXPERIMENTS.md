@@ -1264,3 +1264,11 @@ payoff, convertible-but-not-worth-it). Steps 1-3 GPU-validated end-to-end
 step 5 = talker dense-cache decode_attn_nhd op (9 breaks). Clean-window
 items: MSTAR_CUSTOM_OPS ON/OFF perf A/B (the fusion speedup is
 unquantified), cache-proof warm time (clean boot running, fired 09:08:41).
+
+## CACHE-PROOF PASSED — cached custom-ops boot warms in 12m44s (vs ~40 min uncached)
+Clean solo boot (09:08:41 -> WARM+READY 09:21:25) of the full custom-ops
+stack with TORCHINDUCTOR_FX_GRAPH_CACHE=1 + persistent cache dir. The
+boot-time tension is SOLVED: first boot pays autotune once, every later
+boot ~13 min (still above the 7-min baseline boot — residual dynamo tracing
+time — but operationally fine). The custom-ops route is SHIPPABLE pending
+the clean-window ON/OFF perf A/B. Crusade fully closed.
