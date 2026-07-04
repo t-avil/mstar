@@ -12,22 +12,23 @@ Big change since V5: the campaign moved from a single build chasing i2t B32 to a
 cells. All numbers below are live, ab_verdict-gated (soft-cell + tok/req-parity
 gates), n=3 unless noted.
 
-## 1. THE SCOREBOARD (GOAL_MATRIX.md rev-3.1; live, grade-A unless noted)
+## 1. THE SCOREBOARD (GOAL_MATRIX.md rev-4; live, grade-A unless noted)
 
-20/24 cells GREEN (≥1.05× req/s live). Raw committed under h2h_out*, verdicts via
-`ab_verdict.py`.
+**21/24 cells GREEN** (≥1.05× req/s live). Raw committed under h2h_out* /
+h2h_smallbatch_final, verdicts via `ab_verdict.py`.
 
 - **Speech: 12/12 GREEN** (s2s + i2s, 2.1–2.9×, committed sweep grade D, huge margin).
 - **s2t: 6/6 GREEN** — B1 1.14 (D), **B2 3.062 / B4 2.180** (A, [TQ✓]),
   B8 1.401 (B), B16 1.354 (B, wants r3), **B32 1.349** (A, proof-grade n=3).
   The s2t small-batch ratios are large because vLLM ANSWER-MODES on interrogative
   audio (see §Reliability + the [TQ] sweep); M* transcripts are at parity.
-- **i2t: 2/6 GREEN, 1 borderline, 3 red** — B8 1.221 (B), **B16 1.096** (A, WIN);
-  **B4 1.057** (A, band 1.032–1.082, straddles — BORDERLINE);
-  **B1 0.973 / B2 0.945 / B32 0.918** (A, RED). All honest measured reads; the
-  small-batch tok/req (~189–200) is a batch-dependent length profile common to
-  BOTH systems (vLLM 208–220 at B1), not a defect — the 172–179 identity band is
-  B32-calibrated.
+- **i2t: 3/6 GREEN, 3 red** — B8 1.221 (B), **B16 1.096** (A), **B4 1.1051** (A,
+  n=7, 95%LB 1.0663 — WON, pooled h2h_smallbatch_final; the ab_verdict SUSPECT flag
+  is the stale-B32-band false positive, adjudicated: B4 caption parity 0/12);
+  RED = **B1 0.989 [0.971–1.009] n=5 (+6%), B2 0.942 [0.910–0.976] n=5 (+11%),
+  B32 0.918 [0.889–0.948] n=3 (+14%)**. All honest reads; the small-batch tok/req
+  (~189–200) is a batch-dependent length profile common to BOTH systems (vLLM
+  208–220 at B1), not a defect — the 172–179 identity band is B32-calibrated.
 
 **vLLM reliability ledger — FIVE distinct failure events on 2026-07-04, one box,
 one window (full detail + evidence paths in VLLM_RELIABILITY.md, committed on the
@@ -116,25 +117,25 @@ opt/sched-pack (REJECTED), opt/async-sched (V1 PARKED). New/changed tonight:
 
 ## 4. THE REMAINING-GAP PLAN (in expected-value order)
 
-The war is **three i2t cells**: B1 (+8%), B2 (+11%), B4 (borderline, straddle),
-plus B32 (+14%, the flagship). Levers:
+**i2t B4 is WON** (1.1051, n=7). The war is down to **three i2t cells**: B1 (+6%,
+the nearest miss), B2 (+11%), B32 (+14%, flagship). This is a defensible stopping
+point — the next agent's job is to PROVE the 21/24, not to force B1/B2/B32.
 
-1. **W2 retest — the last small-batch lever (opt/w2-retest, boot running).**
-   Postprocess memoization; theory says it converts at B1–B4 where the host floor
-   is unshaded (remove-work law). Protocol: verify-gate first (shadow mode, ZERO
-   prediction mismatches over thousands of steps) THEN A/B at i2t B1/B2/B4. Honest
-   +2–5%: could flip **B4 to a clean WIN** and put **B1 borderline**; **won't cover
-   B2 or B32**. (Task #10.)
-2. **i2t B32 = Tier-S3 ceiling — state it, don't chase it.** 0.918 in-band, grade A.
-   Every host-side lever was falsified or parked tonight (see §8). Merge added the
-   last +4%. **~0.92× is plausibly at/near the structural ceiling** vs their
-   fresh-boot 8.4–8.5; a clean 1.05× needs an EngineCore-class scheduler rewrite
-   (week+), not a flag. GOAL_MATRIX.md has the paragraph to quote.
-3. **Proof sweep (once W2 resolves).** `proof_sweep.sh --vllm-relaunch`, then
-   `ab_verdict.py` per the PROOF_SWEEP_PROTOCOL: ×5 clean adjacent pairs on the
+1. **Proof sweep — the primary next action.** `proof_sweep.sh --vllm-relaunch`,
+   then `ab_verdict.py` per PROOF_SWEEP_PROTOCOL: ×5 clean adjacent pairs on the
    flagship, ×3 elsewhere, mandatory soft-cell rejection gate (variance is bimodal;
-   the gate is load-bearing, not more rounds). Commit raw + NUMBERS_V4 + the
-   HEADTOHEAD method.
+   the gate is load-bearing, not more rounds). Solo-box window. Commit raw +
+   NUMBERS_V4 + the HEADTOHEAD method. Also grabs s2t B16 round 3 (n=2→3).
+2. **W2 retest — un-parked, viable but LOW EV (optional, solo-boot).** Code is
+   EXONERATED (the OOM was a /dev/shm double-boot, not W2 — see §7). Postprocess
+   memoization, honest +2–5% at B1–B4. **B1 needs only +6%**, so W2 (or any small
+   new host-side cut) could just reach it; won't cover B2 or B32. Run it on a
+   SOLO-IDLE boot (verify-gate = shadow mode ZERO mismatches, THEN A/B at B1/B2).
+3. **i2t B32 = Tier-S3 ceiling — state it, don't chase it.** 0.918, grade A. Every
+   host-side lever falsified/parked (§8); merge added the last +4%. **~0.92× is
+   plausibly at/near the structural ceiling** vs their fresh-boot 8.4–8.5; a clean
+   1.05× needs an EngineCore-class scheduler rewrite (week+), not a flag.
+   GOAL_MATRIX.md has the paragraph to quote.
 4. **Record hygiene:** s2t B16 round 3 (n=2→3); i2t caption parity is DONE (PASS —
    B4 0/12, B32 19/96 divergent-by-verbosity-only, quality-equivalent, zero
    truncations).
@@ -177,8 +178,12 @@ microbench; re-decompose after structural changes). NEW tonight:
     (±11%) can manufacture a double-digit fake req/s delta; if two same-system arms
     differ >5% in tok/req, judge on tok/s. (Law 5 fires INSIDE an A/B, not just
     cross-system.)
-12. **Max 3 concurrent M* labs (RAM rule).** More than 3 booted engines on one node
-    triggers RAM pressure → OOM/graceful-death cascade (bit us tonight, §7).
+12. **Max 2 M* servers + vLLM; never boot during a race (host-RAM / /dev/shm rule).**
+    Only ~300GB host RAM is free for us — Ray plasma owns ~290GB of /dev/shm. Each
+    boot spikes RAM; multi-server windows exceed the headroom → OOM kills healthy
+    engines by clean SIGTERM (the "graceful death" we misread as wrapper-reaping).
+    `free -g` / `df -h /dev/shm` before every boot; boot spikes also contaminate
+    running cells ~−25% (§7). This root-caused the W2 "OOM" — W2 is EXONERATED.
 13. **Readiness-serialization kills cross-request coalescing.** Closed-loop
     admissions cluster in TIME but prefill READINESS serializes through the
     KV-read/encode pipeline, so a gather/jitter window never sees ≥2 ready. Only
@@ -196,9 +201,12 @@ Reconfirmed / new tonight:
 - **Boot contamination −25% same-node** — booting a second engine on a node while
   cells run on it depresses the running arm ~25%; never boot on an active bench
   node (and see Law 12's RAM cap).
-- **The crusade graceful-death in the RAM-pressure window** — a healthy engine
-  died by clean SIGTERM under RAM pressure when >3 labs were up; not a code fault.
-  Enforce the 3-lab cap; watch `free -g` before each boot.
+- **/dev/shm host-RAM pressure = the graceful-death root cause** — ~300GB free for
+  us, Ray plasma owns ~290GB of /dev/shm; boot spikes in multi-server windows
+  OOM-killed crusade, imerge, AND vLLM by clean SIGTERM (same signature we chased
+  as wrapper-reaping). It also produced the **W2 false-fail** (env double-boot on
+  4,5, not a W2 defect — build EXONERATED, CUDA-inert to set_device). Rule: **max 2
+  M* + vLLM, never boot during a race**; check `free -g` / `df -h /dev/shm` first.
 
 ## 8. WHAT'S PROVEN DEAD (don't re-litigate without new conditions)
 

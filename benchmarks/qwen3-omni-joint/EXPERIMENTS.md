@@ -1704,3 +1704,40 @@ levers: in-band small-batch re-race (clears [OB], expected to lift B1/B2/B4) + W
 retest (boot running; honest +2–5% at B1–B4, could flip B4 clean-green, maybe B1
 borderline; won't cover B2 or B32). GOAL_MATRIX rev-3 regenerated. Data:
 h2h_out_imergecol2/, ab_verdict output.
+
+
+## SESSION CLOSE — i2t B4 WON (pooled n=7) → 21/24; + the /dev/shm-pressure ops root-cause (W2 exonerated)
+**i2t B4 CONVERSION.** Pooling the imergecol B4 cells with a follow-up small-batch
+race (h2h_smallbatch_final, committed on the docs branch): **i2t B4 = 1.1051 at
+n=7, 95%LB 1.0663 — a clean grade-A WIN.** The earlier n=3 "1.057 straddle" was
+just under-powered; more clean pairs resolved it above the bar with margin. NOTE
+on the ab_verdict SUSPECT flag it carries: that is the STALE B32-band tok/req
+identity check firing at small batch, already adjudicated — small-batch length is
+a batch-dependent profile common to BOTH systems (§imergecol entry) and i2t B4
+caption parity is 0/12 divergent (§caption-parity). The SUSPECT is a known false
+positive here, not a correctness problem; B4 is WON. FINAL LIVE STANDINGS: **21/24
+GREEN.** RED = i2t B1 0.989 [0.971–1.009] n=5, i2t B2 0.942 [0.910–0.976] n=5, i2t
+B32 0.918 [0.889–0.948] n=3 — B1 needs only +6%.
+
+**OPS ROOT-CAUSE: /dev/shm host-RAM pressure (the W2 false-fail + several deaths).**
+The box holds only **~300GB free host RAM for us** — Ray's plasma store owns
+~290GB of /dev/shm. Each M* boot spikes host RAM; during multi-server windows the
+spikes exceeded the headroom and the kernel/OOM path killed healthy engines
+(crusade, imerge, and even vLLM) by clean SIGTERM — the same "graceful death"
+signature we chased as wrapper-reaping earlier. **The W2 OOM was this, not a W2
+defect: the build is EXONERATED** (CUDA-inert to set_device; the crash was an env
+double-boot on 4,5, not the memoization code). NEW RULE: **max 2 M* servers +
+vLLM concurrently, and NEVER boot during a live race** (boot spikes contaminate
+running cells ~−25% AND risk the OOM cascade). Check `free -g` / `df -h /dev/shm`
+before every boot; W2 needs a solo-idle re-boot to get its real verdict.
+
+**SESSION SUMMARY.** Start: i2t B32 ~0.88, single build, 5 text cells contested.
+End: **21/24 live-graded GREEN**, two documented configs (encoff+merge primary,
+base+audio-merge for s2t small-batch), a full statistical harness (ab_verdict.py
+soft-cell + length-parity gates; PROOF_SWEEP_PROTOCOL), and honest structural
+bounds on the 3 open i2t cells (B1/B2 host-floor, B32 ~ceiling). Killed this
+session (all mechanism-verified, not just perf-washed): fold/smoothing family at
+short spans, admission-jitter, prefill-gather, sidecar-checkstop-at-regime,
+V1-family. The one net win: within-request merged prefill (+4% B32, +11–13% s2t
+small-batch). Next agent: proof sweep (proof_sweep.sh --vllm-relaunch), optional
+W2 solo-boot, else the campaign is at its defensible ceiling.
