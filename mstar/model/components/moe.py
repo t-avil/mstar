@@ -206,7 +206,13 @@ def _moe_fp8_flag(env_name: str) -> bool:
     return _HAS_FUSED and os.environ.get(env_name, "0") == "1"
 
 
+@torch.compiler.disable
 def _ensure_fp8_experts(experts: nn.Module):
+    # compiler.disable lives HERE (not on _dispatch_fp8): the lazy quant
+    # mutates module state (frees the bf16 params) which dynamo must never
+    # trace — the E1 later-bucket re-trace bug. Steady-state callers read
+    # the cache attr before calling in, so this disabled function is only
+    # reached once per layer.
     cached = getattr(experts, "_fp8_cache", None)
     if cached is not None:
         return cached
@@ -225,7 +231,6 @@ def _ensure_fp8_experts(experts: nn.Module):
     return experts._fp8_cache
 
 
-@torch.compiler.disable
 def _dispatch_fp8(
     experts: nn.Module,
     hidden_states: torch.Tensor,
@@ -233,13 +238,18 @@ def _dispatch_fp8(
     routing_weights: torch.Tensor,
     reduce_results: bool = True,
 ) -> torch.Tensor:
-    # compiler.disable (same pattern as FlashInferDecodeWrapper.run): the
-    # lazy quantization mutates module state (frees the bf16 params), which
-    # dynamo must not trace — re-tracing a later bucket otherwise sees the
-    # freed size-0 param and inductor fails the capture.
+    # No longer compiler.disable'd as a whole (was ~38 breaks/boot — one per
+    # MoE layer, severing the routing glue from the fused region). The
+    # state-mutating lazy quant is isolated behind the disable on
+    # _ensure_fp8_experts; the steady-state path below reads the populated
+    # cache attr directly, so a later-bucket re-trace never touches the
+    # freed bf16 params (E1 bug stays fixed).
     from mstar.utils.fused_moe.fp8 import fused_experts_fp8
 
-    w1, s1, w2, s2 = _ensure_fp8_experts(experts)
+    cached = getattr(experts, "_fp8_cache", None)
+    if cached is None:
+        cached = _ensure_fp8_experts(experts)
+    w1, s1, w2, s2 = cached
     return fused_experts_fp8(
         hidden_states, w1, s1, w2, s2,
         routing_weights, selected_experts,
