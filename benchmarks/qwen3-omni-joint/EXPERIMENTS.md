@@ -1210,3 +1210,24 @@ disable-removal attempts wedged). CPU trace-proof: 1 break/2 graphs -> 0
 breaks/1 graph. Remaining 438 = talker-side sites + tail; step 2 = extend
 the op to the Talker's two construction sites (pre-approved). Perf cells
 pending. Trajectory: 1617 -> 816 (norm fix, +4.5% e2e) -> 438 (step 1).
+
+## Crusade steps 3-4 — fp8 class ELIMINATED (111->0); apply_rope op staged
+Step 3 (be16eeb): mstar::fused_experts_fp8 op + pre-capture quant hoist —
+moe.py:478 census 111 -> 0, CPU-validated constant-folding of the cache
+guard. Boot healthy-but-slow: fewer breaks = bigger fused regions = longer
+Inductor max-autotune (a real boot-time trade); one frame recompile-limit
+hit under verification. Census now dominated by ONE class: talker apply_rope
+(105) + small tail (~54). Step 4 built (mstar::apply_rope, clones q/k — no
+input aliasing, mutates_args=()); commits after step-3 WARM gate; full-stack
+(1-4) boot targets <200 with the final census + cell read.
+
+## Crusade boot-time tension identified + production fix prescribed
+Step-3 boot took ~40 min (NEVER_READY past the lab 20-min window; warmed
+late, server healthy): fewer breaks = bigger fused regions = longer Inductor
+max-autotune. This is inherent to the one-big-graph goal and must be solved
+for shippability: TORCHINDUCTOR_FX_GRAPH_CACHE=1 + persistent
+TORCHINDUCTOR_CACHE_DIR (pay autotune once, reuse across boots) +
+TORCHDYNAMO_CACHE_SIZE_LIMIT=128 (kills the frame-[7] recompile-limit eager
+fallback). Full-stack (1-4) reboot with the cache running; early census
+(<200 bar) reads ~3 min into tracing; cache proof = second reboot warming
+<10 min. fp8 census kill (111->0) and step-4 push confirmed.
