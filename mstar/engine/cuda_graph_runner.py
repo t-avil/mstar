@@ -628,6 +628,11 @@ class CudaGraphRunner:
 
                 torch.cuda.set_device(self.device)
                 torch.cuda.synchronize()
+                # Publish this slot's manager for the custom-op forward-context
+                # so any mstar::* op traced into the compiled forward resolves
+                # to the manager whose graph is being warmed / captured here.
+                from mstar.engine.compile_ops import set_active_manager
+                set_active_manager(spec.cache_manager)
                 for _ in range(2):
                     with torch.amp.autocast("cuda", enabled=True, dtype=self.autocast_dtype):
                         run_forward()
