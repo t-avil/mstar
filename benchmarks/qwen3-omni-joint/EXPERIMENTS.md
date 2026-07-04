@@ -1296,3 +1296,23 @@ allocation churn evidently stays under collection cadence significance vs
 an 11-15ms step. Flags stay available; niche retest = small-batch cells
 (higher host share) someday, LOW priority. Zero-code levers at B32:
 exhausted.
+
+## Item 2: MERGED PREFILL WINS THE SHIPPING COMPARISON — +4-6% at B1/B2/B4
+Same-pair (2,3) sequential arms, definitive: pm1 (shipping config, vision
+chunking) B1 0.784 / B2 1.318 / B4 2.116 vs pm2 (merge config:
+vision-chunk flags off + MSTAR_MERGED_PREFILL=1) B1 0.818 (+4.3%) /
+B2 1.392 (+5.6%) / B4 2.211 (+4.5%) — positive at ALL small-batch cells,
+merged_prefill_walks=67+ live. The earlier B1 -4.4% (cross-pair run) is
+resolved as a pair-band artifact. B32 sentinel running on the warm merge
+server (the config swap loses vision-fold-into-mixed at B32 — must not
+regress there before any default flip). If B32 holds: merge config becomes
+the small-batch shipping recommendation (or batch-conditional config).
+
+## Item 2 CLOSED: merge config +4-6% at B1/B2/B4 (solid); B32 impact UNRESOLVED (box instability)
+The B32 sentinel read 5.06/5.10 (merge) but the same-hour shipping-config
+control read 3.83/6.61 — adjacent same-config cells spanning ±40% (Ray
+phase-change instability). MERGED_PREFILL is capture-static so interleaving
+is impossible; B32 comparison deferred to a stable box. SHIP POSTURE:
+small-batch/latency deployments -> merge config (+4-6% B1-B4, consistent,
+mechanism-live); B32-throughput deployments -> keep vision-chunk config
+until the stable-box read. Both configs real, both on opt/integration-v4.
