@@ -863,40 +863,51 @@ class ThinkerSubmodule(ARNodeSubmodule):
         identical to ``prefill_text`` / ``prefill_audio``, so this replays on the
         ``prefill_text`` capture (NOT the vision capture) and the default
         ``advance_seq_lens`` (by ``seq_len``) lands the running position exactly
-        where the two standalone walks would.
+        where the standalone walks would.
+
+        ``merged_audio_order`` selects the span layout:
+          * ``"audio_first"`` / ``"text_first"`` — 2-entry legacy layout.
+          * ``"interleaved"`` — vLLM-layout s2t ([prefix-text, audio,
+            suffix-text]); the two text spans arrive as ``text_inputs`` (prefix)
+            and ``text_inputs_suffix`` (suffix).
         """
-        audio_first = bool(fwd_info.step_metadata.get("merged_audio_first"))
+        order = fwd_info.step_metadata.get("merged_audio_order")
 
-        # --- text span (verbatim from the prefill_text branch) ---
-        text_ids = inputs["text_inputs"][0].to(device)
-        text_embeds = self.model.model.embed_tokens(text_ids)
-        text_len = text_ids.shape[0]
-        seen_token_mask.add_tokens(text_ids)
-        text_talker_mask = torch.stack([
-            torch.zeros(text_ids.shape, dtype=torch.bool, device=device),
-            self._get_talker_text_mask(text_ids),
-        ])
+        def _text_span(key: str, span_start: float):
+            ids = inputs[key][0].to(device)
+            embeds = self.model.model.embed_tokens(ids)
+            seen_token_mask.add_tokens(ids)
+            talker = torch.stack([
+                torch.zeros(ids.shape, dtype=torch.bool, device=device),
+                self._get_talker_text_mask(ids),
+            ])
+            pos = get_rope_index_text(ids.shape[0], span_start, device)
+            return embeds, pos, talker, ids.shape[0]
 
-        if audio_first:
-            # audio occupies [start_pos, start_pos + audio_total); text continues
-            # from there (== prefill_audio then prefill_text).
-            stage = self._build_audio_full(inputs, start_pos, device)
-            text_pos = get_rope_index_text(
-                text_len, start_pos + stage.total_len, device,
-            )
-            embeds = torch.cat([stage.wrapped_embeds, text_embeds], dim=0)
-            pos_ids = torch.cat([stage.pos_ids, text_pos], dim=1)
-            audio_talker = torch.stack([stage.mm_mask, ~stage.mm_mask])
-            masks_for_talker = torch.cat([audio_talker, text_talker_mask], dim=1)
-        else:
-            # text occupies [start_pos, start_pos + text_len); audio continues
-            # from there (== prefill_text then prefill_audio).
-            text_pos = get_rope_index_text(text_len, start_pos, device)
-            stage = self._build_audio_full(inputs, start_pos + text_len, device)
-            embeds = torch.cat([text_embeds, stage.wrapped_embeds], dim=0)
-            pos_ids = torch.cat([text_pos, stage.pos_ids], dim=1)
-            audio_talker = torch.stack([stage.mm_mask, ~stage.mm_mask])
-            masks_for_talker = torch.cat([text_talker_mask, audio_talker], dim=1)
+        def _audio_span(span_start: float):
+            stage = self._build_audio_full(inputs, span_start, device)
+            talker = torch.stack([stage.mm_mask, ~stage.mm_mask])
+            return stage.wrapped_embeds, stage.pos_ids, talker, stage.total_len
+
+        # Build the ordered list of spans, threading start_pos across them EXACTLY
+        # as the standalone walks would (each advances by its own seq_len — text
+        # by token count, audio by audio_len+2; all linear, no side-channel).
+        pos = start_pos
+        spans = []  # (embeds, pos_ids, talker_mask)
+        if order == "interleaved":
+            e, p, t, n = _text_span("text_inputs", pos); pos += n; spans.append((e, p, t))
+            e, p, t, n = _audio_span(pos); pos += n; spans.append((e, p, t))
+            e, p, t, n = _text_span("text_inputs_suffix", pos); pos += n; spans.append((e, p, t))
+        elif order == "audio_first":
+            e, p, t, n = _audio_span(pos); pos += n; spans.append((e, p, t))
+            e, p, t, n = _text_span("text_inputs", pos); pos += n; spans.append((e, p, t))
+        else:  # "text_first"
+            e, p, t, n = _text_span("text_inputs", pos); pos += n; spans.append((e, p, t))
+            e, p, t, n = _audio_span(pos); pos += n; spans.append((e, p, t))
+
+        embeds = torch.cat([s[0] for s in spans], dim=0)
+        pos_ids = torch.cat([s[1] for s in spans], dim=1)
+        masks_for_talker = torch.cat([s[2] for s in spans], dim=1)
 
         return ARNodeInputs(
             input_seq_len=embeds.shape[0],

@@ -1008,7 +1008,10 @@ class Qwen3OmniModel(Model):
             ),
             GraphNode(
                 name="Thinker",
-                input_names=["text_inputs", "audio_embeds"],
+                # text_inputs_suffix is only supplied by the interleaved
+                # vLLM-layout s2t merge ([prefix, audio, suffix]); the 2-entry
+                # layout emits it with an empty payload (declared => must arrive).
+                input_names=["text_inputs", "text_inputs_suffix", "audio_embeds"],
                 outputs=[
                     GraphEdge(
                         next_node=EMIT_TO_CLIENT,
@@ -1373,7 +1376,7 @@ class Qwen3OmniModel(Model):
         # the submodule concatenates in the right order. Returns the schedule
         # unchanged (merged_vision_first=None) when the merge does not apply, so
         # every non-eligible request keeps the byte-identical multi-walk path.
-        schedule, merged_vision_first, merged_audio_first = (
+        schedule, merged_vision_first, merged_audio_order = (
             self._maybe_merge_prefill_schedule(schedule, audio_output)
         )
 
@@ -1438,9 +1441,10 @@ class Qwen3OmniModel(Model):
                 # Span order for a merged prefill_multimodal walk (None otherwise;
                 # the submodule only reads it for that walk).
                 "merged_vision_first": merged_vision_first,
-                # Span order for a merged prefill_multimodal_audio walk (None
-                # otherwise; the submodule only reads it for that walk).
-                "merged_audio_first": merged_audio_first,
+                # Span order for a merged prefill_multimodal_audio walk: one of
+                # "audio_first" / "text_first" / "interleaved" (None otherwise;
+                # the submodule only reads it for that walk).
+                "merged_audio_order": merged_audio_order,
                 # prefill_chunk_offset / prefill_chunk_len for the submodule to
                 # slice this chunk (absent => full span, byte-identical).
                 **chunk_step_metadata,
@@ -1452,17 +1456,19 @@ class Qwen3OmniModel(Model):
         schedule: list[tuple[str, dict[str, TensorPointerInfo]]],
         audio_output: bool,
     ) -> tuple[
-        list[tuple[str, dict[str, TensorPointerInfo]]], bool | None, bool | None
+        list[tuple[str, dict[str, TensorPointerInfo]]], bool | None, str | None
     ]:
-        """Collapse an exact one-text + one-{vision,audio} schedule into a single
-        merged-prefill entry when the corresponding flag applies.
+        """Collapse an exact one-text + one-{vision,audio} schedule (or the
+        interleaved text/audio/text s2t schedule) into a single merged-prefill
+        entry when the corresponding flag applies.
 
-        Returns ``(schedule, merged_vision_first, merged_audio_first)``. Each
-        ``*_first`` is ``True``/``False`` when that modality's merge fired (span
-        order), or ``None`` otherwise. When neither merge applies the schedule is
-        returned UNCHANGED so the request keeps the byte-identical multi-walk
-        path. The two merges are mutually exclusive per admission (a schedule is
-        either text+vision or text+audio, never both, for the 2-entry case).
+        Returns ``(schedule, merged_vision_first, merged_audio_order)``.
+        ``merged_vision_first`` is ``True``/``False`` when the vision merge fired
+        (span order) else ``None``. ``merged_audio_order`` is
+        ``"audio_first"`` / ``"text_first"`` (2-entry) or ``"interleaved"``
+        (3-entry text/audio/text) when the audio merge fired, else ``None``. When
+        neither merge applies the schedule is returned UNCHANGED so the request
+        keeps the byte-identical multi-walk path.
 
         Vision eligibility (all required): MSTAR_MERGED_PREFILL on; text output
         (no Talker); non-chunked vision (``MSTAR_CHUNKED_PREFILL_V2_VISION`` off,
@@ -1471,9 +1477,16 @@ class Qwen3OmniModel(Model):
         ``prefill_vision``.
 
         Audio eligibility (all required): MSTAR_MERGED_PREFILL_AUDIO on; text
-        output (so s2t is eligible, s2s/i2s are not); exactly two entries, one
-        ``prefill_text`` and one ``prefill_audio``. There is no chunked-audio
-        walk, so no chunked-prefill guard is needed (unlike vision).
+        output (so s2t is eligible, s2s/i2s are not); AND either
+          * exactly two entries, one ``prefill_text`` + one ``prefill_audio``
+            (legacy layout, MSTAR_VLLM_PROMPT_LAYOUT off), OR
+          * exactly three entries ``[prefill_text, prefill_audio, prefill_text]``
+            in that order — the vLLM-layout s2t schedule (default, audio inside
+            the user turn) where process_prompt split the text into prefix+suffix
+            (see the schedule builder). The merged entry then carries the prefix
+            under ``text_inputs`` and the suffix under ``text_inputs_suffix`` (the
+            two prefill_text entries would otherwise collide on ``text_inputs``).
+        There is no chunked-audio walk, so no chunked-prefill guard is needed.
         """
         if (
             merged_prefill_enabled()
@@ -1491,21 +1504,29 @@ class Qwen3OmniModel(Model):
                     merged_entry.update(tensor_dict)
                 return [("prefill_multimodal", merged_entry)], vision_first, None
 
-        if (
-            merged_prefill_audio_enabled()
-            and not audio_output
-            and len(schedule) == 2
-        ):
+        if merged_prefill_audio_enabled() and not audio_output:
             walks = [w for w, _ in schedule]
-            if sorted(walks) == ["prefill_audio", "prefill_text"]:
-                audio_first = walks[0] == "prefill_audio"
+            if len(schedule) == 2 and sorted(walks) == [
+                "prefill_audio", "prefill_text"
+            ]:
+                order = "audio_first" if walks[0] == "prefill_audio" else "text_first"
                 # Union the two entries' tensor dicts (their keys are disjoint:
                 # text_inputs vs audio_features/audio_seqlens).
                 merged_entry = {}
                 for _, tensor_dict in schedule:
                     merged_entry.update(tensor_dict)
+                return [("prefill_multimodal_audio", merged_entry)], None, order
+            if len(schedule) == 3 and walks == [
+                "prefill_text", "prefill_audio", "prefill_text"
+            ]:
+                # vLLM-layout s2t: [prefix-text, audio, suffix-text]. Rename the
+                # suffix text so it does not collide with the prefix's
+                # ``text_inputs`` key; audio keys are disjoint.
+                merged_entry = dict(schedule[1][1])          # audio_features/seqlens
+                merged_entry.update(schedule[0][1])          # text_inputs (prefix)
+                merged_entry["text_inputs_suffix"] = schedule[2][1]["text_inputs"]
                 return (
-                    [("prefill_multimodal_audio", merged_entry)], None, audio_first,
+                    [("prefill_multimodal_audio", merged_entry)], None, "interleaved",
                 )
 
         return schedule, None, None
@@ -1709,13 +1730,17 @@ class Qwen3OmniModel(Model):
                     edge = GraphEdge(next_node="audio_encoder", name=name)
                     edge.tensor_info = [tensor_dict[name]]
                     edges.append(edge)
-            # text_inputs is the only conductor-supplied Thinker input; emit it
-            # (empty payload still marks the declared name ready).
-            edge = GraphEdge(next_node="Thinker", name="text_inputs")
-            edge.tensor_info = (
-                [tensor_dict["text_inputs"]] if "text_inputs" in tensor_dict else []
-            )
-            edges.append(edge)
+            # text_inputs (prefix, or the whole text span for the 2-entry layout)
+            # + text_inputs_suffix (only the interleaved vLLM-layout carries it).
+            # ALWAYS emit each declared Thinker input — an empty payload still
+            # marks the declared name ready (the 2-entry layout has no suffix),
+            # mirroring the vision-merge readiness contract.
+            for name in ("text_inputs", "text_inputs_suffix"):
+                edge = GraphEdge(next_node="Thinker", name=name)
+                edge.tensor_info = (
+                    [tensor_dict[name]] if name in tensor_dict else []
+                )
+                edges.append(edge)
             return edges
 
         # Determine the target node — for audio/vision, the first node in

@@ -154,7 +154,7 @@ def test_audio_merge_text_then_audio(monkeypatch):
         [TEXT, AUDIO], audio_output=False)
     assert len(out) == 1
     assert out[0][0] == "prefill_multimodal_audio"
-    assert vorder is None and aorder is False  # text first, audio merge
+    assert vorder is None and aorder == "text_first"
     # merged entry is the union of both entries' tensor dicts
     assert set(out[0][1]) == {"text_inputs", "audio_features", "audio_seqlens"}
 
@@ -165,7 +165,7 @@ def test_audio_merge_audio_then_text(monkeypatch):
     out, vorder, aorder = shim._maybe_merge_prefill_schedule(
         [AUDIO, TEXT], audio_output=False)
     assert len(out) == 1 and out[0][0] == "prefill_multimodal_audio"
-    assert vorder is None and aorder is True  # audio first
+    assert vorder is None and aorder == "audio_first"
 
 
 def test_audio_merge_gated_off_by_audio_output(monkeypatch):
@@ -185,7 +185,7 @@ def test_audio_merge_independent_of_vision_flag(monkeypatch):
     shim = _CondShim()
     out, vorder, aorder = shim._maybe_merge_prefill_schedule(
         [TEXT, AUDIO], audio_output=False)
-    assert out[0][0] == "prefill_multimodal_audio" and aorder is False
+    assert out[0][0] == "prefill_multimodal_audio" and aorder == "text_first"
 
 
 def test_vision_flag_alone_does_not_merge_audio(monkeypatch):
@@ -200,15 +200,45 @@ def test_vision_flag_alone_does_not_merge_audio(monkeypatch):
 @pytest.mark.parametrize("sched", [
     [TEXT],                                   # text only
     [AUDIO],                                  # audio only
-    [TEXT, AUDIO, TEXT],                      # vLLM-layout interleave (3 spans)
+    [AUDIO, TEXT, AUDIO],                     # audio/text/audio (not the s2t shape)
     [TEXT, VISION],                           # vision present (audio flag only)
     [TEXT, TEXT],                             # two text, no audio
+    [TEXT, TEXT, AUDIO],                      # wrong 3-entry order
 ])
-def test_audio_merge_only_exact_text_plus_audio(monkeypatch, sched):
+def test_audio_merge_only_exact_shapes(monkeypatch, sched):
     monkeypatch.setenv("MSTAR_MERGED_PREFILL_AUDIO", "1")
     shim = _CondShim()
     out, vorder, aorder = shim._maybe_merge_prefill_schedule(sched, audio_output=False)
     assert vorder is None and aorder is None and out is sched
+
+
+# --- interleaved vLLM-layout s2t merge ([prefix-text, audio, suffix-text]) -----
+INTERLEAVED = [
+    ("prefill_text", {"text_inputs": _tpi("pre")}),
+    AUDIO,
+    ("prefill_text", {"text_inputs": _tpi("suf")}),
+]
+
+
+def test_audio_merge_interleaved_vllm_layout(monkeypatch):
+    monkeypatch.setenv("MSTAR_MERGED_PREFILL_AUDIO", "1")
+    shim = _CondShim()
+    out, vorder, aorder = shim._maybe_merge_prefill_schedule(
+        INTERLEAVED, audio_output=False)
+    assert len(out) == 1 and out[0][0] == "prefill_multimodal_audio"
+    assert vorder is None and aorder == "interleaved"
+    # prefix under text_inputs, suffix renamed to text_inputs_suffix, audio keys.
+    assert set(out[0][1]) == {
+        "text_inputs", "text_inputs_suffix", "audio_features", "audio_seqlens",
+    }
+
+
+def test_audio_merge_interleaved_gated_off_by_audio_output(monkeypatch):
+    monkeypatch.setenv("MSTAR_MERGED_PREFILL_AUDIO", "1")
+    shim = _CondShim()
+    out, vorder, aorder = shim._maybe_merge_prefill_schedule(
+        INTERLEAVED, audio_output=True)
+    assert vorder is None and aorder is None and len(out) == 3
 
 
 # =============================================================================
@@ -259,9 +289,32 @@ def test_merged_audio_input_routing():
     # encoder gets audio_features + audio_seqlens with real payloads
     assert set(by_dest["audio_encoder"]) == {"audio_features", "audio_seqlens"}
     assert by_dest["audio_encoder"]["audio_features"].tensor_info
-    # Thinker gets the full text span (audio_embeds arrives as an encoder edge).
-    assert set(by_dest["Thinker"]) == {"text_inputs"}
+    # Thinker gets text_inputs (real) + text_inputs_suffix (empty for 2-entry,
+    # still emitted so the declared name is marked ready); audio_embeds arrives
+    # as an encoder edge.
+    assert set(by_dest["Thinker"]) == {"text_inputs", "text_inputs_suffix"}
     assert by_dest["Thinker"]["text_inputs"].tensor_info
+    assert by_dest["Thinker"]["text_inputs_suffix"].tensor_info == []
+
+
+def test_merged_audio_interleaved_input_routing():
+    shim = _CondShim()
+    # interleaved merged entry: prefix under text_inputs, suffix under _suffix.
+    entry = {
+        **AUDIO[1],
+        "text_inputs": _tpi("pre"),
+        "text_inputs_suffix": _tpi("suf"),
+    }
+    edges = shim._get_thinker_prefill_inputs(
+        _merged_meta("prefill_multimodal_audio", entry), {})
+    by_dest = {}
+    for e in edges:
+        by_dest.setdefault(e.next_node, {})[e.name] = e
+    assert set(by_dest["audio_encoder"]) == {"audio_features", "audio_seqlens"}
+    # both text spans reach the Thinker with real payloads
+    assert set(by_dest["Thinker"]) == {"text_inputs", "text_inputs_suffix"}
+    assert by_dest["Thinker"]["text_inputs"].tensor_info
+    assert by_dest["Thinker"]["text_inputs_suffix"].tensor_info
 
 
 # =============================================================================
@@ -421,33 +474,36 @@ def test_thread_positions_text_first(monkeypatch):
         assert torch.equal(ds[TLEN:], torch.full((VLEN, HIDDEN), 3.0))
 
 
-def _run_merged_audio(monkeypatch, audio_first, start_pos):
-    text_start_seen = {}
+SLEN = 3  # suffix text length (interleaved layout)
+
+
+def _run_merged_audio(monkeypatch, order, start_pos):
+    rope_calls = []  # (seq_len, start) per get_rope_index_text call, in order
 
     def _fake_rope_text(seq_len, start, device):
-        text_start_seen["seq_len"] = seq_len
-        text_start_seen["start"] = start
+        rope_calls.append((seq_len, start))
         return torch.zeros((3, seq_len))
 
     monkeypatch.setattr(sm, "get_rope_index_text", _fake_rope_text)
     shim = _ThinkerShim()
     rec = _Recorder()
     inputs = {"text_inputs": [torch.zeros(TLEN, dtype=torch.long)]}
+    if order == "interleaved":
+        inputs["text_inputs_suffix"] = [torch.zeros(SLEN, dtype=torch.long)]
     out = shim._build_merged_audio_inputs(
-        _FwdInfo(merged_audio_first=audio_first), inputs, start_pos,
+        _FwdInfo(merged_audio_order=order), inputs, start_pos,
         torch.device("cpu"), rec,
     )
-    return shim, out, text_start_seen, rec
+    return shim, out, rope_calls, rec
 
 
 def test_thread_positions_audio_first(monkeypatch):
     S = 7.0
-    shim, out, text_seen, rec = _run_merged_audio(monkeypatch, True, S)
+    shim, out, rope, rec = _run_merged_audio(monkeypatch, "audio_first", S)
     # audio starts at S; text continues from S + audio total_len (audio advance
     # == its seq_len, no 3D-grid jump).
     assert shim.audio_start_pos_seen == S
-    assert text_seen["start"] == S + ALEN
-    assert text_seen["seq_len"] == TLEN
+    assert rope == [(TLEN, S + ALEN)]
     # No custom MRoPE advance side-channel: the default advance_seq_lens (by
     # seq_len) already lands position_id_start correctly.
     assert "mrope_pos_advance" not in out.kwargs
@@ -465,9 +521,9 @@ def test_thread_positions_audio_first(monkeypatch):
 
 def test_thread_positions_text_first_audio(monkeypatch):
     S = 7.0
-    shim, out, text_seen, rec = _run_merged_audio(monkeypatch, False, S)
+    shim, out, rope, rec = _run_merged_audio(monkeypatch, "text_first", S)
     # text starts at S; audio continues from S + text len.
-    assert text_seen["start"] == S
+    assert rope == [(TLEN, S)]
     assert shim.audio_start_pos_seen == S + TLEN
     assert "mrope_pos_advance" not in out.kwargs
     # concatenation: text rows first, then audio rows.
@@ -475,3 +531,24 @@ def test_thread_positions_text_first_audio(monkeypatch):
     assert torch.equal(out.input_embeds[:TLEN], torch.zeros((TLEN, HIDDEN)))
     assert torch.equal(out.input_embeds[TLEN:], torch.full((ALEN, HIDDEN), 5.0))
     assert not any(k.startswith("deepstack_") for k in out.tensor_inputs)
+
+
+def test_thread_positions_interleaved(monkeypatch):
+    # vLLM-layout s2t: [prefix-text @S, audio @S+TLEN, suffix-text @S+TLEN+ALEN].
+    S = 7.0
+    shim, out, rope, rec = _run_merged_audio(monkeypatch, "interleaved", S)
+    # audio sits between the two text spans; positions thread linearly.
+    assert shim.audio_start_pos_seen == S + TLEN
+    assert rope == [(TLEN, S), (SLEN, S + TLEN + ALEN)]
+    assert "mrope_pos_advance" not in out.kwargs
+    # concatenation order: prefix-text, audio, suffix-text.
+    assert out.input_seq_len == TLEN + ALEN + SLEN
+    assert out.input_embeds.shape == (TLEN + ALEN + SLEN, HIDDEN)
+    assert torch.equal(out.input_embeds[:TLEN], torch.zeros((TLEN, HIDDEN)))
+    assert torch.equal(
+        out.input_embeds[TLEN:TLEN + ALEN], torch.full((ALEN, HIDDEN), 5.0))
+    assert torch.equal(out.input_embeds[TLEN + ALEN:], torch.zeros((SLEN, HIDDEN)))
+    assert not any(k.startswith("deepstack_") for k in out.tensor_inputs)
+    assert out.tensor_inputs["masks_for_talker"].shape == (2, TLEN + ALEN + SLEN)
+    # both text spans were added to the seen-token mask.
+    assert rec.added is not None
