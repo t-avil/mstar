@@ -1164,3 +1164,30 @@ law) remains the best-motivated B2/B4 code experiment, alongside the
 prefill-merge build (in progress). GPU verdict work STOPPED for the night:
 every absolute since ~03:30 is mush; ratios need adjacent cells the drift
 now defeats. Code streams continue.
+
+## Merged multimodal prefill (B1/B5, opt/prefill-merge 41200ec) — BUILT, awaiting GPU A/B
+Option A: true merged prefill_multimodal walk reusing the prefill_vision
+capture (union signature identical; no new capture). Enabling fact:
+process_prompt strips modality placeholders (qwen3_omni_model.py:2092-2115)
+so KV spans are sequential — merge = concatenation of the per-span embeds,
+no splice. Invariants done: MRoPE span-threading (start_pos per span exactly
+as advance_seq_lens), deepstack zero-rows alignment, byte-identical off.
+14 new CPU tests + chunked/mixed suites green. CAVEATS: fires only with
+CHUNKED_PREFILL_V2_VISION OFF (strategy swap vs the vision-fold path — the
+A/B must compare merge vs vision-chunking, not merge vs nothing);
+process-static (two-server A/B); single-image i2t scope, all else falls
+back byte-identical. Targets the B2/B4 + TTFT hole (one conductor
+round-trip per admission instead of two). SMOKE.md on the branch. Queued
+first in the clean-window GPU queue.
+
+## Merged multimodal prefill A/B — +5.6% at B2 AND B4 (the losing cells); MERGED as VALIDATED-OPT-IN
+Two-server interleave (pmA off/0,1 vs pmB on/2,3, vision-chunking off both,
+4 samples/cell): B2 1.275->1.346 (+5.6%), B4 2.014->2.127 (+5.6%), jct -5-6%
+both; B1 0.819->0.783 (-4.4%, opposite sign => not a pair-band offset —
+investigate at clean-window confirm); B32 excluded (same-order cell
+collision between the two streams — harness lesson: stagger cell orders).
+merged_prefill_walks=71+ (mechanism live). First direct hit on the B2/B4
+hole all campaign. opt/prefill-merge MERGED into opt/integration-v4;
+flag stays default-OFF pending the clean-window confirm (+ the B1 sign
+question). Integration branch now: speech bundle + norm fix + V2 budget +
+merged prefill.
