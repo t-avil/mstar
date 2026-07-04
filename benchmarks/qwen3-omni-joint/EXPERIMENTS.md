@@ -1552,3 +1552,51 @@ on req/s by design (the vLLM ~18-20% length gap is the reason req/s is the chose
 cross-system metric; the tool prints the gap but does not flip). Net: small-batch
 (B1-B4) same-system req/s claims are untrustworthy without the parity gate; n=12
 length variance alone can manufacture a double-digit fake delta.
+
+
+## PREFILL_GATHER A/B (lab_gather/ab_gather_0v4) — WASH e2e AND mechanism-DEAD (readiness serializes, not just arrival)
+Prefill-gather (a ~4ms window that batches multiple admissions' vision prefill
+into one GPU step — the coalescing thesis's cross-request form). A/B gather 0 vs
+4ms, warm lab, i2t B32 x3: req/s 1.036/0.940/0.965 ≈ 0.98 WASH by ab_verdict.
+Counters kill it: prefill_packed_bs1 = 2038, bs2 = 6, bs4 = 2 across 3+3 B32
+cells — the gather window essentially NEVER sees >=2 prefills ready. Root cause is
+symmetric to ADMIT_JITTER but one layer deeper: closed-loop admissions do cluster
+at the trough in TIME, but prefill READINESS serializes through the per-request
+KV-read/encode pipeline, so even co-arriving requests become ready one at a time
+and a 4ms window catches only one. The bs histogram (free with WALK_STATS) is the
+durable artifact: i2t B32 food101 runs bs=1 prefill essentially always. STATUS:
+one 0-vs-10ms retry pending (dynflag, wider window); if it also fails, ready-gather
+CROSS-REQUEST coalescing is CLOSED, and the merged multimodal walk (WITHIN one
+request) becomes the only proven coalescing form. Data: lab_gather/,
+prefill_packed_bs* counters in server.log.
+
+## ARM3 (base yaml co-located + vision merge + audio merge, lab_arm3) — MECHANISM ALIVE; s2t small-batch +11-13%
+Full merge stack on the default (co-located) yaml: MSTAR_MERGED_PREFILL (vision) +
+the audio twin (prefill_text+prefill_audio merge). Counters ALIVE (law 4 met):
+merged_prefill_walks = 477, merged_prefill_audio_walks = 207, walk counts
+prefill_multimodal = 238 / prefill_multimodal_audio = 103. vs shipping arm2
+same-day: s2t B2 ~10.7 vs ~9.65 (+11%), s2t B4 ~13.9 vs ~12.35 (+13%), tok/req
+matched ~18.7 (so these are real, not length artifacts — the parity gate would
+pass). i2t reads ~arm1 levels: co-location adds ~nothing for i2t, and B1 is
+possibly slightly taxed — but that i2t signal is CONFOUNDED by a concurrent gather
+A/B running on node 0, so treat i2t-under-arm3 as inconclusive here. First cell
+per path was cold and is excluded as warmup (s2t B2 r1 7.155, s2t B4 r1 7.939,
+i2t B4 r1 1.854 — the documented ~30% first-cell dip). The audio-merge twin
+converts at exactly the s2t small-batch cells the matrix has as UNMEASURED — first
+real movement there. Data: lab_arm3/.
+
+## STRATEGIC — merge-config is audio-SAFE, so it's a primary-build candidate not just a small-batch alt
+Key structural fact: merge-config touches only VISION flags
+(CHUNKED_PREFILL_V2_VISION off + MSTAR_MERGED_PREFILL on); the audio paths
+(s2t/s2s) never read those flags, so merge-config decomposes BYTE-IDENTICALLY to
+shipping for audio. Consequence: merge-config carries ZERO audio-path risk while
+delivering i2t +3-11% (B1-B32, the merge same-pair + pmerge sentinel deltas) — so
+it is a candidate for the PRIMARY build, not merely the documented small-batch
+alt. arm3 (base yaml + audio merge) is a SEPARATE config candidate for s2t
+small-batch (co-location + audio twin, +11-13% s2t B2/B4). Emerging config→workload
+map: merge-config = primary (all i2t + audio-neutral); arm3 = s2t-small-batch
+config. FINALIZES after the live small-batch race now running (arm3 vs vLLM,
+5 cells x3) settles the s2t B2/B4 numbers and the i2t-under-co-location question
+(currently gather-confounded). Ties to: GOAL build-rule (one primary + <=2
+documented per-workload configs); Merge-config same-pair verdict + ARM3 entries
+above.

@@ -11,17 +11,20 @@ wall clock for the 2026-07-04 session).
 
 ## 1. vLLM-Omni 0.22 crash events (2026-07-04)
 
-All from `/home/tim/exp_vllm_i2s_s2s/server.log` (the i2s/s2s experiment
-server), signature `[StageEngineCoreClient] stage-N [rep-0] subprocess died
-unexpectedly (exit code None)` emitted by `stage_engine_core_client.py:265`.
-The raw log contains **four** such subprocess-death lines across **three
-distinct collapse events**:
+Events A-C are all from `/home/tim/exp_vllm_i2s_s2s/server.log` (the i2s/s2s
+experiment server), signature `[StageEngineCoreClient] stage-N [rep-0]
+subprocess died unexpectedly (exit code None)` emitted by
+`stage_engine_core_client.py:265` — **four** such subprocess-death lines across
+**three distinct collapse events**. Event D is a **fourth, distinct failure
+mode** (silent engine death behind a live API — see its row), evidenced from a
+different artifact (the p2verify small-batch race run logs):
 
-| # | Time (2026-07-04) | Stage(s) died | Load state | APIServer pid | Evidence |
-|---|---|---|---|---|---|
-| A | 17:40:50 | stage-0 **and** stage-1 | pre-race (before race.log cell #1) | 1755838 | server.log:433-434 |
-| B | 18:24:34 + 18:25:38 | stage-1, then stage-2 | **mid-race, under load** | 2113390 | server.log:2523, :2748 |
-| C | 20:16:14 | stage-0 | **IDLE, no benchmark load** | 2875178 | server.log:3388 |
+| # | Time (2026-07-04) | Failure | Load state | Evidence |
+|---|---|---|---|---|
+| A | 17:40:50 | stage-0 **and** stage-1 subprocess died | pre-race (before race.log cell #1) | server.log:433-434 (pid 1755838) |
+| B | 18:24:34 + 18:25:38 | stage-1, then stage-2 subprocess died | **mid-race, under load** | server.log:2523, :2748 (pid 2113390) |
+| C | 20:16:14 | stage-0 subprocess died → full teardown | **IDLE, no benchmark load** | server.log:3388 (pid 2875178) |
+| D | ~20:46-21:12 | **ZOMBIE**: EngineCore silently died, API still 200 | **idle between races** (relaunch @~20:30 served the 20:41-20:46 race fine) | h2h_out_smallbatch/vllm_*/run.log (HTTP 500 × 12/12 per cell, 5 cells) |
 
 Detail per event:
 
@@ -51,11 +54,31 @@ Detail per event:
   20:16:20. This is the cleanest self-inflicted signature: an idle server lost a
   subprocess and tore itself down.
 
-**Honest count note:** the "three deaths, third tonight" framing maps to
-{A, B, C} as three collapse *events*; the raw log has *four* `subprocess died`
-lines because event B killed two stages a minute apart. Either way the log
-evidence is unambiguous: ≥3 unexpected vLLM subprocess collapses in one
-2026-07-04 session, one of them while idle.
+- **Event D (~20:46-21:12, ZOMBIE — distinct failure mode).** After event C the
+  vLLM server was relaunched (~20:30) and served the p2verify race cleanly from
+  20:41-20:46. Its EngineCore then died **silently** sometime between 20:46 and
+  21:12 while the front-end API server kept answering `/v1/models` with HTTP 200
+  — a zombie state. It was discovered only when the 21:12 small-batch race hit
+  the engine: **every request of every cell returned HTTP 500** `{"error":
+  {"message":"EngineCore encountered an issue. See stack trace (above) for the
+  root cause.","type":"InternalServerError","code":500}}` — 12/12 requests
+  across all 5 cells (`h2h_out_smallbatch/vllm_{i2t_B1,i2t_B2,i2t_B4,s2t_B2,
+  s2t_B4}/run.log`). The structured 500 body (not connection-refused) confirms
+  the API layer was alive while the engine was dead. This is materially worse
+  than A-C for an acceptance harness: **a liveness check on `/v1/models`
+  (or any front-end endpoint) passes while the server cannot actually serve.**
+  - *Ops consequence (operator, noted here for the record):* the race reboot
+    procedure now requires an **engine-level liveness probe — a real
+    completion** — before racing, since front-end 200s are not sufficient to
+    prove the engine is up.
+
+**Honest count note:** events {A, B, C} are three subprocess-death collapse
+*events* (four raw `subprocess died` lines; event B killed two stages a minute
+apart). Event D is a **fourth, different** failure — a silent EngineCore death
+behind a live API, evidenced by 500s in the race logs rather than a
+`subprocess died` line. So the session shows **four distinct vLLM failures**,
+two of them (C, D) while not under race load, and D specifically defeats a
+naive front-end liveness check.
 
 ## 2. Earlier documented vLLM deaths (EXPERIMENTS.md)
 
@@ -80,21 +103,22 @@ vLLM deaths and are excluded.)
 
 ## 3. M* side of the ledger (same box, same window)
 
-- **Four M* server boots tonight** — `lab_crusade`, `lab_pmerge`, `lab_jit`,
-  `lab_parm2` (dirs under `/m-coriander/coriander/tim/`). Each `server.log` was
-  grepped for crash signatures (`traceback|fatal|segfault|core dumped|CUDA
-  error|died unexpectedly`): **zero matches in all four**.
-- **The one M* process death tonight was intentional**, initiated by the
-  operator via `lab_kill` (diag/pmerge). This is the load-bearing distinction:
-  an operator teardown is not a self-inflicted crash. (Corroborated pattern:
+- **Six M* server boots tonight (as of 21:35)** — `lab_crusade`, `lab_pmerge`,
+  `lab_jit`, `lab_parm2`, `lab_gather`, `lab_arm3` (dirs under
+  `/m-coriander/coriander/tim/`). Each `server.log` was grepped for crash
+  signatures (`traceback|fatal|segfault|core dumped|CUDA error|died
+  unexpectedly`): **zero matches in all six** (directly checked).
+- **Every M* process death tonight was intentional**, initiated by the operator
+  via `lab_kill` (e.g. diag/pmerge). This is the load-bearing distinction: an
+  operator teardown is not a self-inflicted crash. (Corroborated pattern:
   EXPERIMENTS.md:973 records earlier M* servers ending by *external kill*, never
   an unexpected subprocess death.)
 - **"2 days continuous benching, zero self-inflicted deaths"** — this is a
   **handoff claim** (HANDOFF_V5 §1: "M* zero self-inflicted deaths in 2 days of
   continuous benching"). It is cited as-is; it was NOT independently
-  re-verified end-to-end by this ledger, which only confirms the four boots
+  re-verified end-to-end by this ledger, which only confirms the six boots
   tonight are crash-signature-clean. Treat the 2-day span as an operator
-  assertion, tonight's four-boot cleanliness as directly checked.
+  assertion, tonight's six-boot cleanliness as directly checked.
 
 ## 4. Method & caveats (read before quoting any of this)
 
@@ -102,7 +126,7 @@ vLLM deaths and are excluded.)
   H200 box. M* and vLLM ran in the same period, so environmental factors
   (thermals, neighbors, driver) are shared, not a confound favoring either.
 - **Asymmetric churn — favors the vLLM side, not ours.** M* was under *heavier*
-  operational churn tonight (4 boots, continuous A/B cell fire, dynflags flips)
+  operational churn tonight (6 boots, continuous A/B cell fire, dynflags flips)
   than vLLM, yet showed zero unexpected deaths. The comparison is not "idle M*
   vs stressed vLLM"; if anything the stress asymmetry runs against M*.
 - **Not root-caused.** We did not diagnose *why* vLLM's EngineCore subprocesses
@@ -119,14 +143,18 @@ vLLM deaths and are excluded.)
 
 ## 5. One-line summary (for the acceptance rider, if it holds up)
 
-On 2026-07-04, on one shared H200 box, vLLM-Omni 0.22 logged ≥3 unexpected
-EngineCore subprocess collapses (one mid-race with committed lost cells, one
-while idle) while M* completed every cell across four boots under heavier churn
-with zero self-inflicted deaths — claimable only while the logs keep showing it,
-and pending re-test against vLLM-Omni 0.23.
+On 2026-07-04, on one shared H200 box, vLLM-Omni 0.22 exhibited **four distinct
+failures** — three EngineCore subprocess collapses (one mid-race with committed
+lost cells, one while idle) plus a zombie mode (EngineCore silently dead behind
+a live API, 500-ing an entire race) — while M* completed every cell across six
+boots under heavier churn with zero self-inflicted deaths. Two of the four vLLM
+failures occurred off race load, and the zombie mode defeats a naive front-end
+liveness check. Claimable only while the logs keep showing it, and pending
+re-test against vLLM-Omni 0.23.
 
 ---
 *Sources: `/home/tim/exp_vllm_i2s_s2s/server.log` (lines cited inline);
 `bench-merge/benchmarks/qwen3-omni-joint/h2h_v2/{race.log,race_ext.log}`;
+`h2h_out_smallbatch/vllm_*/run.log` (event D 500s);
 `bench-merge/benchmarks/qwen3-omni-joint/EXPERIMENTS.md:1357,1442,973`;
-`lab_{crusade,pmerge,jit,parm2}/server.log`; HANDOFF_V5 §1.*
+`lab_{crusade,pmerge,jit,parm2,gather,arm3}/server.log`; HANDOFF_V5 §1.*
