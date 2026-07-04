@@ -1,21 +1,23 @@
-"""CPU tests for merged multimodal prefill (MSTAR_MERGED_PREFILL, plan B1/B5).
+"""CPU tests for merged multimodal prefill.
 
-Exercises the conductor-side schedule collapse + input routing and the
-submodule-side span concatenation WITHOUT model weights or a GPU:
+Covers BOTH the vision merge (MSTAR_MERGED_PREFILL, plan B1/B5) and its audio
+twin (MSTAR_MERGED_PREFILL_AUDIO, attacks s2t B2/B4). Exercises the
+conductor-side schedule collapse + input routing and the submodule-side span
+concatenation WITHOUT model weights or a GPU:
 
   * ``_maybe_merge_prefill_schedule`` collapses exactly one text + one vision
-    walk (either order) into a single ``prefill_multimodal`` entry, and is a
-    byte-identical no-op (returns the schedule unchanged, order=None) whenever
-    the flag is off / output is audio / vision is chunked / the schedule is not
-    the exact one-text+one-vision shape.
-  * ``_get_thinker_prefill_inputs`` routes the merged walk's inputs: encoder
-    gets pixel_values + image_grid_thw; Thinker gets text_inputs + image_grid_thw
-    + video_second_per_grid (always emitted, empty payload when absent).
+    walk (vision flag) OR one text + one audio walk (audio flag), either order,
+    into a single merged entry, and is a byte-identical no-op (schedule
+    unchanged, both orders None) whenever the relevant flag is off / output is
+    audio / vision is chunked / the schedule is not the exact merge shape.
+  * ``_get_thinker_prefill_inputs`` routes each merged walk's inputs to the
+    right encoder + the Thinker's text span.
   * ``_get_thinker_forward`` runs the single merged walk then transitions to
     thinker_decode with is_last_prefill on the merged step.
-  * ``_build_merged_multimodal_inputs`` threads the MRoPE start position across
-    spans EXACTLY as the separate walks would (text advances by seq_len, vision
-    by its 3D-grid mrope_pos_advance) and concatenates in modality order — the
+  * ``_build_merged_multimodal_inputs`` / ``_build_merged_audio_inputs`` thread
+    the MRoPE start position across spans EXACTLY as the separate walks would
+    (text advances by seq_len; vision by its 3D-grid mrope_pos_advance; audio by
+    its seq_len — no custom advance) and concatenate in modality order — the
     hard invariant, checked here with stubbed span builders (real numerics are a
     GPU parity check, see SMOKE.md).
 """
@@ -28,7 +30,11 @@ from mstar.graph.base import TensorPointerInfo
 from mstar.model.qwen3_omni import qwen3_omni_model as qm
 from mstar.model.qwen3_omni import submodules as sm
 from mstar.model.qwen3_omni.qwen3_omni_model import Qwen3OmniModel
-from mstar.model.qwen3_omni.submodules import ThinkerSubmodule, _VisionPrefillStage
+from mstar.model.qwen3_omni.submodules import (
+    ThinkerSubmodule,
+    _AudioPrefillStage,
+    _VisionPrefillStage,
+)
 
 
 # --- conductor-side shim: borrow just the schedule/routing/state methods -----
@@ -56,30 +62,37 @@ VISION = ("prefill_vision", {
     "pixel_values": _tpi("pix"),
     "image_grid_thw": _tpi("grid"),
 })
+AUDIO = ("prefill_audio", {
+    "audio_features": _tpi("af"),
+    "audio_seqlens": _tpi("asl"),
+})
 
 
 @pytest.fixture(autouse=True)
 def _clear_flags(monkeypatch):
-    for f in ("MSTAR_MERGED_PREFILL", "MSTAR_CHUNKED_PREFILL_V2_VISION",
-              "MSTAR_CHUNKED_PREFILL_V2"):
+    for f in ("MSTAR_MERGED_PREFILL", "MSTAR_MERGED_PREFILL_AUDIO",
+              "MSTAR_CHUNKED_PREFILL_V2_VISION", "MSTAR_CHUNKED_PREFILL_V2"):
         monkeypatch.delenv(f, raising=False)
 
 
-# --- _maybe_merge_prefill_schedule -------------------------------------------
+# =============================================================================
+# VISION merge: _maybe_merge_prefill_schedule
+# =============================================================================
 def test_merge_off_is_noop():
     shim = _CondShim()
     sched = [TEXT, VISION]
-    out, order = shim._maybe_merge_prefill_schedule(sched, audio_output=False)
-    assert out is sched and order is None  # unchanged object, no merge
+    out, vorder, aorder = shim._maybe_merge_prefill_schedule(sched, audio_output=False)
+    assert out is sched and vorder is None and aorder is None  # unchanged, no merge
 
 
 def test_merge_text_then_vision(monkeypatch):
     monkeypatch.setenv("MSTAR_MERGED_PREFILL", "1")
     shim = _CondShim()
-    out, order = shim._maybe_merge_prefill_schedule([TEXT, VISION], audio_output=False)
+    out, vorder, aorder = shim._maybe_merge_prefill_schedule(
+        [TEXT, VISION], audio_output=False)
     assert len(out) == 1
     assert out[0][0] == "prefill_multimodal"
-    assert order is False  # text first
+    assert vorder is False and aorder is None  # text first, vision merge
     # merged entry is the union of both entries' tensor dicts
     assert set(out[0][1]) == {"text_inputs", "pixel_values", "image_grid_thw"}
 
@@ -87,48 +100,126 @@ def test_merge_text_then_vision(monkeypatch):
 def test_merge_vision_then_text(monkeypatch):
     monkeypatch.setenv("MSTAR_MERGED_PREFILL", "1")
     shim = _CondShim()
-    out, order = shim._maybe_merge_prefill_schedule([VISION, TEXT], audio_output=False)
+    out, vorder, aorder = shim._maybe_merge_prefill_schedule(
+        [VISION, TEXT], audio_output=False)
     assert len(out) == 1 and out[0][0] == "prefill_multimodal"
-    assert order is True  # vision first
+    assert vorder is True and aorder is None  # vision first
 
 
 def test_merge_gated_off_by_audio_output(monkeypatch):
     monkeypatch.setenv("MSTAR_MERGED_PREFILL", "1")
     shim = _CondShim()
-    out, order = shim._maybe_merge_prefill_schedule([TEXT, VISION], audio_output=True)
-    assert order is None and len(out) == 2
+    out, vorder, aorder = shim._maybe_merge_prefill_schedule(
+        [TEXT, VISION], audio_output=True)
+    assert vorder is None and aorder is None and len(out) == 2
 
 
 def test_merge_gated_off_by_chunked_vision(monkeypatch):
     monkeypatch.setenv("MSTAR_MERGED_PREFILL", "1")
     monkeypatch.setenv("MSTAR_CHUNKED_PREFILL_V2_VISION", "1")
     shim = _CondShim()
-    out, order = shim._maybe_merge_prefill_schedule([TEXT, VISION], audio_output=False)
-    assert order is None and len(out) == 2
+    out, vorder, aorder = shim._maybe_merge_prefill_schedule(
+        [TEXT, VISION], audio_output=False)
+    assert vorder is None and aorder is None and len(out) == 2
 
 
 @pytest.mark.parametrize("sched", [
     [TEXT],                                   # text only
     [VISION],                                 # vision only
     [TEXT, VISION, TEXT],                     # extra text span
-    [TEXT, ("prefill_audio", {"audio_features": _tpi("a")})],  # audio present
+    [TEXT, AUDIO],                            # audio present (vision flag only)
     [TEXT, TEXT],                             # two text, no vision
 ])
 def test_merge_only_exact_text_plus_vision(monkeypatch, sched):
     monkeypatch.setenv("MSTAR_MERGED_PREFILL", "1")
     shim = _CondShim()
-    out, order = shim._maybe_merge_prefill_schedule(sched, audio_output=False)
-    assert order is None and out is sched
+    out, vorder, aorder = shim._maybe_merge_prefill_schedule(sched, audio_output=False)
+    assert vorder is None and aorder is None and out is sched
 
 
-# --- _get_thinker_prefill_inputs routing for the merged walk -----------------
-def _merged_meta(vision_first: bool):
-    entry = {**VISION[1], **TEXT[1]}
+# =============================================================================
+# AUDIO merge: _maybe_merge_prefill_schedule
+# =============================================================================
+def test_audio_merge_off_is_noop():
+    shim = _CondShim()
+    sched = [TEXT, AUDIO]
+    out, vorder, aorder = shim._maybe_merge_prefill_schedule(sched, audio_output=False)
+    assert out is sched and vorder is None and aorder is None
+
+
+def test_audio_merge_text_then_audio(monkeypatch):
+    monkeypatch.setenv("MSTAR_MERGED_PREFILL_AUDIO", "1")
+    shim = _CondShim()
+    out, vorder, aorder = shim._maybe_merge_prefill_schedule(
+        [TEXT, AUDIO], audio_output=False)
+    assert len(out) == 1
+    assert out[0][0] == "prefill_multimodal_audio"
+    assert vorder is None and aorder is False  # text first, audio merge
+    # merged entry is the union of both entries' tensor dicts
+    assert set(out[0][1]) == {"text_inputs", "audio_features", "audio_seqlens"}
+
+
+def test_audio_merge_audio_then_text(monkeypatch):
+    monkeypatch.setenv("MSTAR_MERGED_PREFILL_AUDIO", "1")
+    shim = _CondShim()
+    out, vorder, aorder = shim._maybe_merge_prefill_schedule(
+        [AUDIO, TEXT], audio_output=False)
+    assert len(out) == 1 and out[0][0] == "prefill_multimodal_audio"
+    assert vorder is None and aorder is True  # audio first
+
+
+def test_audio_merge_gated_off_by_audio_output(monkeypatch):
+    # Talker-output requests (s2s/i2s) keep the unmerged path so the Talker's
+    # per-walk thinker_states accounting stays aligned.
+    monkeypatch.setenv("MSTAR_MERGED_PREFILL_AUDIO", "1")
+    shim = _CondShim()
+    out, vorder, aorder = shim._maybe_merge_prefill_schedule(
+        [TEXT, AUDIO], audio_output=True)
+    assert vorder is None and aorder is None and len(out) == 2
+
+
+def test_audio_merge_independent_of_vision_flag(monkeypatch):
+    # The audio merge fires on the audio flag ALONE; the vision flag being off
+    # must not suppress it (s2t has no vision to merge).
+    monkeypatch.setenv("MSTAR_MERGED_PREFILL_AUDIO", "1")
+    shim = _CondShim()
+    out, vorder, aorder = shim._maybe_merge_prefill_schedule(
+        [TEXT, AUDIO], audio_output=False)
+    assert out[0][0] == "prefill_multimodal_audio" and aorder is False
+
+
+def test_vision_flag_alone_does_not_merge_audio(monkeypatch):
+    # Symmetric guard: the vision flag must not collapse an audio schedule.
+    monkeypatch.setenv("MSTAR_MERGED_PREFILL", "1")
+    shim = _CondShim()
+    sched = [TEXT, AUDIO]
+    out, vorder, aorder = shim._maybe_merge_prefill_schedule(sched, audio_output=False)
+    assert vorder is None and aorder is None and out is sched
+
+
+@pytest.mark.parametrize("sched", [
+    [TEXT],                                   # text only
+    [AUDIO],                                  # audio only
+    [TEXT, AUDIO, TEXT],                      # vLLM-layout interleave (3 spans)
+    [TEXT, VISION],                           # vision present (audio flag only)
+    [TEXT, TEXT],                             # two text, no audio
+])
+def test_audio_merge_only_exact_text_plus_audio(monkeypatch, sched):
+    monkeypatch.setenv("MSTAR_MERGED_PREFILL_AUDIO", "1")
+    shim = _CondShim()
+    out, vorder, aorder = shim._maybe_merge_prefill_schedule(sched, audio_output=False)
+    assert vorder is None and aorder is None and out is sched
+
+
+# =============================================================================
+# _get_thinker_prefill_inputs routing for the merged walks
+# =============================================================================
+def _merged_meta(walk: str, entry: dict):
     return CurrentForwardConductorMetadata(
-        graph_walk="prefill_multimodal",
+        graph_walk=walk,
         is_prefill=True,
         kwargs={
-            "prefill_schedule": [("prefill_multimodal", entry)],
+            "prefill_schedule": [(walk, entry)],
             "prefill_step": 0,
             "audio_output": False,
             "prefill_chunk_offset": 0,
@@ -138,7 +229,9 @@ def _merged_meta(vision_first: bool):
 
 def test_merged_input_routing():
     shim = _CondShim()
-    edges = shim._get_thinker_prefill_inputs(_merged_meta(False), {})
+    entry = {**VISION[1], **TEXT[1]}
+    edges = shim._get_thinker_prefill_inputs(
+        _merged_meta("prefill_multimodal", entry), {})
     by_dest = {}
     for e in edges:
         by_dest.setdefault(e.next_node, {})[e.name] = e
@@ -155,10 +248,32 @@ def test_merged_input_routing():
     assert by_dest["Thinker"]["video_second_per_grid"].tensor_info == []
 
 
-# --- state machine: merged walk -> decode ------------------------------------
-def test_merged_walk_transitions_to_decode():
+def test_merged_audio_input_routing():
     shim = _CondShim()
-    meta = _merged_meta(False)
+    entry = {**AUDIO[1], **TEXT[1]}
+    edges = shim._get_thinker_prefill_inputs(
+        _merged_meta("prefill_multimodal_audio", entry), {})
+    by_dest = {}
+    for e in edges:
+        by_dest.setdefault(e.next_node, {})[e.name] = e
+    # encoder gets audio_features + audio_seqlens with real payloads
+    assert set(by_dest["audio_encoder"]) == {"audio_features", "audio_seqlens"}
+    assert by_dest["audio_encoder"]["audio_features"].tensor_info
+    # Thinker gets the full text span (audio_embeds arrives as an encoder edge).
+    assert set(by_dest["Thinker"]) == {"text_inputs"}
+    assert by_dest["Thinker"]["text_inputs"].tensor_info
+
+
+# =============================================================================
+# state machine: merged walk -> decode
+# =============================================================================
+@pytest.mark.parametrize("walk,entry", [
+    ("prefill_multimodal", {**VISION[1], **TEXT[1]}),
+    ("prefill_multimodal_audio", {**AUDIO[1], **TEXT[1]}),
+])
+def test_merged_walk_transitions_to_decode(walk, entry):
+    shim = _CondShim()
+    meta = _merged_meta(walk, entry)
     fwd = shim._get_thinker_forward(meta, {})  # completing the merged step
     meta = fwd.full_metadata
     meta.kwargs.update(fwd.step_metadata)
@@ -166,11 +281,14 @@ def test_merged_walk_transitions_to_decode():
     assert meta.graph_walk == "thinker_decode"
 
 
-# --- submodule: MRoPE position threading across spans ------------------------
+# =============================================================================
+# submodule: MRoPE position threading across spans
+# =============================================================================
 NUM_DEEPSTACK = 2
 HIDDEN = 4
 VLEN = 5           # vision total_len (V + 2 sentinels)
 VADV = 100         # vision 3D-grid mrope_pos_advance (> VLEN, like a real grid)
+ALEN = 6           # audio total_len (A + 2 sentinels); advance == ALEN (no jump)
 TLEN = 4           # text span length
 
 
@@ -203,11 +321,13 @@ class _Recorder:
 
 class _ThinkerShim:
     _build_merged_multimodal_inputs = ThinkerSubmodule._build_merged_multimodal_inputs
+    _build_merged_audio_inputs = ThinkerSubmodule._build_merged_audio_inputs
 
     def __init__(self):
         self.config = _StubConfig()
         self.model = _StubModel()
         self.vision_start_pos_seen = None
+        self.audio_start_pos_seen = None
 
     def _get_talker_text_mask(self, text_ids):
         return torch.zeros(text_ids.shape[0], dtype=torch.bool)
@@ -224,10 +344,19 @@ class _ThinkerShim:
             start_pos=start_pos,
         )
 
+    def _build_audio_full(self, inputs, start_pos, device):
+        self.audio_start_pos_seen = start_pos
+        return _AudioPrefillStage(
+            wrapped_embeds=torch.full((ALEN, HIDDEN), 5.0),
+            pos_ids=torch.zeros((3, ALEN)),
+            mm_mask=torch.ones(ALEN, dtype=torch.bool),
+            total_len=ALEN,
+        )
+
 
 class _FwdInfo:
-    def __init__(self, vision_first):
-        self.step_metadata = {"merged_vision_first": vision_first}
+    def __init__(self, **step_metadata):
+        self.step_metadata = step_metadata
 
 
 def _run_merged(monkeypatch, vision_first, start_pos):
@@ -243,7 +372,8 @@ def _run_merged(monkeypatch, vision_first, start_pos):
     rec = _Recorder()
     inputs = {"text_inputs": [torch.zeros(TLEN, dtype=torch.long)]}
     out = shim._build_merged_multimodal_inputs(
-        _FwdInfo(vision_first), inputs, start_pos, torch.device("cpu"), rec,
+        _FwdInfo(merged_vision_first=vision_first), inputs, start_pos,
+        torch.device("cpu"), rec,
     )
     return shim, out, text_start_seen, rec
 
@@ -289,3 +419,59 @@ def test_thread_positions_text_first(monkeypatch):
         ds = out.tensor_inputs[f"deepstack_{i}"]
         assert torch.equal(ds[:TLEN], torch.zeros((TLEN, HIDDEN)))
         assert torch.equal(ds[TLEN:], torch.full((VLEN, HIDDEN), 3.0))
+
+
+def _run_merged_audio(monkeypatch, audio_first, start_pos):
+    text_start_seen = {}
+
+    def _fake_rope_text(seq_len, start, device):
+        text_start_seen["seq_len"] = seq_len
+        text_start_seen["start"] = start
+        return torch.zeros((3, seq_len))
+
+    monkeypatch.setattr(sm, "get_rope_index_text", _fake_rope_text)
+    shim = _ThinkerShim()
+    rec = _Recorder()
+    inputs = {"text_inputs": [torch.zeros(TLEN, dtype=torch.long)]}
+    out = shim._build_merged_audio_inputs(
+        _FwdInfo(merged_audio_first=audio_first), inputs, start_pos,
+        torch.device("cpu"), rec,
+    )
+    return shim, out, text_start_seen, rec
+
+
+def test_thread_positions_audio_first(monkeypatch):
+    S = 7.0
+    shim, out, text_seen, rec = _run_merged_audio(monkeypatch, True, S)
+    # audio starts at S; text continues from S + audio total_len (audio advance
+    # == its seq_len, no 3D-grid jump).
+    assert shim.audio_start_pos_seen == S
+    assert text_seen["start"] == S + ALEN
+    assert text_seen["seq_len"] == TLEN
+    # No custom MRoPE advance side-channel: the default advance_seq_lens (by
+    # seq_len) already lands position_id_start correctly.
+    assert "mrope_pos_advance" not in out.kwargs
+    # concatenation: audio rows first, then text rows.
+    assert out.input_seq_len == ALEN + TLEN
+    assert out.input_embeds.shape == (ALEN + TLEN, HIDDEN)
+    assert out.custom_pos_ids.shape == (3, ALEN + TLEN)
+    assert torch.equal(out.input_embeds[:ALEN], torch.full((ALEN, HIDDEN), 5.0))
+    assert torch.equal(out.input_embeds[ALEN:], torch.zeros((TLEN, HIDDEN)))
+    # NO deepstack tensors (audio has none) — the signature matches prefill_text.
+    assert not any(k.startswith("deepstack_") for k in out.tensor_inputs)
+    assert out.tensor_inputs["masks_for_talker"].shape == (2, ALEN + TLEN)
+    assert rec.added is not None  # seen_token_mask updated for the text span
+
+
+def test_thread_positions_text_first_audio(monkeypatch):
+    S = 7.0
+    shim, out, text_seen, rec = _run_merged_audio(monkeypatch, False, S)
+    # text starts at S; audio continues from S + text len.
+    assert text_seen["start"] == S
+    assert shim.audio_start_pos_seen == S + TLEN
+    assert "mrope_pos_advance" not in out.kwargs
+    # concatenation: text rows first, then audio rows.
+    assert out.input_embeds.shape == (TLEN + ALEN, HIDDEN)
+    assert torch.equal(out.input_embeds[:TLEN], torch.zeros((TLEN, HIDDEN)))
+    assert torch.equal(out.input_embeds[TLEN:], torch.full((ALEN, HIDDEN), 5.0))
+    assert not any(k.startswith("deepstack_") for k in out.tensor_inputs)

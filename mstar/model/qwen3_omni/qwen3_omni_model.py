@@ -441,6 +441,37 @@ def merged_prefill_enabled() -> bool:
     return _envflag("MSTAR_MERGED_PREFILL")
 
 
+def merged_prefill_audio_enabled() -> bool:
+    """Merged multimodal prefill, AUDIO twin (attacks s2t B2/B4). When ON, an
+    admission whose Thinker prefill schedule is exactly one ``prefill_text`` +
+    one ``prefill_audio`` (either order) collapses into a SINGLE
+    ``prefill_multimodal_audio`` walk that runs both spans in one Thinker
+    forward, dropping the conductor round-trip between the two walks.
+
+    The merged walk is a ``Sequential[audio_encoder → Thinker]`` (the encoder
+    still runs first). Audio carries NO deepstack and NO 3D-grid MRoPE jump
+    (positions increment one per token, so the walk's MRoPE advance == its
+    ``seq_len``), so the merged span's post-preprocess signature is IDENTICAL to
+    ``prefill_text`` / ``prefill_audio`` (``input_embeds`` + ``cos_3d`` +
+    ``sin_3d`` + ``masks_for_talker``; no side-channel). It therefore REUSES the
+    ``prefill_text`` CUDA-graph capture (NOT the vision capture) — no new
+    capture, no extra warmup.
+
+    Independent of ``MSTAR_MERGED_PREFILL`` (the vision flag): this gate alone
+    controls whether the audio walk is registered and the audio schedule is
+    collapsed, so s2t (which has no vision) can A/B the audio merge without
+    touching vision-merge behavior. Default OFF -> flag-off is byte-identical:
+    the walk is never registered, the schedule is never collapsed. Merge is
+    gated to text output (no Talker output involvement, so s2t is eligible /
+    s2s+i2s are not) and the exact one-text+one-audio schedule; anything else
+    keeps the unmerged multi-walk path unchanged. There is no chunked-audio
+    walk (unlike vision's encode_vision split), so there is no
+    chunked-prefill interaction to disable — see the interaction note in the
+    branch report.
+    """
+    return _envflag("MSTAR_MERGED_PREFILL_AUDIO")
+
+
 def _tensor_dump_dir() -> str | None:
     """Directory for env-gated intermediate-tensor / token dumps, or None."""
     import os as _os
@@ -959,6 +990,46 @@ class Qwen3OmniModel(Model):
             ),
         ])
 
+        # Merged multimodal prefill, AUDIO twin (MSTAR_MERGED_PREFILL_AUDIO): one
+        # walk that runs the text span AND the audio span in a single Thinker
+        # forward, dropping the conductor round-trip between prefill_text and
+        # prefill_audio. Structurally identical to the prefill_audio Sequential
+        # (audio encoder must still run first), but the Thinker node ALSO declares
+        # text_inputs; its prepare_inputs concatenates the per-span
+        # embeds/pos_ids in modality order (see submodules.py). No deepstack, no
+        # mrope_pos_advance side-channel (audio positions are +1/token). Registered
+        # only when the flag is on so flag-off keeps every walk above
+        # byte-identical.
+        prefill_multimodal_audio = Sequential([
+            GraphNode(
+                name="audio_encoder",
+                input_names=["audio_features", "audio_seqlens"],
+                outputs=[GraphEdge(next_node="Thinker", name="audio_embeds")],
+            ),
+            GraphNode(
+                name="Thinker",
+                input_names=["text_inputs", "audio_embeds"],
+                outputs=[
+                    GraphEdge(
+                        next_node=EMIT_TO_CLIENT,
+                        name="new_token",
+                        output_modality="text",
+                        persist=True,
+                    ),
+                    StreamingGraphEdge(
+                        next_node="Talker",
+                        name="thinker_states",
+                        target_partition="Talker",
+                    ),
+                    StreamingGraphEdge(
+                        next_node="Talker",
+                        name="thinker_mask",
+                        target_partition="Talker",
+                    ),
+                ],
+            ),
+        ])
+
         # -- Thinker decode: produces new_token (persist) + thinker_states
         #    (streaming to Talker) --
         thinker_decode = Loop(
@@ -1083,6 +1154,10 @@ class Qwen3OmniModel(Model):
             # Merged text+vision walk. Only registered under the flag so flag-off
             # leaves the walk table byte-identical.
             walks["prefill_multimodal"] = prefill_multimodal
+        if merged_prefill_audio_enabled():
+            # Merged text+audio walk. Only registered under the flag so flag-off
+            # leaves the walk table byte-identical.
+            walks["prefill_multimodal_audio"] = prefill_multimodal_audio
         return walks
 
     # -----------------------------------------------------------------------
@@ -1101,6 +1176,10 @@ class Qwen3OmniModel(Model):
                     *(("encode_vision",) if chunked_prefill_v2_vision_enabled() else ()),
                     # prefill_multimodal only exists under MSTAR_MERGED_PREFILL.
                     *(("prefill_multimodal",) if merged_prefill_enabled() else ()),
+                    # prefill_multimodal_audio only exists under
+                    # MSTAR_MERGED_PREFILL_AUDIO.
+                    *(("prefill_multimodal_audio",)
+                      if merged_prefill_audio_enabled() else ()),
                 },
                 initial_walk="prefill_text",
                 producer_partitions=[],
@@ -1294,8 +1373,8 @@ class Qwen3OmniModel(Model):
         # the submodule concatenates in the right order. Returns the schedule
         # unchanged (merged_vision_first=None) when the merge does not apply, so
         # every non-eligible request keeps the byte-identical multi-walk path.
-        schedule, merged_vision_first = self._maybe_merge_prefill_schedule(
-            schedule, audio_output,
+        schedule, merged_vision_first, merged_audio_first = (
+            self._maybe_merge_prefill_schedule(schedule, audio_output)
         )
 
         first_walk = schedule[0][0] if schedule else "thinker_decode"
@@ -1359,6 +1438,9 @@ class Qwen3OmniModel(Model):
                 # Span order for a merged prefill_multimodal walk (None otherwise;
                 # the submodule only reads it for that walk).
                 "merged_vision_first": merged_vision_first,
+                # Span order for a merged prefill_multimodal_audio walk (None
+                # otherwise; the submodule only reads it for that walk).
+                "merged_audio_first": merged_audio_first,
                 # prefill_chunk_offset / prefill_chunk_len for the submodule to
                 # slice this chunk (absent => full span, byte-identical).
                 **chunk_step_metadata,
@@ -1369,37 +1451,64 @@ class Qwen3OmniModel(Model):
         self,
         schedule: list[tuple[str, dict[str, TensorPointerInfo]]],
         audio_output: bool,
-    ) -> tuple[list[tuple[str, dict[str, TensorPointerInfo]]], bool | None]:
-        """Collapse an exact one-text + one-vision schedule into a single
-        ``prefill_multimodal`` entry when ``MSTAR_MERGED_PREFILL`` applies.
+    ) -> tuple[
+        list[tuple[str, dict[str, TensorPointerInfo]]], bool | None, bool | None
+    ]:
+        """Collapse an exact one-text + one-{vision,audio} schedule into a single
+        merged-prefill entry when the corresponding flag applies.
 
-        Returns ``(schedule, merged_vision_first)``. ``merged_vision_first`` is
-        ``True``/``False`` when merged (span order), or ``None`` when the merge
-        does not apply — in which case the schedule is returned UNCHANGED so the
-        request keeps the byte-identical multi-walk path.
+        Returns ``(schedule, merged_vision_first, merged_audio_first)``. Each
+        ``*_first`` is ``True``/``False`` when that modality's merge fired (span
+        order), or ``None`` otherwise. When neither merge applies the schedule is
+        returned UNCHANGED so the request keeps the byte-identical multi-walk
+        path. The two merges are mutually exclusive per admission (a schedule is
+        either text+vision or text+audio, never both, for the 2-entry case).
 
-        Eligibility (all required): flag on; text output (no Talker); non-chunked
-        vision (``MSTAR_CHUNKED_PREFILL_V2_VISION`` off, else the schedule holds
-        ``encode_vision`` + a chunkable Thinker walk, a different span model);
-        exactly two entries, one ``prefill_text`` and one ``prefill_vision``.
+        Vision eligibility (all required): MSTAR_MERGED_PREFILL on; text output
+        (no Talker); non-chunked vision (``MSTAR_CHUNKED_PREFILL_V2_VISION`` off,
+        else the schedule holds ``encode_vision`` + a chunkable Thinker walk, a
+        different span model); exactly two entries, one ``prefill_text`` and one
+        ``prefill_vision``.
+
+        Audio eligibility (all required): MSTAR_MERGED_PREFILL_AUDIO on; text
+        output (so s2t is eligible, s2s/i2s are not); exactly two entries, one
+        ``prefill_text`` and one ``prefill_audio``. There is no chunked-audio
+        walk, so no chunked-prefill guard is needed (unlike vision).
         """
         if (
-            not merged_prefill_enabled()
-            or audio_output
-            or chunked_prefill_v2_vision_enabled()
-            or len(schedule) != 2
+            merged_prefill_enabled()
+            and not audio_output
+            and not chunked_prefill_v2_vision_enabled()
+            and len(schedule) == 2
         ):
-            return schedule, None
-        walks = [w for w, _ in schedule]
-        if sorted(walks) != ["prefill_text", "prefill_vision"]:
-            return schedule, None
-        vision_first = walks[0] == "prefill_vision"
-        # Union the two entries' tensor dicts (their keys are disjoint:
-        # text_inputs vs pixel_values/image_grid_thw/video_second_per_grid).
-        merged_entry: dict[str, TensorPointerInfo] = {}
-        for _, tensor_dict in schedule:
-            merged_entry.update(tensor_dict)
-        return [("prefill_multimodal", merged_entry)], vision_first
+            walks = [w for w, _ in schedule]
+            if sorted(walks) == ["prefill_text", "prefill_vision"]:
+                vision_first = walks[0] == "prefill_vision"
+                # Union the two entries' tensor dicts (their keys are disjoint:
+                # text_inputs vs pixel_values/image_grid_thw/video_second_per_grid).
+                merged_entry: dict[str, TensorPointerInfo] = {}
+                for _, tensor_dict in schedule:
+                    merged_entry.update(tensor_dict)
+                return [("prefill_multimodal", merged_entry)], vision_first, None
+
+        if (
+            merged_prefill_audio_enabled()
+            and not audio_output
+            and len(schedule) == 2
+        ):
+            walks = [w for w, _ in schedule]
+            if sorted(walks) == ["prefill_audio", "prefill_text"]:
+                audio_first = walks[0] == "prefill_audio"
+                # Union the two entries' tensor dicts (their keys are disjoint:
+                # text_inputs vs audio_features/audio_seqlens).
+                merged_entry = {}
+                for _, tensor_dict in schedule:
+                    merged_entry.update(tensor_dict)
+                return (
+                    [("prefill_multimodal_audio", merged_entry)], None, audio_first,
+                )
+
+        return schedule, None, None
 
     def _append_vision_schedule(self, schedule: list, entry: dict) -> None:
         """Append the vision prefill schedule entries.
@@ -1587,6 +1696,26 @@ class Qwen3OmniModel(Model):
                 edge = GraphEdge(next_node="Thinker", name=name)
                 edge.tensor_info = [tensor_dict[name]] if name in tensor_dict else []
                 edges.append(edge)
+            return edges
+
+        # Merged multimodal AUDIO walk (MSTAR_MERGED_PREFILL_AUDIO): the encoder
+        # takes audio_features + audio_seqlens; the Thinker additionally takes the
+        # FULL text_inputs span. audio_embeds reaches the Thinker as the encoder's
+        # Sequential output (a graph edge), not a conductor input.
+        if walk_name == "prefill_multimodal_audio":
+            edges = []
+            for name in ("audio_features", "audio_seqlens"):
+                if name in tensor_dict:
+                    edge = GraphEdge(next_node="audio_encoder", name=name)
+                    edge.tensor_info = [tensor_dict[name]]
+                    edges.append(edge)
+            # text_inputs is the only conductor-supplied Thinker input; emit it
+            # (empty payload still marks the declared name ready).
+            edge = GraphEdge(next_node="Thinker", name="text_inputs")
+            edge.tensor_info = (
+                [tensor_dict["text_inputs"]] if "text_inputs" in tensor_dict else []
+            )
+            edges.append(edge)
             return edges
 
         # Determine the target node — for audio/vision, the first node in
