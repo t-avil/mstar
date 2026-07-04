@@ -407,7 +407,7 @@ class Worker:
         if os.environ.get("MSTAR_GC_TUNE", "0") == "1":
             import gc
             gc.set_threshold(50_000, 500, 1000)
-            logger.info("Worker %s: MSTAR_GC_TUNE — gc thresholds raised "
+            logger.warning("Worker %s: MSTAR_GC_TUNE — gc thresholds raised "
                         "(50000, 500, 1000); freeze after warmup", worker_id)
 
         # ``dist_init_method`` is normally provided by the conductor — it
@@ -3766,7 +3766,7 @@ class Worker:
             import gc
             gc.collect()
             gc.freeze()
-            logger.info("Worker %s: MSTAR_GC_TUNE — gc.freeze() applied "
+            logger.warning("Worker %s: MSTAR_GC_TUNE — gc.freeze() applied "
                         "(%d objects frozen)", self.worker_id,
                         gc.get_freeze_count())
 
