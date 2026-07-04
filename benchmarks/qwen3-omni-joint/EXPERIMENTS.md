@@ -962,3 +962,107 @@ zero capture failures/eager fallbacks in all of tonight's server logs.
 User lead checked: separate serving engine (C++ control-plane scheduler,
 static compilation, Blackwell MLA kernels). Zero references in vllm-omni
 source, deps, or venv. Its C++-scheduler idea = the option we scoped out.
+
+## Decode-bucket finer grid (bgridB) — NO WIN, current grid stays
+Arm A (shipped grid [1,2,4,8,16,24,28,32]): 6.603/6.456. Arm B (+20,26,30):
+5.933/6.376 — finer grid reads lower (cross-boot arms, ~40min apart, so
+partly drift; either way no positive signal). More buckets also cost VRAM +
+boot time. CLOSED: keep the shipped grid.
+
+## Ops: lab-kill collision 23:09 — GPU driving moved to single-owner
+The sweep (8299) and speech (8311) servers died mid-cells (external kill,
+zero tracebacks — agents acting on stale "kill when done" instructions while
+main was firing cells). Casualties: speech ac_bundle A/B (one clean baseline
+cell only — the new speech flags are NOT implicated, the A-side i2s cell
+zeroed too) and the chunk-512 B1 latency gate (garbage cell). Both re-queued
+on fresh labs. RULE hardened: exactly one owner for all lab boots/kills/cell
+firing (main); agents are code-only.
+
+## chunk768 mechanism note (sweeper exit report) — 768 floors to the 512 bucket
+The chunk planner picks the largest CAPTURED bucket <= min(remaining, cap)
+from [128,256,512,1024,2048]; cap=768 therefore runs identical 512-bucket
+chunking — the wash was structural, not noise. Real next operating point:
+cap=1024 (bucket already captured) — queued as a quick arm after the B1
+latency gate. 512 remains the validated winner.
+
+## chunk-512 B1 latency gate — PASSED; 512 adopted
+B1 A/B (256 vs 512): req/s -2.4..-3.0%, jct +2.4..+3.5% — bounded small B1
+tax, under the 5% flag bar, against +3-5% at B32. MSTAR_PREFILL_CHUNK_TOKENS=512
+enters the integration stack. (768 = same as 512 structurally; 1024 arm
+optional later.)
+
+## Speech bundle A/B (FAST_CHECKSTOP_TALKER + CODEC_CHUNK_EMIT) — VALIDATED, +1-3%
+Fresh 0,1 lab, default (audio-optimal) yaml, explicit-key dynflags A/B,
+2 rounds x2 cells: s2s B8 1.012/1.016, i2s B8 1.006/1.031 — positive sign in
+4/4 pairs. Matches the builder's scope ceiling (D2H cut + buffer-churn
+reduction; the routing floor stays). Both flags validated for the
+integration stack. SPEECH TRACK CLOSED per user directive.
+
+## Compile fix first validation — graph breaks 1617 -> 771 (mid-boot)
+opt/compile-fix 1733fab (pure-torch RMSNorm under compile): removes ~850
+breaks (each norm break also fragmented neighboring traces). Throughput A/B
+(cfix 2,3 vs gba 6,7 same-config cells) next; if positive, next break
+targets: thinker.py:225 layer-loop (~48) and moe.py:478.
+
+## Integration branch opt/integration-v4 (worktree mstar-iv4)
+= opt/sched-pack (74a985c) + opt/speech-floor merged (talker fast-checkstop
+55faf29 + codec chunk-emit 01856e8, both validated +1-3%; taco yaml doc).
+Chunk-512 finding: the CODE DEFAULT is already 512 (qwen3_omni_model.py:282)
+— the canonical flag set's explicit MSTAR_PREFILL_CHUNK_TOKENS=256 was
+OVERRIDING it; integration = drop that flag from the launch set (new
+canonical set: replace =256 with =512 or omit). Stacked test = final stack
+flags + PREFILL_CHUNK_TOKENS=512 + FAST_CHECKSTOP_TALKER=1 +
+CODEC_CHUNK_EMIT=1, pending cfix A/B (compile fix joins if it wins).
+
+## V1 DECIDER — async OWNS the +12% output lengthening; as-built FAIL
+OFF-control on the SAME worktree/stack: tok/req 173.3 (baseline band) vs ON
+186-199. Not a branch artifact — MSTAR_ASYNC_SCHED changes generated content.
+Ruled out: missed-EOS (unimodal lengths), deferred sampler state (RNG offset
++ penalty mask update inside sample() on the GPU thread). Live hypotheses:
+(a) overrun rows (stopped-but-untrimmed, 1-2 extra steps) perturb shared
+batch numerics -> sequence drift (builder's theory; but symmetric ULP drift
+shouldn't SYSTEMATICALLY lengthen); (b) SAMPLER_CFG_CACHE is keyed by batch
+membership and async shifts membership timing -> misaligned config rows =
+wrong temp/penalty per row = systematic drift (main's theory; decomposition
+test = ON + cache OFF, running). Either way V1 is PARKED as-built; if (b),
+the fix is a composition-versioned cache key (small) and the design
+survives; if (a), the one-step-late stop design is fundamentally at odds
+with output identity for sampled workloads.
+
+## V1 FINAL — PARKED (byte-identity fail + tok/s wash); design-doc prediction empirically confirmed
+Full A/B (i2t B32, same worktree, 4 cells/side): tok/req OFF 178.3 tight vs
+ON 194.3 (+9.0% longer, systematic — identity FAIL); tok/s OFF-healthy 1287
+vs ON 1217-1276 (WASH — no per-token speedup; the req/s gap is purely length
+inflation). Wait-collapse only partial (~1ms residual most windows): at
+current regime the main thread doesn't consistently outrun the GPU step.
+Mechanism by elimination: deferral shifts batch composition (2nd overrun row
+per stopping rid + one-iteration admission lag) -> fp8-MoE numeric footprint
+-> sampled distribution drifts longer; trim protects the stream, not the
+numerics. FUNDAMENTAL TENSION: the win requires deferring check_stop; the
+deferred stop causes the overrun/non-identity — for sampled workloads the
+two are opposed. Flag default-OFF (off path byte-identical), substrate kept
+(like W2/E9/E10) for retest after further main-thread reduction. Session
+yield: clean falsification + 2 real bugs (18b1244 deferred-remove race;
+the non-identity itself). Branch opt/async-sched @ 18b1244 pushed.
+
+## ROOT CAUSE of the night's server deaths + late "degraded windows": /tmp FULL
+OSError Errno 28 in the stacked server: the api server writes every request's
+image/wav upload to /tmp/mstar_uploads_tim; the 70G rootfs hit 100% (20KB
+free). Explains the 00:22 stacked death (NOT the integrated flags), most
+likely the 23:09 server deaths, and taints the late-evening "degraded
+window" absolutes (uploads failing = partial batches). Freed 3.3G; harness
+hardened: lab_server.sh now exports TMPDIR=/m-coriander/coriander/tim/tmp
+and cleans stale uploads at boot. LESSON: add disk-free to the pre-run gate
+(CLAUDE.md already mandates /home checks — rootfs /tmp was the blind spot).
+
+## Final-window A/Bs — INVALID (self-inflicted), re-queued as next session's first runs
+Three concurrent labs = 2 on NUMA node 1 (base2+stacked, crawled ~3.1) vs 1
+on node 0 (cfix2, clean 5.0-5.4): the cross-node norm-fix comparison is
+invalid; the stacked-vs-base comparison (both node-1, matched contention)
+read ~parity = no regression from the integrated flags, nothing more. Plus
+/tmp exhaustion killed stacked r2. OPEN VERDICTS for next session, run
+SEQUENTIALLY one lab at a time: (1) norm compile fix (opt/compile-fix
+1733fab; breaks 1617->816 confirmed, throughput A/B pending); (2) stacked
+integration test (opt/integration-v4: chunk-512 default + speech bundle);
+(3) V2 budgeted admission policy = the main open build (raises fold volume,
+unlocks banked split-attn, targets B2-B4 + TTFT).

@@ -11,6 +11,11 @@ set -uo pipefail
 NAME=$1; WT=$2; FLAGS=$3; CFG=${4:-configs/qwen3omni_2gpu_encoff.yaml}
 GPUS=${5:-6,7}; PORT=${6:-8299}; HOURS=${7:-4}
 export HF_HOME=/m-coriander/coriander/hf HF_DATASETS_CACHE=/m-coriander/coriander/tim/hf_datasets
+# Request uploads (images/wavs per request) go to $TMPDIR/mstar_uploads_*;
+# the 70G rootfs /tmp filled to 100% on 2026-07-04 and killed every server
+# mid-cells. Point TMPDIR at the pool and clean our stale uploads at boot.
+export TMPDIR=/m-coriander/coriander/tim/tmp
+mkdir -p "$TMPDIR"; rm -rf "$TMPDIR"/mstar_uploads_* 2>/dev/null
 SVENV=/m-coriander/coriander/tim/mstar-new/.venv
 CVENV=/home/tim/mstar-encoders/.venv
 BENCH=/m-coriander/coriander/tim/bench-v2
