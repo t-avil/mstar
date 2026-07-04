@@ -1239,3 +1239,17 @@ submodules.py:1809 (9), talker.py:547 (9), code2wav.py:482 (6) — attributed
 total ~165 (site-attributed <200 bar MET; raw grep 489 incl. dup-suppression
 notices). The two new dominant sites are candidates for steps 5-6 if their
 classes are convertible. Warm gate + cache-proof reboot pending (autotune).
+
+## CRUSADE BAR CRUSHED — full-stack census 41 header-breaks (~165 attributed) vs <200 bar
+Trajectory FINAL: 1617 -> 816 (norm fix, +4.5% e2e) -> 438 (step1 thinker
+run_attention custom op) -> 312 (step2 talker run_attn + step3 fp8 op) ->
+41 header / ~165 attributed (step4 talker apply_rope). ALL converted classes
+at zero (run_attention, set_layer_idx, apply_rope, fp8 dispatch — both
+models). TORCHDYNAMO_CACHE_SIZE_LIMIT=128 killed the frame-7 recompile
+fallback. Residual tail: talker.py:173 (36), thinker.py:261 (16),
+submodules.py:2309 (12), talker.py:547 (9), code2wav.py:482 (6, compile-off
+region). Inductor cache populated (616M/70k files). Cache-proof reboot in
+flight (one boot-collision between main and crusader resolved — main's
+parasite killed; clean boot-3 if timing tainted). Branch opt/custom-ops
+@ 12ce776 (4 steps). DEFERRED to clean window: MSTAR_CUSTOM_OPS ON/OFF perf
+A/B (compile-time flag, two-server or sequential), integration decision.
