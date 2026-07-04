@@ -1231,3 +1231,11 @@ TORCHDYNAMO_CACHE_SIZE_LIMIT=128 (kills the frame-[7] recompile-limit eager
 fallback). Full-stack (1-4) reboot with the cache running; early census
 (<200 bar) reads ~3 min into tracing; cache proof = second reboot warming
 <10 min. fp8 census kill (111->0) and step-4 push confirmed.
+
+## Crusade full-stack (steps 1-4) mid-boot census — SIX unique break sites remain
+All four converted classes read ZERO in the full-stack boot. Residual:
+talker.py:173 (72), thinker.py:261 (45), submodules.py:2309 (24),
+submodules.py:1809 (9), talker.py:547 (9), code2wav.py:482 (6) — attributed
+total ~165 (site-attributed <200 bar MET; raw grep 489 incl. dup-suppression
+notices). The two new dominant sites are candidates for steps 5-6 if their
+classes are convertible. Warm gate + cache-proof reboot pending (autotune).
