@@ -155,11 +155,8 @@ class BatchedCacheManager:
         """Switch all requests to the same cache label."""
         self.active_labels = {rid: label for rid in self.request_ids}
 
+    @torch.compiler.disable
     def set_layer_idx(self, layer_idx: int):
-        # Deliberately NOT compiler.disable'd: a one-line attr store is
-        # traceable (dynamo side-effect replay), and the disable graph-broke
-        # the compiled thinker forward once per layer (~48 breaks/boot),
-        # splitting the Inductor fusion regions at every layer boundary.
         self.layer_idx = layer_idx
 
     @torch.compiler.disable
