@@ -1,0 +1,9 @@
+H2H mstar i2t B32 #1 req/s 6.119 tok/s 1084.0 jct 4887
+H2H vllm i2t B32 #1 req/s 8.463 tok/s 1794.4 jct 3443
+H2H mstar i2t B32 #2 req/s 7.306 tok/s 1260.8 jct 4084
+H2H vllm i2t B32 #2 req/s 8.406 tok/s 1765.9 jct 3453
+H2H mstar i2t B8 #3 req/s 4.476 tok/s 776.9 jct 1722
+H2H vllm i2t B8 #3 req/s 3.665 tok/s 770.0 jct 2116
+H2H mstar s2t B8 #4 req/s 19.486 tok/s 387.3 jct 397
+H2H vllm s2t B8 #4 req/s 13.907 tok/s 347.7 jct 503
+[18:11:57] H2H_DONE

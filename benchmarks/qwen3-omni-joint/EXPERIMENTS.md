@@ -1343,3 +1343,22 @@ opt/custom-ops = strong candidate (census 41, correctness sane, boots
 cached, perf positive); the canonical-pair A/B quantifies before merge to
 integration. STABLE-WINDOW QUEUE now: canonical re-baseline (GPU-7 reset),
 custom-ops magnitude A/B, merge-config B32 read, arm-3, W2.
+
+## HEADTOHEAD_V2 — LIVE same-window race, M* full stack (canonical 6,7) vs vLLM-Omni 0.22 (2,3)
+Build: opt/custom-ops (contains integration-v4) + full flags + custom-ops +
+V2 budget + chunk-512 + speech bundle. Adjacent per-cell pairs, clients
+NUMA-pinned, 2026-07-04 18:00-18:35. RESULTS (M*/vLLM):
+- i2t B8: 4.476/3.665 = 1.221x — LIVE WIN (+22%)
+- s2t B8: 19.486/13.907 = 1.401x — LIVE WIN (+40%)
+- i2t B32 pairs: 0.723 (M* soft cell), 0.869, 0.897 (M* warm 7.31-7.60
+  consistent; vLLM 8.24-8.46) -> live warm ratio ~0.87-0.90x, matching the
+  warm-lab projection. STILL LOSING B32 by ~10-13%.
+- tok/req sane both sides (M* 172-177; vLLM 210-212 — their +20% length).
+- RELIABILITY: vLLM DIED MID-RACE (2nd collapse today; pairs 6-7 lost);
+  M* served every cell all day, zero self-inflicted deaths.
+VERDICT: we beat vLLM-Omni live at B8 on both text paths (and speech was
+always 2-3x); the last stand is i2t B32 at ~0.88x live. Remaining levers:
+custom-ops magnitude was IN this build — the next gap-closers are sidecar
+stage-2 (route/check_stop exile), custom-ops step-5 polish + tail breaks,
+V1-post-compile revisit (main thread now lighter), and race variance
+(more rounds; M*'s soft cells cost ~0.05x of pooled ratio).

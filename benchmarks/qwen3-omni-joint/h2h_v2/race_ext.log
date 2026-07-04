@@ -1,0 +1,7 @@
+H2H mstar i2t B32 #5 req/s 7.391 tok/s 1283.3
+H2H vllm i2t B32 #5 req/s 8.243 tok/s 1779.1
+H2H mstar i2t B32 #6 req/s 7.599 tok/s 1320.2
+H2H vllm i2t B32 #6 req/s 0.000 tok/s 0.0
+H2H mstar i2t B32 #7 req/s 7.395 tok/s 1302.6
+H2H vllm i2t B32 #7 req/s 0.000 tok/s 0.0
+H2H_EXT_DONE
