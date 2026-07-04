@@ -1362,3 +1362,91 @@ custom-ops magnitude was IN this build — the next gap-closers are sidecar
 stage-2 (route/check_stop exile), custom-ops step-5 polish + tail breaks,
 V1-post-compile revisit (main thread now lighter), and race variance
 (more rounds; M*'s soft cells cost ~0.05x of pooled ratio).
+---
+
+## Profile gate post-custom-ops (lab_crusade/profile_gate/) — MAIN THREAD IS NO LONGER THE WALL; re-orders the whole B32 plan
+Warm i2t B32 on the full custom-ops stack (7.559 req/s cell, GPUs from
+lab_crusade), py-spy per-worker + nvidia-smi dmon over the measured window:
+MainThread active ~32% of wall vs GPU 64.8% SM-busy and the gpu-thread ~58%.
+This INVERTS the pre-sidecar regime (base: main 13.2ms >> GPU ~8.8ms; design-doc
+prof_final2: main 8.74ms > GPU ~4.5ms). Custom-ops removed 1617->~165 graph
+breaks = CPU dispatch cut on BOTH GIL threads, pulling main-thread Python below
+GPU time — exactly the "current regime the main thread doesn't consistently
+outrun the GPU step" the V1 FINAL entry observed, now measured directly.
+CONSEQUENCE via the GIL-valve law (Sampler config-tensor cache entry: removing a
+gpu-thread WAIT pays ONLY while main-thread Python is the wall): every remaining
+wait-removal lever is now at/below breakeven. Checkstop-family (Stage-2 offload,
+FAST_CHECKSTOP-class, sampler-cache de-sync) and V1-family (async-sched deferral)
+are all wait-removals -> PARKED, predicted wash-to-negative, consistent with the
+already-washed post-sidecar checkstop/cache decompositions. What's left that
+still converts is main-thread WORK removal (exhausted: route/register/store are
+overlapped/load-bearing per W2/E9) or GPU-side — neither is the lever. PROMOTED
+to the P0 lever: admission-wave / variance work (fold rate ~35%, soft cells cost
+~0.05x pooled), the one mechanism not gated by the valve. Data: py-spy dumps +
+dmon.txt in lab_crusade/profile_gate/.
+
+## Stage-2 checkstop offload (opt/sidecar-checkstop @ 5414a5a) — BUILT + CPU-tested, PARKED BEFORE A/B on the profile gate
+Deferred-consume check_stop: the side-stream sampled-token D2H becomes a polled
+event.query() (double-buffered pinned slab) instead of a critical-path
+side.synchronize(); EOS decision moves to the sidecar; max_tokens enforcement
+stays worker-side as a pure counter (a dead sidecar can never cause unbounded
+generation). Route/store/register stay on the worker (SIDECAR_DESIGN §3.2 — they
+drive next-step readiness, cannot leave; this is check_stop ONLY, NOT the
+handoff's route_outputs exile). WALK_STATS counters + a shadow-mode asserting the
+legacy worker-side check_stop against the sidecar decision (W2 pattern) are wired.
+CPU suites green; byte-identity harness in place. PARKED BEFORE any GPU A/B: the
+profile gate (above) shows main-thread < GPU, so by the valve law the removed
+wait converts wash-to-negative — and the deferred-stop overrun rows are the SAME
+batch-composition-drift mechanism that failed V1 (+9% tok/req), so it also risks
+the identity gate. RE-OPEN CONDITION: only if a future main-thread-WORK reduction
+(or a GPU-side speedup) flips the profile back to main-thread > GPU AND a
+re-profile confirms it; then run the shadow-mode A/B with tok/req held at
+176.9-177.0. Branch opt/sidecar-checkstop @ 5414a5a pushed; substrate kept like
+W2/E9/V1.
+
+## HANDOFF_V5 corrections from verification pass — four claims fixed, one design contradiction flagged
+Verifying the handoff against git + committed raw turned up:
+1. "BRANCH MAP ... all pushed" was FALSE — several branches were local-only;
+   pushed and the claim corrected.
+2. h2h_v2 raw (the live-race scoreboard) was UNCOMMITTED — committed to the docs
+   branch so the 0.87-0.90x B32 live numbers are recomputable from raw.
+3. §4.1 "sidecar stage-2: exile route_outputs" CONTRADICTS SIDECAR_DESIGN §3.2
+   (route/store drive Loop.complete_iter next-step readiness, cannot leave the
+   worker; the doc parks route in Stage 3 "expect NO," a week+ EngineCore
+   rewrite, and W2 proved the cheaper in-process version e2e-flat). Stage-2 is
+   check_stop offload ONLY; the handoff's +8-15% double-counts a ~0 component.
+4. Small-batch i2t B2/B4 in the handoff/GOAL used a rosier source
+   (0.82+merge->~0.87 / 0.88->~0.92); the committed canonical sweep reads
+   0.75/0.83 — the B2/B4 hole is deeper than the handoff table implies. Use the
+   sweep numbers for gap-to-goal.
+5. s2t B2/B4/B16 have NO committed final-stack data (starred cells are stale/
+   projected) — flagged as un-measured, not un-won; needs live races (P2 queue).
+
+## ab_verdict.py + proof-sweep protocol — statistical verdict gate; soft-cell rejection is per-ARM robust-z, NOT intra-cell JCT skew
+Built /m-coriander/coriander/tim/ab_verdict.py (stdlib+math): auto-detects h2h
+({mstar,vllm}_<path>_B<b>_<i>) vs lab_ab ({A,B}/{base,v2}_..._r<n>), pools PER
+CELL (never across batches), prints geomean + SE(log) + one-sided 95% LB and a
+WIN/LOSS/WASH verdict vs threshold (1.05 h2h, 1.02 lab_ab). KEY CALIBRATION
+FINDING (overturns the intuitive gate): on real h2h_out the known-soft 0.723 pair
+(mstar #1 = 6.119 req/s) has the LOWEST intra-cell JCT dispersion of the five
+cells (p95/med 1.46, max/med 1.61) while the ACCEPTED cells skew HIGHER (max/med
+1.9-2.1) — so a p95/median or max/median intra-cell threshold rejects the WRONG
+cells. The real signal is that 6.119 is a gross LOW outlier vs its own arm's
+other rounds (7.31/7.39/7.60/7.40). Gate implemented = per-arm, per-(path,batch)
+robust low-outlier test on request_throughput (rel-drop >12% AND robust-z >3, MAD
+scale floored at 4% of median, needs >=3 rounds); intra-cell JCT skew demoted to
+a warning (hard-reject only above max/med 15). Also: hard-reject on crash
+(completed==0 — catches vLLM's two mid-race deaths); tok/req identity gated to
+i2t (172-179 band is i2t-specific); a WIN with i2t identity fail downgrades to
+SUSPECT (the V1 length-inflation guard). VALIDATION on h2h_out i2t B32: rejects
+r1 (soft) + r6/r7 (vLLM crashes), pools clean 0.869/0.897 -> geomean 0.8828,
+SE 1.56%, 95% band [0.860,0.906] -> LOSS (upper bound still < 1.05). The honest
+B32 read is 0.883, statistically clean. i2t B8 (1.221) and s2t B8 (1.401) return
+INCONCLUSIVE (n=1 clean pair — the tool refuses to call a WIN off one cell).
+PROOF-SWEEP PROTOCOL (PROOF_SWEEP_PROTOCOL.md): variance is BIMODAL — clean
+adjacent pairs ~2% per-pair std, soft cells ~8% AND biased LOW ~15% each at a
+~1/3 rate (the -0.05x pooled bias the handoff cites). No round count averages out
+a bias, so the soft-cell REJECTION gate is load-bearing, not more rounds. Sizing:
+x5 clean adjacent pairs on flagship i2t B32 (post-gate SE ~0.9%), x3 elsewhere;
+provision ~7-8 raw cells/arm at flagship to net 5 clean. Adopted as the mandatory
+gate for every A/B and the Stage-2 proof sweep.
