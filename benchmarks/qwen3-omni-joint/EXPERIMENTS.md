@@ -1143,3 +1143,24 @@ tried tonight all closed: single-chunk, budget, floor). Remaining V2 work:
 arm-3 (budget + split-attn + preplan — fold volume is now HIGH at B32, the
 banked +4.4%/mixed-step should finally convert); canonical re-baseline
 blocked on GPU-7 repair.
+
+## Money run (full integrated stack + V2, pair 2,3, ~03:45) — BAND-DEGRADED, absolutes deferred
+i2t B32 5.66/4.98/5.06/5.23 (mean 5.23), s2t B8 mean 17.4 — deep 4am
+degraded window on the box's weaker pair (2,3 band read 5.5-6.5 all night vs
+6,7's 6.9-7.4; foreign 120GB job on GPU 0 throughout). NOT evidence against
+composition: every component ratio is separately banked (norm fix +4.5%,
+chunk-512 +3-5%, V2 +7-11%, all adjacent-protocol). PARITY ABSOLUTE
+CONFIRMATION deferred to: GPU-7 repair + quiet box + warm solo protocol on
+the canonical pair. Projected: stacked 7.34 (measured, 6,7) x V2 1.07-1.11
+= 7.9-8.1 vs vLLM 8.210.
+
+## W2-at-small-batch — NOISE-BLOCKED (box degraded), theory test deferred
+Arm A (old base, TXN off) same-config B2 samples 0.988/1.005/0.854/0.708 —
+±20% spread, monotonic degradation through the run (04:00, foreign 120GB job
+resident). A cross-reboot arm comparison cannot resolve the predicted
+5-10% effect in this. DEFERRED to a clean window; the theory (postprocess
+memoization converts at B2/B4 where the host floor is unshaded — remove-work
+law) remains the best-motivated B2/B4 code experiment, alongside the
+prefill-merge build (in progress). GPU verdict work STOPPED for the night:
+every absolute since ~03:30 is mush; ratios need adjacent cells the drift
+now defeats. Code streams continue.
