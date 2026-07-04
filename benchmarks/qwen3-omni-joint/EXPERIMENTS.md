@@ -1092,3 +1092,54 @@ chunk-512 ~+2%). Campaign trajectory at i2t B32: 0.53x (v0.22 release) ->
 NEXT: graph-break round 2 (thinker.py:225 layer-loop ~48 breaks, moe.py:478),
 V2 budgeted admission policy (B2-B4 + TTFT + unlocks split-attn), then the
 canonical warm+512 re-baseline sweep.
+
+## Compile round-2 — CLOSED (both quick edits wedge the boot); custom-op route required
+Removing @torch.compiler.disable from set_layer_idx OR narrowing the fp8
+dispatch disable both WEDGE the boot (dynamo re-trace storm [13/23], frozen
+trace, dead workers) — the disables are load-bearing: they keep dynamo out
+of the cache-manager/quant object graphs entirely, and tracing in is not a
+2-line change. Round-1 (+4.5%, pure-torch norm) STANDS — the difference:
+norm swapped the computation for a traceable equivalent; round-2 tried to
+trace INTO stateful engine objects. Correct future route: register
+run_rms_norm-class FlashInfer calls and fused_experts_fp8 as torch.library
+custom ops (opaque-but-traceable graph nodes, no breaks, no object tracing).
+Integration branch restored to fix-1-only (7aebb1d content @ head 2e48a41+).
+Remaining break census on fix-1 build: 816 total, top = attention.py:129
+(48, natural piecewise boundary) + moe.py:478 (38) + long tail.
+
+## HARDWARE: GPU 7 dropped off the bus (~02:30, 2026-07-04) — canonical pair DEAD
+nvidia-smi -i 7: "No devices were found"; box enumerates 0-6 only. Every
+"wedge" since 02:30 (gb2, gb3, v2pol boots on 6,7) = worker_1 "invalid
+device ordinal" on the missing device, NOT code. CONSEQUENCES: (1) the gb3
+set_layer_idx revert may be a FALSE NEGATIVE (never got a fair boot) —
+retest cheaply when a pair frees; gb2's [13/23] recompile storm from the
+fp8 narrowing was real (pre-drop) and stays reverted. (2) Canonical pair
+6,7 unusable until an admin reset/reboot — userspace cannot recover a
+fallen-off-bus GPU; FLAG TO USER for the box admin. (3) Remaining usable
+pair: 2,3 (foreign jobs hold 0 and 5; 1,4 are singles). V2 smoke rewired
+to 2,3:8313.
+
+## V2 BUDGET POLICY round 1 — WIN AT B32 (+7.0/+10.6%) and B8 (+9.9/+0.7); floor blocks B2/B4
+opt/v2-policy (0cea3e8+merge), warm 2,3 lab, dynflags A/B budget 0 vs 512,
+2 rounds: B2 0.974/0.993, B4 0.965/0.946, B8 1.099/1.007, B32 1.070/1.106
+(consistent sign at B32; best cell 7.218 on the node-0 pair). The
+predicted-neutral B32 WON — every-step folding removes the phase-drain that
+yield-boundary-only folding left. budget_skips_floor >200 = the inherited
+min-decode floor (24) blocks folds at exactly B2-B8; floor2 A/B
+(MIN_DECODE 24 vs 2 at B2/B4) in flight. B4 slight negative = probe
+overhead without folds (floor blocks all of them) — if floor2 wins, default
+becomes budget=512 + a lower floor; if it regresses, floor stays and V2
+ships as a B8+/B32 lever.
+
+## V2 FINAL — MERGED to integration; ships as a B8/B32 lever (floor stays 24)
+floor2 A/B (MIN_DECODE 24 vs 2 at B2/B4): 0.980/1.090/0.989/0.903 geomean
+0.988 — lowering the floor is wash-to-negative; the occupancy economics at
+tiny decode batches are real and the floor guard was correct. V2 verdict:
+MSTAR_MIXED_BUDGET_TOKENS=512 (floor default 24) = +7-11% at i2t B32,
++1-10% at B8, inert-by-design at B2/B4. Merged opt/v2-policy ->
+opt/integration-v4. B2/B4 remain the open cells — their deficit is fixed
+host cost + multi-process prompt latency, not fold policy (three levers
+tried tonight all closed: single-chunk, budget, floor). Remaining V2 work:
+arm-3 (budget + split-attn + preplan — fold volume is now HIGH at B32, the
+banked +4.4%/mixed-step should finally convert); canonical re-baseline
+blocked on GPU-7 repair.
