@@ -396,6 +396,20 @@ class Worker:
         if self.device.type == "cuda" and self.device.index is not None:
             torch.cuda.set_device(self.device)
 
+        # MSTAR_GC_TUNE: the decode hot loops allocate heavily
+        # (per-step routing/emit objects), and CPython's default gen-0
+        # threshold (700) fires collections mid-step on the GIL-critical
+        # threads. Raise thresholds so collections amortize; gc.freeze()
+        # after model load (see engine warmup) moves the long-lived object
+        # population out of collection scans entirely. vLLM applies the
+        # same class of tuning. Default OFF; env-gated, zero behavior
+        # change besides collection cadence.
+        if os.environ.get("MSTAR_GC_TUNE", "0") == "1":
+            import gc
+            gc.set_threshold(50_000, 500, 1000)
+            logger.info("Worker %s: MSTAR_GC_TUNE — gc thresholds raised "
+                        "(50000, 500, 1000); freeze after warmup", worker_id)
+
         # ``dist_init_method`` is normally provided by the conductor — it
         # picks a free TCP port at startup so multiple ``mstar`` runs on
         # the same host don't collide. The ``tcp://{hostname}:29500``
@@ -3743,6 +3757,19 @@ class Worker:
             self._remove_request(RemoveRequest(request_id=rid, source=MessageSource.SELF))
 
     def run(self) -> None:
+        # MSTAR_GC_TUNE part 2: by the time run() starts, weights are
+        # loaded and graphs captured — the surviving object population is
+        # long-lived. freeze() moves it out of every future collection
+        # scan, so the raised-threshold collections that do fire scan only
+        # the per-step garbage.
+        if os.environ.get("MSTAR_GC_TUNE", "0") == "1":
+            import gc
+            gc.collect()
+            gc.freeze()
+            logger.info("Worker %s: MSTAR_GC_TUNE — gc.freeze() applied "
+                        "(%d objects frozen)", self.worker_id,
+                        gc.get_freeze_count())
+
         switch_interval = os.environ.get("MSTAR_PY_SWITCH_INTERVAL_SEC", "")
         if switch_interval:
             try:
