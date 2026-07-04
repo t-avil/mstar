@@ -1,297 +1,186 @@
-# SMOKE — M* speech host-floor bundle (opt/speech-floor)
+# SMOKE — V2 budgeted chunked-prefill admission (opt/v2-policy)
 
-GPU A/B recipes for the two flag-gated items on this branch. **Code-only branch;
-no GPU was used to produce it.** All commands assume the standard mstar bench
-env (SHM protocol, `HF_HOME=/m-coriander/coriander/hf`, `ninja` on PATH,
+GPU A/B recipe for `MSTAR_MIXED_BUDGET_TOKENS`. **Code-only branch; no GPU was
+used to produce it.** All commands assume the standard mstar bench env (SHM
+protocol, `HF_HOME=/m-coriander/coriander/hf`, `ninja` on PATH,
 `PYTHONPATH=<this worktree>` so spawned GPU workers load THIS worktree's code —
 without it the A/B is invalid, see the worktree-PYTHONPATH trap).
 
-Fixed setup for every cell below:
+## What the flag does
+
+W5 P2 folds a ready prefill chunk into the running decode spec chain ONLY at a
+fairness *yield boundary* (`must_yield_away`, ~8% of steps). Under continuous
+arrivals a mixable chunk then sits idle for several steps before it rides a
+decode step. `MSTAR_MIXED_BUDGET_TOKENS=N` (default 0=off) makes the worker
+probe on EVERY spec chain step and fold a ready chunk NOW, capping the mixed
+step at `N` total tokens (`n_decode` 1-token rows + the `C`-token chunk).
+
+It does NOT change how standalone/unchunked prefills admit — it only accelerates
+the drain of chunks that already exist in the pipeline (long prefills the V2
+chunker split, and vision chunks under the vision stack). This is the sole
+difference from the CLOSED `MSTAR_MIXED_SINGLE_CHUNK`, which routed short
+standalone prefills through the chunk planner and starved decode occupancy ~10%.
+
+Expected value: TTFT / admission latency at **B2-B8** and arrival-heavy
+patterns. A fold is ~compute-neutral (mixed ~30-36ms vs prefill+decode ~29ms
+replaced), so **B32 closed-loop is expected ~neutral — the sentinel is
+no-regression, not a win.**
+
+## Fixed setup (every cell)
 
 ```bash
-WT=/m-coriander/coriander/tim/mstar-speech
-PY=/m-coriander/coriander/tim/mstar-new/.venv/bin/python   # or the bench venv
-GPUS=${GPUS:-5,6}                 # one fixed pair for the whole session
-PORT=${PORT:-8230}
-SOCK=/home/tim/tmp/sk_speechfloor_${PORT}
+WT=/m-coriander/coriander/tim/mstar-v2pol
+PY=/m-coriander/coriander/tim/mstar-new/.venv/bin/python
+GPUS=${GPUS:-6,7}                 # one fixed canonical pair for the whole session
+PORT=${PORT:-8240}
+SOCK=/home/tim/tmp/sk_v2pol_${PORT}
 LIBRI=/home/tim/tmp/libri_wavs    # reuse; do not re-download
 export PYTHONPATH=$WT HF_HOME=/m-coriander/coriander/hf
 # Confirm the devices are idle BEFORE launch (CLAUDE.md GPU-selection rule):
 nvidia-smi --query-gpu=index,utilization.gpu,memory.used --format=csv,noheader -i $GPUS
 ```
 
-Serve (base pattern; per-item env/flags differ):
+**Base stack held constant on both arms** (the locked FINAL STACK, encoff
+config — this is what produces the chunks the budget accelerates; vision
+chunking is part of it, so i2t has vision chunks to fold):
 
 ```bash
-setsid env CUDA_VISIBLE_DEVICES=$GPUS HF_HOME=/m-coriander/coriander/hf \
-  PYTHONPATH=$WT <ITEM_FLAGS> \
-  timeout 5400 $PY -m mstar.cli.main serve qwen3_omni \
-    --gpus $GPUS --port $PORT --tensor-comm-protocol SHM \
-    --socket-path-prefix $SOCK <--config ...> > $SERVER_LOG 2>&1 &
-SERVER_PID=$!
+BASE_FLAGS="MSTAR_MOE_FP8=1 MSTAR_BATCH_EMIT=1 MSTAR_FAST_POSTPROC=1 \
+  MSTAR_CHUNKED_PREFILL_V2=1 MSTAR_CHUNKED_PREFILL_V2_VISION=1 \
+  MSTAR_MIXED_BATCH=1 MSTAR_MIXED_BATCH_VISION=1 MSTAR_MIXED_SPEC=1 \
+  MSTAR_SLIM_EMIT=1 MSTAR_FAST_ROUTE=1 MSTAR_SAMPLER_CFG_CACHE=1 \
+  MSTAR_FAST_CHECKSTOP=1 MSTAR_WALK_STATS=1"
+CONFIG=configs/qwen3omni_2gpu_encoff.yaml
 ```
 
-Bench one cell (B=8; s2s = `audio_to_speech`, i2s = `image_to_speech`):
+Serve:
 
 ```bash
-# request-type: audio_to_speech (s2s) | image_to_speech (i2s)
+setsid env CUDA_VISIBLE_DEVICES=$GPUS $BASE_FLAGS $EXTRA_FLAGS MSTAR_DYNFLAGS=$DYN \
+  timeout 5400 $PY -m mstar.cli.main serve qwen3_omni \
+    --gpus $GPUS --port $PORT --tensor-comm-protocol SHM \
+    --socket-path-prefix $SOCK --config $CONFIG > $SERVER_LOG 2>&1 &
+SERVER_PID=$!
+cleanup(){ kill -- -$SERVER_PID 2>/dev/null || true; }
+trap cleanup EXIT INT TERM
+```
+
+Bench one cell (`$B` in 2,4,8,32; i2t = `image_to_text`):
+
+```bash
 timeout 1800 $PY -m benchmark.runner \
   --url http://127.0.0.1:$PORT --model qwen3omni \
-  --request-type <audio_to_speech|image_to_speech> \
+  --request-type image_to_text \
   --dataset libri --profiling-type closed_loop \
-  --max-concurrency 8 --num-requests 80 --num-warmup 5 \
+  --max-concurrency $B --num-requests $((B*10)) --num-warmup 5 \
   --inference-system ours --local-cache $LIBRI \
   --output-dir $ODIR
 ```
 
-Always record the full metric set from `results.json` (TTFT/first-audio, ITL
-audio, RTF, JCT, request + audio-seconds throughput) — not just the one metric
-an item targets. Free `*.wav` after each cell to protect `/home`.
+Record the FULL metric set from `results.json` (TTFT/first-token, ITL, RTF, JCT,
+request throughput) for every cell — not just the targeted one. Free `*.wav`
+after each cell to protect `/home`.
 
-Hard rules from CLAUDE.md that apply to every cell: one fixed GPU pair, confirm
-idle before launch, `timeout` wrapper on server + bench, kill the process group +
-free devices on every exit path, poll `nvidia-smi` while running and kill on
-freeze, commit only complete runs.
+## Arms
 
----
+Three arms. The budget is dynflags-refreshable (it bakes nothing into capture),
+so **off vs budget is a one-server interleaved dyn_ab**. Split-attn / preplan
+bake the capture layout and are process-static, so they need their **own
+server**.
 
-## Item A — MSTAR_FAST_CHECKSTOP_TALKER (batched talker stop check)
+- **Arm 1 — off**: base stack, `MSTAR_MIXED_BUDGET_TOKENS` unset (=0).
+- **Arm 2 — budget-on**: base stack, `MSTAR_MIXED_BUDGET_TOKENS=512`.
+- **Arm 3 — budget + split + preplan**: base stack, `MSTAR_MIXED_BUDGET_TOKENS=512`,
+  `EXTRA_FLAGS="MSTAR_MIXED_SPLIT_ATTN=1 MSTAR_MIXED_PREPLAN=1"` (raised fold
+  volume is exactly where these two pay off; separate server).
 
-**What it does.** On `talker_decode` steps, replaces the per-request
-`layer0_codes.item()` host read in `TalkerSubmodule.check_stop` with one batched
-D→H of just the layer0 code per rid + pure-int compares against
-`codec_eos_token_id`. Walk-gated to `talker_decode` and flag-gated; thinker paths
-untouched. Off path is the byte-identical engine `check_stop`.
+### Cells
 
-**A/B = two servers**, flag off vs on. Flag is dynflags-refreshable, but for a
-clean measurement use two-server alternation, not a mid-run flip.
+- **Primary (where P2 leaves value): i2t B2, i2t B4, i2t B8.**
+- **Sentinel (must not regress): i2t B32.**
 
-- OFF server: `<ITEM_FLAGS>` = `MSTAR_WALK_STATS=1`
-- ON  server: `<ITEM_FLAGS>` = `MSTAR_FAST_CHECKSTOP_TALKER=1 MSTAR_WALK_STATS=1`
+### Server 1 (no split/preplan) — interleaved off vs budget
 
-Run cells: **s2s B=8** and **i2s B=8** against each server.
-
-### Proof the mechanism fired
-
-`MSTAR_WALK_STATS=1` logs the per-walk step counters (incl. the new one) every
-200 steps at WARNING into the server log. The new counter is
-`talker_fast_checkstop_steps`, bumped once per talker_decode step that took the
-fast path.
+`EXTRA_FLAGS=""`. Point `MSTAR_DYNFLAGS=$DYN` at a JSON file and flip the budget
+between cells (no restart, adjacent cells cancel box noise):
 
 ```bash
-# ON server: the counter must appear and climb with talker_decode steps.
-grep -o 'talker_fast_checkstop_steps[^,}]*' $SERVER_LOG_ON | tail -3
-grep 'WALK_STATS' $SERVER_LOG_ON | tail -2
-
-# OFF server: the counter must NEVER appear (fast path never entered).
-grep -c 'talker_fast_checkstop_steps' $SERVER_LOG_OFF   # expect 0
+echo '{"MSTAR_MIXED_BUDGET_TOKENS":"0"}'   > $DYN   # off cell
+# ... run B2/B4/B8/B32 ...
+echo '{"MSTAR_MIXED_BUDGET_TOKENS":"512"}' > $DYN   # budget cell (worker
+#   picks it up within ~50 iters; _refresh_dynamic_flags re-reads the budget
+#   and resets the min-decode cache)
+# ... run B2/B4/B8/B32 ... then flip back and repeat for >=3 pairs/cell.
 ```
 
-Cross-check that the fast path covers the talker decode volume: on the ON server,
-`talker_fast_checkstop_steps` should track the `talker_decode` step count in the
-same WALK_STATS line (they should be equal when every talker step is uniform;
-any shortfall = steps that fell back to the slow copy, which is correct but
-un-accelerated — investigate if large).
+### Server 2 (split+preplan baked ON) — interleaved off vs budget
 
-### Proof of correctness (stop decisions unchanged)
+Restart with `EXTRA_FLAGS="MSTAR_MIXED_SPLIT_ATTN=1 MSTAR_MIXED_PREPLAN=1"`, same
+dyn_ab off-vs-budget flip. This isolates whether split+preplan turns the raised
+fold volume net-positive (the retained-lever hypothesis).
 
-The stop set must be identical off vs on — same audio, same length. Compare the
-two runs' outputs:
+## Proof the mechanism fired (WALK_STATS, every 200 steps at WARNING)
+
+New counters in the server log — read them on the budget arm:
 
 ```bash
-# Same number of generated codec frames / audio duration per request off vs on.
-# (audio_seconds_throughput and per-request output length must match within
-#  sampling noise; the stop condition is deterministic given identical tokens.)
-$PY - <<'PY'
+grep -oE 'budget_folds[^,}]*|budget_fold_tokens[^,}]*|budget_skips_floor[^,}]*' $SERVER_LOG | tail -6
+grep -oE '_fold_ok[^,}]*|_mix_opp[^,}]*' $SERVER_LOG | tail -4
+```
+
+- **`budget_folds` must be > 0 and climb on the budget arm, and stay 0 on the
+  off arm** (it is only bumped for a fold on a non-yield step). If it stays 0 on
+  the budget arm, the workload produced no chunks to accelerate — check that
+  prefills actually chunk (long text spans > `MSTAR_PREFILL_CHUNK_TOKENS`, or the
+  vision stack on); the flag is inert without chunks, which is a workload
+  finding, not a bug.
+- `_fold_ok` / `_mix_opp` (total folds / opportunities) should be **higher on the
+  budget arm than off** — that is the accelerated drain.
+- `budget_fold_tokens` sizes the chunk tokens the policy admitted.
+- `budget_skips_floor` counts steps where a chunk was ready but the decode side
+  was under the occupancy floor (the anti-lesson guard working). A large value
+  relative to `budget_folds` means ramp-up is dominated by sub-floor batches —
+  consider lowering `MSTAR_MIXED_BUDGET_MIN_DECODE` (default 24).
+
+## Proof of correctness (outputs unchanged)
+
+Folding only changes WHEN a chunk runs, not the math. Under a fixed seed the
+per-request token sequences must be identical off vs budget; at minimum tok/req
+and request/throughput must match within sampling noise:
+
+```bash
+$PY - <<PY
 import json
-off=json.load(open("$ODIR_OFF/results.json")); on=json.load(open("$ODIR_ON/results.json"))
-for k in ("audio_seconds_throughput","request_throughput"):
-    print(k, "off", off.get(k), "on", on.get(k))
+off=json.load(open("$ODIR_OFF/results.json")); on=json.load(open("$ODIR_BUDGET/results.json"))
+for k in ("request_throughput","tokens_per_request"):
+    print(k, "off", off.get(k), "budget", on.get(k))
 PY
 ```
 
-If token dumps are enabled, diff the per-request layer0 code sequences off vs on
-under a fixed seed — they must be identical (the fast path only changes HOW the
-stop token is read, not WHICH token, so greedy/seeded decodes match exactly).
-
-### Proof of win
-
-Compare talker-side latency off vs on at B=8 (the host `.item()` per frame is a
-CPU-floor cost, so expect the gap to show in ITL audio / RTF, largest at higher
-talker batch):
+Run one budget cell with `MSTAR_MIXED_BATCH_ASSERT=1` (server env) and confirm
+**zero** assert failures / "fold missed a peeked chunk" warnings in the log
+(a lost fold race is tolerable but must be rare):
 
 ```bash
-$PY - <<'PY'
-import json
-def itl(p): 
-    d=json.load(open(p)); a=d.get("itl",{}).get("audio") or {}
-    return a.get("p50",0)*1000, a.get("mean",0)*1000, d.get("audio_seconds_throughput",0)
-print("OFF itl_p50/mean(ms), audio_s/s:", itl("$ODIR_OFF/results.json"))
-print("ON  itl_p50/mean(ms), audio_s/s:", itl("$ODIR_ON/results.json"))
-PY
+grep -cE 'AssertionError|fold missed a peeked chunk' $SERVER_LOG   # expect 0
 ```
 
-Expected: ON ≤ OFF on ITL audio / RTF, neutral-to-better throughput; thinker-only
-paths (i2t/s2t) unaffected. If ON regresses, the batched D→H probe cost is
-outweighing the saved `.item()`s at this batch — record and flag (mirrors the E4b
-Talker-tax caution that motivated the walk gate).
+## Proof of win / no-regression
 
----
+- **B2-B8:** TTFT / first-token latency should drop on the budget arm (a waiting
+  chunk admits sooner); request throughput flat-to-up. This is the target.
+- **B32 sentinel:** request throughput must be within noise of off (±~3% on this
+  box). A fold is ~compute-neutral, so a real B32 drop beyond noise is a
+  regression — do not ship budget-on for B32-heavy configs if it appears.
+- **Arm 3:** if split+preplan lifts the budget arm above off where Arm 2 was
+  neutral/negative, that is the retained-lever payoff at raised fold volume.
 
-## Item B — configs/qwen3omni_2gpu_taco.yaml (Talker+Code2Wav colocation)
+Report per-cell deltas as geomean over >=3 interleaved pairs/cell; single cells
+on this box swing ±40% under foreign load (only interleaved dyn_ab counts).
 
-**IMPORTANT — read the yaml header first.** Investigation on this branch found:
+## Hard rules (CLAUDE.md) for every cell
 
-1. M* spawns ONE process per rank (`conductor._launch_workers`). The default
-   `qwen3omni_2gpu.yaml` (the qwen3_omni default) already puts Talker AND
-   Code2Wav on rank 0 → they already share one process (`worker_0`).
-2. `taco.yaml` produces a **byte-identical worker-graph decomposition** to
-   `qwen3omni_2gpu.yaml` (verified on CPU via `get_worker_graphs`). It only
-   states the colocation as one node_group; it is not a new capability.
-3. A config **cannot** fuse them into one worker graph: both are streaming
-   consumers and `_divide_into_worker_graphs` forces every `consumes_stream` node
-   into its own worker graph. The codec_tokens edge is therefore already
-   intra-process on both configs.
-
-So the honest Item B smoke has two parts.
-
-### B.1 — Sanity: taco == default (no regression, no change)
-
-Serve once with `--config configs/qwen3omni_2gpu_taco.yaml` and once with the
-default (no `--config`). s2s B=8 + i2s B=8 on each. Results must match within
-noise — this only confirms the pinned layout serves and is equivalent.
-
-```bash
-# taco
-... serve qwen3_omni --config $WT/configs/qwen3omni_2gpu_taco.yaml ...
-# default (qwen3omni_2gpu.yaml)
-... serve qwen3_omni ...
-```
-
-Confirm placement in each server log (both should show Talker and Code2Wav on
-worker_0 / rank 0):
-
-```bash
-grep -iE 'worker_0|rank 0|Talker|Code2Wav' $SERVER_LOG | grep -i 'rank\|worker' | head
-```
-
-### B.2 — Mechanism probe: does the cross-process codec edge cost anything?
-
-To actually measure the Talker→Code2Wav IPC that colocation removes, force them
-onto SEPARATE ranks/processes and compare against taco. Within 2 GPUs, put
-Code2Wav on rank 1 (with Thinker+encoders); Talker stays rank 0:
-
-```bash
-cat > /tmp/qwen3omni_2gpu_split.yaml <<'YAML'
-model: "qwen3_omni"
-max_seq_len: 32768
-# PROBE ONLY (not for shipping): Talker (rank 0) and Code2Wav (rank 1) on
-# different ranks -> different processes -> codec_tokens crosses a real
-# worker->worker boundary. Isolates the IPC that taco/2gpu.yaml already avoid.
-node_groups:
-  - node_names: [audio_encoder, vision_encoder]
-    ranks: [1]
-  - node_names: [Thinker]
-    ranks: [1]
-  - node_names: [Code2Wav]
-    ranks: [1]
-  - node_names: [Talker]
-    ranks: [0]
-YAML
-# serve taco  (colocated, --config .../qwen3omni_2gpu_taco.yaml)
-# serve split (--config /tmp/qwen3omni_2gpu_split.yaml)
-# s2s B=8 + i2s B=8 on each; compare ITL audio / RTF / first-audio latency.
-```
-
-Interpretation:
-- taco ≈ split → the codec edge is not a bottleneck at this batch; colocation
-  buys nothing measurable and the default already has it. Report as such.
-- taco < split (better) → quantifies the cross-process codec IPC. Since the
-  default already colocates, the takeaway is a guardrail ("keep Talker+Code2Wav
-  co-ranked"), plus a pointer that squeezing the *residual intra-process* edge
-  needs a code change (fused in-graph Talker→Code2Wav, or non-streaming
-  Code2Wav), not a yaml.
-
-VRAM: taco's rank 0 holds only Talker + Code2Wav (small) — never tight on H200
-(143GB); rank 1 (30B-A3B Thinker MoE + encoders) is the heavy GPU. The split
-probe adds Code2Wav to the already-heavy rank 1 — watch rank 1 memory there.
-
----
-
-## Item C — MSTAR_CODEC_CHUNK_EMIT (chunk-batched codec edge handoff)
-
-**What it does.** The Talker emits one `[16]`-code frame per AR step onto the
-`codec_tokens` StreamingGraphEdge, so the colocated Code2Wav `StreamBuffer` takes
-~25 individual `put`s + id→tensor dict churn per `LeftContextChunkPolicy(chunk=25,
-left_context=25)` window. When ON, local-route codec frames are STAGED and
-written into the buffer in ONE batched put per chunk boundary
-(`StreamBuffer.stage` + `flush_pending`). Registration (`pre_read_register`) stays
-per-frame, so the buffered item sequence — and every popped window — is byte
-identical, and coalescing at the policy's `chunk` granularity means a chunk
-becomes ready at the same frame count (first-audio timing preserved).
-
-Gating: default OFF, dynflags-refreshable, EDGE-gated via `policy.coalesce_size()>1`
-— only the codec edge (LeftContextChunkPolicy) opts in; `thinker_states`/
-`thinker_mask` (FixedChunkPolicy chunk=1) and every other stream are untouched.
-Only the LOCAL (colocated) route is coalesced; a split/remote codec edge is
-unaffected by the flag.
-
-**A/B = two servers**, flag off vs on. Focus s2s B=8 (audio path; ITL/RTF).
-
-- OFF server: `<FLAGS>` = `MSTAR_WALK_STATS=1`
-- ON  server: `<FLAGS>` = `MSTAR_CODEC_CHUNK_EMIT=1 MSTAR_WALK_STATS=1`
-
-Via the lab harness (dynflags file): add `MSTAR_CODEC_CHUNK_EMIT=1` to the ON
-lab's `$FLAGS_FILE`, run `lab_ab.sh` with the `s2s:8` cell (i2s:8 optional). Use
-the DEFAULT config (colocated) — this optimization only fires on the local codec
-edge.
-
-### Proof the mechanism fired
-
-WALK_STATS counter `codec_chunk_emits` is bumped once per batched flush (~one per
-25 codec frames per request). It must appear and climb on the ON server, never on
-OFF:
-
-```bash
-grep -o 'codec_chunk_emits[^,}]*' $SERVER_LOG_ON | tail -3
-grep -c 'codec_chunk_emits' $SERVER_LOG_OFF     # expect 0
-```
-
-Sanity on the rate: `codec_chunk_emits` should be roughly
-`(total codec frames) / 25` — i.e. far fewer than the per-frame `put` count. If it
-tracks the frame count 1:1, coalescing isn't engaging (check the edge policy /
-that the codec edge is local).
-
-### Proof of correctness (identical audio)
-
-Windows are byte-identical by construction (covered by
-`test/modular/test_codec_chunk_emit_parity.py`, which drives the real
-StreamBuffer + LeftContextChunkPolicy per-frame vs coalesced and also checks an
-independent HF-style slicing oracle). On GPU, confirm the produced audio matches
-off vs on: same `audio_seconds_throughput` / per-request audio length within
-sampling noise, and if token dumps are on, identical codec token sequences under
-a fixed seed.
-
-### Proof of win
-
-```bash
-$PY - <<'PY'
-import json
-def m(p):
-    d=json.load(open(p)); a=d.get("itl",{}).get("audio") or {}
-    return (a.get("p50",0)*1000, a.get("mean",0)*1000,
-            d.get("audio_seconds_throughput",0), d.get("jct_mean_ms",0))
-print("OFF itl_p50/mean(ms), audio_s/s, jct:", m("$ODIR_OFF/results.json"))
-print("ON  itl_p50/mean(ms), audio_s/s, jct:", m("$ODIR_ON/results.json"))
-PY
-```
-
-Honest expectation: this cuts the buffer-side per-frame `put` + dict churn (25→1
-buffer writes per chunk), NOT the per-frame edge routing/registration
-(`pre_read_register` + `get_tensor` + `clone` + `dereference` still run per frame
-at arrival). So the win is bounded by how much of the audio-path CPU floor is the
-buffer write vs the routing. If ITL/RTF barely moves, that's a real result: the
-buffer churn wasn't the bottleneck, and the larger lever is producer emit-batching
-(collapse the N routed edges per chunk into one) — a bigger change, flagged as
-follow-up, not done here. Neutral-or-better is the pass bar; any regression →
-record and flag.
+One fixed GPU pair; confirm idle before launch; `timeout` wrapper on server +
+bench; kill the process group + free devices on every exit path; poll
+`nvidia-smi` while running and kill on freeze; commit only complete runs. No
+clock locking needed (shared box, no device admin).
