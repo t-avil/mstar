@@ -1,0 +1,19 @@
+H2H[p2verify] mstar s2t B32 #1 req/s 31.907 tok/s 675.7 tok/req 21.2 jct 914
+H2H[p2verify] vllm s2t B32 #1 req/s 26.928 tok/s 638.7 tok/req 23.7 jct 863
+H2H[p2verify] mstar i2t B16 #2 req/s 5.734 tok/s 988.1 tok/req 172.3 jct 2574
+H2H[p2verify] vllm i2t B16 #2 req/s 5.620 tok/s 1190.2 tok/req 211.8 jct 2679
+H2H[p2verify] mstar s2t B16 #3 req/s 11.159 tok/s 222.0 tok/req 19.9 jct 1387
+H2H[p2verify] vllm s2t B16 #3 req/s 19.359 tok/s 484.0 tok/req 25.0 jct 531
+H2H[p2verify] mstar s2t B32 #4 req/s 23.562 tok/s 498.5 tok/req 21.2 jct 1276
+H2H[p2verify] vllm s2t B32 #4 req/s 27.910 tok/s 662.0 tok/req 23.7 jct 825
+H2H[p2verify] mstar i2t B16 #5 req/s 5.733 tok/s 984.7 tok/req 171.8 jct 2573
+H2H[p2verify] vllm i2t B16 #5 req/s 5.558 tok/s 1185.1 tok/req 213.2 jct 2697
+H2H[p2verify] mstar s2t B16 #6 req/s 25.541 tok/s 508.7 tok/req 19.9 jct 569
+H2H[p2verify] vllm s2t B16 #6 req/s 19.058 tok/s 476.5 tok/req 25.0 jct 544
+H2H[p2verify] mstar s2t B32 #7 req/s 36.010 tok/s 761.1 tok/req 21.1 jct 810
+H2H[p2verify] vllm s2t B32 #7 req/s 27.998 tok/s 664.4 tok/req 23.7 jct 818
+H2H[p2verify] mstar i2t B16 #8 req/s 5.479 tok/s 940.6 tok/req 171.7 jct 2688
+H2H[p2verify] vllm i2t B16 #8 req/s 5.557 tok/s 1190.1 tok/req 214.2 jct 2691
+H2H[p2verify] mstar s2t B16 #9 req/s 25.783 tok/s 512.4 tok/req 19.9 jct 572
+H2H[p2verify] vllm s2t B16 #9 req/s 18.856 tok/s 471.4 tok/req 25.0 jct 554
+[20:46:27] H2H_DONE p2verify
