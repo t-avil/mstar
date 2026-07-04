@@ -91,3 +91,47 @@ def _run_attention_fake(
 ) -> torch.Tensor:
     # Output shape == q shape: [total_tokens, num_q_heads, head_dim].
     return torch.empty_like(q)
+
+
+# --------------------------------------------------------------------------
+# mstar::fused_experts_fp8 -- block-fp8 w8a8 grouped-GEMM MoE.
+#
+# Wraps mstar.utils.fused_moe.fp8.fused_experts_fp8, the steady-state kernel.
+# Unlike run_attention this op needs no forward-context: the fp8 expert weights
+# (w1/s1/w2/s2) are passed in as plain tensors. The one-time lazy quantization
+# that produces them (which mutates module state -- frees the bf16 originals --
+# and must not be traced) is hoisted OUT of the compiled forward by
+# moe.prequantize_fp8_experts, run before compile. By trace time the weights are
+# cached, so the caller reads them as ordinary tensors and this op is the only
+# thing left at the call site -- no @torch.compiler.disable, no break.
+# --------------------------------------------------------------------------
+@torch.library.custom_op("mstar::fused_experts_fp8", mutates_args=())
+def fused_experts_fp8(
+    hidden_states: torch.Tensor,
+    w1_fp8: torch.Tensor, w1_scale: torch.Tensor,
+    w2_fp8: torch.Tensor, w2_scale: torch.Tensor,
+    topk_weights: torch.Tensor, topk_ids: torch.Tensor,
+    reduce_results: bool,
+) -> torch.Tensor:
+    from mstar.utils.fused_moe.fp8 import fused_experts_fp8 as _impl
+    return _impl(
+        hidden_states, w1_fp8, w1_scale, w2_fp8, w2_scale,
+        topk_weights, topk_ids, reduce_results=reduce_results,
+    )
+
+
+@fused_experts_fp8.register_fake
+def _fused_experts_fp8_fake(
+    hidden_states: torch.Tensor,
+    w1_fp8: torch.Tensor, w1_scale: torch.Tensor,
+    w2_fp8: torch.Tensor, w2_scale: torch.Tensor,
+    topk_weights: torch.Tensor, topk_ids: torch.Tensor,
+    reduce_results: bool,
+) -> torch.Tensor:
+    # reduce_results: sum over top_k -> hidden shape. Otherwise the unreduced
+    # per-expert partials: [num_tokens, top_k, hidden].
+    if reduce_results:
+        return torch.empty_like(hidden_states)
+    return hidden_states.new_empty(
+        (hidden_states.shape[0], topk_ids.shape[1], hidden_states.shape[1])
+    )

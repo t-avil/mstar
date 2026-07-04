@@ -247,6 +247,37 @@ def _dispatch_fp8(
     )
 
 
+def _dispatch_fp8_maybe_op(
+    experts: nn.Module,
+    hidden_states: torch.Tensor,
+    selected_experts: torch.Tensor,
+    routing_weights: torch.Tensor,
+    reduce_results: bool = True,
+) -> torch.Tensor:
+    """fp8 expert dispatch, custom-op path when available.
+
+    When MSTAR_CUSTOM_OPS is on AND the experts were pre-quantized before
+    compile (prequantize_fp8_experts), read the cached fp8 weights and go
+    through the mstar::fused_experts_fp8 op -- an opaque in-graph node, no
+    graph break. Both operands of the guard are compile-time constants at trace
+    (env flag + a populated module attribute), so dynamo folds to the op path
+    and never traces the mutating legacy fallback. Otherwise fall back to the
+    @torch.compiler.disable legacy dispatch (unchanged default behavior).
+    """
+    from mstar.engine.compile_ops import custom_ops_enabled
+
+    if custom_ops_enabled() and getattr(experts, "_fp8_cache", None) is not None:
+        w1, s1, w2, s2 = experts._fp8_cache
+        return torch.ops.mstar.fused_experts_fp8(
+            hidden_states, w1, s1, w2, s2,
+            routing_weights, selected_experts, reduce_results,
+        )
+    return _dispatch_fp8(
+        experts, hidden_states, selected_experts, routing_weights,
+        reduce_results=reduce_results,
+    )
+
+
 class SparseMoeBlock(nn.Module):
     """Top-K sparse MoE with fused expert weights, no shared expert.
 
@@ -475,7 +506,7 @@ class ParallelSparseMoeBlock(nn.Module):
 
         if self.comm_group.world_size == 1:
             if _moe_fp8_flag("MSTAR_MOE_FP8") and flat.is_cuda:
-                out = _dispatch_fp8(
+                out = _dispatch_fp8_maybe_op(
                     self.experts, flat, selected_experts, routing_weights,
                 )
             else:
@@ -496,7 +527,7 @@ class ParallelSparseMoeBlock(nn.Module):
 
         # (tokens, top_k, hidden) — partial results before reduce
         if _moe_fp8_flag("MSTAR_MOE_FP8") and flat.is_cuda:
-            cache3 = _dispatch_fp8(
+            cache3 = _dispatch_fp8_maybe_op(
                 self.experts, flat, selected_experts, routing_weights,
                 reduce_results=False,
             )
@@ -587,7 +618,7 @@ class ParallelSparseMoeBlockWithSharedExpert(nn.Module):
         _, routing_weights, selected_experts = self.gate(flat)
         if self.comm_group.world_size == 1:
             if _moe_fp8_flag("MSTAR_MOE_FP8_TALKER") and flat.is_cuda:
-                routed = _dispatch_fp8(
+                routed = _dispatch_fp8_maybe_op(
                     self.experts, flat, selected_experts, routing_weights,
                 )
             else:
@@ -608,7 +639,7 @@ class ParallelSparseMoeBlockWithSharedExpert(nn.Module):
         from mstar.utils.fused_moe import fused_experts, moe_sum_reduce_triton
 
         if _moe_fp8_flag("MSTAR_MOE_FP8_TALKER") and flat.is_cuda:
-            cache3 = _dispatch_fp8(
+            cache3 = _dispatch_fp8_maybe_op(
                 self.experts, flat, selected_experts, routing_weights,
                 reduce_results=False,
             )
@@ -621,3 +652,29 @@ class ParallelSparseMoeBlockWithSharedExpert(nn.Module):
         output = torch.empty_like(flat)
         moe_sum_reduce_triton(cache3, output, routed_scaling_factor=1.0)
         return output
+
+
+def prequantize_fp8_experts(module: nn.Module) -> int:
+    """Eagerly fp8-quantize the experts of every fp8-eligible MoE block in
+    ``module``, BEFORE torch.compile traces it.
+
+    The lazy quant in :func:`_ensure_fp8_experts` mutates module state (frees
+    the bf16 params) and so cannot run inside a traced/compiled forward -- which
+    is exactly why the legacy fp8 dispatch is ``@torch.compiler.disable`` (a
+    graph break). Running the quant here, before compile, leaves the fp8 weights
+    cached so the forward reads them as plain tensors and calls the
+    mstar::fused_experts_fp8 op with no break. Idempotent (skips already-cached),
+    so it is safe to call once per submodule/slot capture. Returns the number of
+    blocks quantized this call. Only meaningful under MSTAR_CUSTOM_OPS.
+    """
+    n = 0
+    for m in module.modules():
+        if isinstance(m, ParallelSparseMoeBlock) and _moe_fp8_flag("MSTAR_MOE_FP8"):
+            _ensure_fp8_experts(m.experts)
+            n += 1
+        elif isinstance(m, ParallelSparseMoeBlockWithSharedExpert) and _moe_fp8_flag(
+            "MSTAR_MOE_FP8_TALKER"
+        ):
+            _ensure_fp8_experts(m.experts)
+            n += 1
+    return n
