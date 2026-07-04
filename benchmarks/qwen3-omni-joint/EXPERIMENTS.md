@@ -1272,3 +1272,27 @@ boot-time tension is SOLVED: first boot pays autotune once, every later
 boot ~13 min (still above the 7-min baseline boot — residual dynamo tracing
 time — but operationally fine). The custom-ops route is SHIPPABLE pending
 the clean-window ON/OFF perf A/B. Crusade fully closed.
+
+## OPS ROOT CAUSE SOLVED: the recurring "mystery server deaths" = wrapper reaping
+Pattern (23:09 last night, 10:03 today): a HEALTHY lab server dies by clean
+SIGTERM shortly after its owning AGENT's turn ends. Mechanism: lab_server's
+wrapper shell lives in the agent's process tree; when the harness reaps the
+agent's shells between turns, TERM hits the wrapper -> the INT/TERM cleanup
+trap fires -> kills the server pgid. The server's own setsid protects it
+from ORPHANING but not from the trap's deliberate kill. MITIGATION: labs
+launched by agents must setsid the WRAPPER itself (setsid bash lab_server.sh
+... < /dev/null) or main launches all labs (current mode). Night-runner
+released after an honest post-mortem (its cells-fire step also never
+executed — agent-loop gap; second failure mode of the night for
+agent-driven GPU work).
+
+## Item 1: GC-tune + jemalloc 3-arm (pair 2,3, sequential solo boots) — WASH at B32, theory falsified cleanly
+gc1 base 6.105/5.747/6.439/6.383 (mean 6.17); gc2 +MSTAR_GC_TUNE
+5.775/5.865/5.783/6.749 (mean 6.04, gc.freeze PROVEN live x2 workers after
+the WARNING-level fix); gc3 +jemalloc LD_PRELOAD 6.241/6.457/6.077/6.095
+(mean 6.22). All bands overlap: GC tune -2%, jemalloc +1% = noise. The
+mid-step-gen0-collection theory does NOT convert at B32 — per-step
+allocation churn evidently stays under collection cadence significance vs
+an 11-15ms step. Flags stay available; niche retest = small-batch cells
+(higher host share) someday, LOW priority. Zero-code levers at B32:
+exhausted.
