@@ -1191,3 +1191,12 @@ hole all campaign. opt/prefill-merge MERGED into opt/integration-v4;
 flag stays default-OFF pending the clean-window confirm (+ the B1 sign
 question). Integration branch now: speech bundle + norm fix + V2 budget +
 merged prefill.
+
+## MSTAR_GC_TUNE + allocator chain — NOISE-BLOCKED (weak positive lean), chain stopped at 2 arms
+gcA (off): 4.679/4.708/4.387 + one 2.17 collapse; gcB (GC_TUNE=1, carrying
+concurrent crusade-boot contention): 4.911/4.972/4.650/4.225 — bands overlap,
+gcB mean +2.2% vs gcA clean cells DESPITE worse contention = weak positive
+lean, unresolvable at the ≥8% bar on the makeshift 0,6 pair under a 4x92GB
+foreign job. Chain STOPPED before the jemalloc arm (effect-size gate).
+Code kept (c879884+, default OFF, gate lines now WARNING) — cheap retest in
+the clean window alongside jemalloc/mimalloc LD_PRELOAD (both on box).
