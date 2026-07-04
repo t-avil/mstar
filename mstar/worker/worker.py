@@ -498,6 +498,9 @@ class Worker:
             tp_rank_zero_nodes=self.tp_rank_zero_nodes,
             tp_nodes=self.tp_nodes,
         )
+        # Share the WALK_STATS dict so the scheduler's gather counters
+        # (prefill_gather_*, prefill_packed_bsN) ride the same diagnostics log.
+        self.scheduler._walk_stats = self._walk_stats
 
         # Determine store write policy based on worker graph topology
         node_engine_types = model.get_node_engine_types() if model is not None else {}
@@ -1961,6 +1964,10 @@ class Worker:
         self._mixed_budget_tokens = mixed_budget_tokens()
         if hasattr(self.scheduler, "_mixed_min_decode_cached"):
             self.scheduler._mixed_min_decode_cached = None
+        # MSTAR_PREFILL_GATHER_MS is a pure scheduling-timing knob (no capture
+        # bake) — refreshable mid-run. Reset its cache so a flip re-derives.
+        if hasattr(self.scheduler, "_gather_ms_cached"):
+            self.scheduler._gather_ms_cached = None
         # Winning-stack flags, made runtime-refreshable so one-server dyn_ab
         # A/Bs cover them (each is semantics-free to flip: slim emit falls
         # back to full items; fast checkstop falls back to engine path).
@@ -4526,7 +4533,14 @@ class Worker:
                         exclude_target=yield_away_from_target,
                     )
                 if batch is None:
-                    batch = self.scheduler.get_next_batch(self.worker_graphs_manager)
+                    # allow_gather ONLY here (the phase-drain prefill path), not
+                    # on the yield-away call above — that is the C2-protected
+                    # fairness boundary and must stay prompt. A gather deferral
+                    # returns None and falls to wait_for_work(10) below, then
+                    # retries; the loop never busy-spins.
+                    batch = self.scheduler.get_next_batch(
+                        self.worker_graphs_manager, allow_gather=True,
+                    )
                 if self.enable_nvtx:
                     range_pop(synchronize=False)
                 if batch is None:

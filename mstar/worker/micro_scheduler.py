@@ -86,6 +86,41 @@ class MicroScheduler:
         # Rids with a deferred remove; stop initiating new work for them.
         # Shared by reference with Worker._pending_removes.
         self.pending_removes: set[str] = set()
+        # MSTAR_PREFILL_GATHER_MS: (node, walk) -> monotonic time the current
+        # gather deferral for that prefill walk began. Cleared on schedule.
+        self._gather_since: dict[tuple[str, str], float] = {}
+        self._gather_ms_cached: float | None = None
+        # Shared WALK_STATS dict (set by Worker; None when diagnostics off).
+        # Gather counters live here so they ride the same 200-step WARNING log.
+        self._walk_stats: dict | None = None
+
+    # Prefill walks eligible for gather-coalescing. prefill_multimodal is bs=1
+    # by capture (never packs two) so gather can't help it, but listing it is
+    # harmless (target is never reached, so it releases on the window each time
+    # — a lone-request no-op at the cost of at most one window).
+    _PREFILL_GATHER_WALKS = frozenset(
+        {"prefill_text", "prefill_vision", "prefill_audio"}
+    )
+
+    def _prefill_gather_ms(self) -> float:
+        """Gather window (ms), cached; reset by _refresh_dynamic_flags on a
+        dynflags flip (Worker clears _gather_ms_cached alongside the min-decode
+        cache)."""
+        v = self._gather_ms_cached
+        if v is None:
+            from mstar.model.qwen3_omni.qwen3_omni_model import prefill_gather_ms
+            v = prefill_gather_ms()
+            self._gather_ms_cached = v
+        return v
+
+    def _prefill_gather_target(self) -> int:
+        from mstar.model.qwen3_omni.qwen3_omni_model import prefill_gather_target
+        return prefill_gather_target()
+
+    def _ws(self, key: str) -> None:
+        """Bump a WALK_STATS counter if diagnostics are on (no-op otherwise)."""
+        if self._walk_stats is not None:
+            self._walk_stats[key] = self._walk_stats.get(key, 0) + 1
 
     def _select_node_priority(
         self, node_name_to_requests: dict[str, list[ReadyNodeEntry]]
@@ -628,6 +663,7 @@ class MicroScheduler:
         target_node_name: str | None = None,
         target_graph_walk: str | None = None,
         exclude_target: tuple[str, str] | None = None,
+        allow_gather: bool = False,
     ) -> ScheduledBatch | None:
         """
         Scans all worker graph queues for ready nodes.
@@ -717,6 +753,40 @@ class MicroScheduler:
         entries = [e for e in node_name_to_requests[best_node_name] \
                    if e.graph_walk == graph_walk]
 
+        # MSTAR_PREFILL_GATHER_MS: coalesce clustered short prefills. When a lone
+        # ready prefill would schedule at bs=1, briefly DEFER (return None; the
+        # worker loop then blocks on wait_for_work(10) and retries) so more
+        # same-walk prefills become ready and the pop below packs them into one
+        # bs-2/4 forward. Release early once `target` are ready, or after the
+        # window elapses. Occupancy guard (C1/C3/C5): only gather at wave-scale
+        # concurrency (live requests >= the fold floor) — below it, B1-B16 never
+        # gather and the engine is never idled waiting for phantom siblings.
+        # Gate on allow_gather so only the main non-spec schedule path (not the
+        # side-prefill probe / fresh_batch) can defer. No queue state is mutated
+        # before the return, so a deferral is side-effect-free.
+        gather_ms = self._prefill_gather_ms() if allow_gather else 0.0
+        if gather_ms > 0.0 and graph_walk in self._PREFILL_GATHER_WALKS:
+            key = (best_node_name, graph_walk)
+            target = self._prefill_gather_target()
+            if len(entries) >= target:
+                self._gather_since.pop(key, None)
+                self._ws("prefill_gather_released_full")
+            elif len(worker_graphs_manager.per_request_info) >= (
+                self._mixed_min_decode() or 24
+            ):
+                first = self._gather_since.get(key)
+                if first is None:
+                    first = now
+                    self._gather_since[key] = first
+                if (now - first) * 1000.0 < gather_ms:
+                    self._ws("prefill_gather_held")
+                    return None
+                self._gather_since.pop(key, None)
+                self._ws("prefill_gather_released_window")
+            else:
+                # Below wave scale: schedule immediately (never idle-wait).
+                self._gather_since.pop(key, None)
+
         # Limit batch size if requested (e.g., for CUDA graph compatibility)
         if max_batch_size is not None and len(entries) > max_batch_size:
             entries = entries[:max_batch_size]
@@ -743,6 +813,11 @@ class MicroScheduler:
         self.node_and_walk_to_last_batch_num[(
             best_node_name, graph_walk
         )] = self.batch_number
+
+        # WALK_STATS packed-bs histogram for prefill (the C1 gate: gather must
+        # shift mass from bs1 toward bs2/bs4 without raising decode chain-steps).
+        if self._walk_stats is not None and graph_walk in self._PREFILL_GATHER_WALKS:
+            self._ws(f"prefill_packed_bs{len(node_objects)}")
 
         return ScheduledBatch(
             node_name=best_node_name,

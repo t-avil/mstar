@@ -314,6 +314,60 @@ def mixed_budget_tokens() -> int:
     return v if v > 0 else 0
 
 
+def prefill_gather_ms() -> float:
+    """Prefill-coalescing gather window in milliseconds (``MSTAR_PREFILL_GATHER_MS``).
+
+    Coalescing lever (V+C): at i2t B32 every prefill runs at effective bs=1
+    (measured: prefill_vision/prefill_text steps == request count) even though
+    the packed prefill captures support bs ``[1,2,4]`` — because in the arrival
+    wave <2 same-walk prefills are ready at any ``get_next_batch`` call. With
+    this > 0 the scheduler briefly DEFERS scheduling a lone ready prefill (up to
+    ``gather_ms``, releasing early the moment ``MSTAR_PREFILL_GATHER_TARGET``
+    same-walk prefills are ready) so the existing batching packs them into one
+    bs-2/4 forward — amortizing the 48-layer weight read across 4x the tokens.
+
+    The INVERSE of ``MSTAR_ADMIT_JITTER_MS`` (which SPREAD arrivals): this
+    CLUSTERS ready prefills. It is C1-POSITIVE (fewer prefill steps for identical
+    tokens, not the fold-graveyard occupancy tax). Occupancy-guarded: gather only
+    fires at wave-scale concurrency (live requests >= the fold floor), so B1-B16
+    are byte-identical and the engine is never left idle waiting for phantom
+    siblings at low load.
+
+    0 (the default) disables it — flag-off is byte-identical. It only changes
+    scheduling TIMING (bakes nothing into capture), so it is safe to flip mid-run
+    via ``MSTAR_DYNFLAGS``; the scheduler re-derives the cached value on refresh.
+    NOTE: the actual batched-prefill CAPTURE (bs>1) is a separate, capture-static
+    flag — ``MSTAR_BATCH_VISION_PREFILL`` for the vision walk; text already
+    captures ``[1,2,4]``. Gather without those captures still clusters but the
+    runner caps the pack at the largest captured bs.
+    """
+    import os as _os
+    raw = _os.environ.get("MSTAR_PREFILL_GATHER_MS")
+    if raw is None:
+        return 0.0
+    try:
+        v = float(raw.strip())
+    except ValueError:
+        return 0.0
+    return v if v > 0.0 else 0.0
+
+
+def prefill_gather_target() -> int:
+    """Target ready same-walk prefill count that releases a gather early
+    (``MSTAR_PREFILL_GATHER_TARGET``, default 4 = the largest captured prefill
+    batch size ``ThinkerSubmodule.PREFILL_CAPTURE_BATCH_SIZES[-1]``). Clamped to
+    >=2 (a target of 1 would never gather)."""
+    import os as _os
+    raw = _os.environ.get("MSTAR_PREFILL_GATHER_TARGET")
+    if raw is None:
+        return 4
+    try:
+        v = int(raw.strip())
+    except ValueError:
+        return 4
+    return max(2, v)
+
+
 def prefill_chunk_tokens() -> int:
     """Cap on chunk size C for chunked prefill. The planner picks the largest
     ``ThinkerSubmodule.PREFILL_TOKEN_BUCKETS`` entry <= min(remaining, this cap),
