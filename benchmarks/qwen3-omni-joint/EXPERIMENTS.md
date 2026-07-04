@@ -1316,3 +1316,18 @@ is impossible; B32 comparison deferred to a stable box. SHIP POSTURE:
 small-batch/latency deployments -> merge config (+4-6% B1-B4, consistent,
 mechanism-live); B32-throughput deployments -> keep vision-chunk config
 until the stable-box read. Both configs real, both on opt/integration-v4.
+
+## Item 3 (W2 small-batch) — PARKED at spread-gate (B2 within-arm 18%)
+Old-base TXN=0 arm: B2 0.895-1.074 (18% same-config spread under Ray phase
+instability), B4 ~5%. Cross-boot arms cannot resolve the predicted 5-10%
+effect at B2 in this. Parked to the stable-window queue (with W2's own
+one-server interleave impossible — TXN is init-static on the old base).
+
+## Item 4 ABORTED mid-A/B — box entered catastrophic contention phase (~13:45)
+OFF-arm cells ALL 0.000 req/s ("expected modalities ['text'], received []"
+= requests timing out server-side and returning empty; warm cell crawled at
+2.0 req/s vs normal 4-7). Not a flag effect — the Ray job's current phase
+starves our server below usability. Disk clean (TMPDIR hardening held).
+Item 4 re-queued for the stable window. GPU VERDICT WORK SUSPENDED until
+box conditions change (Ray release / GPU-7 return / load drop) — burning
+boots in this produces only noise entries. Watch mode: low-frequency polls.
