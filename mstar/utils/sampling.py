@@ -222,13 +222,32 @@ _SAMPLER_CFG_CACHE = _os.environ.get(
     "MSTAR_SAMPLER_CFG_CACHE", "0"
 ).strip().lower() in ("1", "true", "yes", "on")
 
+# MSTAR_SAMPLER_CFG_CACHE_V2 (default OFF): membership-CHURN-proof successor.
+# The V1 cache keys on tuple(request_ids) — exact membership — so at B32
+# closed-loop the admission churn misses nearly every step and the six pageable
+# H2D syncs come back (profiled 2026-07-05: sample @ this line = 22% of wall).
+# V2 holds each config field in a PERSISTENT per-request-SLOT device tensor
+# (written once at admission/set_config via pinned non_blocking, no per-step
+# H2D) and assembles the batch by index_select on a slot-index tensor — the
+# slot-index is the only per-step device object, rebuilt sync-free (pinned +
+# non_blocking) on a membership change, else cached. rand_offset is an
+# on-device per-slot counter (index_add each step). No pageable sync on any
+# path. Byte-identical outputs to V1/off (same per-rid values, same
+# u(T)=T-1 rand_offset). Supersedes _SAMPLER_CFG_CACHE when on.
+_SAMPLER_CFG_CACHE_V2 = _os.environ.get(
+    "MSTAR_SAMPLER_CFG_CACHE_V2", "0"
+).strip().lower() in ("1", "true", "yes", "on")
+
 
 def _refresh_sampler_flags() -> None:
-    """MSTAR_DYNFLAGS hook: re-read the cache flag at runtime (safe — the
-    cache is semantics-free; flipping only changes whether it's consulted)."""
-    global _SAMPLER_CFG_CACHE
+    """MSTAR_DYNFLAGS hook: re-read the cache flags at runtime (safe — both
+    caches are semantics-free; flipping only changes assembly, not values)."""
+    global _SAMPLER_CFG_CACHE, _SAMPLER_CFG_CACHE_V2
     _SAMPLER_CFG_CACHE = _os.environ.get(
         "MSTAR_SAMPLER_CFG_CACHE", "0"
+    ).strip().lower() in ("1", "true", "yes", "on")
+    _SAMPLER_CFG_CACHE_V2 = _os.environ.get(
+        "MSTAR_SAMPLER_CFG_CACHE_V2", "0"
     ).strip().lower() in ("1", "true", "yes", "on")
 
 
@@ -342,6 +361,148 @@ class Sampler(BaseSampler):
     # sample()). Invalidated on set_config; bounded in sample().
     _batch_cfg_cache: dict = field(default_factory=dict)
     tp_group: "TPCommGroup | None" = None  # noqa: F821
+    # --- MSTAR_SAMPLER_CFG_CACHE_V2 slot machinery (lazy; unused when off) ---
+    _v2_rid_to_slot: dict = field(default_factory=dict)   # rid -> slot int
+    _v2_free_slots: list = field(default_factory=list)    # reusable slot ids
+    _v2_n_slots: int = 0
+    _v2_dev: dict = field(default_factory=dict)           # field -> device [n_slots]
+    _v2_cpu: dict = field(default_factory=dict)           # field -> pinned CPU [n_slots]
+    _v2_slot_index_cache: dict = field(default_factory=dict)  # membership -> device idx
+    _v2_pinned_idx: "torch.Tensor | None" = None          # [RING, n] pinned staging
+    _v2_idx_ring: int = 0                                 # rotates pinned staging rows
+    _v2_ones: "torch.Tensor | None" = None                # device ones for rand advance
+    _v2_stats: dict = field(default_factory=dict)         # WALK_STATS-style counters
+
+    # Static per-request config fields carried in per-slot device tensors, plus
+    # the on-device rand_offset counter. (name, dtype, SamplingConfig attr|None)
+    _V2_FIELDS = (
+        ("temperature", "float32", "temperature"),
+        ("top_k", "int32", "top_k"),
+        ("top_p", "float32", "top_p"),
+        ("r_pen", "float32", "repetition_penalty"),
+        ("seed", "int64", "seed"),
+        ("rand", "int64", None),  # advanced on-device each step
+    )
+    _V2_IDX_RING = 4  # pinned slot-index staging depth (H2D in-flight safety)
+
+    def _v2_ensure_capacity(self, need: int) -> None:
+        """Grow the per-slot device+pinned tensors to hold >= ``need`` slots."""
+        if need <= self._v2_n_slots:
+            return
+        new_n = max(need, max(64, self._v2_n_slots * 2))
+        pin = torch.cuda.is_available()
+        for name, dt, _ in self._V2_FIELDS:
+            dtype = getattr(torch, dt)
+            dev = torch.zeros(new_n, dtype=dtype, device=self.device)
+            cpu = torch.zeros(new_n, dtype=dtype, device="cpu", pin_memory=pin)
+            if name in self._v2_dev:
+                dev[: self._v2_n_slots] = self._v2_dev[name]
+                cpu[: self._v2_n_slots] = self._v2_cpu[name]
+            self._v2_dev[name] = dev
+            self._v2_cpu[name] = cpu
+        # Ring of pinned staging rows so the CPU never overwrites a row whose
+        # non_blocking H2D (into a fresh cached device tensor) may still be
+        # in flight — the membership-miss build runs ~every step at churn.
+        self._v2_pinned_idx = torch.zeros(
+            (self._V2_IDX_RING, new_n), dtype=torch.int64,
+            device="cpu", pin_memory=pin,
+        )
+        self._v2_ones = torch.ones(new_n, dtype=torch.int64, device=self.device)
+        # New slot ids become free (reused LIFO).
+        self._v2_free_slots.extend(range(self._v2_n_slots, new_n))
+        self._v2_n_slots = new_n
+
+    def _v2_slot_for(self, rid: str) -> int:
+        """Slot for ``rid``, assigning + initializing one on first use."""
+        slot = self._v2_rid_to_slot.get(rid)
+        if slot is not None:
+            return slot
+        if not self._v2_free_slots:
+            self._v2_ensure_capacity(self._v2_n_slots + 1)
+        slot = self._v2_free_slots.pop()
+        self._v2_rid_to_slot[rid] = slot
+        self._v2_write_slot(rid, slot)
+        self._v2_inc("cfgv2_slot_miss")
+        return slot
+
+    def _v2_write_slot(self, rid: str, slot: int | None = None) -> None:
+        """Write ``rid``'s current SamplingConfig into its slot, sync-free
+        (pinned CPU write + single-element non_blocking H2D). rand_offset is
+        seeded from the Python _step_offset so it matches V1/off exactly."""
+        if slot is None:
+            slot = self._v2_rid_to_slot.get(rid)
+            if slot is None:
+                return
+        cfg = self._sampling_config[rid]
+        vals = {
+            "temperature": cfg.temperature,
+            "top_k": cfg.top_k,
+            "top_p": cfg.top_p,
+            "r_pen": cfg.repetition_penalty,
+            "seed": cfg.seed,
+            "rand": self._step_offset.get(rid, 0),
+        }
+        for name, v in vals.items():
+            self._v2_cpu[name][slot] = v
+            self._v2_dev[name][slot : slot + 1].copy_(
+                self._v2_cpu[name][slot : slot + 1], non_blocking=True
+            )
+        # A slot's config changed → any cached slot-index for a membership
+        # containing rid is still valid (slot id unchanged); only the field
+        # tensors moved, which are read fresh each step. No cache invalidation
+        # needed (unlike V1, whose cached VALUES would go stale).
+
+    def _v2_free_slot(self, rid: str) -> None:
+        slot = self._v2_rid_to_slot.pop(rid, None)
+        if slot is not None:
+            self._v2_free_slots.append(slot)
+        # Drop cached slot-index tensors whose membership included rid.
+        if self._v2_slot_index_cache:
+            self._v2_slot_index_cache = {
+                k: t for k, t in self._v2_slot_index_cache.items() if rid not in k
+            }
+
+    def _v2_inc(self, key: str) -> None:
+        self._v2_stats[key] = self._v2_stats.get(key, 0) + 1
+
+    def _assemble_cfg_v2(self, request_ids: list[str], device):
+        """Assemble the six batch config tensors by gathering per-slot device
+        tensors — no pageable H2D on any path. Returns
+        (temperature, top_k, top_p, r_pen, seed, rand_offset)."""
+        slots = [self._v2_slot_for(rid) for rid in request_ids]
+        key = tuple(request_ids)
+        slot_index = self._v2_slot_index_cache.get(key)
+        if slot_index is None:
+            self._v2_inc("cfgv2_rebuilds")
+            B = len(slots)
+            ring = self._v2_idx_ring & (self._V2_IDX_RING - 1)
+            self._v2_idx_ring += 1
+            stage = self._v2_pinned_idx[ring, :B]
+            stage.copy_(torch.tensor(slots, dtype=torch.int64))  # CPU->pinned
+            slot_index = torch.empty(B, dtype=torch.int64, device=device)
+            slot_index.copy_(stage, non_blocking=True)  # sync-free H2D (fresh dst)
+            if len(self._v2_slot_index_cache) > 64:
+                self._v2_slot_index_cache.clear()
+            self._v2_slot_index_cache[key] = slot_index
+        g = lambda name: self._v2_dev[name].index_select(0, slot_index)
+        temperature, top_k, top_p = g("temperature"), g("top_k"), g("top_p")
+        r_pen, seed = g("r_pen"), g("seed")
+        # rand_offset: gather the PRE-advance value (u(T)=T-1, matches V1/off),
+        # then advance the per-slot counter on-device (+1 per rid this step).
+        rand_offset = g("rand")
+        self._v2_dev["rand"].index_add_(0, slot_index, self._v2_ones[: len(slots)])
+        self._v2_inc("cfgv2_calls")
+        if self._v2_stats["cfgv2_calls"] % 2000 == 0:
+            # Surface the churn counters in server.log (WALK_STATS cadence):
+            # cfgv2_rebuilds/cfgv2_calls ~ the miss rate the V1 cache suffered;
+            # a healthy V2 keeps this high (churn) but sync-free (no regression).
+            logger.warning(
+                "CFGV2 %s slots=%d free=%d",
+                dict(sorted(self._v2_stats.items())),
+                self._v2_n_slots,
+                len(self._v2_free_slots),
+            )
+        return temperature, top_k, top_p, r_pen, seed, rand_offset
 
     def add_request(self, request_id: str):
         self._sampling_config[request_id] = SamplingConfig()
@@ -362,6 +523,9 @@ class Sampler(BaseSampler):
         if request_id in self._seen_token_mask:
             del self._seen_token_mask[request_id]
         self._step_offset.pop(request_id, None)
+        # V2: return the slot to the pool + drop its cached slot-indices.
+        if self._v2_rid_to_slot:
+            self._v2_free_slot(request_id)
 
     def set_config(self, request_id: str, **kwargs):
         # Config change with unchanged batch membership must not serve stale
@@ -388,6 +552,11 @@ class Sampler(BaseSampler):
                 vocab_size=new_vocab_size,
                 device=self.device
             )
+        # V2: the config VALUES for this rid changed → refresh its slot's
+        # device tensors (sync-free). Slot id is unchanged, so cached
+        # slot-index tensors stay valid; only the field values are updated.
+        if request_id in self._v2_rid_to_slot:
+            self._v2_write_slot(request_id)
 
     def sample(
         self, request_ids: list[str], logits: torch.Tensor, **kwargs
@@ -411,30 +580,37 @@ class Sampler(BaseSampler):
         # loop at the bottom), so the cached device tensor is add_(1)'d
         # in-place — no H2D at steady state. Any membership change → new key
         # → one rebuild (its syncs are amortized to churn events).
-        key = tuple(request_ids)
-        cached = (
-            self._batch_cfg_cache.get(key) if _SAMPLER_CFG_CACHE else None
-        )
-        if cached is None:
-            temperature = torch.tensor([c.temperature for c in configs], device=logits.device)
-            top_k = torch.tensor([c.top_k for c in configs], device=logits.device, dtype=torch.int32)
-            top_p = torch.tensor([c.top_p for c in configs], device=logits.device)
-            r_pen = torch.tensor([c.repetition_penalty for c in configs], device=logits.device)
-            seed = torch.tensor([c.seed for c in configs], device=logits.device, dtype=torch.long)
-            rand_offset = torch.tensor(
-                [self._step_offset.get(rid, 0) for rid in request_ids],
-                device=logits.device, dtype=torch.long,
-            )
-            # Keep the cache from growing over a long server life: batch
-            # membership churn creates a new key per admission wave. Bound it.
-            if len(self._batch_cfg_cache) > 64:
-                self._batch_cfg_cache.clear()
-            self._batch_cfg_cache[key] = (
-                temperature, top_k, top_p, r_pen, seed, rand_offset,
+        if _SAMPLER_CFG_CACHE_V2:
+            # Churn-proof path: gather per-slot device tensors (no pageable H2D
+            # on any path). Byte-identical values to the branches below.
+            temperature, top_k, top_p, r_pen, seed, rand_offset = (
+                self._assemble_cfg_v2(request_ids, logits.device)
             )
         else:
-            temperature, top_k, top_p, r_pen, seed, rand_offset = cached
-            rand_offset.add_(1)
+            key = tuple(request_ids)
+            cached = (
+                self._batch_cfg_cache.get(key) if _SAMPLER_CFG_CACHE else None
+            )
+            if cached is None:
+                temperature = torch.tensor([c.temperature for c in configs], device=logits.device)
+                top_k = torch.tensor([c.top_k for c in configs], device=logits.device, dtype=torch.int32)
+                top_p = torch.tensor([c.top_p for c in configs], device=logits.device)
+                r_pen = torch.tensor([c.repetition_penalty for c in configs], device=logits.device)
+                seed = torch.tensor([c.seed for c in configs], device=logits.device, dtype=torch.long)
+                rand_offset = torch.tensor(
+                    [self._step_offset.get(rid, 0) for rid in request_ids],
+                    device=logits.device, dtype=torch.long,
+                )
+                # Keep the cache from growing over a long server life: batch
+                # membership churn creates a new key per admission wave. Bound it.
+                if len(self._batch_cfg_cache) > 64:
+                    self._batch_cfg_cache.clear()
+                self._batch_cfg_cache[key] = (
+                    temperature, top_k, top_p, r_pen, seed, rand_offset,
+                )
+            else:
+                temperature, top_k, top_p, r_pen, seed, rand_offset = cached
+                rand_offset.add_(1)
 
         any_rep_pen = any(c.repetition_penalty != 1.0 for c in configs)
         any_greedy = any(c.temperature == 0 for c in configs)
