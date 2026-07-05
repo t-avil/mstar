@@ -1751,3 +1751,19 @@ lines — native crash signature). The rebased build is implicated after all,
 or GPU-pair state; either way the debugging cost now exceeds the lever's
 honest EV (2-5% at B1/B2 only, B1 already at parity). CLOSED. The substrate
 remains on opt/w2-retest @ a2788a9 for a future session with a fresh rebase.
+
+## Session end 2026-07-05 03:15 — coalescing family CLOSED, box lost to foreign jobs
+Encoder-gather A/B (encg3, clean warm protocol): req/s wash (0.90/0.97/1.11)
+AND mechanism structurally dead — worker_0 gather floor never opens
+(per_request_info < 24 on the encoder rank; encode is a 6.6ms transient),
+worker_1 prefills schedule via the spec-loop yield-away site (worker.py:4243)
+where the return-None deferral has no retry semantics. Natural batches that
+DID form (encode bs4/bs10, prefill bs27) moved req/s ~0 — the B32 residual is
+NOT the admission path; it is the per-step host/GPU floor (sidecar/V1 column,
+parked by the profile gate). Jitter/prefill-gather/encoder-gather all remain
+pushed, validated, default-off, inert. GPU-idle decomposition (35% at B32)
+queued for the next session: profile_gate on a warm merge-config server —
+imerge2 died 00:14 (4th boot-window graceful death; every M* server loss
+tonight correlates with a concurrent boot RAM spike) and foreign jobs now
+occupy GPUs 2-6, ending valid measurement for this session. FINAL: 21/24
+green, i2t B1 0.989 / B2 0.942 / B32 0.918.
