@@ -372,6 +372,7 @@ class Sampler(BaseSampler):
     _v2_idx_ring: int = 0                                 # rotates pinned staging rows
     _v2_ones: "torch.Tensor | None" = None                # device ones for rand advance
     _v2_stats: dict = field(default_factory=dict)         # WALK_STATS-style counters
+    _v2_was_on: bool = False                              # last-seen V2 flag (flip detect)
 
     # Static per-request config fields carried in per-slot device tensors, plus
     # the on-device rand_offset counter. (name, dtype, SamplingConfig attr|None)
@@ -383,7 +384,13 @@ class Sampler(BaseSampler):
         ("seed", "int64", "seed"),
         ("rand", "int64", None),  # advanced on-device each step
     )
-    _V2_IDX_RING = 4  # pinned slot-index staging depth (H2D in-flight safety)
+    # Pinned slot-index staging depth: a fresh row per membership-miss build so
+    # the CPU never overwrites a row whose non_blocking H2D is still in flight.
+    # 4 covers the current spec pipeline (~1-deep speculation + double-buffer, so
+    # at most ~3 sample() H2Ds can be outstanding). If the engine ever deepens
+    # the pipeline past ~3, GROW this (power of two — the ring mask assumes it)
+    # OR gate each row's reuse on a recorded CUDA event.
+    _V2_IDX_RING = 4
 
     def _v2_ensure_capacity(self, need: int) -> None:
         """Grow the per-slot device+pinned tensors to hold >= ``need`` slots."""
@@ -461,6 +468,19 @@ class Sampler(BaseSampler):
             self._v2_slot_index_cache = {
                 k: t for k, t in self._v2_slot_index_cache.items() if rid not in k
             }
+
+    def _v2_resync_rand(self) -> None:
+        """OFF→ON flip repair: while V2 is off the per-slot device rand counter
+        freezes (index_add runs only on the V2 path) but _step_offset keeps
+        advancing (its loop is unconditional), so a rid that survived the off
+        interval would read a stale rand. Re-seed every live slot's rand from
+        _step_offset on the transition (rids admitted while off have no slot yet
+        and get seeded correctly at their first _v2_slot_for). Sync-free."""
+        for rid, slot in self._v2_rid_to_slot.items():
+            self._v2_cpu["rand"][slot] = self._step_offset.get(rid, 0)
+            self._v2_dev["rand"][slot : slot + 1].copy_(
+                self._v2_cpu["rand"][slot : slot + 1], non_blocking=True
+            )
 
     def _v2_inc(self, key: str) -> None:
         self._v2_stats[key] = self._v2_stats.get(key, 0) + 1
@@ -583,10 +603,16 @@ class Sampler(BaseSampler):
         if _SAMPLER_CFG_CACHE_V2:
             # Churn-proof path: gather per-slot device tensors (no pageable H2D
             # on any path). Byte-identical values to the branches below.
+            if not self._v2_was_on:
+                # OFF→ON transition (incl. first-ever use, when the slot map is
+                # empty and this is a no-op): re-sync frozen per-slot rand.
+                self._v2_was_on = True
+                self._v2_resync_rand()
             temperature, top_k, top_p, r_pen, seed, rand_offset = (
                 self._assemble_cfg_v2(request_ids, logits.device)
             )
         else:
+            self._v2_was_on = False
             key = tuple(request_ids)
             cached = (
                 self._batch_cfg_cache.get(key) if _SAMPLER_CFG_CACHE else None
