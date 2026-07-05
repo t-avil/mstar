@@ -1,0 +1,105 @@
+{
+  "system": "ours",
+  "inference_system": "ours",
+  "model": "Qwen3Omni",
+  "request_type": "image_to_text",
+  "profiling_type": "closed_loop",
+  "num_requests": 6,
+  "num_warmup": 4,
+  "completed": 6,
+  "failed": 0,
+  "wall_time_s": 3.810562769882381,
+  "jct_mean_ms": 1173.0705102284749,
+  "jct_median_ms": 1299.535407917574,
+  "jct_p90_ms": 1468.7201955821365,
+  "jct_p95_ms": 1518.0651103146374,
+  "jct_p99_ms": 1557.5410421006382,
+  "request_throughput": 1.574570571943419,
+  "text_token_throughput": 288.40884309430294,
+  "audio_seconds_throughput": null,
+  "audio_duration_mean_s": null,
+  "batch_size": 1,
+  "max_concurrency": 2,
+  "ttft": {
+    "text": {
+      "mean": 0.230270334558251,
+      "p50": 0.2341977225150913,
+      "higher_is_better": false,
+      "p95": 0.2778999996371567,
+      "p99": 0.27868697764351963,
+      "p05": null,
+      "p10": null
+    }
+  },
+  "itl": {
+    "text": {
+      "mean": 0.005168599490466556,
+      "p50": 0.005500885890796781,
+      "higher_is_better": false,
+      "p95": 0.005674779647961259,
+      "p99": 0.010395919708534755,
+      "p05": null,
+      "p10": null
+    }
+  },
+  "e2e_latency": {
+    "mean": 1.1730705102284749,
+    "p50": 1.2195729565573856,
+    "higher_is_better": false,
+    "p95": 1.5180651103146374,
+    "p99": 1.5575410421006382,
+    "p05": null,
+    "p10": null
+  },
+  "rtf": null,
+  "per_request": [
+    {
+      "request_id": 0,
+      "jct_ms": 983.479080023244,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 641
+      }
+    },
+    {
+      "request_id": 1,
+      "jct_ms": 1299.535407917574,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 995
+      }
+    },
+    {
+      "request_id": 2,
+      "jct_ms": 1567.4100250471383,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 1080
+      }
+    },
+    {
+      "request_id": 3,
+      "jct_ms": 1370.0303661171347,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 977
+      }
+    },
+    {
+      "request_id": 4,
+      "jct_ms": 678.3576770685613,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 448
+      }
+    },
+    {
+      "request_id": 5,
+      "jct_ms": 1139.6105051971972,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 811
+      }
+    }
+  ]
+}
