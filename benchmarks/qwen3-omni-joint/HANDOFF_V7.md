@@ -295,3 +295,18 @@ OPS: pair 4,5 killed 4 straight boots (quarantine until verified); every M*
 server death correlates with a concurrent boot RAM spike (max 2 M* + vLLM,
 never boot during measurement); box was lost to foreign jobs on GPUs 2-6 at
 ~03:00 — verify solo before racing.
+
+## §2/§4 CORRECTION (2026-07-05 07:15, closes the night's measurement program)
+Order-symmetric re-measurement (ABBA harness, lab_stackc/ab_cfgv2sym) supersedes
+the stack magnitudes: **cfgv2 ≈ +2% ± 4%** (mechanism real — 22%-of-wall sync,
+profiled — but mostly GIL-shade-overlapped; identity PASS; keep default-ON),
+**checkstop +2.3% owes the same order-symmetric re-bank** (inside the legacy
+harness's +5-12% B-favoring ordering-bias band). THE HEADLINE STANDS ON A
+DIFFERENT LEG: the flagship is at **PARITY at true steady state** (warm cells
+5-8: 8.29 req/s vs vLLM live 8.24-8.46); the 0.938 pooled race carried warm-in
+tail + h2h alternation bias (asymmetric against M*), both now diagnosed and
+harness-corrected (ABBA + criterion warm-in in lab_ab.sh; h2h mitigations
+documented). ACCEPTANCE SWEEP REQUIREMENT: use the corrected protocol or it
+inherits the bias. Next agent: (1) re-bank checkstop order-symmetric, (2)
+steady-state flagship race with tail-amortizing n (≥384/cell) or keepalive,
+(3) then the proof sweep.

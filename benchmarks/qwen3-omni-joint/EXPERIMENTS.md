@@ -1939,3 +1939,69 @@ VLLM_RELIABILITY.md for the F/G rows + evidence paths.) Pattern holds: the major
 of vLLM failures are mid-race under load; M* zero self-inflicted across the campaign
 under heavier churn. Ledger claim updated 5 → 7 events; MTBF still ~30–60 min under
 our cadence; claimable on this window's logs, pending re-test vs 0.23.
+
+
+## MEASUREMENT: lab_ab A-then-B ORDERING BIAS + warm-in tail — protocol amended, wins re-banked
+Variance probe (lab_stackc/ab_varprobe, 8 solo B32 cells, IDENTICAL flags both
+sides, pair 6,7): req/s 6.97/7.88/6.56/8.61/8.20/8.29/7.99/8.66. Two structures,
+both measurement artifacts:
+1. **Warm-in TAIL (not clocks).** Decode `_ms/step` is FLAT across all cells
+   (1.87–2.33, A sometimes < B) → not GPU downclocking. The slowness is a JCT
+   TAIL: medians stable (~3300–3800) but p99 fat on early cells (A_r1/r2 p99
+   ≈8150/8200) tightening to ~6000–6460 by cells 5–8. First-wave cold-start
+   (allocator / page-cache / CUDA-graph-pool / JIT first-touch on prefill+
+   admission) that decays over ~4–5 B32 cells (~400 req) — matching the prior
+   "server maturity spans 100+ req" note. Discard-ONE-warm-cell is far too few.
+2. **Sign-consistent A/B ORDERING bias.** With identical flags, B (second-in-
+   pair) beat A 8/8 pairs; even at steady state (cells 5–8, tails tight) pooled
+   A=8.09 vs B=8.48 = **+4.8% B-favoring**, magnitude noisy (+1/+8.5/+13/+31%).
+   Mechanism: A runs right after the dynflags write + 2s idle (working-set cools,
+   cache-clears fire); B runs hot immediately after A. lab_ab's fixed A-then-B
+   alternation VIOLATES law #6 (A-B-A bracketing) and systematically inflates the
+   B/treatment arm by ~+5–12%.
+
+**Harness patch (lab_ab.sh, 2026-07-05):** ABBA per-round ordering (arm labels
+track FLAGS; order alternates so over EVEN rounds each arm is first-in-pair half
+the time → position bias cancels in the pooled ratio); criterion warm-in
+(baseline cells until p99/median<1.7 AND throughput within 3% for 2 consecutive,
+cap 8, `warm_*` saved+excluded) replacing discard-one; settle 2s→0.2s
+(`LAB_AB_SETTLE`); `LAB_AB_LEGACY=1` restores old behavior. Verdict still pools by
+arm dir (A_=FA/B_=FB) unchanged.
+
+**cfgv2 RE-BANKED order-symmetric (supersedes +5.2%).** ABBA rounds=4 on stackc:
+A(V2 off)=7.91/8.06/6.91/8.23, B(V2 on)=8.39/8.28/7.36/7.63. Pooled B/A means
+**+1.8%**, per-round geomean **+1.9%**, robust (drop softest per arm) **+0.4%**.
+Within-arm spread A **17%** / B **13%** — far above the 3% gate (warm-in did NOT
+converge in 8 cells; box drifting, p99/med still 1.6–2.1), so **the effect is not
+resolvable above noise: cfgv2 e2e ≈ +2% ± ~4%, i.e. 0-to-small-positive.**
+Identity PASS (tok/req A 174.6 vs B 174.8, Δ0.23, both in-band — byte-identical as
+the CPU test guaranteed). HONEST FRAMING: the mechanism (config-tensor sync =
+22%-of-wall at sampling.py, profiled) was REAL but mostly GIL-shade-OVERLAPPED, so
+removing it converts little e2e (the sampler-cache valve law again). The +5.2%
+banked with the legacy fixed-order harness was inflated by the ordering bias.
+cfgv2 stays default-ON: correct, byte-identical, zero-harm, small-positive-lean —
+a real sync removal that may pay more on a quieter box / heavier-main-thread
+regime, but NOT a +5% flagship mover.
+
+**checkstop +2.3% — SAME re-bank owed.** It was a B-side treatment measured
+cross-boot with the legacy harness; +2.3% is inside the ordering-bias band and
+likely similarly soft. Re-measure order-symmetric before banking; do not claim
++2.3% as resolvable.
+
+**h2h alternation bias (asymmetric, worse for M*).** In M*-then-vLLM per-cell
+alternation every M* cell fires right after an idle gap (while vLLM ran the other
+cell), and M* carries the heavier cold-tail (finding 1), so h2h systematically
+punishes the M* side — reconciling steady-state parity ABSOLUTES (cells 5–8 mean
+8.29 vs vLLM 8.24–8.46) with the 0.94 pooled RACE. Proof-sweep mitigations:
+(a) larger n per cell so the fixed first-wave tail amortizes (n=96 → tail is ~1/3
+of requests; n=384 → ~1/12); (b) an M*-side keepalive trickle between its cells so
+it never cools; (c) run each system in a CONTINUOUS block (all M* cells, then all
+vLLM) instead of alternating — removes the per-cell idle for both. Use ≥1 of these
+for the acceptance sweep or it inherits the bias.
+
+CONSEQUENCE FOR PRIOR VERDICTS: sub-10% legacy-harness A/Bs are confounded by the
++5–12% B-favoring bias. jitter/gather/fold "wash ~1.0" readings were likely small
+real losses (real ≈ 0.90–0.95) — but those are dead on mechanism anyway, no
+verdict flips. cfgv2 (re-banked ≈+2%) and checkstop (owed) are the only wins to
+restate. Net: the flagship is at PARITY at true steady state; the ~0.94 pooled was
+warm-in + ordering artifacts, not a real 6% deficit.
