@@ -52,6 +52,25 @@ _PREP_DEVICE_POS = os.environ.get(
 _PREP_POS_HITS = [0]  # prep_pos_device_hits (mechanism-alive counter)
 
 
+def _refresh_prep_flags() -> None:
+    """MSTAR_DYNFLAGS hook: re-read the flag at runtime. Safe to flip mid-run —
+    it only changes how the pos_ids INPUT tensor is built (empty+fill vs
+    torch.tensor), nothing baked into the CUDA-graph capture; the value fed to
+    the graph is byte-identical either way. Enables a clean SINGLE-BOOT dynflag
+    A/B (cross-boot A/Bs carry the warm-in/ordering noise documented 2026-07-05)."""
+    global _PREP_DEVICE_POS
+    _PREP_DEVICE_POS = os.environ.get(
+        "MSTAR_PREP_DEVICE_POS", "0"
+    ).strip().lower() in ("1", "true", "yes", "on")
+
+
+try:
+    from mstar.utils import dynflags as _dynflags
+    _dynflags.register_cache_clear(_refresh_prep_flags)
+except Exception:
+    pass
+
+
 def _prep_pos_count() -> None:
     _PREP_POS_HITS[0] += 1
     if _PREP_POS_HITS[0] % 2000 == 0:
