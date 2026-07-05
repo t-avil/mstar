@@ -174,3 +174,7 @@ h2h_out_imergecol2: i2t B4 = 0/12 divergent pairs; i2t B32 = 19/96 divergent
 in verbosity (both correctly identify the dish, same reasoning structure) —
 the documented vLLM verbosity asymmetry, not a correctness failure. i2t
 output parity: PASS. Zero M* truncations observed.
+
+## OWNER RULE (2026-07-05): do NOT benchmark/boot/race vLLM — the user does that
+themselves. Compare against COMMITTED vLLM values (benchmarks branch, h2h_* raw;
+i2t B32 fresh-boot band 8.03-8.50). M*-only cells and A/Bs are unrestricted.

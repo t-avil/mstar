@@ -318,3 +318,7 @@ tight. M* 7.94/8.23/8.02 vs vLLM 8.17/8.14/8.03; M* spread collapsed to 3.5%
 under the fixed protocol (the variance was protocol, not engine). This is the
 number NUMBERS_V4 should carry for the flagship. ≥1.05 at B32 remains an
 EngineCore-class ask.
+
+## OWNER RULE (2026-07-05): do NOT benchmark/boot/race vLLM — the user does that
+themselves. Compare against COMMITTED vLLM values (benchmarks branch, h2h_* raw;
+i2t B32 fresh-boot band 8.03-8.50). M*-only cells and A/Bs are unrestricted.
