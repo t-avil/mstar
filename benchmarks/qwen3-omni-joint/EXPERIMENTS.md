@@ -2005,3 +2005,18 @@ real losses (real ≈ 0.90–0.95) — but those are dead on mechanism anyway, n
 verdict flips. cfgv2 (re-banked ≈+2%) and checkstop (owed) are the only wins to
 restate. Net: the flagship is at PARITY at true steady state; the ~0.94 pooled was
 warm-in + ordering artifacts, not a real 6% deficit.
+
+## Iteration session 2026-07-05 close — B1/B2 CLEAR committed refs; B32 at band-parity; frontier exhausted
+M*-only iteration vs committed vLLM refs (owner rule): prep-h2d (+3.1% B2,
+opt/prep-h2d), CDT coordinate_descent_tuning (+3.4% B32, env-only, cache
+inductor_cache_cdt). FINAL: B1 1.045 = 1.21x ref; B2 1.611 matched-protocol
+= 1.08x ref; B32 8.37 mean / 8.72 peak vs band 8.03-8.50 = band-parity,
+needs ~+5% for 1.05x band-mean. sidecar-batch (opt/sidecar-batch @8b775a3)
+WASHED-NEGATIVE (B/A ~0.94, 4 ABBA rounds) — send Python was GIL-shade;
+parked default-off. struct-pack measured DEAD pre-build (pickle wins 1.8x).
+Preprocess lever thin (GPU img-preprocess already shipped default-on).
+B32 main-thread frontier now exhausted: sample-sync fixed, checkstop shipped,
+sends washed, synchronize structural (completion/D2H wait = V1 territory).
+Next ideas require either kernel-level work below Inductor or the EngineCore
+rewrite. Winning build env: stack-n2 lineage + MSTAR_PREP_DEVICE_POS=1 +
+TORCHINDUCTOR_COORDINATE_DESCENT_TUNING=1 (cache inductor_cache_cdt).
