@@ -42,6 +42,21 @@ from mstar.utils.sampling import CudaGraphableSampler, SeenTokenMask
 
 logger = logging.getLogger(__name__)
 
+# MSTAR_PREP_DEVICE_POS (default OFF): build the per-step thinker_decode MRoPE
+# pos_ids without a pageable H2D + cudaStreamSynchronize. b1prof2 flagged
+# prepare_inputs' `torch.tensor([[start_pos]*3], device=cuda)` at 24% of wall at
+# bs=1 (same bug class as the sampler cfg cache). Boot-static.
+_PREP_DEVICE_POS = os.environ.get(
+    "MSTAR_PREP_DEVICE_POS", "0"
+).strip().lower() in ("1", "true", "yes", "on")
+_PREP_POS_HITS = [0]  # prep_pos_device_hits (mechanism-alive counter)
+
+
+def _prep_pos_count() -> None:
+    _PREP_POS_HITS[0] += 1
+    if _PREP_POS_HITS[0] % 2000 == 0:
+        logger.warning("MSTAR_PREP_DEVICE_POS prep_pos_device_hits=%d", _PREP_POS_HITS[0])
+
 
 @dataclass
 class _VisionPrefillStage:
@@ -617,11 +632,27 @@ class ThinkerSubmodule(ARNodeSubmodule):
             # Next MRoPE position for all 3 components: read from the
             # per-request cache-manager state (kept in sync by the
             # post-forward ``advance_seq_lens`` call in ``thinker.py``).
-            pos_ids = torch.tensor(
-                [[start_pos], [start_pos], [start_pos]],
-                dtype=torch.float,
-                device=device,
-            )  # (3, 1)
+            if _PREP_DEVICE_POS:
+                # Sync-free: empty() (caching allocator, no copy) + fill_()
+                # (scalar is a kernel arg, no H2D) replaces the pageable
+                # torch.tensor(..., device=cuda). All 3 MRoPE components share
+                # start_pos for a text token, so the value is byte-identical to
+                # the torch.tensor path. start_pos is read FRESH from pos_info
+                # (the advance_seq_lens source of truth) each step, so positions
+                # can't drift — no self-maintained counter (unlike a slot
+                # scheme, which risks desyncing from advance_seq_lens → MRoPE
+                # drift). Fresh buffer per call → no reuse/sharing hazard at any
+                # batch size (the runner copies it into the captured static
+                # input before replay).
+                pos_ids = torch.empty((3, 1), dtype=torch.float, device=device)
+                pos_ids.fill_(float(start_pos))
+                _prep_pos_count()
+            else:
+                pos_ids = torch.tensor(
+                    [[start_pos], [start_pos], [start_pos]],
+                    dtype=torch.float,
+                    device=device,
+                )  # (3, 1)
 
             return ARNodeInputs(
                 input_seq_len=1,

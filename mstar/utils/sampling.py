@@ -504,12 +504,18 @@ class Sampler(BaseSampler):
             if len(self._v2_slot_index_cache) > 64:
                 self._v2_slot_index_cache.clear()
             self._v2_slot_index_cache[key] = slot_index
-        g = lambda name: self._v2_dev[name].index_select(0, slot_index)
-        temperature, top_k, top_p = g("temperature"), g("top_k"), g("top_p")
-        r_pen, seed = g("r_pen"), g("seed")
+        # Direct index_select gathers (no per-call lambda closure — it showed up
+        # as a bs=1 hot line, ~3% of wall, in b1prof2: sample() runs per step so
+        # the closure allocated 188x/request).
+        dev = self._v2_dev
+        temperature = dev["temperature"].index_select(0, slot_index)
+        top_k = dev["top_k"].index_select(0, slot_index)
+        top_p = dev["top_p"].index_select(0, slot_index)
+        r_pen = dev["r_pen"].index_select(0, slot_index)
+        seed = dev["seed"].index_select(0, slot_index)
         # rand_offset: gather the PRE-advance value (u(T)=T-1, matches V1/off),
         # then advance the per-slot counter on-device (+1 per rid this step).
-        rand_offset = g("rand")
+        rand_offset = dev["rand"].index_select(0, slot_index)
         self._v2_dev["rand"].index_add_(0, slot_index, self._v2_ones[: len(slots)])
         self._v2_inc("cfgv2_calls")
         if self._v2_stats["cfgv2_calls"] % 2000 == 0:
