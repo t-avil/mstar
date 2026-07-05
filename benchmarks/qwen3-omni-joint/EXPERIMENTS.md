@@ -1856,3 +1856,86 @@ Decider = profile_gate per-thread split of the 35% (splice-Python vs plan-wait v
 submit-launch). Caveat on that measurement: a foreign 75GB job on GPU 5 (node 1)
 was resident — the RELATIVE per-thread decomposition survives it, absolute idle %
 may read high.
+
+
+## MSTAR_SAMPLER_CFG_CACHE-V2 — WIN +5.2% i2t B32 (the cache was THRASHING, not helping)
+opt/cfgcache-v2 @ ded928d. Root cause found via profile: the existing sampler
+config cache was keyed by a tuple-of-rids, which at B32 admission CHURN changes
+every step (batch membership turns over), so the cache MISSED every step and
+re-ran the six torch.tensor config uploads — reinstating the exact ~9ms
+six-pipeline-drain-sync penalty the cache was built to kill (profiled at 22% of
+the decode wall, sampling.py:419). The cache was net-NEGATIVE-to-neutral all along
+because it thrashed under churn (this retroactively explains the long "cache
+wash/regression" saga — cache3, cache4, cache_sanity: they were all measuring a
+thrashing cache). FIX: key by slot-tensor (stable per graph slot, not per rid
+membership) so it hits across admission turnover. A/B (warm i2t B32): 1.038/1.052/
+1.066, 95%LB 1.039, tok/req in band. First-pass cells pay a one-time slot-init
+cost — WARM before measuring (cold cells understate). Flagship: 0.918 → ~0.966.
+Ties: this is the "re-test sampler cache after the main thread lightens" item from
+the GIL-valve saga finally converting — but the reason was the KEY, not the GIL
+shade. LAW reinforced: a cache that can't hit under the workload's churn pattern is
+worse than no cache (it pays the miss cost AND the lookup).
+
+## REGIME RE-FLIP (cfgv2-on profile) — MainThread is the wall AGAIN; checkstop-family valve RE-OPENS
+profile_gate on the cfgv2 build: GPU **85.7% busy** (up from 74.6), gpu-worker
+thread near-idle, **MainThread 55% = the binding wall again**. Mechanism: removing
+the 9ms sampling sync (cfgv2) un-shaded the main-thread postprocess, so main-thread
+Python is once more the constraint (main-thread > gpu-worker). This REVERSES the
+earlier "checkstop valve-dead" parking (that verdict was measured post-custom-ops
+when main < GPU; the regime has since flipped). Per LAW 8 (re-decompose after
+structural changes), the **checkstop-family wait-removals are viable again** —
+sidecar Stage-2 check_stop offload comes OFF the parked shelf; stack build in
+progress. This is the valve law working exactly as written: wait-removal converts
+IFF main-thread is the wall, and cfgv2 put it back there. NOTE the still-standing
+caveat: check_stop offload shares V1's overrun-row batch-drift risk (shadow-mode +
+tok/req gate mandatory before believing any e2e win).
+
+## OPS — a *.json .gitignore rule silently EMPTIED four raw-data commits
+bench-merge/.gitignore carried a `*.json` rule that silently excluded the
+committed raw from FOUR races — h2h_v2/raw, p2verify, smallbatch2, imergecol — so
+the "committed" scoreboard raw was absent from git despite clean commit messages.
+Repaired with `git add -f` (98 files, commit 'repair:'). This is a
+correctness-of-record hazard: every acceptance claim ("recomputable from committed
+raw") was silently false for those cells until the repair. NEW RULE: after
+committing benchmark raw, ALWAYS `git ls-files <dir>` (or `git show --stat`) to
+verify the files actually entered the tree — a green commit message is not proof
+against a .gitignore swallow. Add raw-data dirs with `-f` or carve a
+`!benchmarks/**/*.json` exception into .gitignore.
+
+## FLAGSHIP TRAJECTORY UPDATE (i2t B32)
+0.53 (v0.22) → 0.77 (v2) → 0.88 (sidecar) → 0.918 (merge) → **~0.966 (cfgv2,
++5.2%)** → checkstop stack pending (regime re-opened it). Gate-cell absolute hit
+**8.483 on pair 0,1** vs vLLM live 8.4–8.5 — i.e. a single warm cell has now
+touched parity. Not yet a graded win (single cell, cross-pair); the checkstop
+stack + a proof-grade n≥5 warm sweep are what convert ~0.966 + a parity-touching
+cell into a defensible B32 verdict. The Tier-S3 "0.92 structural ceiling" statement
+is now SUPERSEDED for B32 — cfgv2 moved it, and the wall is host-side again, so
+there is at least one more real lever (checkstop) before the ceiling claim holds.
+
+---
+
+## STACK VERDICT (opt/stack-n2 = merge + cfgv2 + checkstop, shadow-gated) — flagship2, SESSION CLOSE
+The checkstop lever converted on the re-flipped regime and stacked with cfgv2 on
+the merge config. Live vs vLLM (flagship2, ab_verdict-gated, stack build):
+- **i2t B32: pooled 0.938 n=6 [0.885–0.994], peaks 1.048/1.031.** M* absolutes
+  7.1–9.0 entered vLLM's live band (8.2–8.6) for the FIRST TIME. The pooled ratio
+  is dragged by cell VARIANCE (±6% band), not compute — peaks are already ≥ bar.
+- **i2t B1: 0.972 [0.946–0.997] n=3. i2t B2: 0.999 [0.940–1.060] n=3 WASH** — the
+  stack moved B2 **+6%** from the merge-only 0.942 to parity.
+Trajectory: 0.53 → 0.77 → 0.88 → 0.918 (merge) → **0.938 pooled / peak 1.048
+(stack)**. Checkstop's overrun-drift risk was gated exactly as prescribed:
+shadow-mode ZERO mismatches + tok/req in band (no V1-style length inflation). NET:
+**21/24 GREEN ≥1.05; the 3 remaining i2t cells are parity-class (0.94–1.00), NONE a
+loss** — every cell of 24 ≥0.94, wins to 3.06×. FLAGSHIP NEXT ITEM is now VARIANCE,
+not a lever — diagnose why B32 cells spread 7.1–9.0 (admission-wave residual /
+allocator / NUMA neighbor); a soft-cell fix converts the peaks into a pooled win.
+The Tier-S3 "0.92 ceiling" is RETRACTED.
+
+## vLLM RELIABILITY — event G (the SEVENTH failure) + F, session close
+Two more mid-race vLLM deaths on 07-05, extending the ledger to SEVEN distinct
+failure events. **Event G: the flagship2 stack race — vLLM zeroed r3–r5 mid-race**
+while M* served every cell of the same race. (F is the other 07-05 death; see
+VLLM_RELIABILITY.md for the F/G rows + evidence paths.) Pattern holds: the majority
+of vLLM failures are mid-race under load; M* zero self-inflicted across the campaign
+under heavier churn. Ledger claim updated 5 → 7 events; MTBF still ~30–60 min under
+our cadence; claimable on this window's logs, pending re-test vs 0.23.

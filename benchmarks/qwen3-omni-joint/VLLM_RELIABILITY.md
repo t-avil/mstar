@@ -210,3 +210,14 @@ logs keep showing it, and pending re-test against vLLM-Omni 0.23.
 `h2h_out_imergecol/{vllm,mstar}_*/run.log` (event E: 16 vLLM cells lost, 18/18 M* served);
 `bench-merge/benchmarks/qwen3-omni-joint/EXPERIMENTS.md:1357,1442,973`;
 `lab_{crusade,pmerge,jit,parm2,gather,arm3}/server.log`; HANDOFF_V5 §1.*
+
+## Events F and G (2026-07-05, appended at session close)
+- **F — ~00:00:55**: engine dead/zombie at the proofA sweep's first liveness
+  gate (a real-completion probe failed while /v1/models answered); auto-
+  relaunch fired. Evidence: h2h_out_proofA/driver.log RELIABILITY-EVENT lines.
+- **G — ~06:0x, mid-race**: died after 2 cells of the flagship2 stack race;
+  rounds 3-5 returned completed=0 (h2h_flagship_stack/vllm_i2t_B32_{3,4,5}).
+  M* (opt/stack-n2) served all 5 cells in the same window, 8.10-9.01 req/s.
+Running count: SEVEN failure events in ~12h of benchmarking. M*: ~14 boots,
+zero self-inflicted deaths (all losses were operator kills or the documented
+boot-window RAM-pressure environment, see EXPERIMENTS).
