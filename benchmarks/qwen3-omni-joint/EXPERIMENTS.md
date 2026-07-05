@@ -1812,3 +1812,47 @@ depth, not concurrency floor); prefill needs a gather-aware spec loop (deferred-
 prefill queue + own wakeup) — spec-chain surgery, high risk. NEXT (Law 8
 re-decompose, host floor no longer binds): the GPU-thread / submit column — the
 ~35% GPU idle between decode steps. See the GPU-column memo.
+
+
+## DEFER-SAMPLE — NOT BUILT (already-implemented substrate; the removable part reduces to V1)
+Scoped as the top GPU-column lever ("move the sampled-token D2H off the gpu-thread
+critical path so it submits N+1 without waiting; main thread event-polls N's
+tokens"). Read of the live decode pipeline (opt/custom-ops) shows there is nothing
+correct left to build — STOP-and-report per the pre-authorized "transport can't
+defer without the decision deferring too → V1-in-disguise → close" rule.
+
+Why it's already done:
+- **Feedback to N+1 is GPU-resident.** `_thread_outputs_to_speculative`
+  (`worker.py:2943`) splices batch_N's sampled token into N+1's inputs as a GPU
+  tensor VIEW: DIRECT_FEED path `row_view = sampled[i:i+1]` (`:2994`); with
+  DIRECT_FEED off (it is — E9 wash) the fallback `per_request_input_tensors[rid] =
+  list(tensors)` (`:3000`) is still the GPU `per_request_output_tensors`. No
+  `.cpu()`/`.item()` — the only sampled-token host read in the file is in
+  premat/check_stop.
+- **The only sample D2H is on the MAIN thread, already overlapped.**
+  `_prematerialize_for_check_stop` (`worker.py:3548`) uses a dedicated side stream
+  (`_d2h_stream`), `side.wait_event(completion_event)` gated on GPU(N), pinned
+  non-blocking copy, `side.synchronize()` (`:3614`). It runs inside
+  `_postprocess_batch(N)`, which the pipeline comment labels "overlap with
+  GPU(N+1)" (`worker.py:1943`) and which runs AFTER submit(N+1). So the gpu-thread
+  already submits N+1 without waiting on the transport — the copy-stream+event
+  double-buffer substrate exists (landed with E9/E3).
+- **The plan_executor** does `advance_seq_lens` (int counter) + FlashInfer
+  pre-plan — neither consumes the token value; no token-dependent plan sync.
+
+The lone removable wait — the main-thread `side.synchronize()` at `worker.py:3614`
+— feeds `check_stop(N)` immediately (`flat.tolist()`, `:3183`) in the SAME
+postprocess(N). Making it non-blocking (event.query poll) helps nothing (gpu-thread
+already unblocked); the only way to erase the wait is consuming token(N) at
+iteration N+1 = deferring the check_stop DECISION = the V1 overrun-row / +9%-length
+identity failure (opt/async-sched). Transport and decision are coupled here.
+
+Redirect (the real GPU-column lever): the ~35% GPU idle is NOT a sample wait — it's
+inter-step HOST PYTHON on the gpu/plan threads between GPU(N)-done and GPU(N+1)-
+launch: the output splice, `advance_seq_lens`, the `plan_future.result()` wait
+(`worker.py:2131`), and the submit. Levers = custom-op/vectorize the inter-step
+splice+advance, or extend the pre-plan (MSTAR_MIXED_PREPLAN substrate) to N+2.
+Decider = profile_gate per-thread split of the 35% (splice-Python vs plan-wait vs
+submit-launch). Caveat on that measurement: a foreign 75GB job on GPU 5 (node 1)
+was resident — the RELATIVE per-thread decomposition survives it, absolute idle %
+may read high.
