@@ -1767,3 +1767,48 @@ imerge2 died 00:14 (4th boot-window graceful death; every M* server loss
 tonight correlates with a concurrent boot RAM spike) and foreign jobs now
 occupy GPUs 2-6, ending valid measurement for this session. FINAL: 21/24
 green, i2t B1 0.989 / B2 0.942 / B32 0.918.
+
+
+## GATHER-COALESCING FAMILY — CLOSED (all three branches, mechanism-verified)
+The pivot after the fold family died at short spans (i2t B32 food101 = 100%
+unchunked prefills ≤256 tok; `_fold_ok`/`thinker_mixed` == 0 all run). Idea:
+don't fold prefill into decode — CLUSTER admissions so the already-built batched
+captures engage. Three branches built + GPU-tested, all inert/wash. Verdict:
+**the i2t B32 residual is NOT in the admission/prefill/encoder path.**
+
+- **MSTAR_ADMIT_JITTER_MS (opt/admit-jitter)** — SPREAD arrivals via a per-rid
+  `held_until` stamp (floor-guarded, B1-B16 untouched). A/B geomean ~1.01 wash;
+  `admit_jitter_held` = 3 total in the B arm (0 in A). Dead by design: closed-loop
+  admissions arrive AT the decode trough (active ≤ floor), exactly where the
+  starvation guard must not stagger — you cannot de-sync a closed-loop wave by
+  delaying the work that refills occupancy. Correct, zero-harm, default-off.
+- **MSTAR_PREFILL_GATHER_MS (opt/prefill-gather)** — ready-time gather: defer a
+  lone prefill (`return None` → the loop's `wait_for_work(10)` retries) so the
+  built prefill_text bs`[1,2,4]` captures pack. DOES NOT TRANSPLANT: thinker-rank
+  prefills are scheduled INSIDE the spec loop (`worker.py:4243` yield-away,
+  `_yield_away`=4006 vs the instrumented non-spec `:4541`), where `return None`
+  has no `wait_for_work` retry (the result is wrapped into a `Speculation`
+  immediately). `prefill_gather_held` = 0; `prefill_packed_bs1`=2028 dominates,
+  a handful of natural co-arrival packs (bs27×2, bs11, bs9).
+- **encode_vision gather (same branch)** — the native vision encoder ALREADY
+  batches N requests (`can_batch()=True`, `preprocess(list)` + `forward_batched`:
+  concat pixel_values, one varlen/eager cu_seqlens forward, slice per-request;
+  STATELESS = no capture grid). It REACHES the `allow_gather=True` site on the
+  encoder rank (worker_0 `_spec_none`=999 → non-spec path; `encode_packed_bs*`
+  fired), refuting the call-site hypothesis — BUT the wave-scale floor never
+  opens: `encode_gather_held`=0, `encode_packed_bs1`=998 vs bs4×1/bs10×1
+  (natural). Root cause: `per_request_info < 24` on the encoder rank. Global-
+  completion removal (`conductor.py:806 _process_request_done`) keeps a request
+  FORMALLY alive on all ranks, but the encoder rank does not hold ~32 RESIDENT
+  requests (encode = 6.6ms transient of an ~850ms request). Concurrency floor is
+  the wrong wave-signal there.
+
+Payoff check: where natural batching DID occur (encode bs4/bs10, prefill bs27),
+req/s was a wash (0.90/0.97/1.11, geomean ~0.99) — consistent with the profile
+(main 32% / GPU 64.8%): the wall is GPU-side idle, not prefill/encode phase-drain.
+Both branches stay pushed, validated-but-inert, default-off, byte-identical off.
+Fixing either = big lift, low EV: encoder needs a new wave-detector (ready-encode
+depth, not concurrency floor); prefill needs a gather-aware spec loop (deferred-
+prefill queue + own wakeup) — spec-chain surgery, high risk. NEXT (Law 8
+re-decompose, host floor no longer binds): the GPU-thread / submit column — the
+~35% GPU idle between decode steps. See the GPU-column memo.

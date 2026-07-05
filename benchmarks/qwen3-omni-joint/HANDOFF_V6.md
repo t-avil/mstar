@@ -239,3 +239,23 @@ this cell; the only thing that moved it was WITHIN-request merge (+4%). B32 at
    keep GOAL_MATRIX.md + project memory current. **Never quote an un-graded or
    correctness-unresolved cell as acceptance-grade; projections never outrank
    measurements.**
+
+## §4-ADDENDUM (2026-07-05 03:20) — the next agent's P0 queue, pre-registered
+The B32 residual (0.918) is the ~35% GPU idle between decode steps (main 32% /
+GPU 65% / gpu-thread 58%; admission path exonerated by the closed gather
+family). The GPU-thread column re-opens under Law 8 — the record pre-registered
+"defer-sample overlap should flip positive once the GIL shade is gone" and that
+condition is now measured. Queue, in EV order:
+1. profile_gate.sh on a warm merge-config server (imerge flags) — split the 35%
+   idle into: sample-D2H block / submit-hop gap / plan-inline / kernel bubble.
+2. DEFER-SAMPLE (the narrow V1): move sampled-token D2H/remap off the gpu-thread
+   critical path (copy-stream + event, lazy placeholder repair); keep check_stop
+   + penalty/RNG synchronous — dodges V1's identity trap (which came from
+   deferring the STOP, not the transport). Historically the sampler was the
+   single biggest gpu-thread cost (6 syncs killed → +10.5%).
+3. W3 future-token run-ahead — revisit iff the idle is the submit hop.
+4. Decode pre-plan (banked MIXED_PREPLAN substrate) — iff plan is inline.
+OPS: pair 4,5 killed 4 straight boots (quarantine until verified); every M*
+server death correlates with a concurrent boot RAM spike (max 2 M* + vLLM,
+never boot during measurement); box was lost to foreign jobs on GPUs 2-6 at
+~03:00 — verify solo before racing.
