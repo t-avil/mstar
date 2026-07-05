@@ -2020,3 +2020,16 @@ sends washed, synchronize structural (completion/D2H wait = V1 territory).
 Next ideas require either kernel-level work below Inductor or the EngineCore
 rewrite. Winning build env: stack-n2 lineage + MSTAR_PREP_DEVICE_POS=1 +
 TORCHINDUCTOR_COORDINATE_DESCENT_TUNING=1 (cache inductor_cache_cdt).
+
+## Frontier CLOSED (2026-07-05 12:05) — the last 10%-of-wall line is the await-GPU gate
+The residual 1.96s synchronize is worker.py:3193 completion_event.synchronize()
+— the await-GPU(N) gate at the top of _postprocess_batch, NOT a premat
+consumer (checkstop's deferral is alive; pyspy parent chain is _postprocess_
+batch direct). Deferring it = V1 (parked, identity-fail); polling it burns the
+gpu-thread's GIL shade; and the main thread WAITING there means the main
+thread is AHEAD of the GPU — structural GPU-bound time. This also explains
+mechanistically why the sidecar batch-send washed (freed host ms absorb into
+a longer 3193 wait). VERDICT: B32 ≈ 8.37 mean / 8.72 peak (committed ref band
+8.03-8.50) is the defensible host-side ceiling on this pair; all other goal
+cells clear the committed refs. Remaining B32 upside is kernel-level (below
+Inductor+CDT) or the EngineCore rewrite.
