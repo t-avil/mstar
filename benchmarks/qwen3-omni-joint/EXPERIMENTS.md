@@ -1741,3 +1741,13 @@ short spans, admission-jitter, prefill-gather, sidecar-checkstop-at-regime,
 V1-family. The one net win: within-request merged prefill (+4% B32, +11–13% s2t
 small-batch). Next agent: proof sweep (proof_sweep.sh --vllm-relaunch), optional
 W2 solo-boot, else the campaign is at its defensible ceiling.
+
+## W2 retest — CLOSED WITHOUT VERDICT (4/4 boot failures, 2 environments)
+opt/w2-retest failed to boot 4 times: 3x CUDA OOM at set_device during the
+/dev/shm memory-pressure window (build exonerated by static analysis —
+step_txn.py is CUDA-inert to set_device), then 1x SILENT worker_1 death
+mid-load on a quiet solo box (270G avail, no traceback, no step_txn log
+lines — native crash signature). The rebased build is implicated after all,
+or GPU-pair state; either way the debugging cost now exceeds the lever's
+honest EV (2-5% at B1/B2 only, B1 already at parity). CLOSED. The substrate
+remains on opt/w2-retest @ a2788a9 for a future session with a fresh rebase.
