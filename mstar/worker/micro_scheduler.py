@@ -94,13 +94,25 @@ class MicroScheduler:
         # Gather counters live here so they ride the same 200-step WARNING log.
         self._walk_stats: dict | None = None
 
-    # Prefill walks eligible for gather-coalescing. prefill_multimodal is bs=1
-    # by capture (never packs two) so gather can't help it, but listing it is
-    # harmless (target is never reached, so it releases on the window each time
-    # — a lone-request no-op at the cost of at most one window).
+    # Walks eligible for gather-coalescing. prefill_multimodal is bs=1 by
+    # capture (never packs two) so it is intentionally excluded. encode_vision
+    # (the NativeVisionEncoder node, only present under CHUNKED_PREFILL_V2_VISION)
+    # batches N requests' images into one varlen/eager forward (can_batch=True) —
+    # clustering it is the ROOT lever: batched embeds land N Thinker prefills
+    # together, so the prefill walks below then coalesce downstream.
+    _ENCODER_GATHER_WALK = "encode_vision"
     _PREFILL_GATHER_WALKS = frozenset(
-        {"prefill_text", "prefill_vision", "prefill_audio"}
+        {"prefill_text", "prefill_vision", "prefill_audio", "encode_vision"}
     )
+
+    def _gather_target_for(self, graph_walk: str) -> int:
+        if graph_walk == self._ENCODER_GATHER_WALK:
+            return self._encoder_gather_target()
+        return self._prefill_gather_target()
+
+    def _encoder_gather_target(self) -> int:
+        from mstar.model.qwen3_omni.qwen3_omni_model import encoder_gather_target
+        return encoder_gather_target()
 
     def _prefill_gather_ms(self) -> float:
         """Gather window (ms), cached; reset by _refresh_dynamic_flags on a
@@ -767,22 +779,29 @@ class MicroScheduler:
         gather_ms = self._prefill_gather_ms() if allow_gather else 0.0
         if gather_ms > 0.0 and graph_walk in self._PREFILL_GATHER_WALKS:
             key = (best_node_name, graph_walk)
-            target = self._prefill_gather_target()
+            # Distinct counter namespace so encoder packs are readable apart
+            # from prefill packs (the encoder is the upstream/root lever).
+            tag = "encode" if graph_walk == self._ENCODER_GATHER_WALK else "prefill"
+            target = self._gather_target_for(graph_walk)
             if len(entries) >= target:
                 self._gather_since.pop(key, None)
-                self._ws("prefill_gather_released_full")
+                self._ws(f"{tag}_gather_released_full")
             elif len(worker_graphs_manager.per_request_info) >= (
                 self._mixed_min_decode() or 24
             ):
+                # Wave-scale guard opens on BOTH ranks: the conductor removes a
+                # request from every worker only at global completion
+                # (_process_request_done), so the encoder worker retains all live
+                # i2t requests through decode — per_request_info ~= concurrency.
                 first = self._gather_since.get(key)
                 if first is None:
                     first = now
                     self._gather_since[key] = first
                 if (now - first) * 1000.0 < gather_ms:
-                    self._ws("prefill_gather_held")
+                    self._ws(f"{tag}_gather_held")
                     return None
                 self._gather_since.pop(key, None)
-                self._ws("prefill_gather_released_window")
+                self._ws(f"{tag}_gather_released_window")
             else:
                 # Below wave scale: schedule immediately (never idle-wait).
                 self._gather_since.pop(key, None)
@@ -814,10 +833,12 @@ class MicroScheduler:
             best_node_name, graph_walk
         )] = self.batch_number
 
-        # WALK_STATS packed-bs histogram for prefill (the C1 gate: gather must
-        # shift mass from bs1 toward bs2/bs4 without raising decode chain-steps).
+        # WALK_STATS packed-bs histogram (the C1 gate: gather must shift mass
+        # from bs1 toward bs2/bs4+ without raising decode chain-steps). Encoder
+        # packs are namespaced separately so the two levers are distinguishable.
         if self._walk_stats is not None and graph_walk in self._PREFILL_GATHER_WALKS:
-            self._ws(f"prefill_packed_bs{len(node_objects)}")
+            _tag = "encode" if graph_walk == self._ENCODER_GATHER_WALK else "prefill"
+            self._ws(f"{_tag}_packed_bs{len(node_objects)}")
 
         return ScheduledBatch(
             node_name=best_node_name,

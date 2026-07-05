@@ -368,6 +368,24 @@ def prefill_gather_target() -> int:
     return max(2, v)
 
 
+def encoder_gather_target() -> int:
+    """Target ready ``encode_vision`` count that releases an encoder gather early
+    (``MSTAR_ENCODER_GATHER_TARGET``, default 8). The native vision encoder is
+    varlen (cu_seqlens per image) and eager (no capture grid), so it packs N
+    requests' images into one forward with no bs cap — a larger target than the
+    prefill target (4) is worthwhile, bounded to keep the packed patch count /
+    per-request TTFT reasonable. Clamped to >=2 (a target of 1 never gathers)."""
+    import os as _os
+    raw = _os.environ.get("MSTAR_ENCODER_GATHER_TARGET")
+    if raw is None:
+        return 8
+    try:
+        v = int(raw.strip())
+    except ValueError:
+        return 8
+    return max(2, v)
+
+
 def prefill_chunk_tokens() -> int:
     """Cap on chunk size C for chunked prefill. The planner picks the largest
     ``ThinkerSubmodule.PREFILL_TOKEN_BUCKETS`` entry <= min(remaining, this cap),
