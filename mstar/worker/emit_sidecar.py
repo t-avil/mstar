@@ -58,6 +58,7 @@ the slim-template protocol needs.
 import logging
 import multiprocessing as mp
 import os
+import pickle
 import signal
 import time
 from dataclasses import dataclass, field
@@ -94,6 +95,36 @@ SIDECAR_WALKS = frozenset({"thinker_decode", "prefill_text", "thinker_mixed"})
 # B32 step. The sidecar has 4-7x headroom per step, so the queue only grows
 # when the sidecar has degraded — treat a trip as failure, not backpressure.
 SIDECAR_SNDHWM = 512
+
+# MSTAR_SIDECAR_BATCH=K (default 1 = off): coalesce up to K consecutive records
+# into ONE send (b1prof2/B32: the per-CALL socket send dominates the worker→
+# sidecar cost, not the pickle — measured send_pyobj 21.7us/call vs a batched
+# send 4.75us/record, −78%). The batch is one pickled list sent copy=False; the
+# sidecar processes the list in order so the per-(rid,name) FIFO is preserved
+# (byte-identical downstream). Latency bound: ≤K steps in steady decode; a
+# boundary (WGD) or admission/teardown record flushes immediately. K only
+# changes send granularity → dynflags-refreshable.
+def _read_sidecar_batch() -> int:
+    try:
+        v = int(os.environ.get("MSTAR_SIDECAR_BATCH", "1").strip())
+    except ValueError:
+        v = 1
+    return v if v >= 1 else 1
+
+
+_SIDECAR_BATCH = _read_sidecar_batch()
+
+
+def _refresh_sidecar_batch() -> None:
+    global _SIDECAR_BATCH
+    _SIDECAR_BATCH = _read_sidecar_batch()
+
+
+try:
+    from mstar.utils import dynflags as _dynflags
+    _dynflags.register_cache_clear(_refresh_sidecar_batch)
+except Exception:
+    pass
 
 # StepRecord item flags (bit field, plain int per design §4.2).
 ITEM_INLINE = 1  # inline-qualifying: values carried, no SHM fetch downstream
@@ -153,6 +184,16 @@ class StepRecord:
     new_names: list = field(default_factory=list)
     new_layouts: list = field(default_factory=list)
     entries: list = field(default_factory=list)
+
+
+def _forces_flush(rec) -> bool:
+    """Records that must not sit in the batch: RidRegister/RidRemove (rare,
+    ordering-critical) and any StepRecord carrying a boundary/WGD entry (bound
+    the client-visible completion latency). entries tuple = (rid_idx,
+    new_tokens, items, boundary); boundary is index 3."""
+    if type(rec) is StepRecord:
+        return any(e[3] is not None for e in rec.entries)
+    return True
 
 
 class SidecarRecordBuilder:
@@ -261,6 +302,10 @@ class SidecarClient(SidecarRecordBuilder):
         self.failed = False
         self.hwm_trips = 0
         self.records_sent = 0
+        # MSTAR_SIDECAR_BATCH: pending records awaiting a coalesced flush.
+        self._pending: list = []
+        self.batch_flushes = 0
+        self.batch_k_sum = 0
 
         # Spawn, not fork: the worker holds a CUDA context (design §7).
         # daemon=True is the backstop against orphaned sidecars; graceful
@@ -296,15 +341,14 @@ class SidecarClient(SidecarRecordBuilder):
             socket_path_prefix,
         ))
 
-    def send(self, rec) -> bool:
-        """NOBLOCK send of one record. False = the sidecar is (now) failed;
-        the caller must go through the permanent-fallback path. An HWM trip
-        is failure by policy, not backpressure — mixing per-step fallback
+    def _do_send(self, send_call) -> bool:
+        """Run one NOBLOCK socket send with the shared failure policy. An HWM
+        trip is failure by policy, not backpressure — mixing per-step fallback
         with sidecar sends would split the per-(rid, name) FIFO."""
         if self.failed:
             return False
         try:
-            self._socket.send_pyobj(rec, flags=zmq.NOBLOCK)
+            send_call()
         except zmq.Again:
             self.hwm_trips += 1
             self.failed = True
@@ -321,7 +365,55 @@ class SidecarClient(SidecarRecordBuilder):
                 "failed", self.worker_id, exc_info=True,
             )
             return False
-        self.records_sent += 1
+        return True
+
+    def send(self, rec) -> bool:
+        """NOBLOCK send of one record. False = the sidecar is (now) failed; the
+        caller must go through the permanent-fallback path. With
+        MSTAR_SIDECAR_BATCH=K>1, records coalesce into one send per K (or per
+        force-flush record); the sidecar processes the batched list in order so
+        the FIFO / template-before-slim invariants hold byte-identically."""
+        if self.failed:
+            return False
+        k = _SIDECAR_BATCH
+        if k <= 1:
+            # Off (default): exact legacy path. Drain any pending first (a
+            # dynflags K→1 flip mid-run) so order is never violated.
+            if self._pending and not self.flush_pending():
+                return False
+            if not self._do_send(
+                lambda: self._socket.send_pyobj(rec, flags=zmq.NOBLOCK)
+            ):
+                return False
+            self.records_sent += 1
+            return True
+        self._pending.append(rec)
+        if len(self._pending) >= k or _forces_flush(rec):
+            return self.flush_pending()
+        return True
+
+    def flush_pending(self) -> bool:
+        """Send the pending batch as one pickled list (copy=False releases the
+        GIL during the socket copy). No-op when empty."""
+        if not self._pending:
+            return not self.failed
+        batch = self._pending
+        self._pending = []
+        n = len(batch)
+        if not self._do_send(lambda: self._socket.send(
+            pickle.dumps(batch, pickle.HIGHEST_PROTOCOL),
+            flags=zmq.NOBLOCK, copy=False,
+        )):
+            return False
+        self.records_sent += n
+        self.batch_flushes += 1
+        self.batch_k_sum += n
+        if self.batch_flushes % 2000 == 0:
+            logger.warning(
+                "Worker %s: sidecar_batch_flushes=%d sidecar_batch_mean_k=%.2f",
+                self.worker_id, self.batch_flushes,
+                self.batch_k_sum / self.batch_flushes,
+            )
         return True
 
     def healthy(self) -> bool:
@@ -330,6 +422,9 @@ class SidecarClient(SidecarRecordBuilder):
     def shutdown(self, timeout: float = 5.0) -> None:
         """SIGTERM the sidecar (it drains its queue with its own 5 s
         deadline) and wait at most ``timeout`` (design §7)."""
+        # Flush any batched-but-unsent records so the sidecar drains them.
+        if not self.failed and self._pending:
+            self.flush_pending()
         if self.proc.is_alive():
             self.proc.terminate()
             self.proc.join(timeout=timeout)
@@ -390,6 +485,17 @@ class SidecarState:
     # ------------------------------------------------------------------
     # Record dispatch
     # ------------------------------------------------------------------
+
+    def handle_message(self, msg) -> None:
+        """Dispatch one received message: a coalesced batch (list, from
+        MSTAR_SIDECAR_BATCH) is unrolled in order — identical to receiving its
+        records one-by-one — so downstream state is byte-identical to the
+        unbatched stream. A bare record dispatches directly (batch off)."""
+        if type(msg) is list:
+            for rec in msg:
+                self.handle(rec)
+        else:
+            self.handle(msg)
 
     def handle(self, rec) -> None:
         if type(rec) is StepRecord:
@@ -646,7 +752,7 @@ def run_sidecar(
         state.note_drain(len(messages))
         for rec in messages:
             try:
-                state.handle(rec)
+                state.handle_message(rec)
             except Exception:
                 # Loud fail-fast (design §7): a corrupted record stream must
                 # not half-process silently. Exiting flips the worker to the
