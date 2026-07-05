@@ -310,3 +310,11 @@ documented). ACCEPTANCE SWEEP REQUIREMENT: use the corrected protocol or it
 inherits the bias. Next agent: (1) re-bank checkstop order-symmetric, (2)
 steady-state flagship race with tail-amortizing n (≥384/cell) or keepalive,
 (3) then the proof sweep.
+
+## FINAL FLAGSHIP NUMBER (fair protocol, 2026-07-05 07:15)
+n=384/cell steady-state race (h2h_steadyflag, tail-amortized, ABBA-era
+protocol): **i2t B32 = 0.993 [0.975-1.012], SE 1.15%** — statistical parity,
+tight. M* 7.94/8.23/8.02 vs vLLM 8.17/8.14/8.03; M* spread collapsed to 3.5%
+under the fixed protocol (the variance was protocol, not engine). This is the
+number NUMBERS_V4 should carry for the flagship. ≥1.05 at B32 remains an
+EngineCore-class ask.
