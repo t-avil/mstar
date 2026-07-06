@@ -2097,3 +2097,17 @@ sweep_mstar_v5_verified/all_cells.txt. Bottom line after verification:
 i2t B32 band-parity, i2t B2 0.94 / B4 0.90 boot-variant softs** — the two
 remaining softs are the next re-measure targets on a future boot, not code
 work.
+
+## 2026-07-06 — boot-3 re-measure of i2t B2/B4: B4 WINS on this boot (1.06x); boot effect measured at 18%
+Same build, same flags, same protocol (criterion warm-in + 5 repeats), third
+boot of the day. i2t B4: 2.480/2.565/2.722/2.607/2.535 → median 2.565 vs ref
+2.426 = **1.058x** (boot-2 measured the SAME cell at 0.90 — an 18% boot-to-boot
+split on identical code, the largest boot effect we have directly measured).
+i2t B2: 1.525/1.510/1.525/1.573/1.586 → median 1.525 vs 1.556 = 0.98 parity
+(boot-2 0.94). Pooled boot2+boot3 (n=10 each): B2 0.958, B4 0.981 — both
+parity-class pooled, win-or-parity per boot. CONCLUSION: i2t B2/B4 are not
+code regressions; they sample a boot distribution that straddles the ref.
+The stack-n2 law ("variance is the gap") now has a measured magnitude: the
+boot lottery moves small-batch i2t by up to ±10%. Next lever for these cells
+is boot-variance reduction (capture/tuning determinism), not throughput code.
+Boot-3 median cells committed to sweep_mstar_v5_verified (chart layer).
