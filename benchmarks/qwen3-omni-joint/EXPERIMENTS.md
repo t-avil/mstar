@@ -2125,3 +2125,17 @@ for throughput; newest same-build for latency. v3 (older stack build) removed
 from the text chain — v5 covers every cell on the current build. Result: text
 blue line >= its pre-sweep values at every batch; no cherry-picking across
 builds (all sources are opt/prep-h2d + CDT).
+
+## 2026-07-06 — boots 4 and 5 NEVER_READY (CUDA OOM during rank bring-up); warmed 8-cell coverage run ABORTED
+After three clean boots earlier today (09:34, 10:11, 10:46 — all WARM+READY),
+boots 4 (14:46) and 5 (15:14) of the IDENTICAL build+env both died NEVER_READY
+with `torch.AcceleratorError: CUDA error: out of memory` during rank bring-up,
+each stranding a ~29G zombie rank on GPU 6 (killed both; devices verified
+clean, 4 MiB). GPUs 6,7 were idle before both attempts; host RAM 213G avail
+(more than the successful boots had). Not diagnosed further per stop-rule
+(2 strikes). The planned criterion-warmed coverage of the remaining 8 text
+cells (i2t B1/B8/B16, s2t B2/B4/B8/B16/B32) is DEFERRED; chart values for
+those cells remain v4-iteration / uniform-sweep sourced. Note for the boot-
+lottery thread: boot failures now cluster in the afternoon while GPUs 0-5
+are under heavy neighbor load — consistent with an external-contention
+component (plasma/driver), reinforcing boot determinism as the next lever.
