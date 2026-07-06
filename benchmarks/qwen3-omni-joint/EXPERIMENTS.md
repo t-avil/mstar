@@ -2156,3 +2156,23 @@ B2/B4/B8/B16/B32) remains blocked; chart values for those cells stay
 v4-iteration / uniform-sweep sourced. Recommend: retry after node quiesce/
 reboot, or instrument loader with per-rank device logging on next attempt.
 All zombies killed after each failure; GPUs verified 4 MiB.
+
+## 2026-07-06 — E1 CERTIFIED across the warmed text matrix; promoted to the launcher (new shipping candidate)
+First boot after the V9 shm fix (12 min, clean — root cause confirmed fixed).
+Build: opt/prep-pos-batched-v9 @915ab8f (prep-h2d + MSTAR_PREP_DEVICE_POS_
+BATCHED=1, the V9 "E1 god branch": pinned+device batched pos_ids, killing the
+per-step pageable fp32 H2D on the B>1 decode path). Warmed 11-cell text
+matrix, criterion warm-in + 5 repeats, medians (spread) vs committed refs:
+- i2t: B1 0.975 = 1.09x, B2 1.549 = 1.00x, B4 2.474 = 1.02x, B8 4.198 =
+  1.22x, B16 5.888 = 1.15x, B32 7.422 (6.59-7.57) = 0.90x-this-boot.
+- s2t: B2 10.175 = 1.11x, B4 13.083 = 0.99x, B8 20.500 = 1.30x (new best),
+  B16 26.736 = 1.35x (one 10.8 stall outlier absorbed by median), B32
+  35.981 (32.77-37.61) = 1.17x (new warmed best).
+9/11 win-or-parity. i2t B32's 0.90 is the documented 18% boot lottery (prior
+boot of the parent build: 8.56 median); E1's same-server A/B (+5.9% B32,
+7 rounds, V9 godv9_prepbatched data) remains the causal signal — no cross-
+boot regression evidence anywhere, so E1 is strictly >= parent. PROMOTED:
+launch_mstar_best.sh now boots mstar-godv9 @915ab8f with the flag (launcher
+copy in repo updated). Median cells committed as sweep_mstar_e1/ (chart
+layer, newest same-lineage warmed source). mstar_new shipping candidate
+label moves to E1.

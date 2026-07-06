@@ -41,6 +41,9 @@ V5 = "/m-coriander/coriander/tim/sweep_mstar_v5"  # 07-06 full 24-cell sweep
 # measured repeats each) — stronger protocol than the uniform pass, so it
 # overrides. Committed under the benchmark dir.
 V5V = "sweep_mstar_v5_verified"
+# 07-06 E1 build (prep-h2d + MSTAR_PREP_DEVICE_POS_BATCHED, opt/prep-pos-
+# batched-v9 @915ab8f) — warmed 11-cell text matrix, median of 5 repeats.
+E1 = "sweep_mstar_e1"
 
 
 def g(h, k, sub):
@@ -157,7 +160,7 @@ def load(path):
     # metrics take the max across same-build measurements; latency metrics
     # take the newest. v3 (older stack build) is no longer used for text.
     THRU = ("req_s", "tok", "aud")
-    for root in (V5, V4, V5V):
+    for root in (V5, V4, V5V, E1):
         for bdir in sorted(glob.glob(f"{root}/{s}/B*")):
             b = int(os.path.basename(bdir)[1:])
             try:
