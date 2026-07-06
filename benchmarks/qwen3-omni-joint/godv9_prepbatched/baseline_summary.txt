@@ -1,0 +1,4 @@
+  RESULT i2t B1 | req/s 1.049 | tok/s 194.5 | ttft_ms mean nan p50 nan p95 nan | itl_ms mean nan p50 nan p95 nan | jct_ms 953 | n=24
+  RESULT i2t B2 | req/s 1.849 | tok/s 315.9 | ttft_ms mean nan p50 nan p95 nan | itl_ms mean nan p50 nan p95 nan | jct_ms 1079 | n=32
+  RESULT i2t B4 | req/s 3.056 | tok/s 522.0 | ttft_ms mean nan p50 nan p95 nan | itl_ms mean nan p50 nan p95 nan | jct_ms 1287 | n=48
+  RESULT i2t B32 | req/s 7.090 | tok/s 1212.6 | ttft_ms mean nan p50 nan p95 nan | itl_ms mean nan p50 nan p95 nan | jct_ms 4157 | n=96
