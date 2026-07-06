@@ -2139,3 +2139,20 @@ those cells remain v4-iteration / uniform-sweep sourced. Note for the boot-
 lottery thread: boot failures now cluster in the afternoon while GPUs 0-5
 are under heavy neighbor load — consistent with an external-contention
 component (plasma/driver), reinforcing boot determinism as the next lever.
+
+## 2026-07-06 — boot-6 NEVER_READY on an IDLE box: contention hypothesis KILLED; boot failure is intra-process
+Boot-6 (16:42, whole box idle — all 8 GPUs 4 MiB, 215G RAM free) failed
+identically to boots 4-5: CUDA OOM inside safetensors weight loading
+(iterators.py:39 f.get_tensor) with GPU 6 at only ~29G of ~95G. Post-mortem
+probes all healthy: GPU 6 ECC zero / no remapped rows / no remap failure;
+fresh-process device alloc 45G+ OK on GPU 6; pinned host alloc 24G OK.
+So: 3/3 morning boots succeeded, 3/3 afternoon boots fail, identical
+build+env+launcher, device+driver+RAM+pinned all pass in isolation — the
+failure is specific to M* multi-rank bring-up state (suspect: rank placement
+race putting both ranks' load on GPU 6, or degraded intra-process pinned/
+staging pool; NOT external contention, NOT device health). STOPPED retrying
+per rule. Consequence: warmed 8-cell text coverage (i2t B1/B8/B16, s2t
+B2/B4/B8/B16/B32) remains blocked; chart values for those cells stay
+v4-iteration / uniform-sweep sourced. Recommend: retry after node quiesce/
+reboot, or instrument loader with per-rank device logging on next attempt.
+All zombies killed after each failure; GPUs verified 4 MiB.
