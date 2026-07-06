@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Targeted re-verification of the 4 soft sweep-v5 cells with criterion warm-in:
+# s2t B1, i2t B2, i2t B4, i2t B32. Per cell: warm until p99/med<1.7 and last two
+# req/s within +-3% (max 6 warm cells), then 5 measured repeats. M*-only.
+set -uo pipefail
+export HF_HOME=/m-coriander/coriander/hf HF_DATASETS_CACHE=/m-coriander/coriander/tim/hf_datasets
+CVENV=/home/tim/mstar-encoders/.venv
+BENCH=/m-coriander/coriander/tim/bench-v2
+OUT=/m-coriander/coriander/tim/verify_soft_v5
+BOOTLOG=/m-coriander/coriander/tim/verify_boot.log
+URL=http://127.0.0.1:8321
+declare -A P=( [i2t]=image_to_text [s2t]=audio_to_text )
+declare -A DS=( [i2t]=food101 [s2t]=libri )
+declare -A CACHE=( [i2t]=/m-coriander/coriander/hf [s2t]=/home/tim/tmp/libri_wavs )
+nfor(){ case $1 in 1) echo 12;; 32) echo 96;; *) echo $((3*$1));; esac; }
+log(){ echo "[$(date -u +%H:%M:%S)] $*"; }
+
+for i in $(seq 1 240); do
+  grep -q "WARM+READY" "$BOOTLOG" && break
+  grep -qiE "CRASH|FATAL" "$BOOTLOG" && { log BOOT_FAILED; exit 1; }
+  sleep 15
+done
+grep -q "WARM+READY" "$BOOTLOG" || { log BOOT_TIMEOUT; exit 1; }
+log "READY — verifying soft cells"
+mkdir -p "$OUT"; date -u +%Y%m%dT%H%M%SZ > "$OUT/started_utc.txt"
+
+run_cell(){ # $1 s  $2 b  $3 tag  -> prints "req_s p99med"
+  local s=$1 b=$2 tag=$3 n od
+  n=$(nfor $b); od="$OUT/${s}_B${b}_$tag"; mkdir -p "$od"
+  PYTHONPATH=$BENCH timeout 2400 numactl --cpunodebind=1 --membind=1 \
+    "$CVENV/bin/python" -m benchmark.runner --url "$URL" --model qwen3omni \
+    --request-type "${P[$s]}" --dataset "${DS[$s]}" --profiling-type closed_loop \
+    --max-concurrency "$b" --num-requests "$n" --num-warmup 4 \
+    --inference-system ours --local-cache "${CACHE[$s]}" \
+    --output-dir "$od" > "$od/run.log" 2>&1
+  "$CVENV/bin/python" - "$od" <<'PY'
+import json,sys,statistics as st
+d=json.load(open(f"{sys.argv[1]}/results.json"))
+j=[p["jct_ms"] for p in d.get("per_request",[]) if p.get("jct_ms")]
+j.sort()
+p99med=(j[max(0,int(len(j)*0.99)-1)]/j[len(j)//2]) if j else 9.9
+print(f"{d['request_throughput']:.3f} {p99med:.2f}")
+PY
+}
+
+for cell in s2t:1 i2t:2 i2t:4 i2t:32; do
+  s=${cell%%:*}; b=${cell##*:}
+  prev=0
+  for w in 1 2 3 4 5 6; do
+    read rs pm < <(run_cell $s $b warm$w) || { echo "VERIFY $s B$b warm$w FAIL"; continue; }
+    log "VERIFY $s B$b warm$w req/s $rs p99/med $pm"
+    ok=$("$CVENV/bin/python" -c "print(1 if $pm<1.7 and $prev>0 and abs($rs-$prev)/$prev<0.03 else 0)")
+    prev=$rs
+    [ "$ok" = 1 ] && { log "VERIFY $s B$b warmed after $w"; break; }
+  done
+  for r in 1 2 3 4 5; do
+    read rs pm < <(run_cell $s $b r$r) || { echo "VERIFY $s B$b r$r FAIL"; continue; }
+    echo "VERIFYCELL $s B$b r$r req/s $rs p99/med $pm"
+  done
+done
+date -u +%Y%m%dT%H%M%SZ > "$OUT/VERIFY_DONE"
+log VERIFY_DONE

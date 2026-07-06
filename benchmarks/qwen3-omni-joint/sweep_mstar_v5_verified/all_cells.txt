@@ -1,0 +1,39 @@
+[10:26:57] VERIFY s2t B1 warm1 req/s 4.230 p99/med 1.22
+[10:27:17] VERIFY s2t B1 warm2 req/s 5.775 p99/med 1.28
+[10:27:33] VERIFY s2t B1 warm3 req/s 6.137 p99/med 1.28
+[10:27:50] VERIFY s2t B1 warm4 req/s 6.117 p99/med 1.18
+[10:27:50] VERIFY s2t B1 warmed after 4
+VERIFYCELL s2t B1 r1 req/s 6.173 p99/med 1.10
+VERIFYCELL s2t B1 r2 req/s 6.412 p99/med 1.24
+VERIFYCELL s2t B1 r3 req/s 6.452 p99/med 1.22
+VERIFYCELL s2t B1 r4 req/s 6.536 p99/med 1.23
+VERIFYCELL s2t B1 r5 req/s 6.462 p99/med 1.21
+[10:29:24] VERIFY i2t B2 warm1 req/s 1.621 p99/med 1.15
+[10:29:44] VERIFY i2t B2 warm2 req/s 1.592 p99/med 1.02
+[10:29:45] VERIFY i2t B2 warmed after 2
+VERIFYCELL i2t B2 r1 req/s 1.579 p99/med 1.03
+VERIFYCELL i2t B2 r2 req/s 1.524 p99/med 1.34
+VERIFYCELL i2t B2 r3 req/s 1.223 p99/med 1.07
+VERIFYCELL i2t B2 r4 req/s 1.458 p99/med 1.19
+VERIFYCELL i2t B2 r5 req/s 1.405 p99/med 1.10
+[10:32:16] VERIFY i2t B4 warm1 req/s 2.090 p99/med 1.55
+[10:32:40] VERIFY i2t B4 warm2 req/s 2.349 p99/med 1.29
+[10:33:03] VERIFY i2t B4 warm3 req/s 2.488 p99/med 1.36
+[10:33:25] VERIFY i2t B4 warm4 req/s 2.502 p99/med 1.34
+[10:33:25] VERIFY i2t B4 warmed after 4
+VERIFYCELL i2t B4 r1 req/s 2.341 p99/med 1.44
+VERIFYCELL i2t B4 r2 req/s 2.184 p99/med 1.35
+VERIFYCELL i2t B4 r3 req/s 2.209 p99/med 1.59
+VERIFYCELL i2t B4 r4 req/s 2.076 p99/med 1.52
+VERIFYCELL i2t B4 r5 req/s 2.091 p99/med 1.41
+[10:36:16] VERIFY i2t B32 warm1 req/s 7.339 p99/med 1.89
+[10:37:08] VERIFY i2t B32 warm2 req/s 4.522 p99/med 1.33
+[10:38:33] VERIFY i2t B32 warm3 req/s 7.606 p99/med 1.54
+[10:39:34] VERIFY i2t B32 warm4 req/s 5.558 p99/med 1.49
+[10:40:28] VERIFY i2t B32 warm5 req/s 6.350 p99/med 1.90
+[10:41:07] VERIFY i2t B32 warm6 req/s 8.623 p99/med 1.75
+VERIFYCELL i2t B32 r1 req/s 7.206 p99/med 1.51
+VERIFYCELL i2t B32 r2 req/s 8.666 p99/med 2.14
+VERIFYCELL i2t B32 r3 req/s 7.486 p99/med 1.87
+VERIFYCELL i2t B32 r4 req/s 8.636 p99/med 1.74
+VERIFYCELL i2t B32 r5 req/s 8.563 p99/med 2.00

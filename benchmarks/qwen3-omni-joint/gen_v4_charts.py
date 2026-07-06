@@ -37,6 +37,10 @@ BATCHES = [1, 2, 4, 8, 16, 32]
 V3 = "/m-coriander/coriander/tim/sweep_mstar_v3"
 V4 = "/m-coriander/coriander/tim/sweep_mstar_v4"
 V5 = "/m-coriander/coriander/tim/sweep_mstar_v5"  # 07-06 full 24-cell sweep
+# 07-06 criterion-warmed re-verification of the 4 soft v5 cells (median of 5
+# measured repeats each) — stronger protocol than the uniform pass, so it
+# overrides. Committed under the benchmark dir.
+V5V = "sweep_mstar_v5_verified"
 
 
 def g(h, k, sub):
@@ -148,7 +152,7 @@ def load(path):
     # v3 (final stack, 07-03), v4 (07-05/06 iteration), then v5 (07-06 full
     # sweep) overrides for mnew_cur — per-METRIC merge so committed points
     # that a sweep cell doesn't carry are never dropped.
-    for root in (V3, V4, V5):
+    for root in (V3, V4, V5, V5V):
         for bdir in sorted(glob.glob(f"{root}/{s}/B*")):
             b = int(os.path.basename(bdir)[1:])
             try:

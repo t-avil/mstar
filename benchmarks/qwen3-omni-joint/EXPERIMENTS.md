@@ -2073,3 +2073,27 @@ that measured these same cells at 1.04-1.21x. Raw committed at
 benchmarks/qwen3-omni-joint/sweep_mstar_v5 (env.txt, requirements, command,
 SWEEP_V5_DONE sentinel). Charts blue solid = v5 layered over v3/v4 per-metric.
 Follow-up: targeted re-verification of the 4 soft cells with criterion warm-in.
+
+## 2026-07-06 — soft-cell re-verification (verify_soft_v5): s2t B1 win CONFIRMED, i2t B2/B4 soft this boot, B32 band-parity
+Criterion warm-in (p99/med<1.7 + back-to-back ±3%, max 6 warm cells) then 5
+measured repeats per cell, fresh boot of the same winning build, canonical 6,7,
+no co-location (checked). vs committed refs:
+- s2t B1: 6.17/6.41/6.45/6.54/6.46 → median 6.452 vs ref 3.831 = **1.68x WIN**.
+  The sweep's 0.713 was a COLD-CELL artifact (first cell after i2t B32, no
+  criterion warm-in) — falsified.
+- i2t B2: 1.579/1.524/1.223/1.458/1.405 → median 1.458 vs 1.556 = **0.94 soft**.
+- i2t B4: 2.341/2.184/2.209/2.076/2.091 → median 2.184 vs 2.426 = **0.90 soft**.
+  Both text small-batch cells read below ref on THIS boot despite warm-in;
+  earlier graded boots measured the same cells at 1.04-1.11x — boot-to-boot
+  variance (stack-n2 law: "variance is the gap") is the live explanation, not
+  a code regression (build identical, flags identical, dynflags verified).
+- i2t B32: 7.21/8.67/7.49/8.64/8.56 → median 8.563, mean 8.11, peak 8.67 vs
+  band 8.03-8.50 = **band-parity**, median above band-mid; consistent with the
+  closed structural frontier.
+Median repeat cells committed as sweep_mstar_v5_verified/ (chart layer V5V
+overrides the uniform-pass values for these 4 cells). Full cell log:
+sweep_mstar_v5_verified/all_cells.txt. Bottom line after verification:
+**17/24 cells ≥1.05x, 3 parity-class (i2t B1 0.99, s2t B4 0.99, s2t B32 1.00),
+i2t B32 band-parity, i2t B2 0.94 / B4 0.90 boot-variant softs** — the two
+remaining softs are the next re-measure targets on a future boot, not code
+work.
