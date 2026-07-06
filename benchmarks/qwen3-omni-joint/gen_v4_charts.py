@@ -27,6 +27,7 @@ SHORT = {"audio_to_text": "s2t", "image_to_text": "i2t",
          "audio_to_speech": "s2s", "image_to_speech": "i2s"}
 BATCHES = [1, 2, 4, 8, 16, 32]
 V3 = "/m-coriander/coriander/tim/sweep_mstar_v3"
+V4 = "/m-coriander/coriander/tim/sweep_mstar_v4"  # 07-05/06 iteration medians
 
 
 def g(h, k, sub):
@@ -111,6 +112,23 @@ def load(path):
             "req_s": res.get("request_throughput"), "ttft": t.get("p50"),
             "itl": itl, "rtf": rtfs[len(rtfs)//2] if rtfs else None,
         }
+    # v4 (07-05/06 iteration: prep-h2d + cfgv2 + checkstop + CDT) — per-METRIC
+    # merge on top of v3: closed-loop cells carry no TTFT, so only non-None
+    # values override and the v3 latency points survive.
+    for bdir in sorted(glob.glob(f"{V4}/{s}/B*")):
+        b = int(os.path.basename(bdir)[1:])
+        try:
+            res = json.load(open(f"{bdir}/results.json"))
+        except FileNotFoundError:
+            continue
+        t = ((res.get("ttft") or {}).get("text") or {})
+        i = res.get("itl") or {}
+        itl = (i.get("text") or {}).get("mean") if isinstance(i.get("text"), dict) else None
+        cell = out["mnew_cur"].setdefault(b, {})
+        for k, v in (("req_s", res.get("request_throughput")),
+                     ("ttft", t.get("p50")), ("itl", itl)):
+            if v is not None:
+                cell[k] = v
     return out
 
 
