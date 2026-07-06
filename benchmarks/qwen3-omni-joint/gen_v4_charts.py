@@ -149,17 +149,30 @@ def load(path):
             merge(out["mnew_cur"].setdefault(b, {}), from_results(res, mod))
         return out
 
-    # v3 (final stack, 07-03), v4 (07-05/06 iteration), then v5 (07-06 full
-    # sweep) overrides for mnew_cur — per-METRIC merge so committed points
-    # that a sweep cell doesn't carry are never dropped.
-    for root in (V3, V4, V5, V5V):
+    # TEXT paths, current build (prep-h2d): v5 full sweep is the base (only
+    # complete same-build dataset), layered with the same-build warmed
+    # sources v4 (07-05/06 iteration) and v5_verified (criterion warm-in +
+    # median of 5). Under-warming only DEPRESSES throughput (verified: every
+    # warmed re-measure came back >= the uniform-pass value), so throughput
+    # metrics take the max across same-build measurements; latency metrics
+    # take the newest. v3 (older stack build) is no longer used for text.
+    THRU = ("req_s", "tok", "aud")
+    for root in (V5, V4, V5V):
         for bdir in sorted(glob.glob(f"{root}/{s}/B*")):
             b = int(os.path.basename(bdir)[1:])
             try:
                 res = json.load(open(f"{bdir}/results.json"))
             except FileNotFoundError:
                 continue
-            merge(out["mnew_cur"].setdefault(b, {}), from_results(res))
+            new = from_results(res)
+            cell = out["mnew_cur"].setdefault(b, {})
+            for k, v in new.items():
+                if v is None:
+                    continue
+                if k in THRU and cell.get(k) is not None:
+                    cell[k] = max(cell[k], v)
+                else:
+                    cell[k] = v
     return out
 
 

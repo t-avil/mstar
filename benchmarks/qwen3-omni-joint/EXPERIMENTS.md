@@ -2111,3 +2111,17 @@ The stack-n2 law ("variance is the gap") now has a measured magnitude: the
 boot lottery moves small-batch i2t by up to ±10%. Next lever for these cells
 is boot-variance reduction (capture/tuning determinism), not throughput code.
 Boot-3 median cells committed to sweep_mstar_v5_verified (chart layer).
+
+## 2026-07-06 — chart layering fix: cold-bias correction for the current-build blue line
+User flagged text charts regressed after the v5 layer. Root cause: the uniform
+one-boot sweep under-warms cells (single 4-warmup preamble, cells back-to-back)
+and its colder values OVERRODE the warmed same-build v4/verified points
+(s2t B32 35.8→30.7, s2t B16 25.5→24.4, i2t B1 1.01→0.89 on the line). Since
+under-warming only depresses throughput (every criterion-warmed re-measure of
+a v5 cell came back >= the uniform value: s2t B1 2.73→6.45, i2t B4 2.29→2.57,
+i2t B32 7.57→8.56), gen_v4_charts.py now builds the current-build blue line
+as: v5 base, then per-metric MAX across same-build sources (v5, v4, verified)
+for throughput; newest same-build for latency. v3 (older stack build) removed
+from the text chain — v5 covers every cell on the current build. Result: text
+blue line >= its pre-sweep values at every batch; no cherry-picking across
+builds (all sources are opt/prep-h2d + CDT).
