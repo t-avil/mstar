@@ -58,3 +58,29 @@ TTFT (H1 mixed prefill+decode step), then H2/H3/H4. See REVIEW_V9_WHY_WE_LOSE.md
 ## Raw data
 `godv9_prepbatched/` (baseline measure + both A/B runs' results.json). Regenerate
 tables: `parse_results.py` (baseline), `agg_ab.py <abdir>...` (A/B medians).
+
+## 3. Full cross-batch verdict (from verify_warm_e1, E1-on, warmed) + B32 lever hunt
+
+M*+E1 vs committed vLLM 0.22 (medians): **B1 1.11× · B2 1.02× · B4 1.13× · B8 1.15× ·
+B16 1.05× — all win/tie. B32 0.89× — the ONLY loss.** The old "B2/B8/B16 failures"
+were under-warming + 20–29% noise, not real.
+
+**B32 loses because it is CPU-floor + prefill-serialization bound** (TTFT ~2.3–3 s while
+ITL ~6 ms) — exactly what vLLM 0.22's Model Runner V2 removed. Lean levers tried:
+
+| lever | result |
+|-------|--------|
+| E1 (MSTAR_PREP_DEVICE_POS_BATCHED) | **+5–6% req/s at B32** (shipped, in the build) |
+| MSTAR_SIDE_PREFILL (encoder overlaps decode) | **BROKEN** — `q.shape != qo_indptr` paged-prefill race (vision chunked prefill on side stream); NOT a flag conflict (fails with MERGED off too). Needs an engine fix (disjoint side-path qo_indptr buffers). |
+| MSTAR_PREFILL_CHUNK_TOKENS 512→256 | **regresses −9% req/s / +17.6% TTFT** at B32. 512 already fits the ~300-tok i2t prefill in one chunk; smaller just adds steps. **512 is optimal.** Raw: `godv9_prepbatched/b32_chunk_ab/`. |
+
+**Two hard caveats on the B32 number itself:**
+1. **Contention.** B32/B16 are so CPU-floor-bound that any concurrent host activity depresses
+   them 15–25%. Under a co-tenant GPU job (0,1 pinned), the SAME build measured B32 at ~6.0
+   interleaved vs 7.42 clean. Only isolated single-server runs on a quiet host are trustworthy.
+   The true M*-vs-vLLM B32 gap should be re-measured with the box quiescent.
+2. **No lean flag closes B32.** It needs structural work: fix the SIDE_PREFILL packing race
+   (unlocks encoder overlap → cuts the TTFT) OR M*'s own MRV2 (persistent zero-sync scheduler).
+
+**Bottom line:** win 5/6 batches; B32 is close (0.89×, +E1) and its remaining gap is either
+contention-inflated or requires structural (not flag) work.
