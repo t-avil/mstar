@@ -2033,3 +2033,28 @@ a longer 3193 wait). VERDICT: B32 ≈ 8.37 mean / 8.72 peak (committed ref band
 8.03-8.50) is the defensible host-side ceiling on this pair; all other goal
 cells clear the committed refs. Remaining B32 upside is kernel-level (below
 Inductor+CDT) or the EngineCore rewrite.
+
+## 2026-07-06 — sidecar batch-send v4 retest (zb/sbatch_1v4): WASH confirmed at n=4 ABBA
+Retest of the batched sidecar send on the newest build, i2t B32, 4 ABBA rounds:
+A (off) 8.047/6.677/7.775/8.269, B (on) 7.662/7.159/6.263/7.888 req/s. A-mean
+7.69 vs B-mean 7.24, high per-cell variance (p99/med up to 2.02) — consistent
+with the earlier washed-negative verdict; the freed host milliseconds are
+absorbed into the worker.py:3193 await-GPU wait. Family stays CLOSED.
+
+## 2026-07-06 — sweep_mstar_v4 staging + chart repair (process entry, no new perf)
+Staged benchmarks/qwen3-omni-joint/sweep_mstar_v4/ = median representative
+results.json per (path,batch) from the 07-05/06 iteration cells: i2t B1 1.010,
+B2 1.521, B4 2.455, B16 6.142, B32 7.524; s2t B2 10.797, B4 13.536, B16 25.541,
+B32 35.794 req/s. B8 (both) and s2t B1 intentionally not overridden (no new
+same-protocol data; v3 values remain current). gen_v4_charts.py rewritten to
+the ORIGINAL 2×2 4-metric square (text: tok/s | req/s | TTFT p50 | ITL mean;
+speech: audio s/s | RTF p50 | TTFT | ITL, audio-side latency keys) with a
+per-METRIC layered merge (committed v2 → v3 → v4): an override only replaces
+metrics it actually carries, so closed-loop cells lacking TTFT no longer drop
+committed blue points. First regeneration had two defects (1×n row layout;
+whole-cell v3 override eating latency points) — both fixed and re-pushed.
+
+## 2026-07-06 — remote hygiene: all M* branches on fork
+Verified every opt/* and exp/* branch against fork (git@github.com:t-avil/mstar.git);
+only opt/mixed-walk was missing — pushed. The full campaign code state is now
+recoverable from the fork + the benchmarks branch alone.
