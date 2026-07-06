@@ -1,0 +1,27 @@
+`trust_remote_code` is not supported anymore.
+Please check that the Hugging Face dataset 'openslr/librispeech_asr' isn't based on a loading script and remove `trust_remote_code`.
+If the dataset is based on a loading script, please ask the dataset author to remove it and convert it to a standard format like Parquet.
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'interleaved', 'mrope_section'}
+
+--- Benchmark Results (wall time: 2.21s) ---
+Closed-Loop Benchmark Results (12 requests, max_concurrency=4)
+──────────────────────────────────────────────────
+Request type breakdown: audio_to_speech=12
+Requests : 12/12 succeeded
+TTFT (audio)  : mean=0.366s  p50=0.359s  p95=0.421s  p99=0.429s
+TTFT (text)   : mean=0.102s  p50=0.090s  p95=0.170s  p99=0.182s
+E2E           : mean=0.685s  p50=0.686s  p95=0.916s  p99=0.944s
+ITL  (audio)  : mean=0.164s  p50=0.190s  p95=0.229s  p99=0.244s
+ITL  (text)   : mean=0.009s  p50=0.007s  p95=0.022s  p99=0.036s
+Audio SV      : mean=1.000s  p50=1.000s  p05=1.000s  p10=1.000s  (higher is better)
+RTF           : mean=0.147  p50=0.140  p95=0.200  p99=0.205  (lower is better; <1.0 = real-time)
+Audio dur    : mean=4.913s
+Text tokens: 254 total (21.2 avg/req)
+Output bytes (audio): 2829900 total (35 chunks)
+Output bytes (text): 1241 total (254 chunks)
+Throughput: 5.44 req/s (successful only)
+Throughput: 115.09 text tok/s
+Throughput: 26.71 audio sec/s (synthesized audio per wall second)
+Total wall time: 2.21s
+
+Saved 24 outputs to /m-coriander/coriander/tim/sweep_mstar_v5/s2s/B4/

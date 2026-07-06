@@ -1,0 +1,105 @@
+{
+  "system": "ours",
+  "inference_system": "ours",
+  "model": "Qwen3Omni",
+  "request_type": "audio_to_text",
+  "profiling_type": "closed_loop",
+  "num_requests": 6,
+  "num_warmup": 4,
+  "completed": 6,
+  "failed": 0,
+  "wall_time_s": 0.5759511101059616,
+  "jct_mean_ms": 181.4438063496103,
+  "jct_median_ms": 173.85205603204668,
+  "jct_p90_ms": 245.15102745499462,
+  "jct_p95_ms": 249.77956217480823,
+  "jct_p99_ms": 253.48238995065913,
+  "request_throughput": 10.41755089055413,
+  "text_token_throughput": 194.46094995701043,
+  "audio_seconds_throughput": null,
+  "audio_duration_mean_s": null,
+  "batch_size": 1,
+  "max_concurrency": 2,
+  "ttft": {
+    "text": {
+      "mean": 0.07917131386542071,
+      "p50": 0.07867113850079477,
+      "higher_is_better": false,
+      "p95": 0.09454206732334569,
+      "p99": 0.09741602070862428,
+      "p05": null,
+      "p10": null
+    }
+  },
+  "itl": {
+    "text": {
+      "mean": 0.005721016130234413,
+      "p50": 0.004619123064912856,
+      "higher_is_better": false,
+      "p95": 0.013372036453802139,
+      "p99": 0.02077098209410906,
+      "p05": null,
+      "p10": null
+    }
+  },
+  "e2e_latency": {
+    "mean": 0.1814438063496103,
+    "p50": 0.16969631204847246,
+    "higher_is_better": false,
+    "p95": 0.24977956217480823,
+    "p99": 0.25348238995065914,
+    "p05": null,
+    "p10": null
+  },
+  "rtf": null,
+  "per_request": [
+    {
+      "request_id": 0,
+      "jct_ms": 235.8939580153674,
+      "type": "audio_to_text",
+      "output_bytes": {
+        "text": 125
+      }
+    },
+    {
+      "request_id": 1,
+      "jct_ms": 254.40809689462185,
+      "type": "audio_to_text",
+      "output_bytes": {
+        "text": 140
+      }
+    },
+    {
+      "request_id": 2,
+      "jct_ms": 173.85205603204668,
+      "type": "audio_to_text",
+      "output_bytes": {
+        "text": 91
+      }
+    },
+    {
+      "request_id": 3,
+      "jct_ms": 126.84469996020198,
+      "type": "audio_to_text",
+      "output_bytes": {
+        "text": 53
+      }
+    },
+    {
+      "request_id": 4,
+      "jct_ms": 132.1234591305256,
+      "type": "audio_to_text",
+      "output_bytes": {
+        "text": 45
+      }
+    },
+    {
+      "request_id": 5,
+      "jct_ms": 165.54056806489825,
+      "type": "audio_to_text",
+      "output_bytes": {
+        "text": 105
+      }
+    }
+  ]
+}

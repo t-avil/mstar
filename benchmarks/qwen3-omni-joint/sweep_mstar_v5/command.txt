@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# FULL 24-cell M*-only sweep on the newest build (opt/prep-h2d + CDT env).
+# Waits for WARM+READY on the 'best' lab server (port 8321), then runs
+# {i2t,s2t,s2s,i2s} x {1,2,4,8,16,32} closed-loop, same protocol/n as
+# h2h_cells.sh. Writes sweep_mstar_v5/<path>/B<b>/; sentinel SWEEP_V5_DONE
+# only after all 24 cells produced results.json.
+set -uo pipefail
+export HF_HOME=/m-coriander/coriander/hf HF_DATASETS_CACHE=/m-coriander/coriander/tim/hf_datasets
+CVENV=/home/tim/mstar-encoders/.venv
+BENCH=/m-coriander/coriander/tim/bench-v2
+OUT=/m-coriander/coriander/tim/sweep_mstar_v5
+BOOTLOG=/m-coriander/coriander/tim/sweep_v5_boot.log
+URL=http://127.0.0.1:8321
+NODE=1
+declare -A P=( [i2t]=image_to_text [s2t]=audio_to_text [i2s]=image_to_speech [s2s]=audio_to_speech )
+declare -A DS=( [i2t]=food101 [s2t]=libri [i2s]=food101 [s2s]=libri )
+declare -A CACHE=( [i2t]=/m-coriander/coriander/hf [s2t]=/home/tim/tmp/libri_wavs [i2s]=/m-coriander/coriander/hf [s2s]=/home/tim/tmp/libri_wavs )
+nfor(){ case $1 in 1) echo 12;; 8) echo 48;; 32) echo 96;; *) echo $((3*$1));; esac; }
+log(){ echo "[$(date -u +%H:%M:%S)] $*"; }
+
+# ---- wait for WARM+READY (boot can take ~20 min even with caches) ----
+for i in $(seq 1 240); do
+  grep -q "WARM+READY" "$BOOTLOG" && break
+  grep -qiE "CRASH|Traceback|FATAL" "$BOOTLOG" && { log "BOOT_FAILED"; tail -5 "$BOOTLOG"; exit 1; }
+  sleep 15
+done
+grep -q "WARM+READY" "$BOOTLOG" || { log "BOOT_TIMEOUT (60 min)"; exit 1; }
+log "SERVER WARM+READY — starting 24-cell sweep"
+mkdir -p "$OUT"
+date -u +%Y%m%dT%H%M%SZ > "$OUT/started_utc.txt"
+
+fail=0
+for s in i2t s2t s2s i2s; do
+  for b in 1 2 4 8 16 32; do
+    n=$(nfor $b); od="$OUT/$s/B$b"; mkdir -p "$od"
+    PYTHONPATH=$BENCH timeout 2400 numactl --cpunodebind=$NODE --membind=$NODE \
+      "$CVENV/bin/python" -m benchmark.runner --url "$URL" --model qwen3omni \
+      --request-type "${P[$s]}" --dataset "${DS[$s]}" --profiling-type closed_loop \
+      --max-concurrency "$b" --num-requests "$n" --num-warmup 4 \
+      --inference-system ours --local-cache "${CACHE[$s]}" \
+      --output-dir "$od" > "$od/run.log" 2>&1
+    "$CVENV/bin/python" - "$od" "$s" "$b" <<'PY' || { echo "SWEEPV5 $s B$b FAIL"; fail=1; }
+import json,sys
+od,s,b=sys.argv[1:4]
+d=json.load(open(f"{od}/results.json"))
+tok=d.get('text_token_throughput') or 0
+print(f"SWEEPV5 {s} B{b} req/s {d['request_throughput']:.3f} tok/s {tok:.1f} jct {d['jct_mean_ms']:.0f}")
+PY
+    sleep 2
+  done
+done
+
+[ $fail -eq 0 ] && { date -u +%Y%m%dT%H%M%SZ > "$OUT/SWEEP_V5_DONE"; log "SWEEP_V5_DONE"; } || log "SWEEP_V5_INCOMPLETE (fail cells above)"

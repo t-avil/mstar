@@ -1,0 +1,9 @@
+ on the ingredients visible in the image, this dish is a **Caprese salad**.
+
+It is a classic Italian salad, typically composed of:
+*   **Fresh mozzarella cheese:** The white, soft, sliced cheese in the center.
+*   **Ripe tomatoes:** The red, sliced tomatoes that form the base and are layered around the cheese.
+*   **Fresh basil:** The green leaves scattered on top.
+*   **Olive oil and balsamic glaze:** The glistening liquid drizzled over the salad.
+
+The name "Caprese" comes from the Italian island of Capri, where the dish is said to have originated.<|im_end|>Based

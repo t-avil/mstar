@@ -2058,3 +2058,18 @@ whole-cell v3 override eating latency points) — both fixed and re-pushed.
 Verified every opt/* and exp/* branch against fork (git@github.com:t-avil/mstar.git);
 only opt/mixed-walk was missing — pushed. The full campaign code state is now
 recoverable from the fork + the benchmarks branch alone.
+
+## 2026-07-06 — FULL 24-cell one-boot sweep on the winning build (sweep_mstar_v5)
+First uniform single-boot sweep since the iteration campaign; launch_mstar_best.sh
+(opt/prep-h2d 620de91 + CDT env) on canonical 6,7; boot 16.5 min (inductor cache
+hit), all 24 cells in 16.5 min, protocol = h2h nfor, 4 warmups/cell, closed loop.
+vs COMMITTED vLLM refs: 15/24 clear wins — speech 12/12 at 2.31-3.07x, s2t B2
+1.14 / B8 1.05 / B16 1.23, i2t B8 1.34 / B16 1.28. Parity: i2t B1 0.99, s2t B4
+0.99, s2t B32 1.00. BELOW in this snapshot: s2t B1 0.713, i2t B2 0.900, i2t B4
+0.945, i2t B32 0.923. Every below/parity cell is a small-n cell (n=6-12, seconds
+of measured wall) or the known-volatile B32; the uniform pass has NO criterion
+warm-in per cell (single 4-warmup preamble), unlike the graded targeted runs
+that measured these same cells at 1.04-1.21x. Raw committed at
+benchmarks/qwen3-omni-joint/sweep_mstar_v5 (env.txt, requirements, command,
+SWEEP_V5_DONE sentinel). Charts blue solid = v5 layered over v3/v4 per-metric.
+Follow-up: targeted re-verification of the 4 soft cells with criterion warm-in.

@@ -1,0 +1,9 @@
+Based on the visual characteristics of the food in the image, this dish is **Xiaolongbao** (also known as **soup dumplings**).
+
+Here are the key features that lead to this identification:
+
+*   **Steamed Dumplings:** They are small, round dumplings that have been cooked by steaming, which is evident from the condensation on the parchment paper and the soft, plump appearance of the wrappers.
+*   **Pleated Top:** The dumplings have a distinctive pleated top, which is pinched to seal the filling inside. This is a classic characteristic of Xiaolongbao.
+*   **Serving Method:** They are served in a bamboo steamer basket, which is the traditional vessel for cooking and serving these dumplings.
+
+Xiaolongbao are a famous type of soup dumpling originating from the Jiangnan region of China, particularly associated with the city of Wuxi. The defining feature of a true Xiaolongbao is the hot, savory soup inside, which is created by using a gelatinized broth that melts into liquid when steamed.<|im_end|>

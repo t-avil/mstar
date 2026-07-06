@@ -36,6 +36,7 @@ TITLE = {"audio_to_text": "S2T  (audio -> text)", "image_to_text": "I2T  (image 
 BATCHES = [1, 2, 4, 8, 16, 32]
 V3 = "/m-coriander/coriander/tim/sweep_mstar_v3"
 V4 = "/m-coriander/coriander/tim/sweep_mstar_v4"
+V5 = "/m-coriander/coriander/tim/sweep_mstar_v5"  # 07-06 full 24-cell sweep
 
 
 def g(h, k, sub):
@@ -133,13 +134,21 @@ def load(path):
                 cell["ttft"] = r["ttft"]
             if cell.get("itl") is None:
                 cell["itl"] = r["itl"]
-        # the new stack doesn't touch audio: committed v2 stays "current"
+        # v5 (07-06 full sweep on the winning build) refreshes speech too —
+        # per-metric merge, audio-side latency.
+        for bdir in sorted(glob.glob(f"{V5}/{s}/B*")):
+            b = int(os.path.basename(bdir)[1:])
+            try:
+                res = json.load(open(f"{bdir}/results.json"))
+            except FileNotFoundError:
+                continue
+            merge(out["mnew_cur"].setdefault(b, {}), from_results(res, mod))
         return out
 
-    # v3 (final stack, 07-03) then v4 (07-05/06 iteration) overrides for
-    # mnew_cur — TEXT paths only, per-METRIC merge so committed points that
-    # a sweep cell doesn't carry (e.g. closed-loop TTFT) are never dropped.
-    for root in (V3, V4):
+    # v3 (final stack, 07-03), v4 (07-05/06 iteration), then v5 (07-06 full
+    # sweep) overrides for mnew_cur — per-METRIC merge so committed points
+    # that a sweep cell doesn't carry are never dropped.
+    for root in (V3, V4, V5):
         for bdir in sorted(glob.glob(f"{root}/{s}/B*")):
             b = int(os.path.basename(bdir)[1:])
             try:

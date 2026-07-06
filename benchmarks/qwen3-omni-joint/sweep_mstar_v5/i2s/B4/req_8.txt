@@ -1,0 +1,9 @@
+Based on the visual characteristics of the food in the image, this dish is most likely **spring rolls**.
+
+Here are the key details that lead to this identification:
+
+*   **Wrapping:** The rolls are encased in a thin, translucent wrapper that appears to be rice paper, which is characteristic of fresh spring rolls (also known as summer rolls).
+*   **Fillings:** The visible fillings include fresh ingredients such as green lettuce, shredded carrots, and other vegetables. The roll on the left also appears to contain a slice of a pinkish ingredient, which could be cooked shrimp or a type of cured meat like ham.
+*   **Serving Style:** They are served cold or at room temperature on a plate, often accompanied by a dipping sauce, which is typical for this dish.
+
+This dish is a popular appetizer in various Asian cuisines, particularly Vietnamese (where they are called *gỏi cuốn*), Thai, and Chinese.<|im_end|>

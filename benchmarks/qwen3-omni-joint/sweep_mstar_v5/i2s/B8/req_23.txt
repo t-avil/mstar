@@ -1,0 +1,9 @@
+Based on the visual characteristics of the food in the image, this dish is **Xiaolongbao** (also known as **soup dumplings**).
+
+Here are the key features that lead to this identification:
+
+*   **Steamed Dumplings:** They are small, round dumplings with a thin, translucent wrapper, which is characteristic of dumplings steamed in a bamboo basket, as shown in the photo.
+*   **Pleated Top:** The dumplings have a distinct pleated top, which is a signature feature of Xiaolongbao. This pleating is not just decorative; it's a technique used to seal the dumpling and create a pocket for the filling.
+*   **Filling:** The name "soup dumpling" comes from the fact that they are filled with a mixture of meat (usually pork) and a gelatinized broth. When steamed, the gelatin melts into a hot, savory soup. The dumplings in the image appear plump, suggesting they are filled with this liquid.
+
+In summary, the combination of the steamed, pleated, and plump appearance strongly indicates that these are Xiaolongbao, a famous type of soup dumpling originating from the Jiangnan region of China.<|im_end|>

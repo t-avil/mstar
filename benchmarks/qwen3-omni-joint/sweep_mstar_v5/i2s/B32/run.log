@@ -1,0 +1,24 @@
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'interleaved', 'mrope_section'}
+
+--- Benchmark Results (wall time: 45.33s) ---
+Closed-Loop Benchmark Results (96 requests, max_concurrency=32)
+──────────────────────────────────────────────────
+Request type breakdown: image_to_speech=96
+Requests : 96/96 succeeded
+TTFT (audio)  : mean=2.423s  p50=1.175s  p95=7.335s  p99=7.955s
+TTFT (text)   : mean=1.632s  p50=0.461s  p95=4.243s  p99=4.264s
+E2E           : mean=13.877s  p50=14.530s  p95=22.655s  p99=23.890s
+ITL  (audio)  : mean=0.525s  p50=0.491s  p95=0.811s  p99=3.030s
+ITL  (text)   : mean=0.016s  p50=0.007s  p95=0.022s  p99=0.208s
+Audio SV      : mean=0.985s  p50=1.000s  p05=0.949s  p10=0.955s  (higher is better)
+RTF           : mean=0.332  p50=0.318  p95=0.467  p99=0.822  (lower is better; <1.0 = real-time)
+Audio dur    : mean=44.118s
+Text tokens: 16757 total (174.6 avg/req)
+Output bytes (audio): 203294070 total (2188 chunks)
+Output bytes (text): 73081 total (16757 chunks)
+Throughput: 2.12 req/s (successful only)
+Throughput: 369.69 text tok/s
+Throughput: 93.44 audio sec/s (synthesized audio per wall second)
+Total wall time: 45.33s
+
+Saved 192 outputs to /m-coriander/coriander/tim/sweep_mstar_v5/i2s/B32/
