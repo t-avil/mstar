@@ -49,18 +49,34 @@ logger = logging.getLogger(__name__)
 _PREP_DEVICE_POS = os.environ.get(
     "MSTAR_PREP_DEVICE_POS", "0"
 ).strip().lower() in ("1", "true", "yes", "on")
+# MSTAR_PREP_DEVICE_POS_BATCHED (default OFF): same fix, but for the B>1
+# thinker_decode path (`prepare_inputs_batched`). The B1 flag above only patches
+# the per-request `prepare_inputs`; `prepare_inputs_batched` — which serves the
+# ENTIRE throughput regime (B2..B32, incl. the cells we lose to vLLM 0.22) — still
+# built pos_ids via `torch.tensor(starts).to(cuda, non_blocking=True)` from a
+# PAGEABLE source, so non_blocking is silently ignored -> a blocking H2D +
+# implicit sync on the decode thread every step. This flag replaces it with a
+# reusable PINNED host buffer + a genuinely async H2D. Input-build only,
+# capture-safe (the value copied into the captured static input is identical).
+_PREP_DEVICE_POS_BATCHED = os.environ.get(
+    "MSTAR_PREP_DEVICE_POS_BATCHED", "0"
+).strip().lower() in ("1", "true", "yes", "on")
 _PREP_POS_HITS = [0]  # prep_pos_device_hits (mechanism-alive counter)
 
 
 def _refresh_prep_flags() -> None:
-    """MSTAR_DYNFLAGS hook: re-read the flag at runtime. Safe to flip mid-run —
-    it only changes how the pos_ids INPUT tensor is built (empty+fill vs
-    torch.tensor), nothing baked into the CUDA-graph capture; the value fed to
-    the graph is byte-identical either way. Enables a clean SINGLE-BOOT dynflag
-    A/B (cross-boot A/Bs carry the warm-in/ordering noise documented 2026-07-05)."""
-    global _PREP_DEVICE_POS
+    """MSTAR_DYNFLAGS hook: re-read the flags at runtime. Safe to flip mid-run —
+    they only change how the pos_ids INPUT tensor is built (pinned async vs
+    pageable torch.tensor), nothing baked into the CUDA-graph capture; the value
+    fed to the graph is byte-identical either way. Enables a clean SINGLE-BOOT
+    dynflag A/B (cross-boot A/Bs carry the warm-in/ordering noise documented
+    2026-07-05)."""
+    global _PREP_DEVICE_POS, _PREP_DEVICE_POS_BATCHED
     _PREP_DEVICE_POS = os.environ.get(
         "MSTAR_PREP_DEVICE_POS", "0"
+    ).strip().lower() in ("1", "true", "yes", "on")
+    _PREP_DEVICE_POS_BATCHED = os.environ.get(
+        "MSTAR_PREP_DEVICE_POS_BATCHED", "0"
     ).strip().lower() in ("1", "true", "yes", "on")
 
 
@@ -606,7 +622,22 @@ class ThinkerSubmodule(ARNodeSubmodule):
         starts = [
             pi.get("main", PositionInfo()).position_id_start for pi in pos_infos
         ]
-        pos = torch.tensor(starts, dtype=torch.float).to(device, non_blocking=True)
+        if _PREP_DEVICE_POS_BATCHED:
+            # Sync-free: write starts into a reusable PINNED host buffer, then a
+            # genuinely async H2D. Replaces the pageable torch.tensor(starts)
+            # whose non_blocking=True was a no-op (unpinned src -> blocking copy).
+            # start_pos values are read FRESH from pos_infos each step (the
+            # advance_seq_lens source of truth), so positions can't drift.
+            n = len(starts)
+            host = getattr(self, "_pos_host_buf", None)
+            if host is None or host.numel() < n:
+                host = torch.empty(max(n, 32), dtype=torch.float, pin_memory=True)
+                self._pos_host_buf = host
+            host.numpy()[:n] = starts                    # host-side write, no sync
+            pos = host[:n].to(device, non_blocking=True)  # async H2D from pinned
+            _prep_pos_count()
+        else:
+            pos = torch.tensor(starts, dtype=torch.float).to(device, non_blocking=True)
         pos3 = pos.unsqueeze(0).expand(3, -1)            # (3, bs)
         mask = self._get_decode_thinker_mask(device)
         return [
