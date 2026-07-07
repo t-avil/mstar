@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+import os
 import torch
 import triton
 import triton.language as tl
@@ -398,14 +399,38 @@ def moe_sum_reduce_triton(
 # ---------------------------------------------------------------------------
 
 
+# Per-M-bucket tuned decode configs (M<=E regime), from an isolated microbench
+# of fused_experts at the Qwen3-Omni Thinker MoE shape (hidden=2048, E=128,
+# top_k=8, inter=768, bf16, H200) — moe_microbench.py, 2026-07-07. The old
+# hardcoded {16,32,64,1} never set num_warps/num_stages (Triton defaults);
+# tuning them + BLOCK_N/K gives ~1.03-1.12x on the GEMM (biggest at M=4-8).
+# Numerically identical output; pure tile/launch selection. Gate: MSTAR_MOE_AUTOTUNE.
+_DECODE_MOE_CONFIGS: Dict[int, Dict[str, int]] = {
+    1:  {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 64,  "BLOCK_SIZE_K": 64,  "GROUP_SIZE_M": 1, "num_warps": 8, "num_stages": 4},
+    2:  {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 64,  "GROUP_SIZE_M": 1, "num_warps": 8, "num_stages": 3},
+    4:  {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64,  "BLOCK_SIZE_K": 256, "GROUP_SIZE_M": 8, "num_warps": 8, "num_stages": 4},
+    8:  {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 64,  "GROUP_SIZE_M": 8, "num_warps": 4, "num_stages": 4},
+    16: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64,  "BLOCK_SIZE_K": 64,  "GROUP_SIZE_M": 8, "num_warps": 8, "num_stages": 4},
+    32: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64,  "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 1, "num_warps": 8, "num_stages": 4},
+    48: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 8, "num_warps": 8, "num_stages": 4},
+    64: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64,  "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 8, "num_warps": 4, "num_stages": 3},
+}
+_MOE_AUTOTUNE = os.environ.get("MSTAR_MOE_AUTOTUNE", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
 def get_default_config(M: int, E: int, N: int, K: int, top_k: int) -> Dict[str, int]:
     """Pick Triton tile sizes based on problem shape.
 
-    Mirrors sglang's ``get_default_config`` for the unquantized path.
-    For decode batch sizes (``M`` on the order of 1--64) we always fall
-    into the ``M <= E`` branch since Qwen3-Omni has ``E == 128``.
+    For decode batch sizes (``M`` 1--64) we fall into the ``M <= E`` branch since
+    Qwen3-Omni has ``E == 128``. With MSTAR_MOE_AUTOTUNE=1 use the per-M-bucket
+    microbench-tuned table (rounds M up to the nearest tuned bucket); otherwise
+    the legacy hardcoded default. Boot-static (config is a captured-graph constexpr).
     """
     if M <= E:
+        if _MOE_AUTOTUNE:
+            for bucket in (1, 2, 4, 8, 16, 32, 48, 64):
+                if M <= bucket:
+                    return dict(_DECODE_MOE_CONFIGS[bucket])
         return {
             "BLOCK_SIZE_M": 16,
             "BLOCK_SIZE_N": 32,
