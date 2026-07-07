@@ -88,6 +88,7 @@ class BatchedCacheManager:
         cuda_graph_plan_states: dict[str, _PlanState] | None = None,
         auto_write_store: bool=False,
         enable_nvtx: bool=False,
+        side_stream: bool=False,
     ):
         self.request_ids = request_ids
         self.active_labels = active_labels_per_request  # {req_id: label}
@@ -98,6 +99,18 @@ class BatchedCacheManager:
         self.device = device
         self.layer_idx = 0
         self.enable_nvtx = enable_nvtx
+
+        # MSTAR_SIDE_PREFILL: a side-stream prefill runs eager, CONCURRENTLY
+        # with the main GPU thread's own eager work. FlashInfer's plan() writes
+        # per-batch scheduling metadata into the shared workspace buffer that
+        # run()'s kernels later read; two eager batches sharing one workspace
+        # (both keyed by cache label "main") race and corrupt each other's
+        # schedule. A side manager suffixes the WORKSPACE key only (never the KV
+        # cache label — pages stay under the real label), so its FlashInfer
+        # scratch/plan workspace is disjoint from any main-thread "main"
+        # workspace and its plan+q are self-consistent under concurrency.
+        # Empty suffix off the side path => byte-identical buffer keys.
+        self._ws_suffix = "__side" if side_stream else ""
 
         self.auto_write_store = auto_write_store
 
@@ -352,7 +365,9 @@ class BatchedCacheManager:
             wrapper = ps.wrapper
         elif is_decode:
             wrapper = FlashInferDecodeWrapper(
-                workspace_buffer=self.buffer_manager.get(effective_label),
+                workspace_buffer=self.buffer_manager.get(
+                    effective_label + self._ws_suffix
+                ),
                 num_qo_heads=num_qo_heads,
                 num_kv_heads=num_kv_heads,
                 head_dim=head_dim,
@@ -364,7 +379,9 @@ class BatchedCacheManager:
             self._plan_states[effective_label] = ps
         else:
             wrapper = FlashInferPrefillWrapper(
-                workspace_buffer=self.buffer_manager.get(effective_label),
+                workspace_buffer=self.buffer_manager.get(
+                    effective_label + self._ws_suffix
+                ),
                 num_qo_heads=num_qo_heads,
                 num_kv_heads=num_kv_heads,
                 head_dim=head_dim,
@@ -607,7 +624,9 @@ class BatchedCacheManager:
         paged_kv_last_page_len = torch.tensor(kv_last_page_lens, dtype=torch.int32)
 
         wrapper = FlashInferPrefillWrapper(
-            workspace_buffer=self.buffer_manager.get(combined_label),
+            workspace_buffer=self.buffer_manager.get(
+                combined_label + self._ws_suffix
+            ),
             num_qo_heads=num_qo_heads,
             num_kv_heads=num_kv_heads,
             head_dim=head_dim,

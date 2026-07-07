@@ -32,6 +32,7 @@ untouched.
 from __future__ import annotations
 
 import os
+import threading
 
 import torch
 
@@ -44,21 +45,38 @@ import torch
 # op body does not re-run (its kernels were recorded), so the global matters
 # solely on the warmup / capture / eager-serve paths, each of which sets it
 # just-in-time.
+#
+# THREAD-LOCAL (MSTAR_SIDE_PREFILL correctness). This registry is published by
+# whichever thread is about to run a forward and read back inside the custom op
+# on that SAME thread. With MSTAR_SIDE_PREFILL the side-executor thread runs an
+# eager Thinker prefill CONCURRENTLY with the main GPU thread running its own
+# eager forward (e.g. a graph-missed decode/mixed step). A single module global
+# would let the two threads clobber each other's publication: the side forward's
+# ``get_active_manager()`` could return the MAIN thread's manager, whose
+# FlashInfer prefill wrapper was planned for a DIFFERENT token count, so
+# ``wrapper.run(side_q)`` trips FlashInfer's ``q.shape[0] != qo_indptr[-1]``
+# consistency check (the 315-vs-250 race). A thread-local slot makes each
+# thread resolve to the manager IT published, so a side forward always uses the
+# side manager (and its own dedicated wrapper/workspace) and the two paths are
+# self-consistent. Every publish/read pair already lives on one thread (the
+# engine executes plan_attention + forward synchronously on its executor
+# thread), so this is byte-identical to the old global when only one thread is
+# ever active — i.e. default-off (MSTAR_SIDE_PREFILL unset) and single-GPU-
+# thread serving are unchanged. CUDA-graph replay never reads the registry.
 # --------------------------------------------------------------------------
-_ACTIVE_MANAGER = None
+_ACTIVE_MANAGER = threading.local()
 
 
 def set_active_manager(mgr) -> None:
-    global _ACTIVE_MANAGER
-    _ACTIVE_MANAGER = mgr
+    _ACTIVE_MANAGER.mgr = mgr
 
 
 def get_active_manager():
-    mgr = _ACTIVE_MANAGER
+    mgr = getattr(_ACTIVE_MANAGER, "mgr", None)
     assert mgr is not None, (
         "compile_ops: no active BatchedCacheManager. A custom op ran without a "
         "manager published by the driver -- set_active_manager was not called "
-        "on this forward path."
+        "on this forward path (this thread)."
     )
     return mgr
 

@@ -2156,9 +2156,23 @@ class Worker:
         decode replays on the default stream and downstream token-
         materialization waits gate on the correct stream. The captured graphs
         carry no stream affinity (torch.cuda.graph captures on its own
-        internal stream), so replay on a side stream is valid; prefill and
-        decode use disjoint static I/O buffers and FlashInfer workspaces, so
-        concurrent execution does not corrupt.
+        internal stream), so replay on a side stream is valid.
+
+        Concurrency isolation (verified, was previously overclaimed): the side
+        batch is forced eager (``_can_use_cuda_graph`` returns False for
+        ``metadata["side_stream"]``), so it never replays a captured decode
+        graph and never touches decode's per-slot static I/O buffers. The two
+        remaining pieces of shared state that a concurrent main-thread EAGER
+        forward would otherwise race are now isolated for the side path:
+          1. The custom-op forward-context (``compile_ops._ACTIVE_MANAGER``) is
+             thread-local, so the side forward resolves its OWN cache manager /
+             FlashInfer wrapper, not the main thread's (this was the
+             ``q.shape[0] != qo_indptr[-1]`` race).
+          2. The FlashInfer plan/scratch workspace is keyed with a ``__side``
+             suffix for the side manager (BatchedCacheManager ``side_stream``),
+             disjoint from the main-thread "main" workspace.
+        So a side prefill's plan and q are self-consistent and cannot be
+        clobbered by concurrent default-stream work.
         """
         from mstar.utils.profiler import range_pop, range_push
 

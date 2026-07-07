@@ -183,9 +183,17 @@ class KVCacheEngine(BaseEngine):
 
     def _create_cache_manager(
         self, request_ids: list[str],
-        node_name: str
+        node_name: str,
+        side_stream: bool = False,
     ) -> BatchedCacheManager:
-        """Create a CacheHandle for a single request."""
+        """Create a CacheHandle for a single request.
+
+        ``side_stream`` (MSTAR_SIDE_PREFILL): route this manager's FlashInfer
+        scratch/plan workspace to a dedicated buffer disjoint from the main
+        thread's "main" workspace, so a side-stream eager prefill cannot race
+        the main GPU thread's concurrent eager work on the shared workspace.
+        Only the workspace key is affected; the KV cache label is unchanged.
+        """
         submod_mgmt = self.submodule_management[node_name]
         cache_mgmt = submod_mgmt.kv_management
 
@@ -202,6 +210,7 @@ class KVCacheEngine(BaseEngine):
             device=self.device,
             auto_write_store=autowrite,
             enable_nvtx=self.enable_nvtx,
+            side_stream=side_stream,
         )
 
     def _compile_submodules(self) -> None:
@@ -405,7 +414,8 @@ class KVCacheEngine(BaseEngine):
     ) -> NodeOutput:
         """Execute batch with BatchedCacheManager for true vectorized batching."""
         cache_manager = self._create_cache_manager(
-            batch.request_ids, batch.node_name
+            batch.request_ids, batch.node_name,
+            side_stream=bool(batch.metadata.get("side_stream")),
         )
         engine_inputs = ModelInputsFromEngine(
             request_ids=batch.request_ids,
@@ -487,8 +497,11 @@ class KVCacheEngine(BaseEngine):
         """Original per-request execution with CacheHandle."""
         per_request_outputs = {}
 
+        side_stream = bool(batch.metadata.get("side_stream"))
         for rid, node_inputs in zip(batch.request_ids, inputs, strict=True):
-            cache_manager = self._create_cache_manager([rid], batch.node_name)
+            cache_manager = self._create_cache_manager(
+                [rid], batch.node_name, side_stream=side_stream,
+            )
             inputs = batch.per_request_input_tensors.get(rid, {})
             engine_inputs = ModelInputsFromEngine(
                 request_ids=[rid],
