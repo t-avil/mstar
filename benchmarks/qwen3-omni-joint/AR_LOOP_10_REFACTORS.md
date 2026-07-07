@@ -11,6 +11,37 @@ are current-checkout). **V/** = vLLM `…/vllm-omni/.venv/…/site-packages/vllm
 
 ---
 
+## ⚠️ SCOREBOARD REFRAME (2026-07-07) — the decode floor is NOT the i2t loss
+
+Fresh measurement on the current best build (`mstar-new` @ 8402, GPUs 6/7, all opt
+flags ON: SIDECAR_CHECKSTOP, FAST_POSTPROC/ROUTE/SEND, SLIM_EMIT, PREP_DEVICE_POS,
+MIXED_BATCH, MERGED_PREFILL, CHUNKED_PREFILL_V2, MOE_FP8/AUTOTUNE, CUSTOM_OPS) vs the
+committed vLLM 0.22 h2h. i2t, warmup 10, `--ignore-eos`:
+
+| B | M* req/s | vLLM req/s | M* ITL | vLLM ITL | **M* TTFT** | **vLLM TTFT** |
+|---|---|---|---|---|---|---|
+| 1 | **0.98** ✅ | 0.88 | **4.3** ✅ | 4.8 | 196 | 87 |
+| 8 | **4.20** ✅ | 3.67 | **6.1** ✅ | 9.6 | 486 | 100 |
+| 16 | **5.89** ✅ | 5.62 | **7.1** ✅ | 11.9 | 912 | 168 |
+| 32 | 7.42 ❌ | **8.32** | **9.3** ✅ | 15.4 | **2400** | **179** |
+
+**M* already beats vLLM on ITL at every batch, and on req/s at B1–B16.** At B32 len512
+(decode-dominated) M* does **1771 tok/s vs vLLM 1769** with **ITL 10 vs 15.4** — decode
+is at parity-or-better. **The one and only i2t loss is B32 req/s, caused 100% by TTFT:**
+~2400 ms vs vLLM's flat 179 ms (**14×**). vLLM holds TTFT flat across batch (chunked +
+fairly-scheduled prefill); M* prefill serializes at high concurrency. The already-on
+mixed-prefill flags only nudged it (2532→2369).
+
+**Consequence for this doc:** R1–R10 optimize the *decode* floor (ITL, tok/s) — exactly
+the axes M* already wins. **They cannot close the B32 loss.** The real best-ROI target is
+**B32 TTFT = prefill admission/chunking scheduling** (make a waiting request's first
+prefill chunk run promptly instead of behind the full queue — vLLM's flat-TTFT behavior).
+Parity note: pure chunking of a single prefill is parity-safe (same attention math, same
+tokens); it's the *co-batching* of prefill+decode (already shipped as MIXED_BATCH) that
+carries the batch-composition parity risk. Pursue the chunk/admission-order lever, not more
+decode work. Keep R1/R4 only as ITL-tail (p99) polish — decode p99 spikes to 133 ms from
+GIL contention, a latency (not throughput) nicety.
+
 ## A. Empirical floor — where the GIL thread actually spends decode CPU
 
 Profiled PID 2521088 (the Thinker decode worker, GPU 7) under `--max-concurrency 32
