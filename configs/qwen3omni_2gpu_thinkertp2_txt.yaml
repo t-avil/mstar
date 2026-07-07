@@ -1,0 +1,17 @@
+# Text-path (i2t/s2t) config: Thinker sharded TP=2 across BOTH GPUs so the 30B
+# text model uses all hardware during decode (vs speech-colocated 2gpu_encoff
+# which leaves rank 0 idle during text generation). Talker/Code2Wav/encoders
+# colocated on rank 0 (loaded but never invoked for text output — costs memory,
+# not compute).
+model: "qwen3_omni"
+max_seq_len: 32768
+node_groups:
+  - node_names: [Thinker]
+    ranks: [0, 1]
+    tp_size: 2
+  - node_names: [audio_encoder, vision_encoder]
+    ranks: [0]
+  - node_names: [Talker]
+    ranks: [0]
+  - node_names: [Code2Wav]
+    ranks: [0]

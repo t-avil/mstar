@@ -149,11 +149,16 @@ class WorkerTPGroups:
         if not self.any_tp:
             return
 
+        # Pin the device for this rank so NCCL does not "guess device ID based
+        # on global rank" — with CUDA_VISIBLE_DEVICES remapping (e.g. 4,5,6,7)
+        # that guess is heterogeneous and deadlocks the first collective. The
+        # visible-device index for this rank equals global_rank (set_device above).
         dist.init_process_group(
             backend="nccl",
             init_method=init_method,
             world_size=self.num_workers,
             rank=self.global_rank,
+            device_id=torch.device("cuda", self.global_rank),
         )
 
         rank_tuple_to_pg: dict[tuple[int, ...], "dist.ProcessGroup"] = {}
