@@ -44,6 +44,38 @@ re-planned inline per micro-step).
 
 ---
 
+## PARITY FILTER (2026-07-07) — only ship refactors that keep the output byte-identical
+
+Constraint: **greedy output must be unchanged, token-for-token.** No speculative decoding,
+no sampler/temperature change, nothing that shifts batch composition (which flips logits
+via FP non-associativity — the `project_mstar_v1_async_sched` trap: async-sched shifted
+batch composition → +9% length, NON-identical). Verdict per refactor:
+
+| Refactor | Parity | Why |
+|---|---|---|
+| **R1** exile postprocess | ✅ identical | moves *where* work runs, not *what* — same tokens |
+| **R2** capturable plan-advance | ✅ identical | same plan values; the multi-step it unblocks is already byte-identical; NOT speculation (replays the same model, no guess/verify) |
+| **R3** on-GPU positions | ✅ identical | same position ids; existing `MSTAR_PREP_DEVICE_POS` is identical-by-design |
+| **R4** in-graph stop-check | ✅ identical | same eq/isin decision, on GPU not CPU |
+| **R5** persistent slot routing | ✅ identical | uuid/clone/dict bookkeeping only |
+| **R6** batched zmq | ✅ identical | transport only |
+| **R9** in-graph seq-len advance | ✅ identical | same counter values |
+| **R10** in-graph sampler | ⚠️ **argmax-only** | greedy argmax-on-GPU is identical; **the Gumbel-Max stochastic path is EXCLUDED** (touches RNG/temperature) |
+| ~~**R7**~~ ready-set + budget/**chunked/mixed**~~ | ⛔ **EXCLUDED** | changes batch composition + prefill chunking → non-identical (async-sched trap) |
+| ~~**R8**~~ split-at-attention **torch.compile**~~ | ⛔ **EXCLUDED** | Inductor fusion changes FP reduction order → logits flip at ties; not bit-identical unless a byte-identical gate passes |
+
+**Parity-safe implementation set: R1, R2, R3, R4, R5, R6, R9, R10(argmax-only).** These
+remove the *entire* measured CPU floor (postprocess 23% + plan 5% + positions + sync)
+without touching a single emitted token. Every one must still pass a greedy
+byte-identical A/B (n=1 vs baseline, `--ignore-eos` fixed len) before it lands — same
+gate that certified `MSTAR_DECODE_MULTISTEP`.
+
+**Excluded because they can change the output:** R7 (batch-composition/chunked-prefill),
+R8 (compile fusion), R10's stochastic sampler. R7's *throughput* intent (mixed
+prefill+decode for TTFT) is real but must be re-derived in a parity-preserving form —
+identical batch composition, only the *packing* changed — before it's admissible; treat
+it as blocked, not scheduled.
+
 ## B. The 10 refactors (ranked by ROI on the measured floor)
 
 ### R1 — Exile `_postprocess_batch` off the engine thread ⭐ biggest single win (~30–40% of floor)
@@ -129,7 +161,10 @@ re-planned inline per micro-step).
   compact codec (msgpack/raw buffers, not `send_pyobj` pickle). M* already has SHM tensor
   protocol; extend it to the control message so the 13% pickle cost drops toward memcpy.
 
-### R7 — Incremental ready-set + budgeted (Sarathi-style) scheduling instead of per-step rescan
+### R7 — ⛔ EXCLUDED (parity): incremental ready-set + budgeted (Sarathi-style) scheduling
+> Changes batch composition + prefill chunking → non-identical output (async-sched trap).
+> The incremental ready-set *bookkeeping* alone is parity-safe and can be salvaged for R1;
+> the budgeted/chunked/mixed scheduling is what's excluded.
 - **Target:** `run()` body (8.1%) rescans request state to form each batch; combined with
   the R1 exile it needs a lock-free "which rids are ready for step N+1" structure so the
   loop never waits on postprocess.
@@ -140,7 +175,9 @@ re-planned inline per micro-step).
   stop) and a per-step token budget so mixed prefill+decode packs into one forward — this
   is also the TTFT lever (see §C) and what makes captured mixed-batch feasible.
 
-### R8 — Split-at-attention torch.compile (`fullgraph` around the transformer block)
+### R8 — ⛔ EXCLUDED (parity): split-at-attention torch.compile (`fullgraph` around the block)
+> Inductor fusion reorders FP reductions → logits can flip at ties → not byte-identical.
+> Only admissible if a greedy byte-identical A/B passes on the compiled graph.
 - **Target:** M* runs the Thinker forward eager-with-custom-ops (fullgraph=False); the
   per-op Python dispatch between kernels adds to the floor and blocks whole-block fusion.
 - **vLLM:** `@support_torch_compile` compiles the model with `fullgraph=True` and an FX
@@ -163,16 +200,19 @@ re-planned inline per micro-step).
   tensors advanced by a captured `+= step`; keep the Python mirror synced once per burst,
   not per step. With R2+R3+R9 no per-step host work remains → K steps replay as one graph.
 
-### R10 — In-graph Gumbel-Max / argmax sampler (remove the sampler host round-trip)
+### R10 — In-graph **argmax** sampler (remove the sampler host round-trip) — ⚠️ argmax-only
+> Parity-safe scope: greedy **argmax** on GPU (identical). The **Gumbel-Max stochastic
+> path is EXCLUDED** — it touches RNG/temperature and changes the output.
 - **Target:** sampling currently returns to Python between forward and the next input build;
   for greedy it's an argmax but still a host-visible tensor read that gates the step.
-- **vLLM:** a Triton Gumbel-Max sampler (`V/v1/sample/`) runs entirely on GPU; sampled ids
-  feed straight back into the persistent input buffer with no D→H except the final output
-  copy.
-- **M* change:** keep argmax/sample on-GPU and write the sampled id directly into the
-  persistent decode-input slot (R5) so the next replay consumes it without a host hop.
-  Together with R2/R3/R9/R4 this closes the last per-step sync, making a fully in-graph
-  K-token decode loop possible — M*'s equivalent of the MRV2 zero-sync decode.
+- **vLLM:** the sampler (`V/v1/sample/`) runs entirely on GPU; sampled ids feed straight
+  back into the persistent input buffer with no D→H except the final output copy.
+- **M* change (argmax-only):** keep **greedy argmax** on-GPU and write the sampled id
+  directly into the persistent decode-input slot (R5) so the next replay consumes it
+  without a host hop. Together with R2/R3/R9/R4 this closes the last per-step sync, making
+  a fully in-graph K-token decode loop possible — M*'s equivalent of the MRV2 zero-sync
+  decode. **Do NOT** port the stochastic Gumbel-Max path (RNG/temperature → output
+  changes) under the parity constraint.
 
 ---
 
