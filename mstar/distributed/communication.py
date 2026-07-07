@@ -165,6 +165,38 @@ class WorkerTPGroups:
         for rank_tuple in self.world_tp_groups:
             rank_tuple_to_pg[rank_tuple] = dist.new_group(ranks=list(rank_tuple))
 
+        # Prime every TP subgroup this rank belongs to with one dummy all-reduce
+        # BEFORE weight load and CUDA-graph capture. ``dist.new_group`` is lazy
+        # for NCCL: the subgroup communicator is created — and its cross-rank
+        # connections established via a host-side rendezvous — only on the
+        # subgroup's FIRST collective. That first-collective bootstrap must NOT
+        # happen inside a CUDA-graph capture (it is not capturable and can hang /
+        # trip the NCCL watchdog, rethrown at ProcessGroupNCCL.cpp:2063, killing
+        # the worker). It also must not happen at a moment when the two TP ranks
+        # are far apart in wall-clock time (one still loading a 30B tower), or the
+        # subgroup connect-retry budget (~33 s) is exceeded. Here — right after
+        # ``init_process_group``'s global rendezvous — all ranks are tightly
+        # synchronized, so priming now forces every subgroup comm to fully
+        # connect while its members are co-located in time. The in-capture
+        # all-reduces (ParallelAttention o_proj, ParallelSparseMoeBlock) then
+        # only RECORD kernels onto an already-connected comm.
+        #
+        # Iterate the globally-sorted ``world_tp_groups`` so every member primes
+        # each group in the same order; a rank skips groups it is not a member of
+        # (calling a collective on a non-member group is illegal). No-op when
+        # there are no multi-rank groups.
+        if self.world_tp_groups:
+            prime_device = torch.device("cuda", self.global_rank)
+            for rank_tuple in self.world_tp_groups:
+                if self.global_rank not in rank_tuple:
+                    continue
+                dummy = torch.zeros(1, device=prime_device)
+                dist.all_reduce(dummy, group=rank_tuple_to_pg[rank_tuple])
+            torch.cuda.synchronize()
+            # Global fence so no rank races ahead into weight load / capture
+            # while a peer is still finishing its subgroup bootstrap.
+            dist.barrier()
+
         seen: set[int] = set()
         for comm_group in self.node_to_group.values():
             if id(comm_group) in seen:

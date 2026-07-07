@@ -420,7 +420,11 @@ class NativeQwen3OmniAudioEncoder(nn.Module):
                 for _ in range(3):
                     self._layer_loop_tail(static_x, cu_seqlens, max_seqlen)
             torch.cuda.current_stream().wait_stream(stream)
-            with torch.cuda.graph(graph):
+            # thread_local: when the run uses TP anywhere, a process-global NCCL
+            # watchdog thread polls cudaEventQuery concurrently; the default
+            # "global" capture mode treats that cross-thread CUDA call as illegal
+            # during capture and aborts it. See CudaGraphRunner._capture_slots.
+            with torch.cuda.graph(graph, capture_error_mode="thread_local"):
                 out = self._layer_loop_tail(static_x, cu_seqlens, max_seqlen)
         except Exception:
             logger.warning("audio encoder CUDA-graph capture failed for key=%s; "

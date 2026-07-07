@@ -655,7 +655,24 @@ class CudaGraphRunner:
 
                 graph = torch.cuda.CUDAGraph()
                 with torch.amp.autocast("cuda", enabled=True, dtype=self.autocast_dtype):
-                    with torch.cuda.graph(graph, pool=self.memory_pool):
+                    # capture_error_mode="thread_local": the TP-sharded decode
+                    # forward records NCCL collectives (ParallelAttention o_proj
+                    # all-reduce, ParallelSparseMoeBlock all-reduce) into the
+                    # graph. When any worker uses TP, ProcessGroupNCCL spawns a
+                    # process-global watchdog thread that polls cudaEventQuery on
+                    # in-flight Work. Under the default "global" capture mode,
+                    # that concurrent cross-thread CUDA call is treated as an
+                    # illegal action during capture and aborts it — surfacing as
+                    # the watchdog rethrow at ProcessGroupNCCL.cpp:2063 ("worker
+                    # is gone"). "thread_local" restricts the capture-safety
+                    # check to THIS (capturing) thread, so the watchdog's queries
+                    # in its own thread no longer invalidate the capture. The
+                    # capturing thread is still fully checked, so real unsafe ops
+                    # here still error. No-op difference for single-GPU runs.
+                    with torch.cuda.graph(
+                        graph, pool=self.memory_pool,
+                        capture_error_mode="thread_local",
+                    ):
                         output = run_forward()
                 torch.cuda.synchronize()
 
@@ -2509,7 +2526,13 @@ class StatelessCudaGraphRunner:
         stream.synchronize()
 
         graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph, pool=self.memory_pool, stream=stream):
+        # thread_local: keep the concurrent process-global NCCL watchdog thread's
+        # cudaEventQuery from invalidating this capture (see the AR decode capture
+        # in CudaGraphRunner._capture_slots for the full rationale).
+        with torch.cuda.graph(
+            graph, pool=self.memory_pool, stream=stream,
+            capture_error_mode="thread_local",
+        ):
             static_output = fwd(
                 graph_walk=config.capture_graph_walk,
                 engine_inputs=engine_inputs,
@@ -2807,7 +2830,12 @@ class PiecewiseCudaGraphRunner:
         # Capture
         graph = torch.cuda.CUDAGraph()
         with torch.amp.autocast("cuda", enabled=True, dtype=self.autocast_dtype):
-            with torch.cuda.graph(graph, pool=self.memory_pool):
+            # thread_local: keep the concurrent process-global NCCL watchdog
+            # thread from invalidating this capture (see CudaGraphRunner._capture_slots).
+            with torch.cuda.graph(
+                graph, pool=self.memory_pool,
+                capture_error_mode="thread_local",
+            ):
                 static_out = fn(static_x)
         torch.cuda.synchronize()
 
