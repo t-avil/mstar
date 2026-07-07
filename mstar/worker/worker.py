@@ -218,6 +218,24 @@ class Worker:
         self._peek_backoff = 0
         self._peek_skip = 0
 
+        # MSTAR_DECODE_MULTISTEP (default 1): replay the captured thinker_decode
+        # graph n times per scheduler pass, feeding each micro-step's sampled
+        # token back on-GPU. Amortizes the ~26 ms Python scheduler+postprocess
+        # over n GPU replays. n>1 requires MSTAR_FAST_CHECKSTOP (the same-burst
+        # stop trim lives on that fast path). MAX is read ONCE at boot; n itself
+        # is dynflags-refreshable up to MAX (nothing about capture depends on n).
+        from mstar.model.qwen3_omni.qwen3_omni_model import (
+            decode_multistep as _dms,
+            decode_multistep_max as _dmsm,
+        )
+        self._decode_multistep_max = max(1, _dmsm())
+        self._decode_multistep = min(max(1, _dms()), self._decode_multistep_max)
+        # Cumulative emitted decode tokens per rid, for exact max_tokens
+        # enforcement across bursts (the worker-graph loop counter advances once
+        # per completion, so a burst emitting n tokens would under-count it — we
+        # self-maintain here instead). Cleared when a rid stops/is removed.
+        self._multistep_emitted: dict[str, int] = {}
+
         # Diagnostics (MSTAR_WALK_STATS): count executed steps per
         # (node, graph_walk) and log every 200 steps at WARNING (visible under
         # --log-level WARNING). Measures the mixed-batch fold rate on real runs
@@ -859,6 +877,8 @@ class Worker:
                 if not self._sidecar_client.send(rec):
                     self._disable_sidecar("rid removal send failed")
         self._sidecar_condemned.discard(body.request_id)
+        # MSTAR_DECODE_MULTISTEP: drop the per-rid cumulative emit counter.
+        self._multistep_emitted.pop(body.request_id, None)
 
         for node_name in self.engine_manager.lru_tracked_nodes():
             self._last_active.pop((body.request_id, node_name), None)
@@ -2012,6 +2032,11 @@ class Worker:
         self._mixed_budget_tokens = mixed_budget_tokens()
         if hasattr(self.scheduler, "_mixed_min_decode_cached"):
             self.scheduler._mixed_min_decode_cached = None
+        # MSTAR_DECODE_MULTISTEP: safe to flip mid-run (only the replay COUNT
+        # changes; capture is independent of n). Clamp to the boot-time MAX that
+        # bounded any sizing. No register_cache_clear needed — read live here.
+        from mstar.model.qwen3_omni.qwen3_omni_model import decode_multistep as _dms
+        self._decode_multistep = min(max(1, _dms()), self._decode_multistep_max)
         # Winning-stack flags, made runtime-refreshable so one-server dyn_ab
         # A/Bs cover them (each is semantics-free to flip: slim emit falls
         # back to full items; fast checkstop falls back to engine path).
@@ -2065,6 +2090,46 @@ class Worker:
         by the same every-200-steps WARNING line."""
         if self._walk_stats is not None:
             self._walk_stats[key] = self._walk_stats.get(key, 0) + 1
+
+    def _tag_multistep(self, batch, node_batch) -> None:
+        """MSTAR_DECODE_MULTISTEP: tag a plain thinker_decode batch with the
+        per-burst replay depth ``multistep_n`` (consumed by the engine ->
+        CudaGraphRunner.run_multistep). No-op unless the flag is on (n>1), the
+        batch is pure ``thinker_decode``, and the fast-checkstop path is active
+        (the same-burst stop trim lives there). n is capped by the tightest
+        remaining max_tokens budget across the batch — a pure-CPU bound (budgets
+        are known ahead), so the burst never drives a rid past max_tokens; an EOS
+        landing mid-burst is trimmed in postprocess. n<=1 leaves metadata
+        untouched, so the engine/runner take the byte-identical single-step path.
+        """
+        if (
+            self._decode_multistep <= 1
+            or not self._fast_checkstop
+            or node_batch.graph_walk != "thinker_decode"
+        ):
+            return
+        n = self._decode_multistep
+        for rid, info in node_batch.per_request_info.items():
+            # AUDIO GUARD: a thinker_decode step with audio output packs per-step
+            # ``thinker_states`` that route to the Talker. run_multistep collects
+            # only ``new_token`` per micro-step (dropping intermediate
+            # thinker_states), so it is correct for TEXT-only output (i2t/s2t)
+            # but would starve the Talker on audio requests. Only burst when
+            # EVERY rid is text-only (audio_output=False). audio_output defaults
+            # True, so audio batches keep n=1 automatically.
+            if info.step_metadata.get("audio_output", True):
+                return
+            emitted = self._multistep_emitted.get(rid)
+            if emitted is None:
+                emitted = info.dynamic_loop_iter_counts.get(
+                    "thinker_decode_loop", 0
+                )
+            remaining = info.max_tokens - emitted
+            if remaining < n:
+                n = remaining
+            if n <= 1:
+                return
+        node_batch.metadata["multistep_n"] = n
 
     def _pre_plan_for_speculative_batch(
         self,
@@ -3415,6 +3480,39 @@ class Worker:
                 rid: self._prematerialized_new_tokens(cpu_output, rid)
                 for rid in routing_per_request
             }
+            # MSTAR_DECODE_MULTISTEP: trim each rid's n-token burst at its stop
+            # (computed same-burst in _compute_new_stops) so nothing past the
+            # stop token is emitted, and advance the self-maintained cumulative
+            # emitted count by the surviving length (the source of truth for
+            # max_tokens — the worker-graph loop counter only moves once per
+            # completion). n==1 leaves prem untouched (_multistep_trim absent).
+            _trim = getattr(cpu_output, "_multistep_trim", None)
+            for rid in routing_per_request:
+                keep = _trim.get(rid) if _trim else None
+                if keep is not None:
+                    # Burst: slice the emit list at the same-burst stop.
+                    prem = prem_per_request.get(rid)
+                    if prem is not None:
+                        for name, toks in prem.items():
+                            if len(toks) > keep:
+                                prem[name] = toks[:keep]
+                # Advance the self-maintained emit counter (the max_tokens source
+                # of truth) for any rid a burst has ever tracked — including a
+                # plain single step that emits 1 token — so the count stays exact
+                # across a mid-run MSTAR_DECODE_MULTISTEP flip. Untracked rids on
+                # a pure single-step server never enter this dict (no overhead).
+                if keep is not None or rid in self._multistep_emitted:
+                    base = self._multistep_emitted.get(rid)
+                    if base is None:
+                        info = batch_N.node_batch.per_request_info.get(rid)
+                        base = (
+                            info.dynamic_loop_iter_counts.get(
+                                "thinker_decode_loop", 0
+                            ) if info is not None else 0
+                        )
+                    self._multistep_emitted[rid] = base + (
+                        keep if keep is not None else 1
+                    )
         else:
             prem_per_request = {rid: None for rid in routing_per_request}
 
@@ -3630,20 +3728,40 @@ class Worker:
                 eos_id = self._thinker_eos_id = submod.config.im_end_token_id
             new_stops = {}
             per_info = batch_N.node_batch.per_request_info
+            # MSTAR_DECODE_MULTISTEP: each rid emitted ``n`` tokens this burst,
+            # laid out rid-major in ``flat`` (n==1 = single step). Scan a rid's n
+            # tokens for the FIRST stop and record how many tokens survive the
+            # trim (``_multistep_trim``); postprocess slices the emit list there
+            # so nothing past the stop token reaches the client. max_tokens is
+            # checked against the self-maintained cumulative emitted count
+            # (``base``), because the worker-graph loop counter advances only once
+            # per completion and would otherwise under-count an n-token burst.
+            n = getattr(cpu_output, "_checkstop_n", 1)
+            trim: dict[str, int] = {}
             for i, rid in enumerate(cpu_output._checkstop_rids):
                 info = per_info.get(rid)
                 if info is None:
                     continue
-                if (
-                    (
-                        int(tokens[i]) == eos_id
-                        and not info.sampling_config["Thinker"].ignore_eos
-                    )
-                    or info.dynamic_loop_iter_counts.get(
+                base = self._multistep_emitted.get(rid)
+                if base is None:
+                    base = info.dynamic_loop_iter_counts.get(
                         "thinker_decode_loop", 0
-                    ) + 1 >= info.max_tokens
-                ):
-                    new_stops[rid] = {"thinker_decode_loop"}
+                    )
+                ignore_eos = info.sampling_config["Thinker"].ignore_eos
+                emitted = n  # tokens kept if no stop fires this burst
+                for k in range(n):
+                    tok = int(tokens[i * n + k])
+                    if (
+                        (tok == eos_id and not ignore_eos)
+                        or base + k + 1 >= info.max_tokens
+                    ):
+                        new_stops[rid] = {"thinker_decode_loop"}
+                        emitted = k + 1  # include the stop token, drop the rest
+                        break
+                if n > 1:
+                    trim[rid] = emitted
+            if n > 1:
+                cpu_output._multistep_trim = trim
             return new_stops
         return engine.check_stop_for_batch(batch_N.node_batch, cpu_output)
 
@@ -3727,6 +3845,65 @@ class Worker:
         # per-rid copy loop (32 tiny copies/step at B32).
         per_rid = output.per_request_output_tensors
         rids = list(per_rid.keys())
+
+        # MSTAR_DECODE_MULTISTEP burst: every rid carries n>1 ``new_token`` views
+        # (uniform n) from run_multistep. Do ONE rid-major D→H of the whole
+        # n*bs burst keyed SPECIFICALLY on "new_token" — tolerant of a coexisting
+        # "text_inputs" loop-back key that ``postprocess`` may alias in, so this
+        # fires independently of the exactly-one-key single-step probe below. Sets
+        # ``_checkstop_n`` so ``_compute_new_stops`` does the same-burst stop trim.
+        if batch_fast and rids:
+            def _burst_toks(r):
+                d = per_rid[r]
+                v = d.get("new_token") if isinstance(d, dict) else None
+                if (
+                    isinstance(v, list) and len(v) > 1
+                    and all(
+                        torch.is_tensor(t) and t.is_cuda and t.numel() == 1
+                        for t in v
+                    )
+                ):
+                    return v
+                return None
+            burst = [_burst_toks(r) for r in rids]
+            if all(x is not None for x in burst):
+                _lens = {len(x) for x in burst}
+                _dtypes = {t.dtype for x in burst for t in x}
+                if len(_lens) == 1 and len(_dtypes) == 1:
+                    _L = next(iter(_lens))
+                    with torch.cuda.stream(side):
+                        flat_gpu = torch.cat([
+                            t.reshape(1) for x in burst for t in x
+                        ])
+                        flat_cpu = self._get_pinned_d2h_buffer(
+                            "check_stop_flat", flat_gpu.shape, flat_gpu.dtype,
+                        )
+                        flat_cpu.copy_(flat_gpu, non_blocking=True)
+                    ev = self._checkstop_barrier(side, defer)
+                    cpu_fast_ms: dict = {
+                        r: {"new_token": [
+                            flat_cpu[i * _L + j:i * _L + j + 1]
+                            for j in range(_L)
+                        ]}
+                        for i, r in enumerate(rids)
+                    }
+                    out = NodeOutput(
+                        per_request_output_tensors=cpu_fast_ms,
+                        allocation_failed=output.allocation_failed,
+                        alloc_pages_short=output.alloc_pages_short,
+                        alloc_failed_request_id=output.alloc_failed_request_id,
+                        completion_event=output.completion_event,
+                    )
+                    out._checkstop_event = ev
+                    out._checkstop_flat = flat_cpu
+                    out._checkstop_rids = rids
+                    out._checkstop_n = _L
+                    return out
+
+        # Fast path: the common AR-decode shape is exactly one small
+        # same-shaped tensor per rid under one key (new_token). Batch the
+        # whole step into a single cat + one pinned D2H instead of a
+        # per-rid copy loop (32 tiny copies/step at B32).
         uniform_key: str | None = None
         # batch_fast gates the uniform-shape probe to the Thinker text-decode
         # walk: on Talker steps the per-step probe cost outweighs the copy
@@ -4154,7 +4331,32 @@ class Worker:
                 speculation = None
                 yield_away_from_target = None
 
-                if pending is not None and self._can_speculate(pending.batch):
+                # MSTAR_DECODE_MULTISTEP: when multi-step is on, take the decode
+                # chain OFF the 1-deep speculative pipeline and let it fall to the
+                # non-speculative submit below, which assembles a plain
+                # thinker_decode batch and submits it as an n-replay BURST (see
+                # the multistep_n tagging near the fallthrough submit). One burst
+                # replaces n single-step spec iterations: the ~26 ms Python
+                # scheduler+postprocess is paid once per burst instead of once per
+                # token, which is the amortization the flag buys. (Re-instating
+                # the spec overlap AROUND bursts — submit burst N+1 before awaiting
+                # burst N — is a follow-up; it needs last-token loop-back threading
+                # + pre-plan reconciliation for a multi-advance burst.)
+                _decode_burst = (
+                    self._decode_multistep > 1
+                    and self._fast_checkstop
+                    and pending is not None
+                    and pending.graph_walk == "thinker_decode"
+                    # Only text-only decode can burst (run_multistep drops the
+                    # per-step thinker_states an audio request feeds the Talker).
+                    # Audio decode stays on the speculative pipeline unchanged.
+                    and all(
+                        not info.step_metadata.get("audio_output", True)
+                        for info in pending.node_batch.per_request_info.values()
+                    )
+                )
+                if pending is not None and not _decode_burst \
+                        and self._can_speculate(pending.batch):
                     # Fairness check (peek-based, replaces the old iter-
                     # counter cap): only break the spec chain when there's
                     # another (node, walk) actually ready to schedule on
@@ -4710,6 +4912,13 @@ class Worker:
                 # advance_seq_lens.
                 fallthrough_advance_event = threading.Event()
                 node_batch.metadata["advance_event"] = fallthrough_advance_event
+                # MSTAR_DECODE_MULTISTEP: tag a plain thinker_decode batch as an
+                # n-replay burst. n is capped by the tightest remaining
+                # max_tokens budget in the batch (pure-CPU: budgets are known
+                # ahead), so no rid is driven past max_tokens; any EOS mid-burst
+                # is trimmed in postprocess. Only pure decode batches qualify —
+                # a mixed/other walk keeps n=1.
+                self._tag_multistep(batch, node_batch)
                 future = gpu_executor.submit(
                     self._execute_on_gpu_thread, batch, node_batch,
                     None, fallthrough_advance_event,

@@ -650,6 +650,47 @@ class ThinkerSubmodule(ARNodeSubmodule):
             for i in range(len(inputs_list))
         ]
 
+    def build_decode_feedback_inputs(
+        self,
+        sampled_tokens: torch.Tensor,
+        prev_inputs: list[ARNodeInputs],
+    ) -> list[ARNodeInputs] | None:
+        """MSTAR_DECODE_MULTISTEP: next micro-step inputs from the tokens the
+        previous micro-step sampled, entirely on GPU.
+
+        ``sampled_tokens`` is ``[real_bs]`` int64 GPU (the sampler clone from
+        ``_sample_and_remap`` — never D2H'd). One ``embed_tokens`` launch turns
+        it into ``[real_bs, hidden]`` bf16 embeds (identical module + math to the
+        per-step ``prepare_inputs_batched`` embed, submodules.py:621), so the
+        loop-back token embed never leaves the device. Positions advance by one
+        token: for a Thinker TEXT decode token all three MRoPE components share a
+        single position, so ``custom_pos_ids`` (3,1) is simply the previous
+        step's positions + 1 — a pure GPU add off the prior ARNodeInputs, no
+        host ``position_id_start`` re-read. (This matches the +1 that
+        ``advance_seq_lens`` applies to ``position_id_start`` for a 1-token text
+        step; both paths converge on the same absolute MRoPE position.)
+        """
+        device = self.get_device()
+        sampled_tokens = sampled_tokens.reshape(-1).to(device)
+        embeds = self.model.model.embed_tokens(sampled_tokens)  # (real_bs, hidden)
+        mask = self._get_decode_thinker_mask(device)
+        out: list[ARNodeInputs] = []
+        for i, prev in enumerate(prev_inputs):
+            # prev.custom_pos_ids is (3,1) float on GPU; advance every MRoPE
+            # component by exactly one token. New allocation per step so the
+            # runner's copy into the captured static buffer never aliases the
+            # prior step's buffer.
+            new_pos = prev.custom_pos_ids + 1.0
+            out.append(
+                ARNodeInputs(
+                    input_seq_len=1,
+                    input_embeds=embeds[i:i + 1],
+                    custom_pos_ids=new_pos,
+                    tensor_inputs={"masks_for_talker": mask},
+                )
+            )
+        return out
+
     def prepare_inputs(
         self,
         graph_walk: str,
@@ -2033,7 +2074,14 @@ class ThinkerSubmodule(ARNodeSubmodule):
 
         if "new_token" not in outputs:
             return
-        outputs["text_inputs"] = outputs["new_token"]
+        # Loop-back: the decode node feeds its sampled token back as the next
+        # step's ``text_inputs``. MSTAR_DECODE_MULTISTEP: a burst leaves n tokens
+        # under ``new_token`` (all emitted to the client), but the loop must
+        # CONTINUE from the LAST one only — otherwise the next step decodes off
+        # the burst's first token and diverges. Single-step (len 1) is
+        # byte-identical (``[nt[-1]]`` == ``nt``).
+        nt = outputs["new_token"]
+        outputs["text_inputs"] = [nt[-1]] if len(nt) > 1 else nt
 
     def check_stop(
         self, request_id: str,

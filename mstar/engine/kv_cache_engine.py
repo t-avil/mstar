@@ -665,6 +665,10 @@ class KVCacheEngine(BaseEngine):
             advance_event=batch.metadata.get("advance_event"),
             launch_started_event=batch.metadata.get("launch_started_event"),
             exec_timings=batch.exec_timings if self.enable_profile else None,
+            # MSTAR_DECODE_MULTISTEP: >1 replays the captured decode graph n
+            # times, returning up to n new_token views per rid (default 1 =
+            # single replay, byte-identical to the pre-multistep path).
+            multistep_n=batch.metadata.get("multistep_n", 1),
         )
 
         # MSTAR_DIRECT_FEED: the runner may stash (batched_sampled_tokens,

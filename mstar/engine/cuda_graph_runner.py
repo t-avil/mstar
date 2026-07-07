@@ -1480,6 +1480,7 @@ class CudaGraphRunner:
         advance_event: "object | None" = None,
         launch_started_event: "object | None" = None,
         exec_timings: ExecTimings | None = None,
+        multistep_n: int = 1,
     ) -> dict:
         """Look up the matching captured graph and dispatch on config type.
 
@@ -1529,6 +1530,17 @@ class CudaGraphRunner:
 
         cfg_type = graph_data.config.get_config_type()
         if cfg_type == CudaGraphConfigType.BASIC_BATCHED:
+            if multistep_n > 1:
+                # MSTAR_DECODE_MULTISTEP: n replays of this same captured decode
+                # graph in one GPU-thread pass (n==1 is the untouched path below).
+                return self.run_multistep(
+                    multistep_n,
+                    key, graph_data, slot_data,
+                    request_ids, inputs, per_request_info, submodule,
+                    advance_event=advance_event,
+                    launch_started_event=launch_started_event,
+                    exec_timings=exec_timings,
+                )
             return self._run_basic_batched(
                 key, graph_data, slot_data,
                 request_ids, inputs, per_request_info, submodule,
@@ -1764,6 +1776,207 @@ class CudaGraphRunner:
             if self.enable_nvtx:
                 range_pop(synchronize=False)
                 mark("gpu_thread.postprocess_end")
+
+    def run_multistep(
+        self,
+        n: int,
+        key: CudaGraphKey,
+        graph_data: CudaGraphData,
+        slot_data: CudaGraphSlot,
+        request_ids: list[str],
+        inputs: list[ARNodeInputs],
+        per_request_info: dict[str, CurrentForwardPassInfo],
+        submodule: ARNodeSubmodule,
+        advance_event: "object | None" = None,
+        launch_started_event: "object | None" = None,
+        exec_timings: ExecTimings | None = None,
+    ) -> dict:
+        """MSTAR_DECODE_MULTISTEP: replay the captured single-step decode graph
+        ``n`` times in one GPU-thread pass, feeding each micro-step's sampled
+        token back into the next micro-step's ``input_embeds`` entirely on the
+        GPU (``submodule.build_decode_feedback_inputs`` = embed_tokens + a (3,1)
+        MRoPE +1; no D2H, no worker round-trip). Returns per-rid
+        ``{"new_token": [tok_0, ... tok_{n-1}]}`` (GPU 1-elem views) plus the
+        burst's LAST sampled ``[real_bs]`` tensor under ``_DIRECT_FEED_KEY`` for
+        loop-back threading.
+
+        Structural relationship to ``_run_basic_batched``: swap-real-states and
+        restore-dummy-states bracket the WHOLE burst (once each); the inner
+        preprocess -> copy -> replay -> advance_seq_lens -> sample body is the
+        SAME sequence, looped ``n`` times. Between iterations the sampled token
+        is embedded and positions advanced on-GPU. This is only reached for
+        ``n > 1`` (the worker gate); ``_run_basic_batched`` stays byte-identical
+        for the ``n == 1`` default.
+
+        Attention/RoPE PLAN: each micro-step's ``submodule.preprocess`` re-plans
+        FlashInfer attention for that step's seq_len (L+step) inline on the GPU
+        thread. The "pre-plan all n states up front" shape in the design is NOT
+        used here: a ``FlashInferDecodeWrapper`` holds exactly one live plan
+        state (``plan()`` overwrites its static buffers + FlashInfer's internal
+        plan_info in place — flashinfer_utils.py:338-356,445) and the captured
+        graph binds that one wrapper's addresses, so holding n pre-planned states
+        would require n wrappers + n captured graphs (or n-deep staged buffers
+        copied between replays). Inline re-plan reuses the existing machinery and
+        still pays off: the amortized cost is the main-thread scheduler +
+        postprocess (~26 ms), run ONCE per burst instead of once per token.
+        Multistep bursts therefore bypass the double-buffer pre-plan entirely
+        (the worker does not dispatch a plan_future for them).
+        """
+        real_bs = len(request_ids)
+        padded_bs = key.bs
+
+        graph = slot_data.graph
+        static = slot_data.static_inputs
+        static_cm = slot_data.static_cache_manager
+        static_output = slot_data.static_outputs
+
+        preprocessed = static["preprocessed"]
+        dummy_rids = static["dummy_rids"]
+        static_input_keys = static["static_input_keys"]
+        capture_template = static["capture_template"]
+        config_labels = graph_data.config.labels
+
+        per_rid_tokens: dict[str, list[torch.Tensor]] = {
+            rid: [] for rid in request_ids
+        }
+        last_sampled = None  # [real_bs] int64 GPU (fed back + returned)
+
+        swapped = False
+        success = False
+        try:
+            # --- Swap real request states onto dummy slots (ONCE per burst) ---
+            for i, rid in enumerate(request_ids):
+                dummy_rid = dummy_rids[i]
+                for label in config_labels:
+                    real_state = self.alloc_manager.get_state(rid, label)
+                    self.alloc_manager.get_state(dummy_rid, label)
+                    self.alloc_manager.request_states[dummy_rid][label] = real_state
+            for i in range(real_bs, padded_bs):
+                dummy_rid = dummy_rids[i]
+                for label in config_labels:
+                    self.alloc_manager.get_state(dummy_rid, label)
+            swapped = True
+
+            # ``cur_inputs`` is the REAL per-request ARNodeInputs list for the
+            # micro-step about to run. Step 0 uses the worker-built inputs
+            # (loop-back token already embedded); later steps rebuild it on-GPU.
+            cur_inputs = list(inputs)
+            if launch_started_event is not None:
+                launch_started_event.set()
+            if exec_timings is not None:
+                exec_timings.fwd_start = time.perf_counter()
+
+            for step in range(n):
+                # --- Pad + re-plan via preprocess (plans attn for seq_len L+step,
+                #     computes cos/sin from advanced positions) ---
+                real_inputs = list(cur_inputs)
+                for _i in range(real_bs, padded_bs):
+                    real_inputs.append(capture_template.clone())
+
+                real_metadata = self._build_replay_metadata(
+                    dummy_rids, request_ids, real_bs,
+                    per_request_info, static["dummy_metadata"],
+                )
+                if graph_data.applied_penalty_in_graph:
+                    self.sampler_buffer.stage_seen_token_masks(
+                        request_ids,
+                        [self.sampler._seen_token_mask[rid] for rid in request_ids],
+                    )
+                engine_inputs = ModelInputsFromEngine(
+                    request_ids=dummy_rids,
+                    per_request_info=real_metadata,
+                    cache_manager=static_cm,
+                    sampler=self._get_sampler(
+                        per_request_info=per_request_info,
+                        request_ids=request_ids,
+                        padded_bs=padded_bs,
+                        gather_seen_tokens=graph_data.applied_penalty_in_graph,
+                    ),
+                )
+                packed = submodule.preprocess(
+                    graph_walk=key.graph_walk,
+                    engine_inputs=engine_inputs,
+                    inputs=real_inputs,
+                )
+
+                # --- Copy real packed tensors into the static buffers ---
+                for k in static_input_keys:
+                    real_val = packed.get(k)
+                    if real_val is None or not isinstance(real_val, torch.Tensor):
+                        continue
+                    static_buf = preprocessed[k]
+                    static_buf[:real_val.shape[0]].copy_(real_val)
+
+                # --- Replay ---
+                # Multistep bypasses pre-plan, but honor a stray plan_done_event
+                # defensively (e.g. a pre-planned first slot) exactly as the
+                # single-step path does.
+                plan_done_event = getattr(static_cm, "_plan_done_event", None)
+                if plan_done_event is not None:
+                    torch.cuda.default_stream(self.device).wait_event(plan_done_event)
+                    static_cm._plan_done_event = None
+                graph.replay()
+
+                if graph_data.applied_penalty_in_graph:
+                    engine_inputs.sampler.sync_seen_token_masks(
+                        [self.sampler._seen_token_mask[rid] for rid in request_ids]
+                    )
+
+                # --- Advance seq_lens on REAL states (Python-only; commits this
+                #     micro-step's token to KV length + position_id_start) ---
+                for label in config_labels:
+                    static_cm.set_active_label(label)
+                    static_cm.advance_seq_lens()
+                if advance_event is not None and step == 0:
+                    advance_event.set()
+
+                # --- Sample; keep the sampled token ON GPU for feedback ---
+                step_outputs = self._sample_and_remap(
+                    request_ids=request_ids,
+                    dummy_rids=dummy_rids,
+                    static_output=static_output,
+                    per_request_info=per_request_info,
+                    slot_data=slot_data,
+                    submodule=submodule,
+                    inputs=cur_inputs,
+                    return_batched_sampled=True,
+                )
+                sampled, _ = step_outputs.pop(_DIRECT_FEED_KEY)
+                last_sampled = sampled
+                for rid in request_ids:
+                    nt = step_outputs.get(rid, {}).get("new_token")
+                    if nt:
+                        per_rid_tokens[rid].append(nt[0])
+
+                # --- Feedback: build next micro-step inputs on GPU ---
+                if step + 1 < n:
+                    fb = submodule.build_decode_feedback_inputs(sampled, cur_inputs)
+                    if fb is None:
+                        # Submodule can't feed back — end the burst here; the
+                        # tokens collected so far are still valid and emitted.
+                        break
+                    cur_inputs = fb
+
+            success = True
+            outputs: dict = {
+                rid: {"new_token": per_rid_tokens[rid]} for rid in request_ids
+            }
+            # Loop-back handle: the LAST micro-step's sampled tokens are what the
+            # next burst continues from (one burst = one pipeline stage).
+            outputs[_DIRECT_FEED_KEY] = (last_sampled, list(request_ids))
+            return outputs
+        finally:
+            if swapped:
+                self._restore_dummy_states(
+                    dummy_rids=dummy_rids,
+                    request_ids=request_ids,
+                    real_bs=real_bs,
+                    config_labels=config_labels,
+                    static_cm=static_cm,
+                    flush_writes=success,
+                )
+            if advance_event is not None:
+                advance_event.set()
 
     def _run_flashinfer_packed(
         self,
@@ -2154,6 +2367,7 @@ class CudaGraphRunner:
         submodule: ARNodeSubmodule,
         inputs: list[ARNodeInputs] | None = None,
         slot_map: list[int] | None = None,
+        return_batched_sampled: bool = False,
     ) -> dict:
         """Sample logits + copy non-logit per-rid outputs, remapping dummy → real rids.
 
@@ -2211,7 +2425,7 @@ class CudaGraphRunner:
             # already-cloned tensor. Popped off before the per-rid map reaches
             # the worker (kv_cache_engine._execute_with_cuda_graph), so
             # per_request_output_tensors stays byte-identical to flag-off.
-            if MSTAR_DIRECT_FEED:
+            if MSTAR_DIRECT_FEED or return_batched_sampled:
                 outputs[_DIRECT_FEED_KEY] = (sampled, list(request_ids))
 
             # Collect non-logit per-rid outputs (e.g. hidden states) only when
@@ -2268,6 +2482,8 @@ class CudaGraphRunner:
             sampled = self.sampler.sample(request_ids, stacked_logits).clone()
             for i, rid in enumerate(request_ids):
                 outputs[rid] = {"new_token": [sampled[i:i+1]]}
+            if return_batched_sampled:
+                outputs[_DIRECT_FEED_KEY] = (sampled, list(request_ids))
         else:
             for rid in request_ids:
                 outputs[rid] = {}

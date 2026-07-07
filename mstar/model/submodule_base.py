@@ -418,3 +418,23 @@ class ARNodeSubmodule(NodeSubmodule):
         no-ops; override and key off ``static_output`` sentinel names.
         """
         return {}
+
+    def build_decode_feedback_inputs(
+        self,
+        sampled_tokens: "torch.Tensor",
+        prev_inputs: list[ARNodeInputs],
+    ) -> list[ARNodeInputs] | None:
+        """Build the NEXT decode micro-step's per-request inputs from the tokens
+        just sampled ON the GPU (MSTAR_DECODE_MULTISTEP).
+
+        ``sampled_tokens`` is the ``[real_bs]`` int64 GPU tensor produced by the
+        previous micro-step's sampler (still on GPU — no D2H). ``prev_inputs`` is
+        the previous micro-step's REAL (non-padding) per-request ARNodeInputs.
+        The returned list must be one ARNodeInputs per real request, with
+        ``input_embeds`` = embed(sampled_tokens) and positions advanced by one
+        token — everything on GPU so the multi-step loop never leaves the device.
+
+        Returns ``None`` (the base default) to signal the submodule does not
+        support multi-step feedback; the runner then falls back to single-step.
+        """
+        return None

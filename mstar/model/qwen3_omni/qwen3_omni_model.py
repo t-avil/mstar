@@ -314,6 +314,53 @@ def mixed_budget_tokens() -> int:
     return v if v > 0 else 0
 
 
+def decode_multistep_max() -> int:
+    """Boot-time ceiling on ``MSTAR_DECODE_MULTISTEP`` (``MSTAR_DECODE_MULTISTEP_MAX``,
+    default 4). Sizes the deepest per-burst micro-step loop the worker will ever
+    submit, so live ``MSTAR_DECODE_MULTISTEP`` flips (dynflags) can raise n up to
+    this bound WITHOUT re-capturing the decode graph — the single-step graph is
+    replayed n times, nothing about capture depends on n. Read ONCE at boot
+    (unlike the per-decision ``decode_multistep`` below)."""
+    import os as _os
+    raw = _os.environ.get("MSTAR_DECODE_MULTISTEP_MAX")
+    if raw is None:
+        return 4
+    try:
+        v = int(raw.strip())
+    except ValueError:
+        return 4
+    return v if v >= 1 else 4
+
+
+def decode_multistep() -> int:
+    """Multi-step decode replay depth (``MSTAR_DECODE_MULTISTEP``, default 1).
+
+    Replay the EXISTING captured single-step ``thinker_decode`` CUDA graph n
+    times per scheduler pass, feeding each micro-step's sampled token back into
+    the next micro-step's ``input_embeds`` ENTIRELY ON THE GPU (embed_tokens +
+    D2D copy — no D2H, no worker round-trip). Decode is CPU/GIL-bound (~26 ms of
+    Python scheduler+postprocess per step, GPU ~50% idle), so amortizing that
+    Python over n GPU replays converts idle GPU into tokens: ~1 scheduler +
+    ~1 postprocess pass per n tokens instead of per token.
+
+    n=1 (the default) is byte-identical to the pre-multistep single-step path —
+    the worker only routes a burst when n>1, so the captured ``_run_basic_batched``
+    replay is untouched at n=1.
+
+    Bakes NOTHING into CUDA-graph capture (only how many times the same graph is
+    replayed), so it is dynflags-safe to flip mid-run. Clamped to
+    ``decode_multistep_max()`` by the worker."""
+    import os as _os
+    raw = _os.environ.get("MSTAR_DECODE_MULTISTEP")
+    if raw is None:
+        return 1
+    try:
+        v = int(raw.strip())
+    except ValueError:
+        return 1
+    return v if v >= 1 else 1
+
+
 def prefill_chunk_tokens() -> int:
     """Cap on chunk size C for chunked prefill. The planner picks the largest
     ``ThinkerSubmodule.PREFILL_TOKEN_BUCKETS`` entry <= min(remaining, this cap),
