@@ -4,6 +4,31 @@ from typing import Any
 import torch
 import torch.distributed as dist
 
+try:
+    import torch.distributed._symmetric_memory as symm_mem
+    _HAS_SYMM_MEM = True
+except Exception:  # pragma: no cover - older torch
+    symm_mem = None
+    _HAS_SYMM_MEM = False
+
+# Low-latency TP=2 all-reduce via PyTorch symmetric memory (the capturable,
+# NVLink one-shot/two-shot reduction vLLM uses instead of NCCL ring). one_shot
+# below the threshold, two_shot above (matches torch-inductor + vLLM ws=2).
+# Off by default; enable with MSTAR_SYMM_ALLREDUCE=1.
+_SYMM_ONE_SHOT_MAX_BYTES = 128 * 1024
+_SYMM_DTYPE = torch.bfloat16
+# Flat workspace element count (bf16): 32M elems = 64 MiB, matches vLLM's ws=2
+# cap; any all-reduce tensor larger than this falls back to NCCL.
+_SYMM_MAX_NUMEL = 32 * 1024 * 1024
+# group_name -> flat rendezvous'd symm buffer (module-level => static address,
+# never freed, so it satisfies the CUDA-graph static-buffer contract).
+_SYMM_BY_GROUP: dict[str, "torch.Tensor"] = {}
+
+
+def _symm_allreduce_enabled() -> bool:
+    import os
+    return _HAS_SYMM_MEM and os.environ.get("MSTAR_SYMM_ALLREDUCE", "0") == "1"
+
 
 class TPCommGroup:
     def __init__(
@@ -18,6 +43,10 @@ class TPCommGroup:
         self.world_size = len(group_members)
         self.device_group = None
         self.initialized = False
+        # Rendezvous'd symmetric-memory workspace for the fast all-reduce path
+        # (set in init_dist for TP=2 groups; None => NCCL fallback).
+        self.symm_buffer: "torch.Tensor | None" = None
+        self.symm_group_name: "str | None" = None
 
     @classmethod
     def trivial(cls) -> "TPCommGroup":
@@ -58,6 +87,34 @@ class TPCommGroup:
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         if self.world_size == 1:
             return input_
+        buf = self.symm_buffer
+        if buf is not None and self.world_size == 2:
+            n = input_.numel()
+            nbytes = n * input_.element_size()
+            if (
+                input_.is_cuda
+                and input_.is_contiguous()
+                and input_.dtype == buf.dtype
+                and n <= buf.numel()
+                and nbytes % 4 == 0  # uint32 signal-word alignment
+            ):
+                slot = buf[:n]          # offset 0 => 16B-aligned symm slice
+                flat = input_.view(-1)  # contiguous alias of input_ (in-place contract)
+                slot.copy_(flat)
+                if nbytes <= _SYMM_ONE_SHOT_MAX_BYTES:
+                    # one-shot: pull peers + reduce, write straight back into input_
+                    torch.ops.symm_mem.one_shot_all_reduce_out(
+                        slot, "sum", self.symm_group_name, flat
+                    )
+                elif n % self.world_size == 0:
+                    # two-shot: reduce-scatter + all-gather, in-place on symm buf
+                    torch.ops.symm_mem.two_shot_all_reduce_(
+                        slot, "sum", self.symm_group_name
+                    )
+                    flat.copy_(slot)
+                else:
+                    dist.all_reduce(input_, group=self.device_group)
+                return input_
         dist.all_reduce(input_, group=self.device_group)
         return input_
 
@@ -197,6 +254,35 @@ class WorkerTPGroups:
             # while a peer is still finishing its subgroup bootstrap.
             dist.barrier()
 
+            # ---- Symmetric-memory low-latency all-reduce (TP=2 fast path) ----
+            # Allocate one flat symm-mem workspace per TP=2 subgroup and
+            # ``rendezvous`` it NOW, in the same co-timed window as NCCL priming
+            # (rendezvous is a collective host-side handshake, NOT capturable —
+            # the per-call copy + *_all_reduce ops ARE). Only members call it;
+            # any failure leaves the group on the NCCL path (correctness-safe).
+            if _symm_allreduce_enabled():
+                for rank_tuple in self.world_tp_groups:
+                    if self.global_rank not in rank_tuple:
+                        continue
+                    pg = rank_tuple_to_pg[rank_tuple]
+                    if pg.size() != 2:
+                        continue
+                    gname = pg.group_name
+                    if gname in _SYMM_BY_GROUP:
+                        continue
+                    try:
+                        b = symm_mem.empty(
+                            _SYMM_MAX_NUMEL, dtype=_SYMM_DTYPE,
+                            device=torch.device("cuda", self.global_rank),
+                        )
+                        if symm_mem.rendezvous(b, pg) is None:
+                            raise RuntimeError("symm rendezvous returned None")
+                        _SYMM_BY_GROUP[gname] = b
+                    except Exception:
+                        _SYMM_BY_GROUP.pop(gname, None)
+                torch.cuda.synchronize()
+                dist.barrier()
+
         seen: set[int] = set()
         for comm_group in self.node_to_group.values():
             if id(comm_group) in seen:
@@ -206,6 +292,8 @@ class WorkerTPGroups:
                 comm_group.initialized = True
                 continue
             comm_group.device_group = rank_tuple_to_pg[tuple(comm_group.group_members)]
+            comm_group.symm_group_name = comm_group.device_group.group_name
+            comm_group.symm_buffer = _SYMM_BY_GROUP.get(comm_group.symm_group_name)
             comm_group.initialized = True
 
     def get_tp_config_for_node(self, node: str) -> TPCommGroup:
