@@ -408,12 +408,17 @@ def moe_sum_reduce_triton(
 _DECODE_MOE_CONFIGS: Dict[int, Dict[str, int]] = {
     1:  {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 64,  "BLOCK_SIZE_K": 64,  "GROUP_SIZE_M": 1, "num_warps": 8, "num_stages": 4},
     2:  {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 64,  "GROUP_SIZE_M": 1, "num_warps": 8, "num_stages": 3},
-    4:  {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64,  "BLOCK_SIZE_K": 256, "GROUP_SIZE_M": 8, "num_warps": 8, "num_stages": 4},
+    # BLOCK_SIZE_K FIXED at 64 (the get_default_config default) so the tuned
+    # table is BYTE-IDENTICAL to autotune-off: varying BLOCK_SIZE_K regroups the
+    # fp32 GEMM K-reduction (non-associative) and can flip a greedy tie. Only the
+    # parity-neutral knobs (BLOCK_SIZE_M/N, GROUP_SIZE_M, num_warps, num_stages)
+    # are tuned — that is where most of the measured speedup lives.
+    4:  {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64,  "BLOCK_SIZE_K": 64,  "GROUP_SIZE_M": 8, "num_warps": 8, "num_stages": 4},
     8:  {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 64,  "GROUP_SIZE_M": 8, "num_warps": 4, "num_stages": 4},
     16: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64,  "BLOCK_SIZE_K": 64,  "GROUP_SIZE_M": 8, "num_warps": 8, "num_stages": 4},
-    32: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64,  "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 1, "num_warps": 8, "num_stages": 4},
-    48: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 8, "num_warps": 8, "num_stages": 4},
-    64: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64,  "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 8, "num_warps": 4, "num_stages": 3},
+    32: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64,  "BLOCK_SIZE_K": 64,  "GROUP_SIZE_M": 1, "num_warps": 8, "num_stages": 4},
+    48: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 64,  "GROUP_SIZE_M": 8, "num_warps": 8, "num_stages": 4},
+    64: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64,  "BLOCK_SIZE_K": 64,  "GROUP_SIZE_M": 8, "num_warps": 4, "num_stages": 3},
 }
 _MOE_AUTOTUNE = os.environ.get("MSTAR_MOE_AUTOTUNE", "0").strip().lower() in ("1", "true", "yes", "on")
 
