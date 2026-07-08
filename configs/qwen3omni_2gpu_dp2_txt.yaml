@@ -1,0 +1,32 @@
+model: "qwen3_omni"
+max_seq_len: 32768
+# DATA-PARALLEL text config: the Thinker runs as TWO independent replicas, one
+# per GPU (ranks 0 and 1), with NO tp_size -> _tp_ranks stays empty -> the
+# conductor DP-picks worker_0 OR worker_1 per request (conductor.py:468
+# np.random.randint(2)). any_tp=False -> NO NCCL world, ZERO cross-GPU comm on
+# the Thinker step (unlike thinkertp2, which shards + all-reduces every layer
+# and lost -4.64 vs 7.76 req/s). The 30B-A3B Thinker fits on one 80GB H200, so
+# DP (2 replicas, ~2x throughput) beats TP (shard a model that fits).
+#
+# prefill_* and thinker_decode are all name="Thinker" => one node_group => one
+# _group_id => a request's prefill AND decode land on the SAME replica (KV
+# locality correct). Encoders single on rank 0 (~4MB embed transfer for
+# rank-1-assigned requests); speech tail on rank 1 to balance memory.
+node_groups:
+  - node_names: [Thinker]
+    ranks: [0, 1]                 # 2 DP replicas (no tp_size => data-parallel)
+
+  - node_names: [audio_encoder, vision_encoder]
+    ranks: [0]
+
+  - node_names: [Talker]
+    ranks: [1]
+
+  - node_names: [Code2Wav]
+    ranks: [1]
+
+# Each replica only serves ~half the batch, so a smaller KV pool suffices and
+# keeps weights(~55-60GB)+KV under 80GB on both ranks. Global override (applies
+# to Thinker + the unused Talker KV alike).
+kv_cache:
+  max_num_pages: 1024

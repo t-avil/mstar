@@ -229,6 +229,11 @@ class Conductor:
 
         self._worker_processes: list[mp.Process] = []
         self.waiting_queue: list[NewRequestConductor] = []
+        # Round-robin cursor per node-group for DP-replica assignment
+        # (MSTAR_DP_ROUND_ROBIN): deterministic 50/50 balance across replicas
+        # instead of the default independent random pick, whose Binomial(N,0.5)
+        # imbalance caps DP throughput below the ideal replica-count scaling.
+        self._dp_rr_cursor: dict[int, int] = {}
 
         with open(model_config_file, "r") as f:
             self.model_config = yaml.safe_load(f)
@@ -454,20 +459,33 @@ class Conductor:
         transfer (e.g., bias toward keeping prefill→decode handoff local
         for the same request).
         """
-        # _group_id -> chosen DP-replica index within that group's ranks
+        import os
+        round_robin = os.environ.get("MSTAR_DP_ROUND_ROBIN", "0") == "1"
+
+        def _pick(group_id: int, n: int) -> int:
+            # One pick per node-group per request (all wgs of a group share it
+            # via setdefault below), coordinated so encoder+Thinker land on the
+            # same replica. Round-robin cursor gives deterministic balance;
+            # default keeps the original independent random pick.
+            if round_robin:
+                c = self._dp_rr_cursor.get(group_id, 0)
+                self._dp_rr_cursor[group_id] = c + 1
+                return c % n
+            return int(np.random.randint(n))
+
+        # _group_id -> chosen DP-replica index within that group's ranks.
+        # Call _pick exactly ONCE per group per request (setdefault would
+        # eval its default every iteration and over-increment the RR cursor).
         group_id_to_replica_idx: dict[int, int] = {}
         result = {}
         for wg_id, wg in self.worker_graphs.items():
+            n = len(wg._tp_ranks) if wg._tp_ranks else len(wg.ranks)
+            if wg._group_id not in group_id_to_replica_idx:
+                group_id_to_replica_idx[wg._group_id] = _pick(wg._group_id, n)
+            replica_idx = group_id_to_replica_idx[wg._group_id]
             if wg._tp_ranks:
-                replica_idx = group_id_to_replica_idx.setdefault(
-                    wg._group_id, np.random.randint(len(wg._tp_ranks)),
-                )
-                ranks = wg._tp_ranks[replica_idx]
-                result[wg_id] = [f"worker_{r}" for r in ranks]
+                result[wg_id] = [f"worker_{r}" for r in wg._tp_ranks[replica_idx]]
             else:
-                replica_idx = group_id_to_replica_idx.setdefault(
-                    wg._group_id, np.random.randint(len(wg.ranks)),
-                )
                 result[wg_id] = [f"worker_{wg.ranks[replica_idx]}"]
         return result
 

@@ -1,0 +1,23 @@
+model: "qwen3_omni"
+max_seq_len: 32768
+# DATA-PARALLEL text config, Variant A: the FULL pipeline (encoders + Thinker)
+# is replicated as 2 independent copies, one per GPU. vision_encoder +
+# audio_encoder + Thinker share ONE node_group => shared _group_id => a
+# request's encoder AND Thinker land on the SAME replica (conductor.py:457
+# coordination) => ZERO cross-GPU embed transfer, and each GPU has its OWN
+# encoder (no shared-encoder bottleneck that inflated Variant B's TTFT). No
+# tp_size => tp_size=1 => DP-pick per request (conductor.py:468), any_tp=False
+# => no NCCL. Each GPU is a self-contained encode->prefill->decode pipeline for
+# ~half the batch.
+node_groups:
+  - node_names: [vision_encoder, audio_encoder, Thinker]
+    ranks: [0, 1]
+
+  # Speech tail (unused for i2t/s2t) split across ranks for memory balance.
+  - node_names: [Talker]
+    ranks: [0]
+  - node_names: [Code2Wav]
+    ranks: [1]
+
+kv_cache:
+  max_num_pages: 1024
