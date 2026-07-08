@@ -617,6 +617,12 @@ class Worker:
         # _execute_on_gpu_thread), so the existing token-materialization wait
         # gates on the right stream.
         self._side_prefill = os.environ.get("MSTAR_SIDE_PREFILL", "0") == "1"
+        # Route ONLY the STATELESS encoder to the side stream (not thinker
+        # prefill, which needs the _ACTIVE_MANAGER thread-local fix). Overlaps
+        # the ~17ms vision encode with live decode on the same GPU — the last
+        # TTFT lever for the DP config. Parity-safe (encoder is stateless, has
+        # its own FlashInfer workspace, never touches _ACTIVE_MANAGER).
+        self._side_encoder_only = os.environ.get("MSTAR_SIDE_ENCODER_ONLY", "0") == "1"
         self._side_stream: "torch.cuda.Stream | None" = None
         # rids currently executing on the side stream — treated as in-flight
         # for deferred-remove safety (see _apply_pending_removes_safe_to_drop).
@@ -2391,6 +2397,10 @@ class Worker:
         etype = engine.engine_type()
         if etype == EngineType.STATELESS:
             return True
+        # Encoder-only mode: keep thinker prefill on the main stream (avoids the
+        # _ACTIVE_MANAGER race), overlap only the stateless encoder.
+        if self._side_encoder_only:
+            return False
         if etype == EngineType.KV_CACHE and batch.graph_walk.startswith("prefill"):
             return True
         return False
