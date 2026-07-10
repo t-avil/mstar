@@ -1138,6 +1138,10 @@ class CudaGraphRunner:
         try:
             static_cm.request_ids = list(request_ids) + saved_request_ids[len(request_ids):]
             seq_lens = [per_req_seq_len] * len(saved_request_ids)
+            # publish_manager=False: this runs on the plan_executor thread;
+            # publishing the active manager from here races any EAGER forward
+            # executing custom ops on the gpu thread (see plan_attention doc).
+            # The gpu thread re-publishes just-in-time before its own forward.
             if plan_stream is not None:
                 with torch.cuda.stream(plan_stream):
                     for label_name in config_labels:
@@ -1146,6 +1150,7 @@ class CudaGraphRunner:
                             seq_lens=seq_lens,
                             dtype=self.autocast_dtype,
                             label=label_name,
+                            publish_manager=False,
                         )
                 plan_done_event = torch.cuda.Event()
                 plan_done_event.record(plan_stream)
@@ -1156,6 +1161,7 @@ class CudaGraphRunner:
                         seq_lens=seq_lens,
                         dtype=self.autocast_dtype,
                         label=label_name,
+                        publish_manager=False,
                     )
             static_cm._pre_planned_labels = set(config_labels)
             static_cm._plan_done_event = plan_done_event

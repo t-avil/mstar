@@ -187,6 +187,7 @@ class BatchedCacheManager:
         is_causal=True,
         write_store: bool=True,
         label: str | None = None,
+        publish_manager: bool = True,
     ):
         """Pre-compute FlashInfer plan and page positions for a cache label.
 
@@ -204,13 +205,26 @@ class BatchedCacheManager:
             dtype: query data type for FlashInfer.
             is_causal: whether attention is causal.
             label: cache label to plan for. If None, uses the current active label.
+            publish_manager: if False, skip set_active_manager. The
+                plan_executor's speculative pre-plan (pre_plan_for_batch)
+                MUST pass False: it plans on a different thread than the
+                forward, and publishing from there races the custom-op
+                _ACTIVE_MANAGER global read by any concurrently executing
+                EAGER forward (e.g. the MSTAR_UNCAP_PREFILL packed prefill)
+                on the gpu thread — mid-forward the ops would resolve the
+                decode slot's manager/plan and read wrong FlashInfer state
+                (illegal memory access). Captured replays never re-run the
+                custom-op Python, which is why this race is invisible in
+                the all-captured shipping config.
         """
         from mstar.utils.profiler import range_pop, range_push
 
         # plan_attention runs (outside the graph) before every forward that
         # will read this manager, so it is the reliable per-forward hook to make
-        # this manager the one the custom ops resolve to.
-        compile_ops.set_active_manager(self)
+        # this manager the one the custom ops resolve to. The forward and this
+        # publish must be on the SAME thread (see publish_manager above).
+        if publish_manager:
+            compile_ops.set_active_manager(self)
 
         if self.enable_nvtx:
             range_push("cache.plan_attention", synchronize=False)
