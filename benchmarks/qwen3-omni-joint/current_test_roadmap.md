@@ -559,7 +559,44 @@ on read completion. Default OFF byte-identical.
 grids (MSTAR_VIS_BATCH_SIZES/MSTAR_PREFILL_BATCH_SIZES/_env_buckets raise-ceiling)** —
 uncommitted in mstar-godv9, all default-off.
 
-IN FLIGHT: bs16fix boot (bs16 grids, sidecar OFF control) then bs16ord boot (ship config
-+ ORDERED_EMIT=1): s2t canary, greedy parity (expect 0/32 incl. first token), i2t
-B16/B32 x2. Vision token buckets already reach 16384 (not the constraint); text-prefill
-spans at i2t are short (bs16 fits 2048 bucket).
+RESULTS (2026-07-10b, boots bs16fix/bs16v2/bs16v3 on GPUs 6,7):
+
+- **bs16fix (bs16 grids, sidecar OFF, fixes loaded, load ~9):** s2t B32 canary CLEAN
+  37.45 req/s (race fix verified inert). Parity: reorder STILL present with sidecar
+  off => sidecar definitively exonerated. i2t B16 p50 409ms (vs bs8 288, bs4 467 —
+  single samples); B32 p50 3664/7.09 rps — bs16 grids do NOT move B32 (4 groups of 8
+  vs 2 of 16 wash => B32 is compute-bound serialization, grouping can't move p50;
+  terminal diagnosis stands).
+- **ORDERED_EMIT v1 wedge:** first live deploy returned ALL-EMPTY responses.
+  ORDEMIT trace: the FIRST emit item per rid is a SIGNAL-ONLY edge (uuids=[]) —
+  entry was created not-ready with nothing to complete it => permanent FIFO head
+  block => 15s TTL drop. Fixed (trivially-ready + immediate flush). Also made the
+  uuid->entry map list-valued (aliased uuid arrivals).
+- **bs16v2 (ship config + ORDERED_EMIT):** ★ PARITY GATE PASSED — greedy first
+  tokens match B1 ground truth 16/16 at conc 2 AND 32 (was 0/16). Residual text
+  diffs are batch-size-dependent greedy near-tie flips (numerics; same class as
+  vLLM cross-batch nondeterminism), NOT ordering. s2t canary clean 34.7 rps.
+  i2t B32 4.6-4.9 rps / TTFT p50 6.3-6.6s — WORSE than fix-boot, initially
+  attributed to the first-token SHM fetch landing on the critical path (ordered
+  emit stops hiding it), BUT SEE CONTAMINATION below.
+- **MSTAR_INLINE_DUAL** (worker.py, default off): emit copies of dual-consumer
+  prematerialized tokens ride inline while KEEPING the SHM write/registration for
+  loop-back consumers (ref economy: emit ref locally released as pure-inline).
+  bs16v3 (ORDERED+DUAL): parity still 16/16 first tokens at conc 2/32; s2t clean.
+- **HOST-LOAD CONTAMINATION:** load average exploded 9 -> 213 (root jobs, 14-18
+  cores each) across the v2/v3 window. ALL v2/v3 TTFT/req-s numbers are suspect —
+  the v2 "ordered emit costs ~30% at B32" and the v3 B16 3.2s cells track the load
+  ramp, not the flags. Parity verdicts are load-independent and stand. The
+  ordered-emit perf cost and INLINE_DUAL's recovery need a QUIET-HOST paired A/B
+  (ordered-off vs ordered vs ordered+dual, same server via dynflags — all three
+  flags are dynflag-refreshable) before any ship decision.
+
+SHIP GUIDANCE: MSTAR_ORDERED_EMIT(+INLINE_DUAL) is a CORRECTNESS fix for a
+shipping bug (every concurrent request's first token displaced/lost). Committed
+h2h numbers measured WITHOUT it include that bug's (small) early-finish bias.
+Re-certify the flagship cells with ordered+dual on, on a quiet host.
+
+Branch: all fixes on opt/prep-pos-batched-v9 (pushed t-avil/mstar), commits
+0c1003b5 (race) c0b4ece0 (UNCAP) b0ee21e3 (grids) 94e440cb (native-WGIO shadow)
+ebb066ca (ORDERED_EMIT) 94ebe978 (INLINE_DUAL) 42d3b6f0 (tp2 yaml).
+Parity harness: bench-v2 d7c0dfcf (branch bench/greedy-parity-harness).
