@@ -3453,7 +3453,20 @@ class Worker:
         # buffer path, just without the SHM-skip optimization. Extending prem to
         # the mixed batch's decode rows (chunk row has no new token unless last)
         # is a P3 perf follow-up; correctness is unaffected.
-        if batch_N.graph_walk == "thinker_decode":
+        # MSTAR_INLINE_DUAL additionally prematerializes the THINKER PREFILL
+        # walks: the final prefill step samples the request's FIRST token, and
+        # without prem it can never be an inline candidate — the whole point
+        # of dual transport (the ordered-emit stream otherwise gates on that
+        # token's SHM fetch). Talker/Code2Wav walks stay excluded exactly as
+        # before (the measured i2s regression was about those, not thinker
+        # prefills). Flag-off: byte-identical to the old thinker_decode-only
+        # behavior.
+        _prem_walks = (
+            ("thinker_decode", "prefill_text", "prefill_audio",
+             "prefill_vision", "prefill_multimodal")
+            if self._inline_dual else ("thinker_decode",)
+        )
+        if batch_N.graph_walk in _prem_walks:
             prem_per_request: dict[str, dict[str, list[int]] | None] = {
                 rid: self._prematerialized_new_tokens(cpu_output, rid)
                 for rid in routing_per_request
