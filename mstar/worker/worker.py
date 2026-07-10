@@ -167,6 +167,23 @@ class Worker:
         # transport. Default OFF. See _inline_emit_uuids / _send_outputs.
         self._inline_emit = os.environ.get("MSTAR_INLINE_EMIT", "0") == "1"
 
+        # MSTAR_INLINE_DUAL: also carry inline values for prematerialized
+        # emit edges whose uuid has NON-emit consumers (loop-back /
+        # persist / streaming). The SHM write + registration is KEPT for
+        # those consumers; only the api_server-bound copy switches to the
+        # inline transport. Closes the first-token latency hole exposed by
+        # MSTAR_ORDERED_EMIT: the prefill step's sampled token uuid also
+        # feeds the prefill->decode loop-back edge, so under plain inline
+        # emit it rides the async SHM fetch — ordered emit then (correctly)
+        # gates the whole stream on that fetch, putting seconds of B32
+        # fetch latency on every request's TTFT/JCT. With dual transport
+        # the client copy is inline (fast, ordered) and the loop-back
+        # consumer still reads SHM. Ref economy: the emit reference is
+        # released locally exactly as for pure-inline uuids (the api_server
+        # never fetches/acks an inline item); non-emit references ack via
+        # their consumers as always. Default OFF.
+        self._inline_dual = os.environ.get("MSTAR_INLINE_DUAL", "0") == "1"
+
         # Fast path: coalesce all qualifying inline emit_to_client messages of
         # one decode step (across every rid in the batch) into ONE
         # result_tensors_batch APIServerMessage, fanned out on the api_server
@@ -1339,6 +1356,8 @@ class Worker:
         non-inline edge.
         """
         if not self._inline_emit or not prematerialized_new_tokens:
+            if self._inline_dual:
+                routing.pure_inline_uuids = set()
             return set()
 
         inline_candidates: set[str] = set()
@@ -1351,6 +1370,8 @@ class Worker:
             inline_candidates.update(info.uuid for info in edge.tensor_info)
 
         if not inline_candidates:
+            if self._inline_dual:
+                routing.pure_inline_uuids = set()
             return set()
 
         # Any uuid also referenced by a non-inline consumer must keep its
@@ -1372,7 +1393,16 @@ class Worker:
         ):
             non_inline_uuids.update(info.uuid for info in edge.tensor_info)
 
-        return inline_candidates - non_inline_uuids
+        pure_inline = inline_candidates - non_inline_uuids
+        if self._inline_dual:
+            # MSTAR_INLINE_DUAL: the EMIT transport goes inline for every
+            # prematerialized candidate, but only PURE-inline uuids (no
+            # other consumer) may skip SHM registration — stash the pure
+            # set for _register_outputs so dual uuids keep their SHM write
+            # for the non-emit consumers.
+            routing.pure_inline_uuids = pure_inline
+            return inline_candidates
+        return pure_inline
 
     def _register_outputs(
         self,
@@ -1429,7 +1459,15 @@ class Worker:
             # Inline-emit uuids skip SHM registration entirely: no file
             # write, no remote fetch, no ack. Their producer-side ref is
             # released locally in _send_outputs instead.
-            uuids -= inline_uuids
+            # MSTAR_INLINE_DUAL: dual-consumer uuids carry inline values on
+            # the emit message but MUST keep their SHM registration (the
+            # loop-back/persist consumers still read+ack it) — only the
+            # pure-inline subset skips.
+            if self._inline_dual:
+                skip = routing.__dict__.get("pure_inline_uuids")
+                uuids -= skip if skip is not None else inline_uuids
+            else:
+                uuids -= inline_uuids
             # MSTAR_FAST_SEND: an empty registration is a no-op (the loop
             # body never runs), but the SHM implementation still enters its
             # CUDA side-stream context per call — and on the steady inline
@@ -2054,6 +2092,11 @@ class Worker:
         # identical values (E9 correctness record) and the registry/route
         # path runs unchanged under either.
         self._direct_feed = os.environ.get("MSTAR_DIRECT_FEED", "0") == "1"
+        # Safe to flip mid-run: register/send halves of one step share the
+        # stash (pure_inline_uuids / inline_emit_uuids) pinned at register
+        # time; a flip between steps just changes the next step's transport
+        # split, values identical either way.
+        self._inline_dual = os.environ.get("MSTAR_INLINE_DUAL", "0") == "1"
         # MSTAR_EMIT_SIDECAR is deliberately NOT refreshed: the sidecar is a
         # process spawned at init, so the flag is static (see __init__).
         # Sidecar-scoped construction is likewise pinned to the slim stack,
