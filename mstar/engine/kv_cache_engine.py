@@ -353,6 +353,26 @@ class KVCacheEngine(BaseEngine):
         if submod_mg.cuda_graph_runner is None:
             return submod_max_bs
 
+        # IDEA #1 (bounded packed prefill, dynflag-tunable): MSTAR_UNCAP_PREFILL=<N>
+        # raises the per-step prefill batch from the captured-graph cap (<=4) to N, so up
+        # to N ready requests run as ONE eager varlen forward (vLLM-style) instead of
+        # ceil(count/4) serial captured steps. BOUNDED (not None/unbounded): the FlashInfer
+        # prefill workspace is a fixed buffer, so an unbounded packed forward overflows it
+        # on large audio prefills (the s2t illegal-access class). Parity-safe for text/audio:
+        # per-request causal via qo_indptr; minibatching a varlen prefill is identical per
+        # request. Not applied to vision prefill (asserts single-request unless BATCH_VISION).
+        # Exclude prefill_audio: the eager packed AUDIO prefill path illegal-accesses
+        # (untested multi-request audio KV layout). s2t already wins req/s, so gating it
+        # out costs nothing and keeps the i2t path (prefill_text/vision) — the cell we
+        # actually lose — packing safely.
+        _uncap = os.environ.get("MSTAR_UNCAP_PREFILL", "")
+        if _uncap and str(graph_walk).startswith("prefill") and str(graph_walk) != "prefill_audio":
+            try:
+                _n = int(_uncap)
+            except ValueError:
+                _n = 0
+            if _n > 0:
+                return _n if submod_max_bs is None else min(_n, submod_max_bs)
         runner = submod_mg.cuda_graph_runner
         configs = [
             cfg for cfg in runner.capture_configs \
@@ -453,12 +473,35 @@ class KVCacheEngine(BaseEngine):
             range_push("ar.batched.sample", synchronize=False)
         if batched_logits is not None:
             sampler = self.submodule_management[batch.node_name].sampler
-            sampled = sampler.sample(batch.request_ids, batched_logits)
+            # The packed prefill forward returns ONLY the __batched_* sentinels
+            # (no per-rid dicts), and __batched_logits__ is [padded_bs, V]. Mirror
+            # cuda_graph_runner.sample_and_remap: slice to the real request count,
+            # sample once (.clone() to break FlashInfer's reused output-buffer alias),
+            # BUILD per-rid outputs fresh (reuse any existing per-rid entry), then
+            # unpack packed sentinels (e.g. __batched_thinker_states__) at real
+            # seq-len boundaries via the submodule hook. Fixes the KeyError when the
+            # uncapped (MSTAR_UNCAP_PREFILL) batch routes prefill through this path.
+            stacked = batched_logits[:len(batch.request_ids)]
+            sampled = sampler.sample(batch.request_ids, stacked).clone()
+            per_rid = {}
             for rid, view in zip(batch.request_ids, sampled.split(1), strict=True):
-                rid_out = batched_output[rid]
+                rid_out = batched_output.get(rid) or {}
                 rid_out["new_token"] = [view]
-                del rid_out["logits"]
-            output = NodeOutput(per_request_output_tensors=batched_output)
+                rid_out.pop("logits", None)
+                per_rid[rid] = rid_out
+            _unpack = getattr(submodule, "unpack_packed_outputs", None)
+            if _unpack is not None:
+                unpacked = _unpack(
+                    static_output=batched_output,
+                    request_ids=batch.request_ids,
+                    real_seq_lens=[inp.input_seq_len for inp in inputs],
+                    inputs=inputs,
+                    per_request_info=batch.per_request_info,
+                )
+                if unpacked:
+                    for rid, ro in unpacked.items():
+                        per_rid.setdefault(rid, {}).update(ro)
+            output = NodeOutput(per_request_output_tensors=per_rid)
         else:
             output = NodeOutput(per_request_output_tensors=batched_output)
             output = self._sample_decode_outputs(batch.node_name, output)
