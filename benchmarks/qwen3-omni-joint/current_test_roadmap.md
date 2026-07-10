@@ -591,12 +591,41 @@ RESULTS (2026-07-10b, boots bs16fix/bs16v2/bs16v3 on GPUs 6,7):
   (ordered-off vs ordered vs ordered+dual, same server via dynflags — all three
   flags are dynflag-refreshable) before any ship decision.
 
-SHIP GUIDANCE: MSTAR_ORDERED_EMIT(+INLINE_DUAL) is a CORRECTNESS fix for a
-shipping bug (every concurrent request's first token displaced/lost). Committed
-h2h numbers measured WITHOUT it include that bug's (small) early-finish bias.
-Re-certify the flagship cells with ordered+dual on, on a quiet host.
+## FINAL (bs16v4 boot, ordered+dual+prem, quiet-host window 10:49-10:54)
+
+DUAL-without-prem was a NO-OP by construction: the prem dict was
+thinker_decode-only (worker.py), so the prefill token was never an inline
+candidate — measured wash/slight-negative 3/3 pairs on v3. Fixed (prem extended
+to thinker prefill walks under the flag, commit f4038ead), then v4:
+
+★★ QUIET-HOST CELLS (load ~28, the root jobs' gap): **i2t B32 = 8.14 req/s,
+TTFT p50 629ms, 1443 tok/s** — IN the committed vLLM band (8.03-8.50) WITH
+correct first tokens; vs the historical 2333-2532ms TTFT / 7.4-7.7 rps cells.
+B16 431-539ms / 6.2-6.3 rps (ordered-off band was 409/5.98). s2t B32 37.7 rps.
+Parity: determinism 0/16; first tokens vs B1 = 16/16 at conc 2 AND 32.
+Load returned (58-98) for r2 + the A/B; r2 6.51/2103ms shows the recontamination.
+
+DUAL on/off PAIRED A/B (prem engaged, v4 server, load 67-98): OFF (ordered-only)
+ahead 3/3 pairs — ON 5.37/5.61/7.80 vs OFF 5.99/6.89/8.21 rps (~-7% for dual).
+And dualOFF_3 = 8.21 rps @ load 97: ordered-ONLY also reaches vLLM-band.
+=> the bs16v2 "ordered emit costs ~30% at B32" was ENTIRELY host-load artifact.
+
+SHIP GUIDANCE:
+- SHIP MSTAR_ORDERED_EMIT=1 — correctness fix for the shipping first-token bug,
+  parity-certified, no measurable B32 cost (best ordered-only cell 8.21 rps).
+- PARK MSTAR_INLINE_DUAL (+prem extension) — mechanism verified engaged but
+  net -7% (3/3 pairs); the SHM fetch it hides is not on the quiet-host critical
+  path. Keep the code; revisit only if TTFT profiling shows first-token fetch
+  stalls on the certified config.
+- SHIP the captured route: MSTAR_BATCH_VISION_PREFILL +
+  MSTAR_VIS_BATCH_SIZES/MSTAR_PREFILL_BATCH_SIZES=1,2,4,8,16 — B16 TTFT
+  974 -> ~430-540ms; B32 best cells land in the vLLM band.
+- Committed h2h numbers were measured with the first-token bug; re-certify the
+  flagship with ORDERED_EMIT on, quiet host, user's paired protocol.
 
 Branch: all fixes on opt/prep-pos-batched-v9 (pushed t-avil/mstar), commits
 0c1003b5 (race) c0b4ece0 (UNCAP) b0ee21e3 (grids) 94e440cb (native-WGIO shadow)
-ebb066ca (ORDERED_EMIT) 94ebe978 (INLINE_DUAL) 42d3b6f0 (tp2 yaml).
-Parity harness: bench-v2 d7c0dfcf (branch bench/greedy-parity-harness).
+ebb066ca (ORDERED_EMIT) 94ebe978 (INLINE_DUAL) 42d3b6f0 (tp2 yaml)
+f4038ead (prem extension). Parity harness: bench-v2 d7c0dfcf
+(branch bench/greedy-parity-harness). Raw cells: /m-coriander/coriander/tim/
+rm_out/{bs8,bs16fix,bs16v2,bs16v3,bs16v4}/ + v3/v4_dual_ab.run.log.
