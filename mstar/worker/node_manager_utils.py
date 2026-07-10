@@ -46,6 +46,24 @@ except Exception:
     pass
 
 
+def _read_native_wgio_mode() -> str:
+    """MSTAR_NATIVE_WGIO (default off), read ONCE at import. Off is a strict
+    no-op: the bridge module (and the native .so) are never imported and the
+    worker path is byte-identical. "shadow" = run C++ port alongside Python,
+    assert equal state, use the Python result. "1"/"native" = use the C++
+    result where the worker graph is fully backable, else fall back to Python.
+    """
+    v = _os.environ.get("MSTAR_NATIVE_WGIO", "0").strip().lower()
+    if v == "shadow":
+        return "shadow"
+    if v in ("1", "true", "yes", "on", "native"):
+        return "native"
+    return "off"
+
+
+_NATIVE_WGIO_MODE = _read_native_wgio_mode()
+
+
 @dataclass
 class _RoutePlan:
     """MSTAR_FAST_ROUTE2: memoized per-edge classification for one
@@ -113,7 +131,50 @@ class WorkerGraphQueues:
         self.nodes = set(self.worker_graph.section.get_nodes().keys())
         self.loops = set(self.worker_graph.section.get_loops().keys())
 
+        # MSTAR_NATIVE_WGIO: optional C++ state-machine bridge. Default off =>
+        # _native_bridge stays None and every method below takes the untouched
+        # Python path (guarded by a single ``is None`` check). Any construction
+        # failure or an unrepresentable graph falls back to Python and logs —
+        # never crashes the worker.
+        self._native_bridge = None
+        if _NATIVE_WGIO_MODE != "off":
+            try:
+                from mstar.worker.native_wgio_bridge import NativeWGIOBridge
+                bridge = NativeWGIOBridge(
+                    self.worker_graph.section, self.worker_graph_id,
+                    _NATIVE_WGIO_MODE,
+                )
+                # In native mode a worker graph the C++ port cannot fully back
+                # (has loops) is dropped to the pure-Python path (logged once)
+                # so the hot decode path is never risked. Shadow keeps it active
+                # to validate the state machine end-to-end.
+                if _NATIVE_WGIO_MODE == "native" and not bridge.native_capable:
+                    logger.warning(
+                        "MSTAR_NATIVE_WGIO=native: worker graph %s has loops; "
+                        "C++ payload reconstruction unsupported — using Python.",
+                        self.worker_graph_id,
+                    )
+                    bridge = None
+                self._native_bridge = bridge
+            except Exception as e:  # never break boot
+                logger.warning(
+                    "MSTAR_NATIVE_WGIO=%s: bridge init failed for wg %s (%s); "
+                    "using Python.", _NATIVE_WGIO_MODE, self.worker_graph_id, e,
+                )
+                self._native_bridge = None
+
     def process_new_inputs(
+        self, request_id: str, inputs: list[GraphEdge],
+        can_buffer: bool=True
+    ) -> list[GraphEdge]:
+        if self._native_bridge is None:
+            return self._py_process_new_inputs(request_id, inputs, can_buffer)
+        return self._native_bridge.process_new_inputs(
+            request_id, inputs, can_buffer,
+            lambda: self._py_process_new_inputs(request_id, inputs, can_buffer),
+        )
+
+    def _py_process_new_inputs(
         self, request_id: str, inputs: list[GraphEdge],
         can_buffer: bool=True
     ) -> list[GraphEdge]:
@@ -138,6 +199,17 @@ class WorkerGraphQueues:
         self, request_id: str, inputs: list[GraphEdge],
         can_buffer: bool=True
     ) -> list[GraphEdge]:
+        if self._native_bridge is None:
+            return self._py_process_new_streaming_inputs(request_id, inputs, can_buffer)
+        return self._native_bridge.process_new_streaming_inputs(
+            request_id, inputs, can_buffer,
+            lambda: self._py_process_new_streaming_inputs(request_id, inputs, can_buffer),
+        )
+
+    def _py_process_new_streaming_inputs(
+        self, request_id: str, inputs: list[GraphEdge],
+        can_buffer: bool=True
+    ) -> list[GraphEdge]:
         assert request_id in self.per_request_queues, \
             f"Tried to process new inputs for unknown request ID {request_id}"
         queue = self.per_request_queues[request_id]
@@ -148,6 +220,13 @@ class WorkerGraphQueues:
         return not_ingested
 
     def is_done(self, request_id) -> bool:
+        if self._native_bridge is None:
+            return self._py_is_done(request_id)
+        return self._native_bridge.is_done(
+            request_id, lambda: self._py_is_done(request_id),
+        )
+
+    def _py_is_done(self, request_id) -> bool:
         assert request_id in self.per_request_queues, \
             f"Tried to check queue done state for unknown request ID {request_id}"
         queue = self.per_request_queues[request_id]
@@ -163,14 +242,25 @@ class WorkerGraphQueues:
             self.tensor_manager, request_id
         )
         self.per_request_queues[request_id] = queue
+        if self._native_bridge is not None:
+            self._native_bridge.add_request(request_id, queue)
 
     def remove_request(self, request_id: str):
         """
         Delete queues for a completed/removed request (saw EOS)
         """
+        if self._native_bridge is not None:
+            self._native_bridge.remove_request(request_id)
         self.per_request_queues.pop(request_id, None)
 
     def get_ready_node_names(self) -> dict[str, set[str]]:
+        if self._native_bridge is None:
+            return self._py_get_ready_node_names()
+        return self._native_bridge.get_ready_node_names(
+            self._py_get_ready_node_names,
+        )
+
+    def _py_get_ready_node_names(self) -> dict[str, set[str]]:
         """
         Returns mapping of request id to ready node names for that request
         """
@@ -180,11 +270,28 @@ class WorkerGraphQueues:
         }
 
     def get_ready_for_streaming(self, request_id: str):
+        if self._native_bridge is None:
+            return self._py_get_ready_for_streaming(request_id)
+        return self._native_bridge.get_ready_for_streaming(
+            request_id, lambda: self._py_get_ready_for_streaming(request_id),
+        )
+
+    def _py_get_ready_for_streaming(self, request_id: str):
         assert request_id in self.per_request_queues, \
             f"Tried to check ready for streaming for unknown request ID {request_id}"
         return self.per_request_queues[request_id].ready_for_streaming
 
     def pop_ready_nodes(
+        self, request_id: str, node_names: list[str]
+    ) -> list[GraphNode]:
+        if self._native_bridge is None:
+            return self._py_pop_ready_nodes(request_id, node_names)
+        return self._native_bridge.pop_ready_nodes(
+            request_id, node_names,
+            lambda: self._py_pop_ready_nodes(request_id, node_names),
+        )
+
+    def _py_pop_ready_nodes(
         self, request_id: str, node_names: list[str]
     ) -> list[GraphNode]:
         """
@@ -203,10 +310,26 @@ class WorkerGraphQueues:
         self, request_id: str, node: GraphNode
     ) -> None:
         """Push a previously popped node back onto the ready queue (e.g., after OOM hold)."""
+        if self._native_bridge is None:
+            return self._py_push_back_node(request_id, node)
+        return self._native_bridge.push_back_node(
+            request_id, node, lambda: self._py_push_back_node(request_id, node),
+        )
+
+    def _py_push_back_node(
+        self, request_id: str, node: GraphNode
+    ) -> None:
         if request_id in self.per_request_queues:
             self.per_request_queues[request_id].ready_node_names.add(node.name)
 
     def reset(self, request_id):
+        if self._native_bridge is None:
+            return self._py_reset(request_id)
+        return self._native_bridge.reset(
+            request_id, lambda: self._py_reset(request_id),
+        )
+
+    def _py_reset(self, request_id):
         """
         At the end of a worker graph, reset the queues for a request so it can
         be used for the next full model forward pass.
@@ -214,6 +337,16 @@ class WorkerGraphQueues:
         self.per_request_queues[request_id].clear()
 
     def stop_loops(
+        self, request_id: str, loop_names: set[str]
+    ) -> set[NameAndDest]:
+        if self._native_bridge is None:
+            return self._py_stop_loops(request_id, loop_names)
+        return self._native_bridge.stop_loops(
+            request_id, loop_names,
+            lambda: self._py_stop_loops(request_id, loop_names),
+        )
+
+    def _py_stop_loops(
         self, request_id: str, loop_names: set[str]
     ) -> set[NameAndDest]:
         """Register a finish signal for each named loop and return the union
@@ -232,6 +365,16 @@ class WorkerGraphQueues:
         return loop_back_signals
 
     def mark_node_complete(
+        self, request_id: str, node_name: str
+    ) -> NodeCompletionOutput:
+        if self._native_bridge is None:
+            return self._py_mark_node_complete(request_id, node_name)
+        return self._native_bridge.mark_node_complete(
+            request_id, node_name,
+            lambda: self._py_mark_node_complete(request_id, node_name),
+        )
+
+    def _py_mark_node_complete(
         self, request_id: str, node_name: str
     ) -> NodeCompletionOutput:
         """Complete a node in this worker graph's per-request io and return
