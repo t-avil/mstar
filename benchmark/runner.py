@@ -441,6 +441,13 @@ class Benchmark:
         No-op unless ignore_eos or an output-len range is configured.
         """
         cfg = self.config
+        # Parity harness (opt-in via MSTAR_BENCH_GREEDY=1): force greedy so outputs
+        # are deterministic and diffable across flag configs. No-op otherwise.
+        if os.environ.get("MSTAR_BENCH_GREEDY") == "1":
+            for req in requests:
+                if req.req_type.get_output_modalities() in ("text", "audio"):
+                    req.model_kwargs["temperature"] = 0
+                    req.model_kwargs["thinker_temperature"] = 0
         lo, hi = cfg.output_len_min, cfg.output_len_max
         if not cfg.ignore_eos and lo is None and hi is None:
             return
