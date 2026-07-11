@@ -1,0 +1,26 @@
+# 2-GPU prefill/decode disaggregation (TTFT lever, E-probe 2026-07-11).
+# Rank 0: encoders + PREFILL Thinker replica + Talker + Code2Wav.
+# Rank 1: DECODE Thinker only (own GIL, never blocked by prefill compute).
+# Rationale: i2t B16/B32 TTFT is prefill-COMPUTE-bound on the single Thinker
+# GPU while the other GPU idles (~7%); full-TP is net-negative (host-bound
+# decode pays per-layer all-reduce). PD-disagg uses the idle GPU's FLOPs for
+# prefill without touching the decode loop. Cost: Thinker weights loaded
+# twice (+~33GB on rank 0) + per-request prefill->decode KV handoff.
+# NOTE: boot WITHOUT MSTAR_MIXED_BATCH/MSTAR_CHUNKED_PREFILL_V2 — mixed
+# prefill+decode steps require both walk types on one rank.
+model: "qwen3_omni"
+max_seq_len: 32768
+node_groups:
+  - node_names: [audio_encoder, vision_encoder]
+    ranks: [0]
+
+  - node_names: [Thinker]
+    ranks: [0]
+    graph_walks: [prefill_text, prefill_audio, prefill_vision, prefill_multimodal]
+
+  - node_names: [Thinker]
+    ranks: [1]
+    graph_walks: [thinker_decode]
+
+  - node_names: [Talker, Code2Wav]
+    ranks: [0]
