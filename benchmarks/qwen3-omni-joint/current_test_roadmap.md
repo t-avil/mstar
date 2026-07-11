@@ -629,3 +629,40 @@ ebb066ca (ORDERED_EMIT) 94ebe978 (INLINE_DUAL) 42d3b6f0 (tp2 yaml)
 f4038ead (prem extension). Parity harness: bench-v2 d7c0dfcf
 (branch bench/greedy-parity-harness). Raw cells: /m-coriander/coriander/tim/
 rm_out/{bs8,bs16fix,bs16v2,bs16v3,bs16v4}/ + v3/v4_dual_ab.run.log.
+
+## SESSION 2026-07-11: cert grid + PD-DISAGGREGATION BREAKTHROUGH
+
+**CERT1 (colocated winning config: ship stack + ORDERED_EMIT + bs16 grids +
+budgets 2048/4096, static env, GPUs 6,7).** Four-stat verdicts vs committed
+vLLM bands (cell / rps / tok/s / TTFT p50 / ITL p50):
+  i2t B1  1.09 WIN / 198 WIN / 114ms band / 4.4ms LOSS(-1ms)
+  i2t B2  1.76 WIN / 317 band / 176ms LOSS / 5.5ms WIN
+  i2t B4  3.14 WIN / 543 WIN / 152ms band / 5.6ms WIN
+  i2t B8  4.53 (no ref) / 817 / 218ms / 5.8ms
+  i2t B16 6.48 WIN / 1151 ~ / 449ms LOSS / <1ms WIN     (load 55)
+  i2t B32 8.23 band / 1445 LOSS / 1803ms LOSS / <1ms WIN (load 61)
+  s2t B1  5.06 / 98 / 93ms / 4.4ms (no ref; old 163ms machinery-regression GONE)
+  s2t B2  9.94 WIN(2.9x) / 189 ~ / 87ms LOSS(-15ms) / 4.8ms band
+Pattern: rps+ITL won nearly everywhere; every LOSS is TTFT-driven (+1ms B1 ITL).
+
+**s2t B32 "budget regression" FALSIFIED:** all 4 budget combos hit 39.5-39.8
+in good cells; same-flags back-to-back gave 39.7 then 24.6 -> bimodal
+admission-wave lottery at n=96 (whole cell = 3 waves, 2.4-3.9s wall; ITL
+identical, only TTFT tails differ). n=256 wave-averaged truth: 29.59 rps
+(vLLM 25.2-28), TTFT p50 221 WIN, ITL 12.3 band, 620 tok/s band.
+=> s2t B32 cert MUST use n>=256. Budgets 2048/4096 ship globally.
+
+**★★★ PD-DISAGGREGATION (configs/qwen3omni_2gpu_pd.yaml, commit 6c70f758):
+prefill Thinker on rank0 + decode Thinker on rank1 — probe results:**
+  i2t B1: 115ms/1.06rps == colocated (KV handoff free)
+  i2t B16: 7.52 rps (+16% colo, +31% vLLM)
+  i2t B32: 8.08 rps AT LOAD 79 (colo needs quiet host for that); ITL p99 29ms
+  s2t B32 n=256: **48.14 rps** (+63% colo, ~+80% vLLM), TTFT p99 847 vs 2837
+  i2s/s2s: functional; s2s audio ITL 301 vs 228 needs A/B (cross-rank states)
+Decode isolation removes the prefill-freezes-decode structural defect entirely.
+Costs: 2x Thinker weights (fits: 77/66GB), first-boot +24min autotune (cached
+now), no mixed/chunked machinery on this topology.
+
+NEXT: (1) PD as flagship candidate — full grid + speech A/B + i2t B2 TTFT
+(admission timing) on PD; (2) B1 decode ITL -1ms (host floor micro-work);
+(3) certify with user's paired protocol; s2t B32 at n>=256.
