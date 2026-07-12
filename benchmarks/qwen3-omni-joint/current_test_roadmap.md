@@ -666,3 +666,41 @@ now), no mixed/chunked machinery on this topology.
 NEXT: (1) PD as flagship candidate — full grid + speech A/B + i2t B2 TTFT
 (admission timing) on PD; (2) B1 decode ITL -1ms (host floor micro-work);
 (3) certify with user's paired protocol; s2t B32 at n>=256.
+
+## SESSION 2026-07-12: review-fix batch, PD3 ship config, v10 charts
+
+**8-angle code review of the session branch (10 commits): 7 CONFIRMED bugs
+fixed (commit cc704973):** packed pre-plan publish race (sibling of 0c1003b5),
+FAST_SEND multi-name WGD token duplication (both paths), get_result_chunks
+drain-abort KeyError on late chunks, non-idempotent uuid completion
+(dup emit + KeyError), UNCAP blacklist->allowlist (merged walks were silently
+packable; vision uncap now requires BATCH_VISION), _prem_walks +=
+prefill_multimodal_audio, inline audio sample_rate parity. Deferred:
+producer-side emit sequence numbers (the deep ordering fix), per-rid FIFO
+cleanup index, ordered-emit inline fast-path, shared sample+unpack helper,
+env-parser consolidation, config-file capture grids, thread-local
+_ACTIVE_MANAGER, walk-property registry (all in review report).
+
+**MERGED_PREFILL x expanded grids incident (pd2):** merged walks are
+single-request by contract but REUSE the vision/text captures — expanded
+capture grids let the scheduler pack several merged walks into one step ->
+per-step assert storm (7.9k) that killed the workers ~27 min later; the
+salvage dynflag landed 28 s too late. FIX 07eba5bb: get_max_batch_size caps
+prefill_multimodal(_audio) at bs=1. ALSO LEARNED: merged flags are boot-time
+(walk REGISTRATION) — dynflag-on routes admissions to an unregistered walk
+= silent black-hole hang (b1_merged rc=124 on pd3). Merged A/Bs need a
+dedicated boot with the flags on.
+
+**SHIP CONFIG (locked, pd3):** PD topology (qwen3omni_2gpu_pd.yaml) +
+MSTAR_ORDERED_EMIT=1 + BATCH_VISION_PREFILL + VIS/PREFILL grids
+1,2,4,8,16,32 + full decode stack; INLINE_DUAL off (wash-to-negative),
+merged off (pending dedicated A/B), mixed/chunked N/A on PD. Grid verdict:
+bs32 grids i2t B32 = 8.52 rps AT LOAD 59 (top of vLLM band) / B16 parity
+with bs16 grids. DIRECT_FEED at B1: wash (ITL ~4.0ms both) — the ~0.6-1ms
+B1 ITL gap vs vLLM 3.4 remains the one open non-TTFT item. s2t B1/B2 base
+on PD: 109/80ms TTFT (vLLM ~66/69-73) — B2 gap now ~9ms.
+
+**v10 charts:** gen_v10_h2h_charts.py + gen_v10_h2h_s2t_charts.py (3 series:
+best solid blue / encoders-implemeneted 4c33b33 dotted blue from
+sweep_mstar_new_v2{,b,c} / vLLM 0.22 green). Best-series data =
+rm_out/final (pd3c: i2t B1-B32 x3 repeats + s2t B1..B32), medians.
