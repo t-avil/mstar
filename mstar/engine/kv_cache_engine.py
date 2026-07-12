@@ -365,8 +365,23 @@ class KVCacheEngine(BaseEngine):
         # (untested multi-request audio KV layout). s2t already wins req/s, so gating it
         # out costs nothing and keeps the i2t path (prefill_text/vision) — the cell we
         # actually lose — packing safely.
+        # ALLOWLIST, not a name-prefix blacklist: new prefill walks (e.g. the
+        # merged prefill_multimodal, whose audio variant carries the exact
+        # multi-request audio KV layout the exclusion exists for) must OPT IN
+        # after their packed layout is verified, instead of silently
+        # qualifying because their name starts with "prefill". prefill_vision
+        # qualifies ONLY under MSTAR_BATCH_VISION_PREFILL — without it the
+        # submodule asserts one request per vision step, so an uncapped
+        # multi-request vision batch is a guaranteed step crash.
         _uncap = os.environ.get("MSTAR_UNCAP_PREFILL", "")
-        if _uncap and str(graph_walk).startswith("prefill") and str(graph_walk) != "prefill_audio":
+        _walk_s = str(graph_walk)
+        if _uncap and _walk_s == "prefill_vision":
+            from mstar.model.qwen3_omni.qwen3_omni_model import (
+                batch_vision_prefill_enabled,
+            )
+            if not batch_vision_prefill_enabled():
+                _uncap = ""
+        if _uncap and _walk_s in ("prefill_text", "prefill_vision"):
             try:
                 _n = int(_uncap)
             except ValueError:

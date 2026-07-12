@@ -163,10 +163,23 @@ class PreprocessWorker:
         results = []
         while not self.output_queue.empty():
             result: ResultChunk = self.output_queue.get()
-            self.per_request_reading_tensors[result.request_id] -= 1
+            # Tolerant decrement: a LATE chunk can land after cleanup_request
+            # popped this rid's counter (in-flight SHM read completing in the
+            # main-thread-pop -> worker-thread-cleanup window; ordered emit
+            # widens it by holding+late-flushing chunks). A bare subscript
+            # here raised KeyError and aborted the whole drain loop, dropping
+            # every other request's queued chunks with it.
+            cnt = self.per_request_reading_tensors.get(result.request_id)
+            if cnt is None:
+                logger.debug(
+                    "Dropping late chunk for cleaned-up request %s",
+                    result.request_id,
+                )
+                continue
+            self.per_request_reading_tensors[result.request_id] = cnt - 1
             logger.debug(
                 "Data worker reading queue for request %s decreased to length %d",
-                result.request_id,  self.per_request_reading_tensors[result.request_id]
+                result.request_id, cnt - 1,
             )
             results.append(result)
         return results
@@ -496,6 +509,16 @@ class PreprocessWorkerThread:
             k: v for k, v in (result.metadata or {}).items()
             if k != "inline_values"
         }
+        # Keep parity with _process_read_tensors' audio enrichment: an audio
+        # item emitted inline must carry sample_rate too, or clients fall
+        # back to a hardcoded rate and mis-wrap the PCM. (Today only integer
+        # text tokens ride inline, but the two chunk-assembly paths must not
+        # diverge on this field.)
+        if modality == "audio" and self.model is not None:
+            chunk_metadata = {
+                **chunk_metadata,
+                "sample_rate": self.model.get_output_sample_rate("audio"),
+            }
         chunks: list[ResultChunk] = []
         for tensor_info in result.graph_edge.tensor_info:
             n = 1
@@ -577,8 +600,16 @@ class PreprocessWorkerThread:
                         tensor, modality
                     )
 
-                    chunk_metadata = self.tensor_uuid_to_metadata_per_request[request_id][
-                        tensor_info.uuid] or {}
+                    # Tolerant metadata lookup: a duplicate completion for an
+                    # aliased/re-sent uuid (or a completion racing cleanup)
+                    # finds the key already deleted below — a bare double
+                    # subscript raised KeyError and killed the whole
+                    # ready-tensor sweep for every other request.
+                    chunk_metadata = (
+                        self.tensor_uuid_to_metadata_per_request
+                        .get(request_id, {})
+                        .get(tensor_info.uuid)
+                    ) or {}
                     # Audio is emitted as headerless 16-bit PCM; surface the
                     # model's output sample rate so clients can wrap it.
                     if modality == "audio" and self.model is not None:
@@ -615,13 +646,24 @@ class PreprocessWorkerThread:
                             if not entry["pending"]:
                                 entry["ready"] = True
                                 self._flush_emit_fifo(key)
-                    else:
-                        # Flag off — or an entry dropped by request cleanup
-                        # (chunk is late for a dead rid; emit as before, the
-                        # main thread's get_result_chunks tolerates it).
+                    elif not self._ordered_emit:
+                        # Flag off: emit directly, as before ordered emit.
                         self.out_queue.put(chunk)
-                    del self.tensor_uuid_to_metadata_per_request[request_id][
-                        tensor_info.uuid]
+                    else:
+                        # Ordered emit ON but no waiters: every SHM arrival
+                        # registers waiters under the flag, so this is either
+                        # a DUPLICATE completion for an aliased/re-sent uuid
+                        # (the first completion already emitted for every
+                        # waiter — emitting again would deliver a duplicate
+                        # token) or an entry dropped by request cleanup (rid
+                        # dead). Drop, don't emit.
+                        logger.debug(
+                            "ORDEMIT dropping waiterless completion rid=%s "
+                            "uuid=%s", request_id, tensor_info.uuid,
+                        )
+                    self.tensor_uuid_to_metadata_per_request.get(
+                        request_id, {}
+                    ).pop(tensor_info.uuid, None)
                     self.tensor_manager.dereference(
                         request_id=request_id,
                         uuid=tensor_info.uuid

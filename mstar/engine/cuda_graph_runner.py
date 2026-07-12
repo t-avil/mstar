@@ -1406,6 +1406,11 @@ class CudaGraphRunner:
             # active label over the full (real + dummy) request_ids anyway so
             # the padding rows carry it, matching the run path's state after
             # set_active_label in _run_flashinfer_packed.
+            # publish_manager=False: same plan_executor-thread rule as
+            # pre_plan_for_batch (see plan_attention doc) — publishing from
+            # here races any concurrent EAGER forward's custom-op
+            # _ACTIVE_MANAGER reads on the gpu thread. The gpu thread
+            # re-publishes just-in-time before its own forward.
             if plan_stream is not None:
                 with torch.cuda.stream(plan_stream):
                     for label_name in config_labels:
@@ -1415,6 +1420,7 @@ class CudaGraphRunner:
                             dtype=self.autocast_dtype,
                             is_causal=config.causal_attention,
                             label=label_name,
+                            publish_manager=False,
                         )
                 plan_done_event = torch.cuda.Event()
                 plan_done_event.record(plan_stream)
@@ -1426,6 +1432,7 @@ class CudaGraphRunner:
                         dtype=self.autocast_dtype,
                         is_causal=config.causal_attention,
                         label=label_name,
+                        publish_manager=False,
                     )
             static_cm._pre_planned_labels = set(config_labels)
             static_cm._plan_done_event = plan_done_event

@@ -1568,19 +1568,26 @@ class Worker:
                         new_tokens.extend(tensor.cpu().numpy().tolist())
                 name_to_new_token[signal.name] = new_tokens
 
+                # Buffer ONLY this signal's tokens. Both the fast inline and
+                # buffer_new_tokens EXTEND pending state, and this block runs
+                # once per signal — re-passing the ACCUMULATED dict here
+                # re-extended every earlier name's tokens once per later
+                # signal (duplicated WGD tokens whenever a step carries >1
+                # distinct new-token signal name). Dormant while every
+                # production walk emitted exactly one name; the INLINE_DUAL
+                # prefill prem extension widens exposure, so fix both paths.
+                # Byte-identical for single-name steps.
                 if fast_info is not None:
-                    # Inline of worker_graphs_manager.buffer_new_tokens —
-                    # kept call-per-signal with the accumulated dict, exactly
-                    # like the call it replaces (the flushed pending state is
-                    # load-bearing: it rides the WORKER_GRAPHS_DONE message).
+                    # Inline of worker_graphs_manager.buffer_new_tokens (the
+                    # flushed pending state is load-bearing: it rides the
+                    # WORKER_GRAPHS_DONE message).
                     pending = fast_info.pending_new_tokens
-                    for name, toks in name_to_new_token.items():
-                        if name not in pending:
-                            pending[name] = []
-                        pending[name].extend(toks)
+                    if signal.name not in pending:
+                        pending[signal.name] = []
+                    pending[signal.name].extend(new_tokens)
                 else:
                     self.worker_graphs_manager.buffer_new_tokens(
-                        request_id, name_to_new_token
+                        request_id, {signal.name: new_tokens}
                     )
 
         if outputs.emit_to_client:
@@ -3472,7 +3479,8 @@ class Worker:
         # behavior.
         _prem_walks = (
             ("thinker_decode", "prefill_text", "prefill_audio",
-             "prefill_vision", "prefill_multimodal")
+             "prefill_vision", "prefill_multimodal",
+             "prefill_multimodal_audio")
             if self._inline_dual else ("thinker_decode",)
         )
         if batch_N.graph_walk in _prem_walks:
