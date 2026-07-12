@@ -375,6 +375,20 @@ class SidecarState:
         # happen on a healthy Stage-1 stream; belt for future flip paths).
         self.edge_templates: dict[tuple[int, int], object] = {}
 
+        # MSTAR_EMIT_SEQNUMS: per-rid_idx emit sequence counter. For a
+        # sidecar-scoped rid the sidecar process is the SOLE ordering authority
+        # (all of that rid's client-bound emits ride the FIFO record stream and
+        # are rebuilt here in build order), so numbering here matches the order
+        # the consumer must deliver. Scoped rids are text-only (SIDECAR_WALKS is
+        # all text; Talker/Code2Wav emit rides streaming edges, not this path),
+        # so rid_idx alone identifies the (rid, "text") stream — the same
+        # stream the consumer keys as (rid, "text"). Read once: the sidecar is a
+        # spawned process and cannot follow MSTAR_DYNFLAGS (module docstring),
+        # so this flag is effectively static per server boot. Cleared in
+        # ``_remove``.
+        self._emit_seqnums = os.environ.get("MSTAR_EMIT_SEQNUMS", "0") == "1"
+        self._emit_seq: dict[int, int] = {}
+
         # Mechanism-alive counters (design §8 validation recipe 3). The
         # drain size per poll is the observable proxy for queue depth (ZMQ
         # doesn't expose it): >1 means the sidecar fell behind the producer
@@ -406,6 +420,7 @@ class SidecarState:
 
     def _remove(self, rid_idx: int) -> None:
         self.rids.pop(rid_idx, None)
+        self._emit_seq.pop(rid_idx, None)
         self.pending_new_tokens.pop(rid_idx, None)
         self.current_output_chunks.pop(rid_idx, None)
         self.output_loop_indices.pop(rid_idx, None)
@@ -468,6 +483,14 @@ class SidecarState:
                 ) in items:
                     self.items_seen += 1
                     name = self.names[name_idx]
+                    # MSTAR_EMIT_SEQNUMS: one seqnum per emitted edge, in the
+                    # record's edge order (== the worker's build order), before
+                    # the inline/non-inline split — mirrors the legacy
+                    # _send_outputs stamping so both paths number identically.
+                    emit_seq = None
+                    if self._emit_seqnums:
+                        emit_seq = self._emit_seq.get(rid_idx, 0)
+                        self._emit_seq[rid_idx] = emit_seq + 1
                     # buffer_output_signals: one chunk name per emit edge,
                     # in edge order.
                     chunks.append(name)
@@ -498,6 +521,7 @@ class SidecarState:
                                     None if loop_key is not None else nli
                                 ),
                                 loop_key=loop_key,
+                                emit_seq=emit_seq,
                             ))
                         else:
                             # Template step: first full ResultTensors for
@@ -514,6 +538,7 @@ class SidecarState:
                                 graph_edge=tmpl_edge,
                                 loop_indices=nli,
                                 metadata={"inline_values": {name: values}},
+                                emit_seq=emit_seq,
                             ))
                     else:
                         # Non-inline edge: full ResultTensors sent
@@ -528,6 +553,7 @@ class SidecarState:
                                 graph_edge=edge,
                                 loop_indices=nli,
                                 metadata={},
+                                emit_seq=emit_seq,
                             ),
                         ))
 

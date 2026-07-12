@@ -399,6 +399,19 @@ class Worker:
         self._sidecar_rids: set[str] = set()
         self._sidecar_condemned: set[str] = set()
         self._sidecar_client: SidecarClient | None = None
+
+        # MSTAR_EMIT_SEQNUMS: per-(request_id, modality) emit sequence counter
+        # for the LEGACY emit path (_send_outputs). This worker's main thread is
+        # the single authoritative ordering point for every non-sidecar rid, so
+        # one counter here gives each (rid, modality) stream a monotonic seqnum
+        # assigned before the inline/SHM transport split. Sidecar-scoped rids do
+        # NOT use this counter — their (text-only) emits are numbered in the
+        # sidecar process (SidecarState), the sole ordering authority for those
+        # rids. A rid is pinned to exactly one path for its whole life
+        # (scoping is decided once at admission), so the two counters never
+        # both number the same (rid, modality) stream. Cleared per-rid on
+        # request removal. Flag itself is read per-call in _send_outputs.
+        self._emit_seq_counters: dict[tuple[str, str], int] = {}
         if self._emit_sidecar:
             # Spawned here so the child's import cost (~seconds) hides
             # behind weight load / CUDA-graph capture (~minutes).
@@ -873,6 +886,15 @@ class Worker:
         self.tensor_manager.cleanup_request(body.request_id)
         self.profile_info.pop_request(body.request_id)
         self.streaming_buffers.pop(body.request_id, None)
+
+        # MSTAR_EMIT_SEQNUMS: drop this rid's legacy per-(rid, modality) emit
+        # counters. Unconditional (cheap no-op when the flag was never on) so a
+        # mid-run toggle-off cannot leak counter state.
+        if self._emit_seq_counters:
+            for key in [
+                k for k in self._emit_seq_counters if k[0] == body.request_id
+            ]:
+                self._emit_seq_counters.pop(key, None)
 
         # MSTAR_EMIT_SIDECAR: rid teardown drops the sidecar's per-rid state
         # (accumulators, slim protocol entries, cached edge templates).
@@ -1501,6 +1523,21 @@ class Worker:
                     )
 
 
+    def _next_emit_seq(self, request_id: str, modality: str) -> int:
+        """MSTAR_EMIT_SEQNUMS: next per-(rid, modality) producer sequence number
+        for the legacy emit path. Starts at 0 for each stream and increments by
+        one per emitted client-bound edge (inline and SHM alike), in
+        ``_send_outputs``'s edge order — the exact order the consumer must
+        deliver. Keyed per modality (not per rid) because a given
+        (rid, modality) stream has a single producer worker, whereas two
+        modalities of one rid may be emitted by different worker processes; a
+        per-rid counter would then collide across processes. Cleared in
+        ``_remove_request``."""
+        key = (request_id, modality)
+        seq = self._emit_seq_counters.get(key, 0)
+        self._emit_seq_counters[key] = seq + 1
+        return seq
+
     def _send_outputs(
         self, request_id: str, outputs: NodeOutputRouting,
         nested_loop_indices: NestedLoopIndices,
@@ -1630,6 +1667,15 @@ class Worker:
             # the data worker would have sent via TENSOR_RECEIVED).
             local_release: dict[str, int] = {}
             for graph_edge in outputs.emit_to_client:
+                # MSTAR_EMIT_SEQNUMS: stamp one seqnum per emitted edge, in edge
+                # order, BEFORE the inline/SHM/slim split below, so the consumer
+                # can reorder independent of transport arrival. Read per-call
+                # (dynflag-toggleable; a mid-stream flip is unsafe — see report).
+                emit_seq = (
+                    self._next_emit_seq(request_id, graph_edge.output_modality)
+                    if os.environ.get("MSTAR_EMIT_SEQNUMS", "0") == "1"
+                    else None
+                )
                 if fast_info is not None:
                     # Inline of
                     # worker_graphs_manager.register_output_loop_indices.
@@ -1680,7 +1726,8 @@ class Worker:
                         modality=graph_edge.output_modality,
                         graph_edge=graph_edge,
                         loop_indices=nested_loop_indices,
-                        metadata=metadata
+                        metadata=metadata,
+                        emit_seq=emit_seq,
                     )
                 if batch_collector is not None and edge_inline:
                     # Coalesced path: defer to a single result_tensors_batch
@@ -1730,6 +1777,7 @@ class Worker:
                                     else nested_loop_indices
                                 ),
                                 loop_key=loop_key,
+                                emit_seq=emit_seq,
                             ))
                         else:
                             self._slim_emit_sent.add(tkey)

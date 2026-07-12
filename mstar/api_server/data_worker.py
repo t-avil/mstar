@@ -298,6 +298,33 @@ class PreprocessWorkerThread:
         self._rid_to_fifo_keys: dict[str, set] = {}
         self._rid_to_uuid_keys: dict[str, set] = {}
 
+        # MSTAR_EMIT_SEQNUMS (default OFF; read per-call): deliver each
+        # (rid, modality) stream in the PRODUCER's stamped seqnum order via a
+        # per-stream reorder buffer, instead of MSTAR_ORDERED_EMIT's global
+        # arrival-order FIFO + hold. This removes the FIFO's dependence on
+        # arrival order == send order: an inline decode token that arrives
+        # before the earlier prefill token's SHM read completes is held until
+        # the prefill token (its lower seqnum) is delivered. When both flags are
+        # on, seqnums take precedence (the FIFO is bypassed).
+        #
+        # Buffer per (rid, modality): {"next": int, "entries": {seq: entry}}.
+        # ``next`` is the next seqnum to deliver; ``entries`` holds arrived but
+        # not-yet-deliverable seqnums. Entry shape mirrors the FIFO entry:
+        # {"ready": bool, "uuid_order": [...], "chunks": {key: chunk},
+        #  "pending": set(uuids)}. A stream is drained from ``next`` while the
+        # head seqnum is present AND ready. The buffer is NOT dropped when
+        # transiently empty (``next`` must persist across the gap); it is
+        # dropped wholesale on request cleanup.
+        self._seq_buffers: dict[tuple[str, str], dict] = {}
+        # (rid, uuid) -> [(buffer_key, entry), ...] so SHM read completions find
+        # every entry waiting on the uuid (aliased/re-sent uuids: one read must
+        # satisfy all waiters, as in the ordered-emit path).
+        self._uuid_to_seq_entry: dict[tuple[str, str], list] = {}
+        # Per-rid indices for O(its own entries) cleanup (always maintained
+        # under the flag — the seqnum path has no full-scan fallback variant).
+        self._rid_to_seq_keys: dict[str, set] = {}
+        self._rid_to_seq_uuid_keys: dict[str, set] = {}
+
     def _process_input(
         self, input: PreprocessInput
     ):
@@ -432,10 +459,17 @@ class PreprocessWorkerThread:
         self, result: ResultTensors
     ):
         result.graph_edge.name = f"{result.modality}_output"
+        # MSTAR_EMIT_SEQNUMS takes precedence over MSTAR_ORDERED_EMIT: when the
+        # producer stamped a seqnum and the flag is on, order on the seqnum and
+        # bypass the FIFO entirely.
+        seqnums = self._seqnums_on() and result.emit_seq is not None
         # Inline fast path: token values arrived in the message metadata, so
         # there is no SHM tensor to fetch and no producer ack to send. The
         # producer already released its tensor_store ref locally.
         if result.metadata and "inline_values" in result.metadata:
+            if seqnums:
+                self._seq_place_inline(result)
+                return
             if self._ordered_emit:
                 # Enqueue at the FIFO tail; emits only once every earlier
                 # arrival for this (rid, modality) has emitted.
@@ -483,7 +517,9 @@ class PreprocessWorkerThread:
         for tensor_info in result.graph_edge.tensor_info:
             self.tensor_uuid_to_metadata_per_request[result.request_id][
                 tensor_info.uuid] = result.metadata
-        if self._ordered_emit:
+        if seqnums:
+            self._seq_place_shm(result)
+        elif self._ordered_emit:
             key = (result.request_id, result.modality)
             uuids = [info.uuid for info in result.graph_edge.tensor_info]
             entry = {
@@ -583,6 +619,104 @@ class PreprocessWorkerThread:
             ))
         return chunks
 
+    def _seqnums_on(self) -> bool:
+        """MSTAR_EMIT_SEQNUMS, read per-call (dynflag-toggleable). A mid-stream
+        toggle is unsafe (the producer counter and the consumer ``next`` pointer
+        would disagree) — toggle only between requests."""
+        return os.environ.get("MSTAR_EMIT_SEQNUMS", "0") == "1"
+
+    def _seq_buffer(self, key: tuple[str, str], request_id: str) -> dict:
+        """Get or lazily create the reorder buffer for one (rid, modality).
+
+        ``next`` starts at 0: the producer's per-(rid, modality) counter starts
+        at 0 for each fresh stream, so the first seqnum the consumer expects is
+        0 even if a later seqnum arrives first (it is held until 0 lands)."""
+        buf = self._seq_buffers.get(key)
+        if buf is None:
+            buf = self._seq_buffers[key] = {"next": 0, "entries": {}}
+            self._rid_to_seq_keys.setdefault(request_id, set()).add(key)
+        return buf
+
+    def _drain_seq_buffer(self, key: tuple[str, str]) -> None:
+        """Emit the contiguous run of ready entries starting at ``next``.
+
+        Delivers seqnum ``next`` (and each following seqnum) only once it is
+        present and ready, advancing ``next`` past each — so a token that
+        arrived out of order (higher seqnum first) waits for its predecessors,
+        and a signal-only entry (no chunks) simply advances ``next`` without
+        emitting. The buffer stays alive when ``entries`` empties: ``next`` must
+        persist until the request is cleaned up."""
+        buf = self._seq_buffers.get(key)
+        if buf is None:
+            return
+        entries = buf["entries"]
+        n_emitted = 0
+        while True:
+            entry = entries.get(buf["next"])
+            if entry is None or not entry["ready"]:
+                break
+            del entries[buf["next"]]
+            buf["next"] += 1
+            for u in entry["uuid_order"]:
+                chunk = entry["chunks"].get(u)
+                if chunk is not None:
+                    self.out_queue.put(chunk)
+                    n_emitted += 1
+        if self._ordered_emit_debug:
+            logger.warning(
+                "SEQEMIT drain key=%s next=%d emitted=%d held=%s",
+                key, buf["next"], n_emitted, sorted(entries),
+            )
+
+    def _seq_place_inline(self, result: ResultTensors) -> None:
+        """Buffer an inline (always-ready) chunk at its producer seqnum."""
+        key = (result.request_id, result.modality)
+        buf = self._seq_buffer(key, result.request_id)
+        chunks = self._build_inline_chunks(result)
+        buf["entries"][result.emit_seq] = {
+            "ready": True,
+            "uuid_order": list(range(len(chunks))),
+            "chunks": dict(enumerate(chunks)),
+            "pending": set(),
+        }
+        if self._ordered_emit_debug:
+            logger.warning(
+                "SEQEMIT arrival INLINE rid=%s seq=%s n_chunks=%d",
+                result.request_id, result.emit_seq, len(chunks),
+            )
+        self._drain_seq_buffer(key)
+
+    def _seq_place_shm(self, result: ResultTensors) -> None:
+        """Buffer an SHM chunk at its producer seqnum; it becomes ready when
+        every one of its tensor reads completes (in ``_process_read_tensors``).
+        A signal-only edge (no tensor_info) is trivially ready — else it would
+        wedge its seqnum forever (no read will ever complete it) and hold the
+        whole stream. Such edges keep their seqnum slot so no gap is left."""
+        key = (result.request_id, result.modality)
+        buf = self._seq_buffer(key, result.request_id)
+        uuids = [info.uuid for info in result.graph_edge.tensor_info]
+        entry = {
+            "ready": not uuids,
+            "uuid_order": uuids,
+            "chunks": {},
+            "pending": set(uuids),
+        }
+        buf["entries"][result.emit_seq] = entry
+        for u in uuids:
+            self._uuid_to_seq_entry.setdefault(
+                (result.request_id, u), []
+            ).append((key, entry))
+            self._rid_to_seq_uuid_keys.setdefault(
+                result.request_id, set()
+            ).add((result.request_id, u))
+        if self._ordered_emit_debug:
+            logger.warning(
+                "SEQEMIT arrival SHM rid=%s seq=%s uuids=%s",
+                result.request_id, result.emit_seq, uuids,
+            )
+        if entry["ready"]:
+            self._drain_seq_buffer(key)
+
     def _flush_emit_fifo(self, key: tuple[str, str]) -> None:
         """Emit the head-run of ready entries for one (rid, modality) FIFO.
 
@@ -675,6 +809,49 @@ class PreprocessWorkerThread:
                         data=postprocessed,
                         metadata=chunk_metadata,
                     )
+                    # MSTAR_EMIT_SEQNUMS takes precedence over ordered emit:
+                    # when on, mark the seqnum entry ready and drain its stream.
+                    if self._seqnums_on():
+                        seq_waiters = self._uuid_to_seq_entry.pop(
+                            (request_id, tensor_info.uuid), None,
+                        )
+                        uuid_keys = self._rid_to_seq_uuid_keys.get(request_id)
+                        if uuid_keys is not None:
+                            uuid_keys.discard((request_id, tensor_info.uuid))
+                            if not uuid_keys:
+                                self._rid_to_seq_uuid_keys.pop(request_id, None)
+                        if self._ordered_emit_debug:
+                            logger.warning(
+                                "SEQEMIT completion rid=%s uuid=%s waiters=%s",
+                                request_id, tensor_info.uuid,
+                                len(seq_waiters) if seq_waiters else 0,
+                            )
+                        if seq_waiters:
+                            # Satisfy every entry waiting on this uuid (aliased/
+                            # re-sent uuids share one read); drain each stream
+                            # whose head entry became ready.
+                            for key, entry in seq_waiters:
+                                entry["chunks"][tensor_info.uuid] = chunk
+                                entry["pending"].discard(tensor_info.uuid)
+                                if not entry["pending"]:
+                                    entry["ready"] = True
+                                    self._drain_seq_buffer(key)
+                        else:
+                            # No waiter: a DUPLICATE completion for an aliased/
+                            # re-sent uuid (already delivered) or an entry
+                            # dropped by request cleanup (rid dead). Drop.
+                            logger.debug(
+                                "SEQEMIT dropping waiterless completion rid=%s "
+                                "uuid=%s", request_id, tensor_info.uuid,
+                            )
+                        self.tensor_uuid_to_metadata_per_request.get(
+                            request_id, {}
+                        ).pop(tensor_info.uuid, None)
+                        self.tensor_manager.dereference(
+                            request_id=request_id,
+                            uuid=tensor_info.uuid
+                        )
+                        continue
                     waiters = (
                         self._uuid_to_emit_entry.pop(
                             (request_id, tensor_info.uuid), None,
@@ -807,6 +984,16 @@ class PreprocessWorkerThread:
                             self._emit_fifos.pop(key, None)
                         for uk in uuid_keys:
                             self._uuid_to_emit_entry.pop(uk, None)
+                    # MSTAR_EMIT_SEQNUMS: drop this rid's reorder buffers and
+                    # uuid waiters wholesale (abort/complete alike) — no
+                    # KeyError, no leak, and a late read for a dropped entry
+                    # hits the waiterless-drop path in _process_read_tensors.
+                    # Unconditional (cheap no-op when the flag was never on) so a
+                    # mid-run toggle-off cannot strand buffers.
+                    for key in self._rid_to_seq_keys.pop(req_id, ()):
+                        self._seq_buffers.pop(key, None)
+                    for uk in self._rid_to_seq_uuid_keys.pop(req_id, ()):
+                        self._uuid_to_seq_entry.pop(uk, None)
                 did_work = did_work or self._process_read_tensors()
             except Exception:
                 logger.exception("PreprocessWorkerThread error")
