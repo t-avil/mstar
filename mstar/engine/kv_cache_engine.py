@@ -348,6 +348,16 @@ class KVCacheEngine(BaseEngine):
     def get_max_batch_size(self, node_name, graph_walk):
         if node_name not in self.submodule_management:
             return
+        # Merged multimodal prefill walks are SINGLE-REQUEST by contract (the
+        # submodule asserts it): they reuse the prefill_vision/text CAPTURES,
+        # so with an expanded capture grid (MSTAR_VIS/PREFILL_BATCH_SIZES) the
+        # capture-derived cap below would let the scheduler pack several
+        # merged walks into one step and crash every step ("Batching not
+        # implemented for merged multimodal prefill" — observed as a worker
+        # main-loop assert storm on the pd2 boot). Cap them at 1 here until
+        # a batched merge is actually implemented.
+        if str(graph_walk) in ("prefill_multimodal", "prefill_multimodal_audio"):
+            return 1
         submod_max_bs = self.submodule_management[node_name].submodule.max_batch_size(graph_walk)
         submod_mg = self.submodule_management[node_name]
         if submod_mg.cuda_graph_runner is None:
