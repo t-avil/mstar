@@ -645,6 +645,13 @@ class Worker:
         # future change slips a scheduler call onto another thread.
         self._scheduler_lock = threading.Lock()
 
+        # MSTAR_ENCODER_ASYNC: low-priority side stream for speculative encoder
+        # forwards. Lazy-init via ``_get_encoder_async_stream`` (so the flag
+        # can be flipped between init and run() without a restart for tests,
+        # and so workers without CUDA never allocate a stream they can't
+        # back). See ``_execute_on_gpu_thread`` for the dispatch site.
+        self._encoder_async_stream: "torch.cuda.Stream | None" = None
+
         # Streaming buffers: request_id -> edge_name -> list of tensors
         # (Legacy path — kept for models without PartitionTopology)
         self.streaming_buffers: dict[str, dict[str, list[torch.Tensor]]] = {}
@@ -879,6 +886,14 @@ class Worker:
 
         for node_name in self.engine_manager.lru_tracked_nodes():
             self._last_active.pop((body.request_id, node_name), None)
+
+        # If the removed request had an encoder forward dispatched but the
+        # Thinker prefill step that would consume that buffer never ran, the
+        # encoder-async depth counter would otherwise leak. Conservatively
+        # release one credit on every remove — the helper no-ops when the
+        # flag is off, or when the counter is already at zero (so a remove
+        # for a request that had no encoder step is harmless).
+        self.scheduler.release_encoder_async_credit()
 
     def _handle_tensor_received(self, body: TensorReceived) -> None:
         """Sender-side cleanup: receiver confirmed RDMA read, free source buffers."""
@@ -2180,6 +2195,41 @@ class Worker:
         engine = self.engine_manager.get_engine(spec_node_batch.node_name)
         engine.reset_pre_plan_for_batch(spec_node_batch)
 
+    def _get_encoder_async_stream(self) -> "torch.cuda.Stream | None":
+        """Lazily allocate the low-priority CUDA stream used for the encoder
+        forward when ``MSTAR_ENCODER_ASYNC=1``.
+
+        Using a non-default stream with the lowest priority lets the encoder
+        forward overlap with concurrent Thinker decode kernels (which keep
+        running on the default, higher-priority stream). The driver still
+        time-slices SM occupancy, but the lower-priority stream is preferred
+        when the queue is contended, so the encoder is a "good citizen"
+        relative to latency-sensitive decode steps.
+
+        Returns ``None`` when CUDA is unavailable (e.g. tests on CPU), in
+        which case we fall through to default-stream execution — the
+        speculative dispatch still helps by being scheduled earlier even if
+        it can't physically overlap.
+        """
+        if not torch.cuda.is_available():
+            return None
+        if getattr(self, "_encoder_async_stream", None) is None:
+            # priority=0 is the lowest priority (numerically larger = lower
+            # priority in CUDA's API). We deliberately don't pick the most
+            # extreme priority via ``get_stream_priority_range`` because the
+            # range can be empty on non-Tesla devices; the default low value
+            # is universally supported.
+            try:
+                self._encoder_async_stream = torch.cuda.Stream(
+                    device=self.device, priority=0,
+                )
+            except (TypeError, RuntimeError):
+                # Some builds may not accept the priority kwarg or device kw.
+                # Fallback to a plain side stream — still gets us the
+                # non-default-stream benefit even if priority isn't honored.
+                self._encoder_async_stream = torch.cuda.Stream()
+        return self._encoder_async_stream
+
     def _execute_on_gpu_thread(
         self,
         batch: ScheduledBatch,
@@ -2209,6 +2259,13 @@ class Worker:
         internal stream), so replay on a side stream is valid; prefill and
         decode use disjoint static I/O buffers and FlashInfer workspaces, so
         concurrent execution does not corrupt.
+
+        When MSTAR_ENCODER_ASYNC=1 and the batch is an encoder node
+        (``vision_encoder`` / ``audio_encoder``), the forward runs on a
+        dedicated low-priority side stream (input-fenced against the
+        default stream, completion event recorded on the side stream, and
+        the default stream fenced on it afterwards) so encoder kernels
+        overlap Thinker work on the default stream.
         """
         from mstar.utils.profiler import range_pop, range_push
 
@@ -2294,8 +2351,32 @@ class Worker:
                     sorted(self._walk_stats.items(), key=lambda kv: -kv[1]),
                 )
 
+        # MSTAR_ENCODER_ASYNC: encoder nodes run on a dedicated low-priority
+        # side stream (see docstring). Distinct from the MSTAR_SIDE_PREFILL
+        # ``stream`` parameter: this path adds input/downstream fences the
+        # side-prefill contract does not need.
+        use_side_stream = (
+            stream is None
+            and
+            getattr(self.scheduler, "encoder_async_enabled", False)
+            and batch.node_name in ("vision_encoder", "audio_encoder")
+            and torch.cuda.is_available()
+        )
         _ws_t0 = _time.perf_counter() if self._walk_stats is not None else 0.0
         try:
+            if use_side_stream:
+                side_stream = self._get_encoder_async_stream()
+                if side_stream is None:
+                    # CUDA disappeared between the flag check and stream
+                    # allocation — degrade gracefully to default-stream
+                    # execution. This is the same fallback the rest of the
+                    # worker uses when ``torch.cuda.is_available()`` flips.
+                    output = engine.execute_with_max_batch_size(node_batch)
+                    if torch.cuda.is_available():
+                        event = torch.cuda.Event()
+                        event.record(torch.cuda.default_stream(self.device))
+                        output.completion_event = event
+                    return output
             if stream is not None:
                 # Side-stream execution (MSTAR_SIDE_PREFILL): run the whole
                 # batch on the side stream so it overlaps default-stream decode
