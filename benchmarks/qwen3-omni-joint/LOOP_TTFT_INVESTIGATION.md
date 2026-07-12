@@ -146,3 +146,23 @@ the guilty milestone's commits.
 | shipreb | i2t_B32_len212 | - | 3.21s | 6.67 | 78.92 | tok=1189.38 |
 | shipreb | s2t_B32_r1 | - | .284s | 40.27 | 55.60 | tok=843.43 |
 | shipreb | i2t_B32_r2 | - | 3.43s | 6.93 | 67.24 | tok=1202.10 |
+| quietwin | i2t_B32_q0821 | - | 3.2s | 7.42 | 55.01 | tok=1308.01 |
+| quietwin | s2t_B32_q0821 | - | .247s | 35.63 | 41.01 | tok=746.05 |
+- 08:32 wakeup8: quietwin r1: s2t B32 DONE-criteria MET (247ms/35.6rps/746tok
+  @load41 — TTFT<=280 ✓ tok>=664 ✓). i2t caught by mid-cell load burst
+  (3.2s @55). Retrying i2t-only n=96 in the current window (load 13.8).
+| quietwin | i2t_B32_q0832 | - | 3.641s | 7.61 | 44.99 | tok=1344.21 |
+| quietwin | i2t_B32_q0843 | - | 2.68s | 7.62 | 56.11 | tok=1359.99 |
+| quietwin | i2t_B32_q0854 | - | 4.144s | 6.87 | 34.45 | tok=1204.16 |
+| quietwin | s095305 | - | ?s | ? | 12.48 | tok=? |
+| quietwin | s095348 | - | ?s | ? | 12.82 | tok=? |
+| quietwin | s095431 | - | ?s | ? | 13.07 | tok=? |
+| quietwin | s095513 | - | ?s | ? | 11.66 | tok=? |
+| ladder | L0_ship_full | - | .334s | 5.46 | 90.61 | - |
+| ladder | L1_no_mixedchunk | - | 6.8s | 4.93 | 114.19 | - |
+| ladder | L2_no_emitstack | - | 6.172s | 4.91 | 118.41 | - |
+| ladder | L3_no_samplercs | - | 6.3s | 4.82 | 116.95 | - |
+| ladder | L4_budgets512 | - | 6.66s | 4.90 | 126.63 | - |
+| ladder | L5_ship_full_again | - | 6.12s | 4.97 | 136.76 | - |
+- 11:05Z wakeup: 8344 died 10:51 (graceful shutdown = wrapper reaped again; 10:16 boot was not setsid). GPUs idle 4MiB. Killed blind sniper (1568196/7). Relaunched setsid boot_and_snipe.sh (boot -> dynflags -> sniper2), log sniper3.run.log, pid 1881541. Load 27.7. ~65min to floor.
+- 12:11Z FLOOR: SNIPER_TIMEOUT, 0 snipes on final hunt (load 22-39 for entire 10:27-12:09 window, never <14). i2t clean-cell bar UNMET; s2t bar MET (247ms/35.6rps/746tok @load41). Teardown: sniper killed, lab ladder+bisect killed, GPUs 6,7 at 4MiB, bisect worktree removed. Loop closed after ~8h05m.
