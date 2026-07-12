@@ -431,6 +431,7 @@ class MicroScheduler:
         decode_target: tuple[str, str],
         n_decode: int | None = None,
         budget_tokens: int = 0,
+        bypass_floor: bool = False,
     ) -> bool:
         """Read-only peek: would a mixed batch assemble RIGHT NOW if the decode
         group named by ``decode_target`` were back in the ready queue?
@@ -461,11 +462,23 @@ class MicroScheduler:
         When > 0, a chunk only counts as an opportunity if n_decode + C fits the
         budget; the scan keeps looking for a smaller chunk otherwise. 0 = off
         (no cap), so P2 / yield-boundary behavior is byte-identical.
+
+        ``bypass_floor``: MSTAR_COADMIT (fix #1) sets this when a BRAND-NEW
+        request is ready, to skip the occupancy floor for that arrival — vLLM
+        co-admits a new prefill into the decode step regardless of how many
+        decodes are in flight. Only the fold-vs-standalone timing changes: the
+        spec-fold pop (``pop_mixed_chunk_for_spec``) carries no floor, so a True
+        here maps to a real fold. Default False keeps P2 / budget-policy behavior
+        byte-identical.
         """
         from mstar.model.qwen3_omni.qwen3_omni_model import mixed_batch_enabled
         if not mixed_batch_enabled():
             return False
-        if n_decode is not None and n_decode < self._mixed_min_decode():
+        if (
+            not bypass_floor
+            and n_decode is not None
+            and n_decode < self._mixed_min_decode()
+        ):
             return False
 
         decode_node_name, decode_walk = decode_target

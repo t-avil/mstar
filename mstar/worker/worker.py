@@ -231,6 +231,14 @@ class Worker:
         # single-chunk / split flags this bakes nothing into capture (it only
         # changes fold TIMING), so it IS dynflags-refreshable below.
         self._mixed_budget_tokens = _mbt()
+        # MSTAR_COADMIT (fix #1): one-step co-admission of a brand-new request's
+        # first chunk into the running decode step (vLLM's unified per-step
+        # admission). The effective fold budget under COADMIT
+        # (MSTAR_COADMIT_BUDGET_TOKENS, default 32768 = vLLM's ~32k) is HARD-
+        # CLAMPED to the largest captured mixed step so a fold can never route to
+        # an uncaptured bucket (the UNCAP IMA lesson). Cached here; refreshed by
+        # _refresh_dynamic_flags on a dynflags flip.
+        self._coadmit_budget_tokens = self._compute_coadmit_budget()
         # Eager-fold peek backoff state (see the fold_probe site).
         self._peek_backoff = 0
         self._peek_skip = 0
@@ -2105,6 +2113,34 @@ class Worker:
     # for rids whose loop is still continuing.
     # ------------------------------------------------------------------
 
+    def _compute_coadmit_budget(self) -> int:
+        """MSTAR_COADMIT_BUDGET_TOKENS clamped to the largest captured mixed step.
+
+        The requested budget (default 32768, matching vLLM's ~32k unified per-
+        step token budget) is HARD-CLAMPED to ``bs + max_captured_chunk`` — the
+        largest mixed step the CUDA-graph grid actually captured. The chunk-size
+        cap (``_MIXED_MAX_CHUNK_TOKENS``, 512) is the real ceiling on a foldable
+        chunk; this clamp lands at 32 + 512 = 544, so the budget is never the
+        binding constraint for any chunk the capture already allows AND never
+        admits a fold whose bucket wasn't captured (the UNCAP IMA lesson). It is
+        thus never MORE restrictive than the V2 budget for a valid fold. Derived
+        from the scheduler's capture-mirror constants so it tracks any P3 grid
+        growth automatically.
+        """
+        raw = os.environ.get("MSTAR_COADMIT_BUDGET_TOKENS")
+        try:
+            want = int(raw.strip()) if raw is not None else 32768
+        except (ValueError, AttributeError):
+            want = 32768
+        # bs = _MIXED_MAX_DECODE + 1 (31 decode rows + 1 chunk row = padded 32).
+        # Reference the class constants (not self.scheduler) so this is safe to
+        # call from __init__ before the scheduler instance is built.
+        max_captured = (
+            MicroScheduler._MIXED_MAX_DECODE + 1
+            + MicroScheduler._MIXED_MAX_CHUNK_TOKENS
+        )
+        return min(want, max_captured)
+
     def _refresh_dynamic_flags(self) -> None:
         """Re-derive init-cached flag values after a MSTAR_DYNFLAGS refresh.
         Keep in sync with the flags cached in __init__ / the scheduler."""
@@ -2113,6 +2149,9 @@ class Worker:
             mixed_budget_tokens,
         )
         self.mixed_single_chunk = mixed_single_chunk_enabled()
+        # MSTAR_COADMIT budget: safe to flip mid-run (fold-timing only, bakes
+        # nothing into capture); the clamp keeps it IMA-safe regardless.
+        self._coadmit_budget_tokens = self._compute_coadmit_budget()
         # V2 budget: safe to flip mid-run — it only gates whether/when an
         # already-mixable chunk folds; it bakes nothing into capture, and the
         # bucket math (chunk C <= _MIXED_MAX_CHUNK_TOKENS) is unchanged. Reset
@@ -3049,7 +3088,7 @@ class Worker:
         )
 
     def _try_fold_mixed_chunk_into_spec(
-        self, speculation: Speculation
+        self, speculation: Speculation, budget_tokens: int | None = None,
     ) -> int | None:
         """MSTAR_MIXED_SPEC: fold ONE ready mixable prefill chunk row into an
         already-built decode continuation ``speculation``, turning the next
@@ -3087,11 +3126,17 @@ class Worker:
         # n_decode = the continuation size BEFORE the chunk row is appended; feed
         # it + the V2 budget to the pop so it selects the same budget-fitting
         # chunk has_mixed_opportunity approved (both scan first-fit identically).
+        # ``budget_tokens`` defaults to the V2 budget but MSTAR_COADMIT (fix #1)
+        # passes its clamped unified budget so the pop's over-budget filter
+        # matches the budget the peek used — else a chunk the peek approved could
+        # fail to pop under a different ceiling.
+        if budget_tokens is None:
+            budget_tokens = self._mixed_budget_tokens
         popped = self.scheduler.pop_mixed_chunk_for_spec(
             self.worker_graphs_manager,
             (decode_node_name, spec_batch.graph_walk),
             n_decode=len(spec_batch.node_objects),
-            budget_tokens=self._mixed_budget_tokens,
+            budget_tokens=budget_tokens,
         )
         if popped is None:
             return None
@@ -4435,14 +4480,35 @@ class Worker:
                     # (same-step admission either way). Only WHEN eligibility is
                     # evaluated changes -- get_next_batch and the mixed fold keep
                     # their own budget/bucket gates, so tokens are unaffected.
-                    if (
-                        not must_yield_away
-                        and os.environ.get("MSTAR_ADMIT_FASTPATH", "0") == "1"
-                        and self.scheduler.has_new_request_ready(
+                    # MSTAR_COADMIT (fix #1) and MSTAR_ADMIT_FASTPATH (fix #4)
+                    # both key off "is a BRAND-NEW request waiting on its first
+                    # prefill?" Compute that peek AT MOST ONCE per decision and
+                    # share it (has_new_request_ready is a Python ready-scan).
+                    # Both flags are read per-call from os.environ so
+                    # MSTAR_DYNFLAGS can A/B them without reboot; when both are off
+                    # the peek is never called (byte-identical). COADMIT also
+                    # requires the spec-fold path (mixed_spec_enabled): it co-
+                    # admits by FOLDING the new chunk into the decode step, which
+                    # only the MIXED_SPEC chain-fold machinery does.
+                    _admit_fp_on = (
+                        os.environ.get("MSTAR_ADMIT_FASTPATH", "0") == "1"
+                    )
+                    _coadmit_on = (
+                        os.environ.get("MSTAR_COADMIT", "0") == "1"
+                        and mixed_spec_enabled
+                    )
+                    new_req_ready = False
+                    if (_admit_fp_on or _coadmit_on) and not must_yield_away:
+                        new_req_ready = self.scheduler.has_new_request_ready(
                             self.worker_graphs_manager,
                             (pending.node_name, pending.graph_walk),
                         )
-                    ):
+                    # fix #4: force a yield-away so get_next_batch admits the new
+                    # prefill STANDALONE at the next decision. fix #1 (below)
+                    # instead FOLDS the new chunk into THIS decode step when it is
+                    # foldable; the two compose (fold preferred, standalone else,
+                    # no double-admission — the fold clears must_yield_away).
+                    if _admit_fp_on and not must_yield_away and new_req_ready:
                         must_yield_away = True
                         self._ws_inc("_admit_fastpath")
 
@@ -4498,11 +4564,35 @@ class Worker:
                     eager_probe = mixed_spec_enabled and (
                         self.mixed_single_chunk or self._mixed_budget_tokens > 0
                     )
-                    if eager_probe and not must_yield_away and self._peek_skip > 0:
+                    # MSTAR_COADMIT (fix #1): a brand-new request's first chunk
+                    # must co-admit into THIS decode step (vLLM's unified per-step
+                    # admission), not wait for a backoff window or the occupancy
+                    # floor. When a new request is ready, force the probe on this
+                    # step and clear the negative-peek backoff so the fold is
+                    # evaluated NOW; bypass_floor (below) lets it fold even at low
+                    # decode occupancy. The fold still flows through the unchanged
+                    # pop + per-request gates, so KV/capture safety is intact.
+                    coadmit_fold = _coadmit_on and new_req_ready
+                    if coadmit_fold:
+                        eager_probe = True
+                        self._peek_backoff = 0
+                        self._peek_skip = 0
+                        self._ws_inc("_coadmit_probe")
+                    elif eager_probe and not must_yield_away and self._peek_skip > 0:
                         self._peek_skip -= 1
                         eager_probe = False
                         self._ws_inc("_n_peek_skipped")
                     fold_probe = must_yield_away or eager_probe
+                    # Fold-decision token budget. MSTAR_COADMIT overrides the V2
+                    # budget with its clamped unified budget (see
+                    # _compute_coadmit_budget) — never MORE restrictive than V2 for
+                    # a valid fold, and IMA-safe by construction. Passed to BOTH
+                    # the peek and the pop so they agree on over-budget.
+                    _fold_budget = (
+                        self._coadmit_budget_tokens
+                        if _coadmit_on
+                        else self._mixed_budget_tokens
+                    )
                     _peek_t0 = (
                         _time.perf_counter()
                         if (fold_probe and self._walk_stats is not None)
@@ -4513,7 +4603,8 @@ class Worker:
                         self.worker_graphs_manager,
                         (pending.node_name, pending.graph_walk),
                         n_decode=_n_decode_pending,
-                        budget_tokens=self._mixed_budget_tokens,
+                        budget_tokens=_fold_budget,
+                        bypass_floor=coadmit_fold,
                     )
                     # V2 telemetry: a budget-accelerated fold fires on a step that
                     # was NOT a yield boundary (P2 would have stayed pure-decode).
@@ -4580,10 +4671,16 @@ class Worker:
                         if speculate_into_mixed:
                             if speculation is not None:
                                 folded_len = self._try_fold_mixed_chunk_into_spec(
-                                    speculation
+                                    speculation,
+                                    budget_tokens=_fold_budget,
                                 )
                                 folded = folded_len is not None
                                 self._ws_inc("_fold_ok" if folded else "_fold_miss")
+                                if folded and coadmit_fold:
+                                    # A fold that co-admitted a brand-new request
+                                    # this step (would have gone standalone / waited
+                                    # under the floor or backoff without COADMIT).
+                                    self._ws_inc("_coadmit_fold")
                                 if folded and _budget_fold:
                                     # V2 counters: folds the budget policy caused
                                     # (would not have happened at a yield boundary)
