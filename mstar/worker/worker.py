@@ -2242,6 +2242,15 @@ class Worker:
                 self._walk_stats["merged_prefill_walks"] = (
                     self._walk_stats.get("merged_prefill_walks", 0) + 1
                 )
+            # Merged text+audio prefill folds (MSTAR_MERGED_PREFILL_AUDIO):
+            # explicit count of text+audio walks that ran as one
+            # prefill_multimodal_audio step instead of a separate prefill_text +
+            # prefill_audio pair. Proves the audio-merge mechanism is alive
+            # (Law 4) — dumped at WARNING level with the rest of WALK_STATS below.
+            if batch.graph_walk == "prefill_multimodal_audio":
+                self._walk_stats["merged_prefill_audio_walks"] = (
+                    self._walk_stats.get("merged_prefill_audio_walks", 0) + 1
+                )
             # Classify standalone prefill steps: chunked (clen bucket) vs
             # unchunked (raw span bucket from the widest input tensor) — sizes
             # the two mixable-gate misses (no chunk metadata / C too big).

@@ -115,6 +115,30 @@ class _VisionPrefillStage:
     start_pos: float
 
 
+@dataclass
+class _AudioPrefillStage:
+    """Staged full-span audio Thinker prefill, computed once by
+    ``_build_audio_full`` (MSTAR_MERGED_PREFILL_AUDIO).
+
+    ``wrapped_embeds`` (total_len, hidden) = audio_bos + audio tokens +
+    audio_eos. ``pos_ids`` (3, total_len) are the absolute 3D MRoPE positions
+    from ``start_pos`` (start/end sentinels text-like, audio tokens temporal
+    +1/frame with h/w pinned). ``mm_mask`` (total_len,) marks audio (True) vs
+    sentinel (False). ``total_len`` = span = audio_len + 2.
+
+    Unlike vision there is NO deepstack and NO custom MRoPE advance: audio
+    positions increment by exactly one per token (see get_rope_index_audio), so
+    the post-span position lands at ``start_pos + total_len`` — i.e. the walk's
+    MRoPE advance equals its ``seq_len``, the default ``advance_seq_lens`` step.
+    That is why the merged text+audio walk carries the SAME post-preprocess
+    signature as ``prefill_text`` (input_embeds + cos_3d + sin_3d +
+    masks_for_talker) and replays on the ``prefill_text`` capture."""
+    wrapped_embeds: torch.Tensor
+    pos_ids: torch.Tensor
+    mm_mask: torch.Tensor
+    total_len: int
+
+
 # ===================================================================
 # 1. AudioEncoderSubmodule (enc_dec engine)
 # ===================================================================
@@ -756,58 +780,20 @@ class ThinkerSubmodule(ARNodeSubmodule):
             )
 
         if graph_walk == "prefill_audio":
-            audio_embeds = inputs["audio_embeds"][0].to(device)  # (audio_tokens, hidden)
-            audio_len = audio_embeds.shape[0]
-
-            # Env-gated dump of the audio-encoder last_hidden_state for the
-            # cross-system tensor comparison (no-op unless MSTAR_DUMP_DIR set).
-            from mstar.model.qwen3_omni.qwen3_omni_model import _dump_obj
-            _dump_obj("mstar_audio_encoder_last_hidden_state.pt", audio_embeds)
-
-            mm_mask = torch.ones(audio_len + 2, dtype=torch.bool, device=device)
-            mm_mask[[0, -1]] = 0
-            masks_for_talker = torch.stack([
-                mm_mask,
-                ~mm_mask
-            ])
-
-            wrapped_embeds = self._wrap_audio_input(audio_embeds)
-            seq_len = audio_len + 2
-            # Position IDs:
-            #   - audio_start_token: text-like position at start_pos
-            #   - audio tokens:      temporal increments per frame,
-            #                        h/w = start_pos (handled by helper)
-            #   - audio_end_token:   text-like position right after
-            start_pos_ids = get_rope_index_text(1, start_pos, device)
-            audio_pos_ids = get_rope_index_audio(
-                audio_len,
-                start_pos + 1,
-                device,
-                self.config.thinker.position_id_per_seconds,
-            )
-            # M-RoPE parity: M* pins audio h/w to a constant, HF ramps them with
-            # temporal. Under MSTAR_VLLM_PROMPT_LAYOUT, set h/w == temporal so the
-            # 3D position_ids are byte-identical to HF get_rope_index.
-            from mstar.model.qwen3_omni.qwen3_omni_model import (
-                vllm_prompt_layout_enabled,
-            )
-            if vllm_prompt_layout_enabled():
-                audio_pos_ids = audio_pos_ids.clone()
-                audio_pos_ids[1] = audio_pos_ids[0]
-                audio_pos_ids[2] = audio_pos_ids[0]
-            end_pos_ids = get_rope_index_text(
-                1, start_pos + 1 + audio_len, device
-            )
-            pos_ids = torch.cat(
-                [start_pos_ids, audio_pos_ids, end_pos_ids], dim=1
-            )
+            stage = self._build_audio_full(inputs, start_pos, device)
+            masks_for_talker = torch.stack([stage.mm_mask, ~stage.mm_mask])
             return ARNodeInputs(
-                input_seq_len=seq_len,
-                input_embeds=wrapped_embeds,
-                custom_pos_ids=pos_ids,
+                input_seq_len=stage.total_len,
+                input_embeds=stage.wrapped_embeds,
+                custom_pos_ids=stage.pos_ids,
                 tensor_inputs={
                     "masks_for_talker": masks_for_talker
                 }
+            )
+
+        if graph_walk == "prefill_multimodal_audio":
+            return self._build_merged_audio_inputs(
+                fwd_info, inputs, start_pos, device, seen_token_mask,
             )
 
         if graph_walk == "prefill_vision":
@@ -929,6 +915,143 @@ class ThinkerSubmodule(ARNodeSubmodule):
             custom_pos_ids=pos_ids,
             tensor_inputs=tensor_inputs,
             kwargs={"mrope_pos_advance": total_advance},
+        )
+
+    def _build_merged_audio_inputs(
+        self,
+        fwd_info: CurrentForwardPassInfo,
+        inputs: NameToTensorList,
+        start_pos: float,
+        device,
+        seen_token_mask: "SeenTokenMask",
+    ) -> ARNodeInputs:
+        """Merged text+audio Thinker prefill (MSTAR_MERGED_PREFILL_AUDIO).
+
+        Build ONE ARNodeInputs spanning the whole prompt by concatenating the
+        text and audio spans in modality order (``merged_audio_first`` from the
+        conductor), threading the MRoPE start position across them EXACTLY as the
+        separate ``prefill_text`` / ``prefill_audio`` walks would after
+        ``advance_seq_lens`` (each span advances ``position_id_start`` by its own
+        ``seq_len``: text by ``text_len``, audio by ``audio_len + 2`` — audio has
+        NO 3D-grid jump, its positions increment one per token). The per-span
+        embeds / pos_ids are computed by the SAME helpers with the SAME threaded
+        ``start_pos`` as the standalone walks, so they are bit-identical — only
+        the concatenation into one forward differs (causal attention over
+        ``[A][B]`` == B attending to A's already-resident KV).
+
+        Because audio carries neither deepstack nor a custom MRoPE advance, the
+        resulting signature (``input_embeds`` + pos_ids + masks_for_talker) is
+        identical to ``prefill_text`` / ``prefill_audio``, so this replays on the
+        ``prefill_text`` capture (NOT the vision capture) and the default
+        ``advance_seq_lens`` (by ``seq_len``) lands the running position exactly
+        where the standalone walks would.
+
+        ``merged_audio_order`` selects the span layout:
+          * ``"audio_first"`` / ``"text_first"`` — 2-entry legacy layout.
+          * ``"interleaved"`` — vLLM-layout s2t ([prefix-text, audio,
+            suffix-text]); the two text spans arrive as ``text_inputs`` (prefix)
+            and ``text_inputs_suffix`` (suffix).
+        """
+        order = fwd_info.step_metadata.get("merged_audio_order")
+
+        def _text_span(key: str, span_start: float):
+            ids = inputs[key][0].to(device)
+            embeds = self.model.model.embed_tokens(ids)
+            seen_token_mask.add_tokens(ids)
+            talker = torch.stack([
+                torch.zeros(ids.shape, dtype=torch.bool, device=device),
+                self._get_talker_text_mask(ids),
+            ])
+            pos = get_rope_index_text(ids.shape[0], span_start, device)
+            return embeds, pos, talker, ids.shape[0]
+
+        def _audio_span(span_start: float):
+            stage = self._build_audio_full(inputs, span_start, device)
+            talker = torch.stack([stage.mm_mask, ~stage.mm_mask])
+            return stage.wrapped_embeds, stage.pos_ids, talker, stage.total_len
+
+        # Build the ordered list of spans, threading start_pos across them EXACTLY
+        # as the standalone walks would (each advances by its own seq_len — text
+        # by token count, audio by audio_len+2; all linear, no side-channel).
+        pos = start_pos
+        spans = []  # (embeds, pos_ids, talker_mask)
+        if order == "interleaved":
+            e, p, t, n = _text_span("text_inputs", pos); pos += n; spans.append((e, p, t))
+            e, p, t, n = _audio_span(pos); pos += n; spans.append((e, p, t))
+            e, p, t, n = _text_span("text_inputs_suffix", pos); pos += n; spans.append((e, p, t))
+        elif order == "audio_first":
+            e, p, t, n = _audio_span(pos); pos += n; spans.append((e, p, t))
+            e, p, t, n = _text_span("text_inputs", pos); pos += n; spans.append((e, p, t))
+        else:  # "text_first"
+            e, p, t, n = _text_span("text_inputs", pos); pos += n; spans.append((e, p, t))
+            e, p, t, n = _audio_span(pos); pos += n; spans.append((e, p, t))
+
+        embeds = torch.cat([s[0] for s in spans], dim=0)
+        pos_ids = torch.cat([s[1] for s in spans], dim=1)
+        masks_for_talker = torch.cat([s[2] for s in spans], dim=1)
+
+        return ARNodeInputs(
+            input_seq_len=embeds.shape[0],
+            input_embeds=embeds,
+            custom_pos_ids=pos_ids,
+            tensor_inputs={
+                "masks_for_talker": masks_for_talker,
+            },
+        )
+
+    def _build_audio_full(
+        self, inputs: NameToTensorList, start_pos: float, device,
+    ) -> "_AudioPrefillStage":
+        """Compute the full-span audio Thinker prefill tensors once: wrapped
+        embeds (audio_bos + audio + audio_eos), 3D MRoPE pos_ids, and mm_mask.
+        Extracted verbatim from the single-shot prefill_audio path so flag-off
+        stays byte-identical."""
+        audio_embeds = inputs["audio_embeds"][0].to(device)  # (audio_tokens, hidden)
+        audio_len = audio_embeds.shape[0]
+
+        # Env-gated dump of the audio-encoder last_hidden_state for the
+        # cross-system tensor comparison (no-op unless MSTAR_DUMP_DIR set).
+        from mstar.model.qwen3_omni.qwen3_omni_model import _dump_obj
+        _dump_obj("mstar_audio_encoder_last_hidden_state.pt", audio_embeds)
+
+        mm_mask = torch.ones(audio_len + 2, dtype=torch.bool, device=device)
+        mm_mask[[0, -1]] = 0
+
+        wrapped_embeds = self._wrap_audio_input(audio_embeds)
+        total_len = audio_len + 2
+        # Position IDs:
+        #   - audio_start_token: text-like position at start_pos
+        #   - audio tokens:      temporal increments per frame,
+        #                        h/w = start_pos (handled by helper)
+        #   - audio_end_token:   text-like position right after
+        start_pos_ids = get_rope_index_text(1, start_pos, device)
+        audio_pos_ids = get_rope_index_audio(
+            audio_len,
+            start_pos + 1,
+            device,
+            self.config.thinker.position_id_per_seconds,
+        )
+        # M-RoPE parity: M* pins audio h/w to a constant, HF ramps them with
+        # temporal. Under MSTAR_VLLM_PROMPT_LAYOUT, set h/w == temporal so the
+        # 3D position_ids are byte-identical to HF get_rope_index.
+        from mstar.model.qwen3_omni.qwen3_omni_model import (
+            vllm_prompt_layout_enabled,
+        )
+        if vllm_prompt_layout_enabled():
+            audio_pos_ids = audio_pos_ids.clone()
+            audio_pos_ids[1] = audio_pos_ids[0]
+            audio_pos_ids[2] = audio_pos_ids[0]
+        end_pos_ids = get_rope_index_text(
+            1, start_pos + 1 + audio_len, device
+        )
+        pos_ids = torch.cat(
+            [start_pos_ids, audio_pos_ids, end_pos_ids], dim=1
+        )
+        return _AudioPrefillStage(
+            wrapped_embeds=wrapped_embeds,
+            pos_ids=pos_ids,
+            mm_mask=mm_mask,
+            total_len=total_len,
         )
 
     def _build_vision_full(
@@ -1673,7 +1796,18 @@ class ThinkerSubmodule(ARNodeSubmodule):
             ),
             FlashInferPackedCudaGraphConfig(
                 capture_graph_walk="prefill_text",
-                replay_graph_walks=["prefill_text", "prefill_audio"],
+                # prefill_multimodal_audio (MSTAR_MERGED_PREFILL_AUDIO) merges a
+                # text + audio span into one Thinker forward. Audio carries no
+                # deepstack and no custom MRoPE advance (positions +1/token), so
+                # the merged span's post-preprocess signature is identical to
+                # prefill_text/audio (input_embeds + cos_3d + sin_3d +
+                # masks_for_talker) — it replays on THIS capture, not the vision
+                # one. Harmless to list unconditionally: the walk is only ever
+                # scheduled when the flag registers it. The merged span pads up
+                # into the same text/audio token buckets.
+                replay_graph_walks=[
+                    "prefill_text", "prefill_audio", "prefill_multimodal_audio",
+                ],
                 packed_seq_len_to_inputs=prefill_text_packed,
                 requires_cfg=False,
                 labels=["main"],
@@ -1891,7 +2025,7 @@ class ThinkerSubmodule(ARNodeSubmodule):
         # ``__batched_logits__`` (n+1 rows) + ``__batched_thinker_states__``.
         is_prefill = graph_walk in (
             "prefill_text", "prefill_audio", "prefill_vision", "thinker_mixed",
-            "prefill_multimodal",
+            "prefill_multimodal", "prefill_multimodal_audio",
         )
         if mrope_section is None and is_prefill:
             mrope_section = self.MROPE_SECTION
