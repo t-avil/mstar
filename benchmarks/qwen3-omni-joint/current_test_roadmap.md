@@ -704,3 +704,18 @@ on PD: 109/80ms TTFT (vLLM ~66/69-73) — B2 gap now ~9ms.
 best solid blue / encoders-implemeneted 4c33b33 dotted blue from
 sweep_mstar_new_v2{,b,c} / vLLM 0.22 green). Best-series data =
 rm_out/final (pd3c: i2t B1-B32 x3 repeats + s2t B1..B32), medians.
+
+**pd4 (last-mile A/Bs) — both remaining levers CLOSED with data:**
+- MERGED_PREFILL(+AUDIO) is STRUCTURALLY INCOMPATIBLE with the PD topology:
+  the merged Sequential[encoder->Thinker] walk spans two node groups and the
+  worker-graph divider dies at boot (KeyError 'Thinker', model/base.py:96).
+  Colocated-only lever; on PD the round-trip it removes is already gone
+  (B1 108-115ms == colocated).
+- ENCODER_ASYNC (ported, commit 1e7f10da) REJECTED for the ship config even
+  on PD: rank0 side-stream contends with PREFILL kernels instead of decode —
+  s2t B32 n256 collapses 49.2 -> 26.4 rps (lower load!), i2t B1/B2 TTFT
+  +150ms (fence serialization), i2t B16/B32 wash. ONE bright spot: s2t B1
+  TTFT 79ms (best ever; base 109, vLLM ~66) — a BATCH-GATED enc-async
+  (on only when <=2 in flight) is the follow-up worth building.
+SHIP CONFIG UNCHANGED: PD + ORDERED_EMIT + BATCH_VISION + bs32 grids;
+enc-async/merged/dual/mixed all off. v10 charts stand as the certified view.
