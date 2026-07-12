@@ -269,6 +269,23 @@ class PreprocessWorkerThread:
         self._ordered_emit_debug = (
             os.environ.get("MSTAR_ORDERED_EMIT_DEBUG", "0") == "1"
         )
+        # MSTAR_EMIT_RID_INDEX (default OFF): keep a per-rid index of the live
+        # ordered-emit keys so cleanup_request drops a request's state in
+        # O(its own entries) instead of scanning every pending (rid, *) key in
+        # both maps. Byte-identical emit order/semantics; when off, cleanup uses
+        # the original full scan (see run()).
+        self._emit_rid_index = (
+            os.environ.get("MSTAR_EMIT_RID_INDEX", "0") == "1"
+        )
+        # MSTAR_EMIT_INLINE_FASTPATH (default OFF): when an inline (always-ready)
+        # chunk arrives and this stream's FIFO is empty, emit it directly rather
+        # than enqueue+flush. Safe for ordering — an empty FIFO means no earlier
+        # arrival for this (rid, modality) is queued or in flight (every SHM
+        # arrival is appended here synchronously on this same thread and removed
+        # only once its read lands), so nothing can precede this token.
+        self._emit_inline_fastpath = (
+            os.environ.get("MSTAR_EMIT_INLINE_FASTPATH", "0") == "1"
+        )
         # (rid, modality) -> deque of entries in arrival order. Entry:
         # {"ready": bool, "uuid_order": [uuid,...], "chunks": {uuid: chunk},
         #  "pending": set[uuid]}   (inline entries: ready=True, uuid_order
@@ -276,6 +293,10 @@ class PreprocessWorkerThread:
         self._emit_fifos: dict[tuple[str, str], collections.deque] = {}
         # uuid -> (fifo_key, entry) so read completions find their entry.
         self._uuid_to_emit_entry: dict[tuple[str, str], tuple] = {}
+        # MSTAR_EMIT_RID_INDEX bookkeeping: rid -> set of its live keys in
+        # _emit_fifos / _uuid_to_emit_entry. Maintained only when the flag is on.
+        self._rid_to_fifo_keys: dict[str, set] = {}
+        self._rid_to_uuid_keys: dict[str, set] = {}
 
     def _process_input(
         self, input: PreprocessInput
@@ -419,6 +440,18 @@ class PreprocessWorkerThread:
                 # Enqueue at the FIFO tail; emits only once every earlier
                 # arrival for this (rid, modality) has emitted.
                 key = (result.request_id, result.modality)
+                # MSTAR_EMIT_INLINE_FASTPATH: empty FIFO -> nothing queued or in
+                # flight ahead, so this always-ready inline chunk can emit
+                # directly (it would enqueue and flush at the head immediately
+                # anyway). Preserves order and drop/abort semantics.
+                if self._emit_inline_fastpath and not self._emit_fifos.get(key):
+                    if self._ordered_emit_debug:
+                        logger.warning(
+                            "ORDEMIT inline FASTPATH rid=%s (empty fifo)",
+                            result.request_id,
+                        )
+                    self._emit_inline_result(result)
+                    return
                 chunks = self._build_inline_chunks(result)
                 entry = {
                     "ready": True,
@@ -427,6 +460,10 @@ class PreprocessWorkerThread:
                     "pending": set(),
                 }
                 self._emit_fifos.setdefault(key, collections.deque()).append(entry)
+                if self._emit_rid_index:
+                    self._rid_to_fifo_keys.setdefault(
+                        result.request_id, set()
+                    ).add(key)
                 if self._ordered_emit_debug:
                     logger.warning(
                         "ORDEMIT arrival INLINE rid=%s n_chunks=%d fifo_len=%d",
@@ -461,10 +498,18 @@ class PreprocessWorkerThread:
                 "pending": set(uuids),
             }
             self._emit_fifos.setdefault(key, collections.deque()).append(entry)
+            if self._emit_rid_index:
+                self._rid_to_fifo_keys.setdefault(
+                    result.request_id, set()
+                ).add(key)
             for u in uuids:
                 waiters = self._uuid_to_emit_entry.setdefault(
                     (result.request_id, u), []
                 )
+                if self._emit_rid_index:
+                    self._rid_to_uuid_keys.setdefault(
+                        result.request_id, set()
+                    ).add((result.request_id, u))
                 if waiters and self._ordered_emit_debug:
                     logger.warning(
                         "ORDEMIT alias (multi-waiter) rid=%s uuid=%s n=%d",
@@ -566,6 +611,12 @@ class PreprocessWorkerThread:
             )
         if not fifo:
             self._emit_fifos.pop(key, None)
+            if self._emit_rid_index:
+                keys = self._rid_to_fifo_keys.get(key[0])
+                if keys is not None:
+                    keys.discard(key)
+                    if not keys:
+                        self._rid_to_fifo_keys.pop(key[0], None)
 
     def _discard_result_tensor(
         self, result: ResultTensors
@@ -630,6 +681,12 @@ class PreprocessWorkerThread:
                         )
                         if self._ordered_emit else None
                     )
+                    if self._emit_rid_index and waiters is not None:
+                        uuid_keys = self._rid_to_uuid_keys.get(request_id)
+                        if uuid_keys is not None:
+                            uuid_keys.discard((request_id, tensor_info.uuid))
+                            if not uuid_keys:
+                                self._rid_to_uuid_keys.pop(request_id, None)
                     if self._ordered_emit and self._ordered_emit_debug:
                         logger.warning(
                             "ORDEMIT completion rid=%s uuid=%s waiters=%s",
@@ -724,9 +781,20 @@ class PreprocessWorkerThread:
                         # Drop this rid's held-back entries and uuid refs; a
                         # late read for a dropped entry falls back to the
                         # direct out_queue path above (harmless for dead rid).
-                        for key in [
-                            k for k in self._emit_fifos if k[0] == req_id
-                        ]:
+                        # MSTAR_EMIT_RID_INDEX: iterate only this rid's tracked
+                        # keys (O(its own entries)); else scan both maps.
+                        if self._emit_rid_index:
+                            fifo_keys = self._rid_to_fifo_keys.pop(req_id, ())
+                            uuid_keys = self._rid_to_uuid_keys.pop(req_id, ())
+                        else:
+                            fifo_keys = [
+                                k for k in self._emit_fifos if k[0] == req_id
+                            ]
+                            uuid_keys = [
+                                k for k in self._uuid_to_emit_entry
+                                if k[0] == req_id
+                            ]
+                        for key in fifo_keys:
                             if self._ordered_emit_debug:
                                 fifo = self._emit_fifos.get(key)
                                 logger.warning(
@@ -737,10 +805,7 @@ class PreprocessWorkerThread:
                                      if fifo else None),
                                 )
                             self._emit_fifos.pop(key, None)
-                        for uk in [
-                            k for k in self._uuid_to_emit_entry
-                            if k[0] == req_id
-                        ]:
+                        for uk in uuid_keys:
                             self._uuid_to_emit_entry.pop(uk, None)
                 did_work = did_work or self._process_read_tensors()
             except Exception:

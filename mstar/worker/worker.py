@@ -4372,6 +4372,32 @@ class Worker:
                         or must_yield_for_fairness
                     )
 
+                    # MSTAR_ADMIT_FASTPATH (fix #4): arrival-triggered admission.
+                    # A brand-new request (fwd_index==0, no KV state) waiting on
+                    # its FIRST prefill walk should not sit behind the spec-chain
+                    # yield gate -- today it waits for a fairness peek (subject to
+                    # SPEC_PEEK_FOR_FAIRNESS + backoff) or the consecutive-spec
+                    # ceiling (~8% of steps). When on, force a yield-away at THIS
+                    # decision point so the next scheduled batch admits the new
+                    # prefill. Read per-call from os.environ (like the spec knobs
+                    # above) so MSTAR_DYNFLAGS can A/B it without a reboot; default
+                    # off -> byte-identical. Composes with the mixed path below:
+                    # if the new prefill is a foldable chunk the eager/mixed probe
+                    # still resets must_yield_away and folds it into the spec batch
+                    # (same-step admission either way). Only WHEN eligibility is
+                    # evaluated changes -- get_next_batch and the mixed fold keep
+                    # their own budget/bucket gates, so tokens are unaffected.
+                    if (
+                        not must_yield_away
+                        and os.environ.get("MSTAR_ADMIT_FASTPATH", "0") == "1"
+                        and self.scheduler.has_new_request_ready(
+                            self.worker_graphs_manager,
+                            (pending.node_name, pending.graph_walk),
+                        )
+                    ):
+                        must_yield_away = True
+                        self._ws_inc("_admit_fastpath")
+
                     # Mixed batch: the ready contending work is a mixable
                     # prefill CHUNK on the decode's own node. Do NOT yield-away
                     # to a prefill-only step (yield-away schedules with

@@ -142,6 +142,13 @@ class MicroScheduler:
         self.encoder_async_enabled = _encoder_async_enabled()
         self.encoder_async_depth = _encoder_async_depth()
         self.encoder_async_in_flight = 0
+        # --- MSTAR_ENC_STEP_BUDGET bookkeeping -------------------------------
+        # Per-encoder-node spatial-merge factor cache. Used to convert the raw
+        # ViT patch-row count on an encoder node's input edge into post-merge
+        # embed tokens for the step-budget accounting. Resolved lazily from the
+        # submodule the first time an encoder wave is budgeted, then cached
+        # (the factor is a fixed model property). See ``_encoder_merge_factor``.
+        self._enc_merge_factor: dict[str, int] = {}
         if self.encoder_async_enabled:
             logger.info(
                 "MicroScheduler: MSTAR_ENCODER_ASYNC=1 (depth=%d). "
@@ -738,6 +745,124 @@ class MicroScheduler:
                 return popped[0], request_id, wg_id, chunk_len
         return None
 
+    # -----------------------------------------------------------------------
+    # MSTAR_ENC_STEP_BUDGET (fix #2 — encoder step budget)
+    #
+    # vLLM-Omni packs ALL images scheduled in a step into ONE varlen eager ViT
+    # forward, bounded by a per-step embed-token budget (32768) rather than a
+    # request-count grid; over-budget images defer to a later step. M*'s eager
+    # encoder already runs one varlen forward over every request that happens
+    # to be ready at the ``vision_encoder`` node (the ``MSTAR_VIS_BATCH_SIZES``
+    # grid only bounds the *Thinker* ``prefill_vision`` CUDA-graph capture, not
+    # the eager encoder node — eager has no capture-shape constraint), but that
+    # wave is otherwise unbounded, so a burst of large images could blow encoder
+    # memory. This budget makes the eager wave explicit and safe: gather pending
+    # image (or audio) encodes in arrival order up to a summed embed-token
+    # budget into the single varlen forward, and push the remainder back onto
+    # their ready queues so they form the next wave.
+    #
+    # Read per-call (not cached at import) so ``MSTAR_DYNFLAGS`` can toggle it at
+    # runtime without a reboot. Default unset -> ``None`` -> the whole path is a
+    # no-op, byte-identical to today. Also skipped when ``MSTAR_MERGED_PREFILL``
+    # is on (the merged walk owns encode+prefill as one bs=1 walk; there is no
+    # standalone encoder wave to budget).
+    # -----------------------------------------------------------------------
+    @staticmethod
+    def _encoder_step_budget() -> int | None:
+        """Return the embed-token budget for the encoder wave, or ``None`` when
+        the feature is off (unset / non-positive / merged-prefill active)."""
+        raw = os.environ.get("MSTAR_ENC_STEP_BUDGET")
+        if not raw:
+            return None
+        if os.environ.get("MSTAR_MERGED_PREFILL", "0") in ("1", "true", "True"):
+            # No standalone encoder wave under merged prefill — fall back to the
+            # existing (unbudgeted) behavior so the two flags don't interact.
+            return None
+        try:
+            budget = int(raw)
+        except ValueError:
+            return None
+        return budget if budget > 0 else None
+
+    def _encoder_merge_factor(self, node_name: str) -> int:
+        """Spatial-merge factor (patch rows per post-merge embed token) for an
+        encoder node, resolved from its submodule and cached. Vision uses
+        ``spatial_merge_size**2`` (exposed as ``merge_sq`` on
+        ``NativeVisionEncoderSubmodule``); nodes without a merge factor (audio)
+        return 1, so the budget then counts raw encoder input rows for them."""
+        cached = self._enc_merge_factor.get(node_name)
+        if cached is not None:
+            return cached
+        factor = 1
+        try:
+            engine = self.engine_manager.get_engine(node_name)
+            submodule = getattr(engine, "submodules", {}).get(node_name)
+            factor = int(getattr(submodule, "merge_sq", 1)) or 1
+        except Exception:  # pragma: no cover - defensive; fall back to raw rows
+            factor = 1
+        self._enc_merge_factor[node_name] = factor
+        return factor
+
+    @staticmethod
+    def _node_embed_tokens(node: GraphNode, merge_factor: int) -> int:
+        """Embed-token contribution of one encoder request's ready inputs.
+
+        The encoder's varlen sequence length is the row count (dim 0) of its
+        largest input edge — ``pixel_values`` (ViT patch rows) for vision,
+        ``audio_features`` for audio; the tiny ``image_grid_thw`` /
+        ``audio_seqlens`` edges never dominate. Post-merge embed tokens =
+        rows // merge_factor. Returns at least 1 so an item always makes
+        progress and an edge we can't measure never silently costs 0."""
+        rows = 0
+        ready_inputs = getattr(node.ready_signals, "ready_inputs", {})
+        for edge in ready_inputs.values():
+            tinfo = getattr(edge, "tensor_info", None)
+            if tinfo and getattr(tinfo[0], "dims", None):
+                rows = max(rows, int(tinfo[0].dims[0]))
+        return max(1, rows // max(1, merge_factor))
+
+    def _apply_encoder_step_budget(
+        self,
+        node_name: str,
+        entries: list[ReadyNodeEntry],
+        node_objects: dict[str, GraphNode],
+        request_to_worker_graph: dict[str, str],
+        worker_graphs_manager: WorkerGraphsManager,
+        budget: int,
+    ) -> None:
+        """Trim an already-popped encoder wave to ``budget`` embed tokens.
+
+        Walks ``entries`` in order (== arrival order, the order requests were
+        registered in the per-request queues), keeping the prefix whose summed
+        embed tokens fit the budget (always keeping at least one so the wave
+        makes progress even if a single item exceeds the budget), and pushing
+        the over-budget tail's nodes back onto their ready queues so they are
+        re-formed into the next wave. The deferred set is a contiguous tail, so
+        no request ever jumps ahead of an earlier one. Mutates ``node_objects``
+        / ``request_to_worker_graph`` in place to drop the deferred requests."""
+        merge_factor = self._encoder_merge_factor(node_name)
+        used = 0
+        cutoff: int | None = None
+        for i, entry in enumerate(entries):
+            node = node_objects.get(entry.request_id)
+            if node is None:
+                continue  # raced removal in the pop loop above
+            cost = self._node_embed_tokens(node, merge_factor)
+            if used > 0 and used + cost > budget:
+                cutoff = i  # first item that no longer fits -> defer this + rest
+                break
+            used += cost
+        if cutoff is None:
+            return  # whole wave fits the budget; nothing to defer
+        for entry in entries[cutoff:]:
+            rid = entry.request_id
+            if rid not in node_objects:
+                continue
+            wg_id = request_to_worker_graph.pop(rid, None)
+            node = node_objects.pop(rid, None)
+            if wg_id is not None and node is not None:
+                worker_graphs_manager.queues[wg_id].push_back_node(rid, node)
+
     def get_next_batch(
         self,
         worker_graphs_manager: WorkerGraphsManager,
@@ -852,6 +977,21 @@ class MicroScheduler:
         if not node_objects:
             return None
 
+        # MSTAR_ENC_STEP_BUDGET (fix #2): cap the eager encoder wave by summed
+        # embed tokens and defer the over-budget tail to the next wave. Read the
+        # flag per-call so MSTAR_DYNFLAGS can toggle it live; no-op / byte-
+        # identical when unset (or under MSTAR_MERGED_PREFILL), and only ever
+        # touches the standalone encoder nodes.
+        if best_node_name in _ENCODER_NODE_NAMES:
+            budget = self._encoder_step_budget()
+            if budget is not None:
+                self._apply_encoder_step_budget(
+                    best_node_name, entries, node_objects,
+                    request_to_worker_graph, worker_graphs_manager, budget,
+                )
+                if not node_objects:
+                    return None  # defensive; the prefix always keeps >=1
+
         logger.debug(
             "MicroScheduler scheduling node %s with graph walk %s for %d requests",
             best_node_name, graph_walk, len(node_objects)
@@ -946,6 +1086,61 @@ class MicroScheduler:
                     if exclude_target is not None and (sname, graph_walk) == exclude_target:
                         continue
                     fwd_info = worker_graphs_manager.get_fwd_info(request_id, node_partition)
+                    engine = self.engine_manager.get_engine(sname)
+                    if not engine.check_ready(sname, request_id, fwd_info):
+                        continue
+                    return True
+        return False
+
+    def has_new_request_ready(
+        self,
+        worker_graphs_manager: WorkerGraphsManager,
+        exclude_target: tuple[str, str] | None,
+    ) -> bool:
+        """Cheap peek: is a BRAND-NEW request ready on its FIRST prefill walk?
+
+        Used by MSTAR_ADMIT_FASTPATH (fix #4): a request that has never run a
+        forward pass (``fwd_index == 0`` -> no KV state) and is waiting on a
+        prefill walk should become eligible for scheduling at the NEXT decision
+        point instead of sitting behind the spec-chain yield gate (which today
+        batches admissions at fairness peeks / the consecutive-spec ceiling).
+        Returns True iff some ready ``(node, walk)`` other than
+        ``exclude_target`` belongs to such a request.
+
+        Same ready-scan + engine readiness / rank-0 / pending-remove filters as
+        ``get_next_batch`` (so a True here means ``get_next_batch`` would
+        actually schedule that node), narrowed to first-prefill nodes. Does NOT
+        pop or modify queue state. The caller only changes WHEN a yield-away
+        happens; the admission itself still flows through ``get_next_batch`` (or
+        the mixed fold), so all budget/bucket gates stay intact.
+        """
+        now = time.monotonic()
+        for _worker_graph_id, queue in worker_graphs_manager.queues.items():
+            ready_map = queue.get_ready_node_names()
+            for request_id, node_names in ready_map.items():
+                if request_id not in worker_graphs_manager.per_request_info:
+                    continue
+                if request_id in self.pending_removes:
+                    continue  # remove deferred; get_next_batch won't start it
+                if request_id in self.held_until and self.held_until[request_id] > now:
+                    continue
+                for sname in node_names:
+                    if sname not in self.tp_rank_zero_nodes:
+                        continue  # only rank 0 initiates scheduling
+                    node_partition = worker_graphs_manager.get_partition_for_node(sname)
+                    graph_walk = worker_graphs_manager.get_graph_walk(
+                        request_id, node_partition,
+                    )
+                    if exclude_target is not None and (sname, graph_walk) == exclude_target:
+                        continue
+                    # Brand-new request = first prefill walk, no KV state yet.
+                    if not graph_walk.startswith("prefill"):
+                        continue
+                    fwd_info = worker_graphs_manager.get_fwd_info(
+                        request_id, node_partition,
+                    )
+                    if fwd_info.fwd_index != 0:
+                        continue
                     engine = self.engine_manager.get_engine(sname)
                     if not engine.check_ready(sname, request_id, fwd_info):
                         continue

@@ -238,16 +238,37 @@ _SAMPLER_CFG_CACHE_V2 = _os.environ.get(
     "MSTAR_SAMPLER_CFG_CACHE_V2", "0"
 ).strip().lower() in ("1", "true", "yes", "on")
 
+# MSTAR_ARGMAX_FAST (default OFF): when EVERY request in the batch is greedy
+# (temperature == 0) and no repetition penalty is active, the next token is just
+# argmax(logits) per row. Skip the per-batch config-tensor assembly (the six
+# pageable H2D copies / their syncs), the fused temperature+softmax Triton
+# kernel, and the FlashInfer top-k/top-p sampler entirely (vLLM does this —
+# sampler.py:239). Byte-identical token VALUES to the current greedy path, which
+# builds a one-hot at argmax and samples it deterministically: torch.argmax and
+# the kernel's tl.argmax both break ties to the lowest index, and dtype is int32
+# to match FlashInfer's output. Only the eager ``Sampler`` takes this branch —
+# the CUDA-graph ``CudaGraphableSampler`` encodes greedy as (temp=1, top_k=1)
+# and cannot branch on CPU values, so it is deliberately left untouched (the
+# flag is read once in ``Sampler.sample``, never inside a captured region).
+_ARGMAX_FAST = _os.environ.get(
+    "MSTAR_ARGMAX_FAST", "0"
+).strip().lower() in ("1", "true", "yes", "on")
+
 
 def _refresh_sampler_flags() -> None:
     """MSTAR_DYNFLAGS hook: re-read the cache flags at runtime (safe — both
-    caches are semantics-free; flipping only changes assembly, not values)."""
-    global _SAMPLER_CFG_CACHE, _SAMPLER_CFG_CACHE_V2
+    caches are semantics-free; flipping only changes assembly, not values.
+    MSTAR_ARGMAX_FAST is likewise output-preserving: it only fires on all-greedy
+    batches, where its argmax equals the sampled token either way)."""
+    global _SAMPLER_CFG_CACHE, _SAMPLER_CFG_CACHE_V2, _ARGMAX_FAST
     _SAMPLER_CFG_CACHE = _os.environ.get(
         "MSTAR_SAMPLER_CFG_CACHE", "0"
     ).strip().lower() in ("1", "true", "yes", "on")
     _SAMPLER_CFG_CACHE_V2 = _os.environ.get(
         "MSTAR_SAMPLER_CFG_CACHE_V2", "0"
+    ).strip().lower() in ("1", "true", "yes", "on")
+    _ARGMAX_FAST = _os.environ.get(
+        "MSTAR_ARGMAX_FAST", "0"
     ).strip().lower() in ("1", "true", "yes", "on")
 
 
@@ -595,6 +616,25 @@ class Sampler(BaseSampler):
         the hot path doesn't need.
         """
         configs = [self._sampling_config[rid] for rid in request_ids]
+        # MSTAR_ARGMAX_FAST: whole-batch greedy shortcut. When every request is
+        # greedy (temperature == 0) and none carries a repetition penalty (which
+        # would shift the argmax), the sampled token is exactly argmax(logits)
+        # per row — no config tensors, no softmax, no FlashInfer. int32 matches
+        # FlashInfer's output dtype so the return is drop-in for the full path.
+        if (
+            _ARGMAX_FAST
+            and all(c.temperature == 0 for c in configs)
+            and not any(c.repetition_penalty != 1.0 for c in configs)
+        ):
+            tokens = logits.argmax(dim=-1).to(torch.int32)
+            tokens = self._broadcast_tokens(tokens)
+            # Keep the per-request RNG offset advancing in lockstep with the full
+            # path: greedy never reads it, but if a request's temperature later
+            # changes the cached/V2 rand is re-seeded from _step_offset, so it
+            # must not fall behind while the fast path is active.
+            for rid in request_ids:
+                self._step_offset[rid] = self._step_offset.get(rid, 0) + 1
+            return tokens
         # Per-batch config tensors. Building these from Python lists with
         # torch.tensor(..., device=...) does a PAGEABLE H2D copy each — torch
         # issues cudaStreamSynchronize per copy, and on the decode hot path
