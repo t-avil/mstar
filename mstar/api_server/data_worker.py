@@ -17,8 +17,10 @@ try:
 except (ImportError, RuntimeError, OSError):
     VideoDecoder = None
 
+from mstar.api_server.detok_proc import DetokClient
 from mstar.api_server.request_types import (
     DataWorkerProfile,
+    PendingDetok,
     PreprocessInput,
     ResultChunk,
     ResultTensors,
@@ -56,7 +58,11 @@ class PreprocessWorker:
         socket_path_prefix: str = "/tmp/mstar",
         tensor_comm_protocol: CommProtocol = CommProtocol.RDMA,
         tcp_transfer_device="",
-        enable_prof: bool=False
+        enable_prof: bool=False,
+        model_name: str = "dummy",
+        cache_dir: str | None = None,
+        model_kwargs: dict | None = None,
+        log_level: str = "INFO",
     ):
         self.request_input_queue = queue.Queue()
         self.result_tensor_input_queue = queue.Queue()
@@ -90,6 +96,30 @@ class PreprocessWorker:
             enable_prof=enable_prof,
         )
 
+        # MSTAR_DETOK_PROC (#13, default OFF): move the CPU-heavy per-chunk text
+        # detokenization (``model.postprocess``) off this (uvicorn/serve) process
+        # into a dedicated child, so it stops contending for the serve GIL. Read
+        # ONCE here: the child is spawned now and cannot follow MSTAR_DYNFLAGS
+        # (process topology is boot-time; see detok_proc.py). A/B via two boots.
+        # Requires a real model with a tokenizer (postprocess); skipped for the
+        # dummy/None model so tests and dummy configs are untouched.
+        self.detok_client: DetokClient | None = None
+        detok_on = os.environ.get("MSTAR_DETOK_PROC", "0") == "1"
+        if detok_on and model is not None:
+            self.detok_client = DetokClient(
+                model=model,
+                model_name=model_name,
+                cache_dir=cache_dir,
+                model_kwargs=model_kwargs,
+                out_queue=self.output_queue,
+                log_level=log_level,
+            )
+        elif detok_on:
+            logger.warning(
+                "MSTAR_DETOK_PROC=1 but no model with a tokenizer is available; "
+                "keeping detok inline",
+            )
+
         self.thread = threading.Thread(
             target=_preprocess_loop,
             kwargs=dict(
@@ -104,7 +134,8 @@ class PreprocessWorker:
                 communicator=self.communicator,
                 tensor_manager=self.tensor_manager,
                 model=model,
-                enable_prof=enable_prof
+                enable_prof=enable_prof,
+                detok_client=self.detok_client,
             )
         )
         self.thread.start()
@@ -217,6 +248,10 @@ class PreprocessWorker:
         self.stop_event.set()
         if self.thread.is_alive():
             self.thread.join()
+        # After the worker thread has stopped submitting, tear down the detok
+        # child; any still-outstanding chunks are recovered inline in shutdown().
+        if self.detok_client is not None:
+            self.detok_client.shutdown()
 
 
 class PreprocessWorkerThread:
@@ -234,7 +269,8 @@ class PreprocessWorkerThread:
         tensor_manager,
         device: str = "cpu",
         model: Model | None = None,
-        enable_prof: bool=False
+        enable_prof: bool=False,
+        detok_client: DetokClient | None = None,
     ):
         self.in_queue = in_queue
         self.result_tensor_queue = result_tensor_queue
@@ -248,6 +284,13 @@ class PreprocessWorkerThread:
         self.device = device
         self.model = model
         self.enable_prof = enable_prof
+
+        # MSTAR_DETOK_PROC: when set, text chunks are built WITHOUT running
+        # postprocess inline (a PendingDetok is attached instead) and emitted via
+        # _emit_chunk, which hands them to this child. None => flag off / no
+        # tokenizer model => every path stays exactly as before.
+        self.detok_client = detok_client
+        self._detok_enabled = detok_client is not None
 
         self.tensor_uuid_to_metadata_per_request = {}
 
@@ -566,6 +609,28 @@ class PreprocessWorkerThread:
                 # it never lingers at the head.
                 self._flush_emit_fifo(key)
 
+    def _emit_chunk(self, chunk: ResultChunk):
+        """Single emit choke point for every ResultChunk.
+
+        Flag off (or a chunk with no deferred detok — e.g. audio/image): put it
+        straight on the output queue, exactly as before. Flag on with a deferred
+        text chunk: hand it to the detok child (it fills ``data`` off-process and
+        the child's receiver thread does the ``out_queue.put`` in submit order).
+        If the child is unavailable, postprocess inline right here so nothing
+        hangs — identical bytes, just on this process.
+        """
+        dc = self.detok_client
+        if dc is not None and chunk.pending_detok is not None:
+            if dc.submit(chunk):
+                return
+            pd = chunk.pending_detok
+            chunk.data = self.model.postprocess(
+                torch.tensor(pd.ints, dtype=pd.dtype).reshape(pd.dims),
+                chunk.modality,
+            )
+            chunk.pending_detok = None
+        self.out_queue.put(chunk)
+
     def _emit_inline_result(self, result: ResultTensors):
         """Produce ResultChunk(s) directly from inline token values.
 
@@ -576,7 +641,7 @@ class PreprocessWorkerThread:
         using the tensor_info dtype/shape and run through the same postprocess.
         """
         for chunk in self._build_inline_chunks(result):
-            self.out_queue.put(chunk)
+            self._emit_chunk(chunk)
 
     def _build_inline_chunks(self, result: ResultTensors) -> list[ResultChunk]:
         """Construct the ResultChunk list for an inline-values message
@@ -607,16 +672,32 @@ class PreprocessWorkerThread:
                 n *= int(d)
             ints = values[:n]
             values = values[n:]
-            tensor = torch.tensor(ints, dtype=tensor_info.dtype).reshape(
-                tensor_info.dims
-            )
-            postprocessed = self.model.postprocess(tensor, modality)
-            chunks.append(ResultChunk(
-                request_id=result.request_id,
-                modality=modality,
-                data=postprocessed,
-                metadata=chunk_metadata,
-            ))
+            if self._detok_enabled and modality == "text":
+                # Defer detok: carry exactly what postprocess needs (ints, dtype,
+                # dims). The detok child reconstructs the identical tensor, so the
+                # bytes match the inline branch below. Only text is offloaded.
+                chunks.append(ResultChunk(
+                    request_id=result.request_id,
+                    modality=modality,
+                    data=b"",
+                    metadata=chunk_metadata,
+                    pending_detok=PendingDetok(
+                        ints=list(ints),
+                        dtype=tensor_info.dtype,
+                        dims=tuple(tensor_info.dims),
+                    ),
+                ))
+            else:
+                tensor = torch.tensor(ints, dtype=tensor_info.dtype).reshape(
+                    tensor_info.dims
+                )
+                postprocessed = self.model.postprocess(tensor, modality)
+                chunks.append(ResultChunk(
+                    request_id=result.request_id,
+                    modality=modality,
+                    data=postprocessed,
+                    metadata=chunk_metadata,
+                ))
         return chunks
 
     def _seqnums_on(self) -> bool:
@@ -660,7 +741,7 @@ class PreprocessWorkerThread:
             for u in entry["uuid_order"]:
                 chunk = entry["chunks"].get(u)
                 if chunk is not None:
-                    self.out_queue.put(chunk)
+                    self._emit_chunk(chunk)
                     n_emitted += 1
         if self._ordered_emit_debug:
             logger.warning(
@@ -735,7 +816,7 @@ class PreprocessWorkerThread:
             for u in entry["uuid_order"]:
                 chunk = entry["chunks"].get(u)
                 if chunk is not None:
-                    self.out_queue.put(chunk)
+                    self._emit_chunk(chunk)
                     n_emitted += 1
         if self._ordered_emit_debug:
             logger.warning(
@@ -781,10 +862,6 @@ class PreprocessWorkerThread:
                         request_id=request_id,
                         uuid=tensor_info.uuid
                     )
-                    postprocessed = self.model.postprocess(
-                        tensor, modality
-                    )
-
                     # Tolerant metadata lookup: a duplicate completion for an
                     # aliased/re-sent uuid (or a completion racing cleanup)
                     # finds the key already deleted below — a bare double
@@ -803,12 +880,29 @@ class PreprocessWorkerThread:
                             "sample_rate": self.model.get_output_sample_rate("audio"),
                         }
 
-                    chunk = ResultChunk(
-                        request_id=request_id,
-                        modality=modality,
-                        data=postprocessed,
-                        metadata=chunk_metadata,
-                    )
+                    if self._detok_enabled and modality == "text":
+                        # Defer detok (SHM text path — e.g. the prefill first
+                        # token, excluded from the inline transport). Ship the
+                        # flat ints + dtype + dims; the child rebuilds the same
+                        # tensor. Non-text (audio/image) stays inline.
+                        chunk = ResultChunk(
+                            request_id=request_id,
+                            modality=modality,
+                            data=b"",
+                            metadata=chunk_metadata,
+                            pending_detok=PendingDetok(
+                                ints=tensor.flatten().tolist(),
+                                dtype=tensor.dtype,
+                                dims=tuple(tensor.shape),
+                            ),
+                        )
+                    else:
+                        chunk = ResultChunk(
+                            request_id=request_id,
+                            modality=modality,
+                            data=self.model.postprocess(tensor, modality),
+                            metadata=chunk_metadata,
+                        )
                     # MSTAR_EMIT_SEQNUMS takes precedence over ordered emit:
                     # when on, mark the seqnum entry ready and drain its stream.
                     if self._seqnums_on():
@@ -882,7 +976,7 @@ class PreprocessWorkerThread:
                                 self._flush_emit_fifo(key)
                     elif not self._ordered_emit:
                         # Flag off: emit directly, as before ordered emit.
-                        self.out_queue.put(chunk)
+                        self._emit_chunk(chunk)
                     else:
                         # Ordered emit ON but no waiters: every SHM arrival
                         # registers waiters under the flag, so this is either
@@ -954,6 +1048,12 @@ class PreprocessWorkerThread:
                     self.tensor_manager.cleanup_request(req_id)
                     if req_id in self.tensor_uuid_to_metadata_per_request:
                         del self.tensor_uuid_to_metadata_per_request[req_id]
+                    # MSTAR_DETOK_PROC: free the child's per-rid state (complete
+                    # or abort). Outstanding items still return normally and are
+                    # dropped as late chunks if the rid is gone (tolerant path in
+                    # get_result_chunks). No-op when the flag is off.
+                    if self.detok_client is not None:
+                        self.detok_client.drop_rid(req_id)
                     if self._ordered_emit:
                         # Drop this rid's held-back entries and uuid refs; a
                         # late read for a dropped entry falls back to the

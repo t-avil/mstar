@@ -7,12 +7,39 @@ from mstar.profile.worker import GraphTimings
 
 
 @dataclass
+class PendingDetok:
+    """MSTAR_DETOK_PROC: the deferred input for off-process detokenization.
+
+    When ``MSTAR_DETOK_PROC`` is on, the data worker builds a chunk *without*
+    running the (CPU-heavy, GIL-holding) ``model.postprocess`` inline; instead
+    it stashes exactly what that call needs here and hands the chunk to the
+    detok process. The detok process reconstructs
+    ``torch.tensor(ints, dtype=dtype).reshape(dims)`` — the same tensor the
+    inline path would have passed to ``postprocess`` — so the produced bytes are
+    byte-identical to the flag-off path.
+
+    ``dtype`` is kept as an opaque object (a ``torch.dtype``) so this module
+    stays torch-free; only the data worker and the detok process, which both
+    already import torch, ever reconstruct the tensor.
+    """
+    ints: list
+    dtype: object  # torch.dtype
+    dims: tuple
+
+
+@dataclass
 class ResultChunk:
     """One chunk of generated output for a request."""
     request_id: str
     modality: str  # "text" | "image" | "audio" | "video"
     data: bytes  # raw payload (text encoded as utf-8)
     metadata: dict = field(default_factory=dict)
+    # MSTAR_DETOK_PROC: set only while a chunk's token->text detokenization is
+    # deferred to the detok process. When set, ``data`` is a placeholder (b"")
+    # and the detok process fills it in from this input, then clears the field.
+    # None on every flag-off / already-postprocessed chunk — the only shape the
+    # OpenAI/serving layer (which reads data/modality/metadata) ever sees.
+    pending_detok: PendingDetok | None = None
 
 
 @dataclass

@@ -175,6 +175,9 @@ class APIServer:
         model_name: str = "dummy",
         log_stats: bool = False,
         log_stats_file: str | None = None,
+        cache_dir: str | None = None,
+        model_kwargs: dict | None = None,
+        log_level: str = "INFO",
     ):
         self.upload_dir = Path(upload_dir)
         self.upload_dir.mkdir(parents=True, exist_ok=True)
@@ -199,7 +202,13 @@ class APIServer:
             socket_path_prefix=socket_path_prefix,
             tensor_comm_protocol=tensor_comm_protocol,
             tcp_transfer_device=tcp_transfer_device,
-            enable_prof=self.log_stats
+            enable_prof=self.log_stats,
+            # MSTAR_DETOK_PROC: the detok child rebuilds the SAME tokenizer-only
+            # model from these, so its postprocess is byte-identical to ours.
+            model_name=model_name,
+            cache_dir=cache_dir,
+            model_kwargs=model_kwargs,
+            log_level=log_level,
         )
 
         # Concurrent request tracking
@@ -948,6 +957,9 @@ def main(argv: list[str] | None = None):
         tcp_transfer_device=args.tcp_transfer_device,
         log_stats=log_stats,
         log_stats_file=args.log_stats_file,
+        cache_dir=args.cache_dir,
+        model_kwargs=yaml_model_kwargs,
+        log_level=args.log_level,
     )
 
     # Spawn conductor in a separate process
