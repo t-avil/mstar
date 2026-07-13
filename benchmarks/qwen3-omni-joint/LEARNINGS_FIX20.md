@@ -91,3 +91,25 @@ n=128 guard 0.42s/34.61rps/720tok @83.
 3. Grow captured mixed bucket (P3 from #1's report) + vision-mix boot flag —
    the only path to real one-step co-admission.
 4. #16/#17/#19 bench-only certifications + remaining wave-2 (#10-12).
+
+## Loop closeout (01:30Z 07-13, stopped by user — cutting losses)
+
+The DONE-bar cell never ran: from 21:40Z onward the box was continuously either
+CPU-saturated (load 60-680) or GPU-occupied by an external full-box job (all 8
+GPUs, twice). Boot-on-window fired zero windows.
+
+**Idle-time honesty:** two design mistakes of mine held GPUs idle before the
+guard existed — the warm-server + trough-sniper pattern (server waiting for load
+windows with 0% util) and the ~20min post-bench gaps between wakeups. The
+idle_guard (warn 10min / self-kill 15min) then the boot-on-window redesign fixed
+it structurally, but ~1.5h of idle-held GPU time happened before that. Rule for
+future sessions: NEVER keep a warm server waiting for external conditions —
+boot-on-window from the start; the 15-min boot cost is the price of being a
+good neighbor.
+
+Final state: 8 fixes implemented+pushed (opt/fix20 @ 1c4c25c3 tip, fork t-avil),
+#8/#9/#18 measured winner (+4-5% tok, identity-clean) ready to promote into the
+ship flag set; #13 positive-lean pending one load-matched boot-pair; #4/#1/#2/
+#6/#14 need quiet paired retests; #7/#3 closed as no-gos; #10-12/#16/#17/#19
+not reached. Next quiet session: run the retest list from "Recommended next
+session" above.

@@ -101,3 +101,4 @@ stack re-bench thorough at end (n=96/256 + s2t guard cell).
 | w4 | dt_base2 | 4.93s | 6.02 | tok=1046.47 | load=91.30 |
 | w4 | dt_s2t_guard | .42s | 34.61 | tok=720.10 | load=83.34 |
 - 22:04Z BENCH4 (detok boot): dt_base1 0.70s/5.48/922@98, dt_base2 4.93/6.02/1046@91 — both beat same-load prior-boot cells (7.41s/732@100): #13 POSITIVE-LEAN (lottery caveat). s2t guard PASS 0.42s/34.61/720@83 (no regression). DONE sniper hunting (load<27 gate; load 66 falling).
+- 22:42Z Server died 22:24 (graceful SIGTERM ~30min post-boot, wrapper-trap pattern; NOT idle_guard — no KILL line, guard only WARNed 22:27). STRATEGY FLIP: no warm servers; watch_boot_run.sh launched (boots best stack DETOK+CPUSET only when load<27 falling x2 + GPUs free + RAM>=200G; runs up to 6 DONE cells; tears down after window; zero idle by construction; log fix20/window.log). bench4 chain killed.
