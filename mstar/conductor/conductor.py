@@ -35,6 +35,8 @@ from mstar.utils.ipc_format import (
     InputSignals,
     NewRequest,
     NewRequestConductor,
+    PackedConductorMessage,
+    PackedWorkerMessage,
     RemoveRequest,
     UnpersistTensors,
     WorkerGraphsDone,
@@ -226,6 +228,24 @@ class Conductor:
         self.enable_prof = enable_prof
         self.tensor_comm_protocol = tensor_comm_protocol
         self.tcp_transfer_device = tcp_transfer_device
+
+        # MSTAR_WGD_PACK (board #11): coalesce this main-loop iteration's
+        # worker-bound WorkerMessage sends (INPUT_SIGNALS from
+        # _send_partition_inputs / _send_producer_done) per destination
+        # worker into ONE packed send instead of one per partition/request.
+        # A single iteration can process several requests' WORKER_GRAPHS_DONE
+        # and fan out inputs to the same worker multiple times; this
+        # collapses those into 1 conductor hop per worker per iteration.
+        # Read once per iteration (see run()) so a dynflags flip mid-
+        # iteration can't split one iteration's sends across wire formats.
+        # Off (default): byte-identical per-message immediate sends.
+        self._wgd_pack = os.environ.get("MSTAR_WGD_PACK", "0") == "1"
+        # Set for the duration of one run() main-loop iteration when
+        # MSTAR_WGD_PACK is on; None otherwise (including outside run(), and
+        # between iterations) so _send_partition_inputs / _send_producer_done
+        # fall back to their immediate-send path if ever called off the main
+        # loop (e.g. future direct callers, tests).
+        self._pack_buffer_out: dict[str, list] | None = None
 
         self._worker_processes: list[mp.Process] = []
         self.waiting_queue: list[NewRequestConductor] = []
@@ -1027,7 +1047,18 @@ class Conductor:
                     partition_name=partition_name
                 ),
             )
-            self.communicator.send(worker, message)
+            self._send_to_worker(worker, message)
+
+    def _send_to_worker(self, worker_id: str, message: WorkerMessage) -> None:
+        """Route one worker-bound message through the MSTAR_WGD_PACK buffer
+        (if the current run() iteration has one open) or send it immediately.
+        Shared by _send_partition_inputs and _send_producer_done, the two
+        per-partition INPUT_SIGNALS sites that can each fire multiple times
+        per worker within one main-loop iteration."""
+        if self._pack_buffer_out is not None:
+            self._pack_buffer_out.setdefault(worker_id, []).append(message)
+        else:
+            self.communicator.send(worker_id, message)
 
     def _send_producer_done(
         self, request_id: str, producer_partition: str,
@@ -1065,7 +1096,7 @@ class Conductor:
                     producer_done=set([producer_partition]),
                 ),
             )
-            self.communicator.send(worker_id, message)
+            self._send_to_worker(worker_id, message)
 
     def _wait_for_workers_ready(self) -> None:
         """Block until every worker reports ``SETUP_DONE`` (weight load + warmup
@@ -1087,6 +1118,64 @@ class Conductor:
                 time.sleep(0.01)
         logger.info("Conductor: all %d worker(s) ready", len(self.worker_ids))
 
+    def _dispatch_message(
+        self, message, done_partition_forwards: list[tuple[str, str, bool]],
+    ) -> None:
+        """Handle one inbound message, appending any resulting
+        ``(request_id, partition_name, partition_done)`` tuples to
+        ``done_partition_forwards``. Factored out of ``run()``'s main loop
+        dispatch so MSTAR_WGD_PACK's PACKED envelope can unpack and replay
+        each contained message through this SAME path, in the SAME order,
+        exactly as if each had arrived as its own top-level message."""
+        if message.message_type == ConductorMessageType.NEW_REQUEST:
+            self._ingest_request(message.body)
+        elif message.message_type == ConductorMessageType.ABORT_REQUEST:
+            self._abort_request(message.body.request_id)
+        elif message.message_type == ConductorMessageType.PACKED:
+            # Understood unconditionally regardless of this conductor's own
+            # flag state (see PackedConductorMessage) — a sender-side
+            # dynflags lag can never desync the wire protocol.
+            for inner in message.body.messages:
+                self._dispatch_message(inner, done_partition_forwards)
+        elif message.message_type == ConductorMessageType.WORKER_GRAPHS_DONE:
+            rid = message.body.request_id
+            if rid not in self.requests:
+                logger.debug(
+                    "WORKER_GRAPHS_DONE for unknown request %s (already completed?)", rid
+                )
+                return
+
+            if self.enable_nvtx:
+                range_push("conductor._process_worker_graphs_done")
+            done_parts = self._process_worker_graphs_done(message.body)
+            for pname in done_parts:
+                done_partition_forwards.append(
+                    (rid, pname, message.body.partition_done)
+                )
+            if self.enable_nvtx:
+                range_pop()
+        else:
+            raise ValueError(f"Unknown message type: {message.message_type}")
+
+    def _flush_pack_buffer(self, pack_buffer: dict[str, list] | None) -> None:
+        """MSTAR_WGD_PACK: send this iteration's buffered worker-bound
+        messages, one send per destination worker. A single-message buffer
+        is sent unpacked (already 1 frame; wrapping would only add
+        overhead) — PACKED is used exactly when it saves a frame."""
+        if not pack_buffer:
+            return
+        for worker_id, messages in pack_buffer.items():
+            if len(messages) == 1:
+                self.communicator.send(worker_id, messages[0])
+            else:
+                self.communicator.send(
+                    worker_id,
+                    WorkerMessage(
+                        message_type=WorkerMessageType.PACKED,
+                        body=PackedWorkerMessage(messages=messages),
+                    ),
+                )
+
     def run(self):
         from mstar.utils.profiler import range_pop, range_push
 
@@ -1104,48 +1193,43 @@ class Conductor:
             try:
                 done_partition_forwards: list[tuple[str, str, bool]] = []
 
-                startup_backlog = self._startup_message_backlog
-                self._startup_message_backlog = []
-                for message in startup_backlog + self.communicator.get_all_new_messages():
-                    if message.message_type == ConductorMessageType.NEW_REQUEST:
-                        self._ingest_request(message.body)
-                    elif message.message_type == ConductorMessageType.ABORT_REQUEST:
-                        self._abort_request(message.body.request_id)
-                    elif message.message_type == ConductorMessageType.WORKER_GRAPHS_DONE:
-                        rid = message.body.request_id
-                        if rid not in self.requests:
-                            logger.debug(
-                                "WORKER_GRAPHS_DONE for unknown request %s (already completed?)", rid
-                            )
-                            continue
+                # MSTAR_WGD_PACK: this iteration's worker-bound sends
+                # (INPUT_SIGNALS from _send_partition_inputs /
+                # _send_producer_done), collected per destination worker and
+                # flushed as one packed send per worker in the ``finally``
+                # below — including on an early exception, so a mid-
+                # iteration error drops no more than the legacy immediate-
+                # send path would. Read the flag once per iteration (a
+                # natural boundary) so a flip mid-iteration can't split one
+                # iteration's sends across the packed/unpacked wire formats.
+                pack_buffer: dict[str, list] | None = (
+                    {} if self._wgd_pack else None
+                )
+                self._pack_buffer_out = pack_buffer
+                try:
+                    startup_backlog = self._startup_message_backlog
+                    self._startup_message_backlog = []
+                    for message in startup_backlog + self.communicator.get_all_new_messages():
+                        self._dispatch_message(message, done_partition_forwards)
 
-                        if self.enable_nvtx:
-                            range_push("conductor._process_worker_graphs_done")
-                        done_parts = self._process_worker_graphs_done(message.body)
-                        for pname in done_parts:
-                            done_partition_forwards.append(
-                                (rid, pname, message.body.partition_done)
-                            )
-                        if self.enable_nvtx:
-                            range_pop()
-                    else:
-                        raise ValueError(f"Unknown message type: {message.message_type}")
+                    completed_requests = []
 
-                completed_requests = []
+                    for request_id, partition_name, p_done in done_partition_forwards:
+                        if request_id not in self.requests:
+                            continue  # already completed by another partition in this cycle
+                        all_done = self._process_done_forward(
+                            request_id, partition_name,
+                            partition_done_from_worker=p_done,
+                        )
+                        if all_done:
+                            completed_requests.append(request_id)
 
-                for request_id, partition_name, p_done in done_partition_forwards:
-                    if request_id not in self.requests:
-                        continue  # already completed by another partition in this cycle
-                    all_done = self._process_done_forward(
-                        request_id, partition_name,
-                        partition_done_from_worker=p_done,
-                    )
-                    if all_done:
-                        completed_requests.append(request_id)
-
-                for request_id in dict.fromkeys(completed_requests):
-                    if request_id in self.requests:
-                        self._process_request_done(request_id)
+                    for request_id in dict.fromkeys(completed_requests):
+                        if request_id in self.requests:
+                            self._process_request_done(request_id)
+                finally:
+                    self._flush_pack_buffer(pack_buffer)
+                    self._pack_buffer_out = None
             except Exception:
                 logger.exception("Conductor error in main loop")
             finally:

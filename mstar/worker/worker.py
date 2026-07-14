@@ -39,6 +39,7 @@ from mstar.utils.ipc_format import (
     InputSignals,
     MessageSource,
     NewRequest,
+    PackedConductorMessage,
     RemoveRequest,
     ScheduleTPNode,
     SetupDone,
@@ -195,6 +196,19 @@ class Worker:
         self._batch_emit = os.environ.get("MSTAR_BATCH_EMIT", "0") == "1"
         if self._batch_emit:
             self._inline_emit = True
+
+        # MSTAR_WGD_PACK (board #11): coalesce this step's per-rid
+        # conductor-bound ConductorMessage sends (WORKER_GRAPHS_DONE) into
+        # ONE packed send instead of one send_pyobj/ZMQ frame per rid. A
+        # batch step with N concurrently-completing rids (e.g. i2t B32) pays
+        # N conductor hops today; this collapses them to 1. Off (default):
+        # byte-identical per-rid immediate sends. On: only the WIRE framing
+        # changes (N frames -> 1 PackedConductorMessage), never message
+        # content or inter-message order — see _send_outputs. The legacy
+        # (non-sidecar) send path only; MSTAR_EMIT_SIDECAR-scoped rids keep
+        # their own per-rid conductor sends (out of scope here, same
+        # technique applies there as a follow-up).
+        self._wgd_pack = os.environ.get("MSTAR_WGD_PACK", "0") == "1"
 
         # Fast path: memoize the per-rid store_and_populate_graph_edges work in
         # _postprocess_batch so a continuing steady-state decode step replays a
@@ -1063,6 +1077,14 @@ class Worker:
                 self._stop_loops(message.body)
             elif message.message_type == WorkerMessageType.SCHEDULE_TP:
                 self.scheduler.register_tp_follow(message.body)
+            elif message.message_type == WorkerMessageType.PACKED:
+                # MSTAR_WGD_PACK: unpack and dispatch each contained message
+                # through this SAME handler, in order — recursion also
+                # replays the out-of-order-request buffering above per inner
+                # message, exactly as if each had arrived as its own
+                # top-level message. Understood unconditionally regardless
+                # of this worker's own flag state (see PackedWorkerMessage).
+                self._process_message_list(message.body.messages)
 
     def _process_messages(self) -> None:
         self._process_message_list(self.communicator.get_all_new_messages())
@@ -1554,6 +1576,7 @@ class Worker:
         prematerialized_new_tokens: dict[str, list[int]] | None = None,
         node_speculatively_scheduled: bool=False,
         batch_collector: list["ResultTensors"] | None = None,
+        wgd_pack_buffer: list[ConductorMessage] | None = None,
     ) -> None:
         """
         Send outputs to other workers and to the conductor.
@@ -1576,6 +1599,12 @@ class Worker:
         collected — every non-inline emit edge (and every other message here)
         is sent immediately exactly as without the flag. The producer-side
         ref release for inline uuids is unchanged: it happens here per rid.
+
+        ``wgd_pack_buffer`` (optional): when supplied (MSTAR_WGD_PACK), this
+        rid's WORKER_GRAPHS_DONE ``ConductorMessage`` is appended to the list
+        instead of being sent immediately; the caller flushes the whole
+        step's buffer as one packed send to "conductor" after the per-rid
+        loop. Peer-worker INPUT_SIGNALS sends below are unaffected.
         """
         if graph_walk is None:
             graph_walk = self.worker_graphs_manager.get_graph_walk(request_id, partition_name)
@@ -1872,7 +1901,10 @@ class Worker:
                     tx_info=self.tensor_manager.get_tx_info(request_id),
                 ),
             )
-            self.communicator.send("conductor", message)
+            if wgd_pack_buffer is not None:
+                wgd_pack_buffer.append(message)
+            else:
+                self.communicator.send("conductor", message)
 
     def _send_outputs_sidecar(
         self, request_id: str, outputs: NodeOutputRouting,
@@ -2206,6 +2238,12 @@ class Worker:
         # time; a flip between steps just changes the next step's transport
         # split, values identical either way.
         self._inline_dual = os.environ.get("MSTAR_INLINE_DUAL", "0") == "1"
+        # Safe to flip mid-run at a step boundary: the buffer (if any) is
+        # built and flushed atomically inside one _process_step call (see
+        # the call site around _send_outputs), so a flip between steps never
+        # leaves a half-packed buffer in flight or splits one step's sends
+        # across the packed/unpacked wire formats.
+        self._wgd_pack = os.environ.get("MSTAR_WGD_PACK", "0") == "1"
         # MSTAR_EMIT_SIDECAR is deliberately NOT refreshed: the sidecar is a
         # process spawned at init, so the flag is static (see __init__).
         # Sidecar-scoped construction is likewise pinned to the slim stack,
@@ -3710,6 +3748,15 @@ class Worker:
         sidecar_entries: list | None = (
             [] if (self._sidecar_rids or self._sidecar_condemned) else None
         )
+        # MSTAR_WGD_PACK: this step's conductor-bound WORKER_GRAPHS_DONE
+        # messages, collected across every (non-sidecar-scoped) rid and
+        # flushed as one packed send below instead of one send per rid.
+        # Read once per step (a natural iteration boundary) so a dynflags
+        # flip mid-step can't split one step's sends across the two wire
+        # formats.
+        wgd_pack_buffer: list[ConductorMessage] | None = (
+            [] if self._wgd_pack else None
+        )
         for rid, routing in routing_per_request.items():
             if sidecar_entries is not None and (
                 rid in self._sidecar_rids or rid in self._sidecar_condemned
@@ -3737,7 +3784,22 @@ class Worker:
                 prematerialized_new_tokens=prem_per_request[rid],
                 node_speculatively_scheduled=batch_N.batch.node_objects[rid]._speculatively_scheduled,
                 batch_collector=batch_collector,
+                wgd_pack_buffer=wgd_pack_buffer,
             )
+        if wgd_pack_buffer:
+            # A single-message buffer is sent unpacked (no PACKED envelope):
+            # it is already 1 frame, so wrapping it would only add overhead.
+            # PACKED is used exactly when it saves a frame (>=2 messages).
+            if len(wgd_pack_buffer) == 1:
+                self.communicator.send("conductor", wgd_pack_buffer[0])
+            else:
+                self.communicator.send(
+                    "conductor",
+                    ConductorMessage(
+                        message_type=ConductorMessageType.PACKED,
+                        body=PackedConductorMessage(messages=wgd_pack_buffer),
+                    ),
+                )
         if batch_collector:
             self.communicator.send(
                 "api_server",
