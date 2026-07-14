@@ -28,7 +28,7 @@ from mstar.engine.kv_store import (
 )
 from mstar.model.submodule_base import ARNodeInputs, ARNodeSubmodule, ModelInputsFromEngine
 from mstar.utils.profiler import range_pop, range_push
-from mstar.utils.sampling import Sampler, SamplingConfig
+from mstar.utils.sampling import Sampler, SamplingConfig, _slim_sample_enabled, sample_batched_and_unpack
 
 logger = logging.getLogger(__name__)
 
@@ -506,12 +506,25 @@ class KVCacheEngine(BaseEngine):
             # unpack packed sentinels (e.g. __batched_thinker_states__) at real
             # seq-len boundaries via the submodule hook. Fixes the KeyError when the
             # uncapped (MSTAR_UNCAP_PREFILL) batch routes prefill through this path.
-            stacked = batched_logits[:len(batch.request_ids)]
-            sampled = sampler.sample(batch.request_ids, stacked).clone()
+            if _slim_sample_enabled():
+                # MSTAR_SLIM_SAMPLE: slice+sample+clone+split is shared with
+                # cuda_graph_runner._sample_and_remap's identical fast path —
+                # see sample_batched_and_unpack. The per-rid merge below (reuse
+                # existing entries, drop "logits") stays call-site-specific.
+                _, new_token_map = sample_batched_and_unpack(
+                    sampler, batch.request_ids, batched_logits,
+                )
+            else:
+                stacked = batched_logits[:len(batch.request_ids)]
+                sampled = sampler.sample(batch.request_ids, stacked).clone()
+                new_token_map = {
+                    rid: {"new_token": [view]}
+                    for rid, view in zip(batch.request_ids, sampled.split(1), strict=True)
+                }
             per_rid = {}
-            for rid, view in zip(batch.request_ids, sampled.split(1), strict=True):
+            for rid, rid_new_token in new_token_map.items():
                 rid_out = batched_output.get(rid) or {}
-                rid_out["new_token"] = [view]
+                rid_out["new_token"] = rid_new_token["new_token"]
                 rid_out.pop("logits", None)
                 per_rid[rid] = rid_out
             _unpack = getattr(submodule, "unpack_packed_outputs", None)
