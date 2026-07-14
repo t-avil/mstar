@@ -51,7 +51,12 @@ from mstar.utils.ipc_format import (
     WorkerMessageType,
 )
 from mstar.utils.profiler import range_pop, range_push
-from mstar.worker.emit_sidecar import ITEM_INLINE, SIDECAR_WALKS, SidecarClient
+from mstar.worker.emit_sidecar import (
+    ITEM_INLINE,
+    SIDECAR_WALKS,
+    SIDECAR_WALKS_I2T_EXTRA,
+    SidecarClient,
+)
 from mstar.worker.engine_manager import EngineManager
 from mstar.worker.micro_scheduler import MicroScheduler, ScheduledBatch
 from mstar.worker.node_manager_utils import (
@@ -414,6 +419,34 @@ class Worker:
                 worker_id,
             )
             self._emit_sidecar = False
+
+        # MSTAR_SIDECAR_I2T (default off): widen the admission walk-gate to
+        # also scope i2t rids (prefill_vision / prefill_multimodal — see
+        # emit_sidecar.SIDECAR_WALKS_I2T_EXTRA for why these were excluded
+        # from Stage 1 and why admitting them is safe). Read once, same as
+        # MSTAR_EMIT_SIDECAR — the walk set below feeds the ONE admission
+        # decision point (_add_new_request) and must not change mid-life for
+        # an already-admitted rid. Requires MSTAR_EMIT_SIDECAR itself; with
+        # it off there is no sidecar client to scope rids into, so the wider
+        # set would be dead weight — refuse loudly instead of silently
+        # no-op'ing.
+        self._sidecar_i2t = os.environ.get("MSTAR_SIDECAR_I2T", "0") == "1"
+        if self._sidecar_i2t and not self._emit_sidecar:
+            logger.critical(
+                "MSTAR_SIDECAR_I2T=1 requires MSTAR_EMIT_SIDECAR=1; "
+                "disabling the i2t walk-gate widening — worker %s scopes "
+                "only the base SIDECAR_WALKS set.",
+                worker_id,
+            )
+            self._sidecar_i2t = False
+        # The set _add_new_request checks my_walks against. Equal to
+        # SIDECAR_WALKS (by identity of contents) when the flag is off, so
+        # flag-off admission decisions — and therefore every downstream byte
+        # on the wire — are unchanged from before this flag existed.
+        self._sidecar_walks = (
+            SIDECAR_WALKS | SIDECAR_WALKS_I2T_EXTRA
+            if self._sidecar_i2t else SIDECAR_WALKS
+        )
         # rids whose emit/WGD path the sidecar owns (decided ONCE at
         # admission, see _add_new_request), and rids stranded by a sidecar
         # failure (client-bound output dropped while the conductor processes
@@ -834,8 +867,10 @@ class Worker:
         # on every partition's NewRequest), so a later partition's add can
         # never flip a rid between owners mid-flight — the split-brain trap
         # of SIDECAR_DESIGN §0. Scoped ⇔ every walk this rid can EVER run on
-        # THIS worker is a text walk (E4b lesson: audio walks stay exactly
-        # flat — one set-membership test per admission is the whole tax).
+        # THIS worker is in self._sidecar_walks (base text walks, plus the
+        # i2t vision walks when MSTAR_SIDECAR_I2T=1 — audio/Talker/Code2Wav
+        # walks stay exactly flat either way: one set-membership test per
+        # admission is the whole tax).
         if (
             self._sidecar_client is not None
             and body.request_id not in self._sidecar_rids
@@ -847,7 +882,7 @@ class Worker:
             for wg_id, wg_workers in body.worker_graph_to_workers.items():
                 if self.worker_id in wg_workers:
                     my_walks |= wg_to_walks.get(wg_id, set())
-            if my_walks and my_walks <= SIDECAR_WALKS:
+            if my_walks and my_walks <= self._sidecar_walks:
                 reg = self._sidecar_client.register_rid(body.request_id)
                 if self._sidecar_client.send(reg):
                     self._sidecar_rids.add(body.request_id)

@@ -90,6 +90,52 @@ logger = logging.getLogger(__name__)
 # graphs can run on the owning worker is in this set.
 SIDECAR_WALKS = frozenset({"thinker_decode", "prefill_text", "thinker_mixed"})
 
+# MSTAR_SIDECAR_I2T (worker.py, default off): widens the walk gate to also
+# admit i2t rids — requests whose first walk is prefill_vision (or, under
+# MSTAR_MERGED_PREFILL, the merged prefill_multimodal walk). Stage 1 excluded
+# these not because of any structural incompatibility — the E4b lesson was
+# about Talker/Code2Wav's STREAMING audio-output edges, and prefill_vision
+# carries none: its Thinker node emits exactly the same shape prefill_text's
+# does (one EMIT_TO_CLIENT "new_token" text edge, output_modality="text",
+# plus the thinker_states/thinker_mask StreamingGraphEdges to Talker — see
+# qwen3_omni_model.py's prefill_vision/prefill_multimodal Sequentials). It was
+# simply never in Stage 1's validated coverage (LEARNINGS_TTFT.md #12) and
+# was left conservatively flat pending its own walk-gating coverage guard,
+# the same way s2t/i2s were guarded for Stage 1 (SIDECAR_DESIGN.md §8 recipe
+# 5). The item-processing code path itself is already exercised for a
+# prefill-shaped row (non-inline, D2H-fallback new_token — see
+# test_mixed_walk_rows_byte_identical's prem-less chunk row, which has the
+# identical shape to a prefill_vision Thinker emit): only the admission gate
+# needs widening, no new item-processing branch.
+#
+# "encode_vision" (the standalone vision-encoder walk registered only under
+# MSTAR_CHUNKED_PREFILL_V2_VISION) has NO EMIT_TO_CLIENT edges at all — its
+# outputs are persist-only, routed to EMPTY_DESTINATION — so it can never
+# produce a sidecar item. It still must be listed here: the admission check
+# is whole-rid (every walk the rid's worker graphs *could* run on this
+# worker, not just the walk of the step at hand — see worker.py
+# ``_add_new_request``), so a chunked-vision i2t rid's my_walks includes
+# "encode_vision" alongside "prefill_vision" and must clear the same subset
+# test. Kept as a SEPARATE set (not folded into SIDECAR_WALKS) so
+# MSTAR_SIDECAR_I2T=0 leaves SIDECAR_WALKS, and therefore every rid's
+# admission decision, byte-identical to before this flag existed.
+#
+# NOTE (topology caveat, see fix20/ideas/s2-sidecar-i2t.md "risks"): the
+# admission subset check is per WORKER, using the full set of walks that
+# could ever land there (all_worker_graph_ids_to_graph_walks), not the
+# walks this particular request actually uses. On the shipped PD-disagg
+# configs (qwen3omni_2gpu_pd.yaml, qwen3omni_pd_disaggregated.yaml) the
+# prefill-Thinker node_group's ``graph_walks:`` bundles prefill_text,
+# prefill_audio AND prefill_vision together on one rank, so widening this
+# set with vision walks alone does not by itself unblock that rank's
+# admission check (prefill_audio remains outside the allowed set) — it
+# takes effect on the DECODE rank (my_walks == {thinker_decode} there,
+# already a clean subset) and on any topology where prefill_vision is
+# isolated on its own node_group.
+SIDECAR_WALKS_I2T_EXTRA = frozenset({
+    "prefill_vision", "prefill_multimodal", "encode_vision",
+})
+
 # Bounded send queue (design §7): ~512 steps ≈ 4.5 s of buffer at the 8.8 ms
 # B32 step. The sidecar has 4-7x headroom per step, so the queue only grows
 # when the sidecar has degraded — treat a trip as failure, not backpressure.
