@@ -118,6 +118,14 @@ class MicroScheduler:
         # scheduler. Surfaced in the per-assembly INFO log; a monotonic counter
         # gives runtime evidence the mixed path is firing without DEBUG.
         self.mixed_batches_assembled = 0
+        # EAGER FOLD (MSTAR_EAGER_FOLD, idea o1): one-shot arm set by the worker
+        # right before the get_next_batch that should assemble a LARGE-chunk
+        # (C > _MIXED_MAX_CHUNK_TOKENS) mixed step to run EAGER. Read-and-cleared
+        # by _try_assemble_mixed so exactly one assembly relaxes the chunk cap;
+        # every other assembly (and the whole flag-off path) keeps the 512 cap,
+        # so a large chunk can never reach the CAPTURED spec-fold pop. Default
+        # False -> byte-identical.
+        self._eager_fold_armed = False
         # request_id -> monotonic time until which the request is held
         self.held_until: dict[str, float] = {}
         # Rids with a deferred remove; stop initiating new work for them.
@@ -390,6 +398,7 @@ class MicroScheduler:
         node_name: str,
         node_partition,
         entry: "ReadyNodeEntry",
+        eager_ok: bool = False,
     ) -> bool:
         """Per-request gates a chunk row must pass to join a mixed batch.
 
@@ -398,14 +407,27 @@ class MicroScheduler:
         mixable chunk. Gates (see _try_assemble_mixed docstring): chunk metadata
         present (P1 chunked, not a full unchunked prefill), C within the largest
         captured bucket, and repetition_penalty == 1.0 (a discarded chunk sample
-        must not perturb penalty state)."""
+        must not perturb penalty state).
+
+        ``eager_ok`` (MSTAR_EAGER_FOLD, idea o1): raise the chunk-size ceiling
+        from the largest CAPTURED bucket (_MIXED_MAX_CHUNK_TOKENS = 512) to
+        MSTAR_EAGER_FOLD_MAX_CHUNK, because an eager-fold mixed step is run
+        UNCAPTURED (a dynamic varlen forward), so it is not bound by the capture
+        grid. Passed True ONLY by _try_assemble_mixed when the worker armed an
+        eager fold; NEVER by pop_mixed_chunk_for_spec (the spec-fold pop targets a
+        CAPTURED replay, so its chunk must stay <= 512 or it would route to an
+        uncaptured graph = IMA). Default False keeps the captured cap."""
         fwd_info = worker_graphs_manager.get_fwd_info(
             entry.request_id, node_partition,
         )
         clen = fwd_info.step_metadata.get("prefill_chunk_len")
         if clen is None:
             return False  # unchunked full prefill — don't mix (bucket blow)
-        if int(clen) > self._MIXED_MAX_CHUNK_TOKENS:
+        cap = self._MIXED_MAX_CHUNK_TOKENS
+        if eager_ok:
+            from mstar.model.qwen3_omni.qwen3_omni_model import eager_fold_max_chunk
+            cap = max(cap, eager_fold_max_chunk())
+        if int(clen) > cap:
             return False
         sc = fwd_info.sampling_config.get(node_name)
         if sc is not None and getattr(sc, "repetition_penalty", 1.0) != 1.0:
@@ -527,6 +549,92 @@ class MicroScheduler:
                 return True
         return False
 
+    def has_eager_fold_opportunity(
+        self,
+        worker_graphs_manager: WorkerGraphsManager,
+        decode_target: tuple[str, str],
+    ) -> bool:
+        """Read-only peek (MSTAR_EAGER_FOLD, idea o1): is a BRAND-NEW request's
+        first prefill chunk ready that is TOO LARGE for the captured mixed fold
+        (C > _MIXED_MAX_CHUNK_TOKENS) but within the eager cap
+        (<= MSTAR_EAGER_FOLD_MAX_CHUNK), on the in-flight decode's node?
+
+        The worker calls this while a decode spec chain is live (decode rids
+        _speculatively_scheduled, hence absent from the ready scan) to decide
+        whether to BREAK the chain into the non-speculative path, where
+        get_next_batch -> _try_assemble_mixed (armed) assembles decode + this
+        large chunk into a thinker_mixed batch that runs EAGER (no captured graph
+        matches its token count). Mirrors has_mixed_opportunity's ready scan +
+        readiness/rank-0/hold filters, narrowed to:
+          * a brand-new request (fwd_index == 0 — first prefill, no KV state), so
+            the eager step (slower than a replay) fires at arrival, not mid-decode;
+          * a chunk walk allowed by _mixed_chunk_walks() (prefill_text always;
+            prefill_vision only when MSTAR_MIXED_BATCH_VISION booted — a vision
+            chunk otherwise lacks the deepstack the mixed preprocess needs);
+          * 512 < C <= eager cap (a chunk that already fits the captured fold is
+            left to the normal captured/spec/coadmit path, not made eager).
+
+        Returns False when the flag is off (so the worker never breaks a chain for
+        it), keeping flag-off byte-identical. Does not pop or mutate queue state;
+        the actual assembly + its own gates run later in _try_assemble_mixed."""
+        from mstar.model.qwen3_omni.qwen3_omni_model import (
+            eager_fold_enabled,
+            eager_fold_max_chunk,
+        )
+        if not eager_fold_enabled():
+            return False
+
+        decode_node_name, decode_walk = decode_target
+        if decode_walk != self._MIXED_DECODE_WALK:
+            return False
+        if decode_node_name in self.tp_nodes:
+            return False  # TP mixed batches are P3
+
+        eager_cap = eager_fold_max_chunk()
+        capture_cap = self._MIXED_MAX_CHUNK_TOKENS
+        chunk_walks = self._mixed_chunk_walks()
+        node_partition = worker_graphs_manager.get_partition_for_node(
+            decode_node_name
+        )
+        now = time.monotonic()
+        for _wg_id, queue in worker_graphs_manager.queues.items():
+            ready_map = queue.get_ready_node_names()
+            for request_id, node_names in ready_map.items():
+                if request_id not in worker_graphs_manager.per_request_info:
+                    continue
+                if request_id in self.pending_removes:
+                    continue
+                if request_id in self.held_until and self.held_until[request_id] > now:
+                    continue
+                if decode_node_name not in node_names:
+                    continue
+                if decode_node_name not in self.tp_rank_zero_nodes:
+                    continue
+                walk = worker_graphs_manager.get_graph_walk(
+                    request_id, node_partition,
+                )
+                if walk not in chunk_walks:
+                    continue
+                fwd_info = worker_graphs_manager.get_fwd_info(
+                    request_id, node_partition,
+                )
+                if fwd_info.fwd_index != 0:
+                    continue  # not a brand-new request's first prefill
+                clen = fwd_info.step_metadata.get("prefill_chunk_len")
+                if clen is None:
+                    continue  # unchunked — not a foldable chunk row
+                clen = int(clen)
+                if clen <= capture_cap or clen > eager_cap:
+                    continue  # fits captured fold, or beyond the eager bound
+                sc = fwd_info.sampling_config.get(decode_node_name)
+                if sc is not None and getattr(sc, "repetition_penalty", 1.0) != 1.0:
+                    continue
+                engine = self.engine_manager.get_engine(decode_node_name)
+                if not engine.check_ready(decode_node_name, request_id, fwd_info):
+                    continue
+                return True
+        return False
+
     def _try_assemble_mixed(
         self,
         worker_graphs_manager: WorkerGraphsManager,
@@ -559,7 +667,18 @@ class MicroScheduler:
         """
         from mstar.model.qwen3_omni.qwen3_omni_model import mixed_batch_enabled
         if not mixed_batch_enabled():
+            self._eager_fold_armed = False  # one-shot arm can't outlive a no-op
             return None
+
+        # EAGER FOLD (MSTAR_EAGER_FOLD, idea o1): read-and-CLEAR the one-shot arm
+        # the worker set before this get_next_batch. When armed, the chunk gate
+        # accepts a chunk up to MSTAR_EAGER_FOLD_MAX_CHUNK (> the captured 512
+        # cap) and we prefer such a large chunk, so the assembled thinker_mixed
+        # step's token count matches no captured graph and execute_forward runs it
+        # EAGER. Clearing it here guarantees exactly ONE assembly relaxes the cap;
+        # every other assembly keeps the captured cap (byte-identical).
+        eager_ok = self._eager_fold_armed
+        self._eager_fold_armed = False
 
         # W5-P3-lite: allow a prefill_vision chunk row alongside prefill_text
         # when the vision flag is on. A vision chunk carries deepstack + the
@@ -587,14 +706,35 @@ class MicroScheduler:
 
             node_partition = worker_graphs_manager.get_partition_for_node(node_name)
 
-            # Pick the first chunk entry that passes the per-request gates.
-            chunk_entry = None
-            for e in chunk_entries:
-                if self._chunk_entry_passes_gates(
+            # Pick the first chunk entry that passes the per-request gates. When
+            # an eager fold is armed, prefer a LARGE chunk (C > the captured cap)
+            # so the arm targets the chunk the peek confirmed — a small chunk
+            # that also fits the captured fold is left to the normal path. Fall
+            # back to first-fit if no large chunk is present (arm then behaves
+            # like a normal assembly).
+            def _passes(e):
+                return self._chunk_entry_passes_gates(
                     worker_graphs_manager, node_name, node_partition, e,
-                ):
-                    chunk_entry = e
-                    break
+                    eager_ok=eager_ok,
+                )
+
+            chunk_entry = None
+            if eager_ok:
+                for e in chunk_entries:
+                    if not _passes(e):
+                        continue
+                    fwd_info = worker_graphs_manager.get_fwd_info(
+                        e.request_id, node_partition,
+                    )
+                    clen = fwd_info.step_metadata.get("prefill_chunk_len")
+                    if clen is not None and int(clen) > self._MIXED_MAX_CHUNK_TOKENS:
+                        chunk_entry = e
+                        break
+            if chunk_entry is None:
+                for e in chunk_entries:
+                    if _passes(e):
+                        chunk_entry = e
+                        break
             if chunk_entry is None:
                 continue
 
