@@ -255,6 +255,118 @@ _ARGMAX_FAST = _os.environ.get(
 ).strip().lower() in ("1", "true", "yes", "on")
 
 
+# MSTAR_SLIM_SAMPLE (default OFF): per-step Python-body reduction around
+# sampling (fix-20 item #10). Two things, both output-preserving:
+#
+#  1. ``Sampler.sample`` fuses the up-to-six separate ``any()``/``all()``
+#     generator scans over the per-request config list (the ARGMAX_FAST
+#     eligibility check, plus any_rep_pen/any_greedy/any_top_k_zero/
+#     all_top_k_zero) into one pass — see ``_scan_sampling_configs``.
+#  2. The engine's two "sample the batched logits, then build a per-rid
+#     new_token map" bodies — ``kv_cache_engine._execute_batched`` (pure
+#     eager forward) and ``cuda_graph_runner._sample_and_remap`` (CUDA-graph
+#     post-replay) — had drifted into two independently-maintained copies of
+#     the same slice/index_select + sample + clone + split logic (down to an
+#     identical FlashInfer-buffer-aliasing comment in both files). They now
+#     both call ``sample_batched_and_unpack`` in this module.
+#
+# Read per-call (not cached) so MSTAR_DYNFLAGS edits apply immediately,
+# matching the ``_envflag`` convention in qwen3_omni_model.py — no
+# register_cache_clear needed since nothing here is cached across calls.
+# Flag off takes the untouched original code path at every call site: same
+# operations, same order, so outputs are byte-identical either way.
+def _slim_sample_enabled() -> bool:
+    return _os.environ.get(
+        "MSTAR_SLIM_SAMPLE", "0"
+    ).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _scan_sampling_configs(
+    configs: list["SamplingConfig"],
+) -> tuple[bool, bool, bool, bool, bool]:
+    """One pass over ``configs`` computing every per-batch predicate the
+    ``Sampler.sample`` hot path needs, replacing up to six separate
+    ``any()``/``all()`` scans (each re-walking the same B-sized list) with
+    one. B is small (<=32 in practice) so the per-call saving is a handful
+    of microseconds, but this runs on every decode step — pure interpreter
+    overhead, not device work — so it composes with the rest of the
+    fix-20 per-step CPU cuts.
+
+    Returns:
+        ``(all_greedy, any_greedy, any_rep_pen, any_top_k_zero, all_top_k_zero)``
+    """
+    all_greedy = True
+    any_greedy = False
+    any_rep_pen = False
+    any_top_k_zero = False
+    all_top_k_zero = True
+    for c in configs:
+        if c.temperature == 0:
+            any_greedy = True
+        else:
+            all_greedy = False
+        if c.repetition_penalty != 1.0:
+            any_rep_pen = True
+        if c.top_k == 0:
+            any_top_k_zero = True
+        else:
+            all_top_k_zero = False
+    return all_greedy, any_greedy, any_rep_pen, any_top_k_zero, all_top_k_zero
+
+
+def sample_batched_and_unpack(
+    sampler: "BaseSampler",
+    request_ids: list[str],
+    batched_logits: torch.Tensor,
+    slot_map: list[int] | None = None,
+) -> tuple[torch.Tensor, dict[str, dict[str, list[torch.Tensor]]]]:
+    """Shared sample+unpack body for the two engine call sites that sample a
+    stacked ``[padded_bs, V]`` batched-logits tensor and build a per-rid
+    ``new_token`` map: ``kv_cache_engine._execute_batched`` (pure eager
+    forward) and ``cuda_graph_runner._sample_and_remap`` (CUDA-graph
+    post-replay, ``__batched_logits__`` fast path). Both independently
+    duplicated: slice/index_select to the real request rows, call
+    ``sampler.sample()``, ``.clone()`` to break FlashInfer's reused
+    sampling-output-buffer alias (the same tokens-doubling bug is
+    reachable from either call site — see the clone comments this
+    replaces), ``.split(1)`` into per-rid views, and zip into a
+    ``{rid: {"new_token": [view]}}`` map. One copy removes that drift risk
+    and cuts one per-wave Python body.
+
+    Args:
+        sampler: anything with a ``.sample(request_ids, logits)`` method —
+            in practice the eager ``Sampler`` (sampling itself is always
+            eager at both call sites; ``cuda_graph_runner`` only replays the
+            *forward* under CUDA graph, then samples afterwards in Python).
+        request_ids: real (non-dummy) request ids for this wave.
+        batched_logits: ``[padded_bs, V]`` stacked logits from one batched
+            forward.
+        slot_map: optional per-request source row into ``batched_logits``
+            (MSTAR_MIXED_SPLIT_ATTN chunk rows); ``None`` uses the first
+            ``len(request_ids)`` rows in order.
+
+    Returns:
+        ``(sampled, new_token_map)`` — ``sampled`` is the cloned ``[B]``
+        token tensor (callers that also need the whole-batch tensor, e.g.
+        MSTAR_DIRECT_FEED, get it without a second sample/clone);
+        ``new_token_map`` is ``{rid: {"new_token": [view]}}`` where each
+        view is a row-slice of ``sampled`` (no extra copy).
+    """
+    if slot_map is not None:
+        idx = torch.tensor(
+            slot_map, dtype=torch.long, device=batched_logits.device
+        )
+        stacked_logits = batched_logits.index_select(0, idx)
+    else:
+        stacked_logits = batched_logits[: len(request_ids)]
+    sampled = sampler.sample(request_ids, stacked_logits).clone()
+    new_token_map = {
+        rid: {"new_token": [view]}
+        for rid, view in zip(request_ids, sampled.split(1), strict=True)
+    }
+    return sampled, new_token_map
+
+
 def _refresh_sampler_flags() -> None:
     """MSTAR_DYNFLAGS hook: re-read the cache flags at runtime (safe — both
     caches are semantics-free; flipping only changes assembly, not values.
@@ -616,15 +728,28 @@ class Sampler(BaseSampler):
         the hot path doesn't need.
         """
         configs = [self._sampling_config[rid] for rid in request_ids]
+        # MSTAR_SLIM_SAMPLE: fuse the boolean scans over `configs` below (this
+        # ARGMAX_FAST check plus the four any()/all() calls further down) into
+        # one pass over the batch instead of up to six. See
+        # _scan_sampling_configs / MSTAR_SLIM_SAMPLE's module docstring.
+        # Flag off leaves every original any()/all() call untouched below —
+        # same statements, same order, byte-identical output either way.
+        slim_sample = _slim_sample_enabled()
+        if slim_sample:
+            all_greedy, any_greedy, any_rep_pen, any_top_k_zero, all_top_k_zero = (
+                _scan_sampling_configs(configs)
+            )
         # MSTAR_ARGMAX_FAST: whole-batch greedy shortcut. When every request is
         # greedy (temperature == 0) and none carries a repetition penalty (which
         # would shift the argmax), the sampled token is exactly argmax(logits)
         # per row — no config tensors, no softmax, no FlashInfer. int32 matches
         # FlashInfer's output dtype so the return is drop-in for the full path.
-        if (
-            _ARGMAX_FAST
-            and all(c.temperature == 0 for c in configs)
-            and not any(c.repetition_penalty != 1.0 for c in configs)
+        if _ARGMAX_FAST and (
+            all_greedy if slim_sample
+            else all(c.temperature == 0 for c in configs)
+        ) and not (
+            any_rep_pen if slim_sample
+            else any(c.repetition_penalty != 1.0 for c in configs)
         ):
             tokens = logits.argmax(dim=-1).to(torch.int32)
             tokens = self._broadcast_tokens(tokens)
@@ -684,10 +809,12 @@ class Sampler(BaseSampler):
                 temperature, top_k, top_p, r_pen, seed, rand_offset = cached
                 rand_offset.add_(1)
 
-        any_rep_pen = any(c.repetition_penalty != 1.0 for c in configs)
-        any_greedy = any(c.temperature == 0 for c in configs)
-        any_top_k_zero = any(c.top_k == 0 for c in configs)
-        all_top_k_zero = all(c.top_k == 0 for c in configs)
+        if not slim_sample:
+            any_rep_pen = any(c.repetition_penalty != 1.0 for c in configs)
+            any_greedy = any(c.temperature == 0 for c in configs)
+            any_top_k_zero = any(c.top_k == 0 for c in configs)
+            all_top_k_zero = all(c.top_k == 0 for c in configs)
+        # else: already computed by the fused _scan_sampling_configs() above.
 
         for rid in request_ids:
             if self._seen_token_mask[rid]._seen_token_mask is None:

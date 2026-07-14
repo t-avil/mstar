@@ -37,7 +37,14 @@ from mstar.engine.kv_store import KVCacheConfig, PagedAllocationManager
 from mstar.model.submodule_base import ARNodeInputs, ARNodeSubmodule, ModelInputsFromEngine, NodeSubmodule
 from mstar.profile.worker import ExecTimings
 from mstar.utils.profiler import mark, range_pop, range_push
-from mstar.utils.sampling import Sampler, SamplerBuffers, SamplingConfig, make_sampler_from_buffers
+from mstar.utils.sampling import (
+    Sampler,
+    SamplerBuffers,
+    SamplingConfig,
+    _slim_sample_enabled,
+    make_sampler_from_buffers,
+    sample_batched_and_unpack,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -2188,15 +2195,6 @@ class CudaGraphRunner:
         # iteration or torch.cat.
         batched_logits = static_output.get("__batched_logits__")
         if batched_logits is not None:
-            if slot_map is not None:
-                # MSTAR_MIXED_SPLIT_ATTN: request i's logits live at slot
-                # slot_map[i] (chunk row at the last slot), not at prefix i.
-                idx = torch.tensor(
-                    slot_map, dtype=torch.long, device=batched_logits.device
-                )
-                stacked_logits = batched_logits.index_select(0, idx)
-            else:
-                stacked_logits = batched_logits[:len(request_ids)]
             # FlashInfer's top-p / top-k sampling reuses an internal output
             # buffer across calls, so iter-N's ``sampled`` tensor address
             # equals iter-(N+k)'s for some small k. With speculation,
@@ -2210,12 +2208,30 @@ class CudaGraphRunner:
             # The .clone() snapshots the sampled value into a fresh
             # allocation that lives as long as the Python view, breaking
             # the alias.
-            sampled = self.sampler.sample(request_ids, stacked_logits).clone()
-            sampled_views = sampled.split(1)
-            outputs = {
-                rid: {"new_token": [view]}
-                for rid, view in zip(request_ids, sampled_views, strict=True)
-            }
+            if _slim_sample_enabled():
+                # MSTAR_SLIM_SAMPLE: this slot_map slice/index_select +
+                # sample + clone + split + per-rid map is identical to
+                # kv_cache_engine._execute_batched's batched_logits fast
+                # path — shared in sample_batched_and_unpack.
+                sampled, outputs = sample_batched_and_unpack(
+                    self.sampler, request_ids, batched_logits, slot_map=slot_map,
+                )
+            else:
+                if slot_map is not None:
+                    # MSTAR_MIXED_SPLIT_ATTN: request i's logits live at slot
+                    # slot_map[i] (chunk row at the last slot), not at prefix i.
+                    idx = torch.tensor(
+                        slot_map, dtype=torch.long, device=batched_logits.device
+                    )
+                    stacked_logits = batched_logits.index_select(0, idx)
+                else:
+                    stacked_logits = batched_logits[:len(request_ids)]
+                sampled = self.sampler.sample(request_ids, stacked_logits).clone()
+                sampled_views = sampled.split(1)
+                outputs = {
+                    rid: {"new_token": [view]}
+                    for rid, view in zip(request_ids, sampled_views, strict=True)
+                }
 
             # MSTAR_DIRECT_FEED: also expose the batched [bs] tensor + rid order
             # so the worker can feed loop-back text_inputs from its rows without
