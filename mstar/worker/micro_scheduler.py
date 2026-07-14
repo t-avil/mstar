@@ -13,6 +13,44 @@ from mstar.worker.node_manager_utils import WorkerGraphsManager
 
 logger = logging.getLogger(__name__)
 
+# W5-P2/P3 mixed-batch chunk grid (MSTAR_MIXED_CHUNK_SIZES). Kept as a
+# scheduler-local duplicate of ThinkerSubmodule.MIXED_BATCH_CHUNK_SIZES (same
+# pattern as qwen3_omni_model._PREFILL_CHUNK_BUCKETS mirroring
+# ThinkerSubmodule.PREFILL_TOKEN_BUCKETS) so the scheduler does not import the
+# model submodule. If the submodule default changes, change this too.
+#
+# Boot-time only (the grid IS the CUDA-graph capture buckets — see
+# ThinkerSubmodule.get_cuda_graph_configs / MIXED_BATCH_CHUNK_SIZES): resolved
+# once and cached for the process lifetime, not refreshed on a dynflags flip.
+_MIXED_CHUNK_SIZES_DEFAULT = (256, 288, 512)
+_mixed_chunk_sizes_cache: tuple[int, ...] | None = None
+
+
+def _resolve_mixed_chunk_sizes() -> tuple[int, ...]:
+    """Parse MSTAR_MIXED_CHUNK_SIZES the same way ThinkerSubmodule does
+    (union with the default, never shrink) so the scheduler's gate agrees
+    with whatever grid was actually captured at boot."""
+    global _mixed_chunk_sizes_cache
+    if _mixed_chunk_sizes_cache is not None:
+        return _mixed_chunk_sizes_cache
+    raw = os.environ.get("MSTAR_MIXED_CHUNK_SIZES", "").strip()
+    if not raw:
+        _mixed_chunk_sizes_cache = _MIXED_CHUNK_SIZES_DEFAULT
+        return _mixed_chunk_sizes_cache
+    try:
+        vals = {int(x) for x in raw.split(",") if x.strip()}
+    except ValueError:
+        _mixed_chunk_sizes_cache = _MIXED_CHUNK_SIZES_DEFAULT
+        return _mixed_chunk_sizes_cache
+    vals = {v for v in vals if v > 0}
+    if not vals:
+        _mixed_chunk_sizes_cache = _MIXED_CHUNK_SIZES_DEFAULT
+    else:
+        _mixed_chunk_sizes_cache = tuple(
+            sorted(vals | set(_MIXED_CHUNK_SIZES_DEFAULT))
+        )
+    return _mixed_chunk_sizes_cache
+
 # ---------------------------------------------------------------------------
 # MSTAR_ENCODER_ASYNC: pipeline the vision/audio encoder ahead of the Thinker.
 #
@@ -335,7 +373,18 @@ class MicroScheduler:
     # side-channel (see ThinkerSubmodule.preprocess / get_cuda_graph_configs).
     _MIXED_VISION_CHUNK_WALK = "prefill_vision"
     _MIXED_MAX_DECODE = 31          # padded_bs 32 = up to 31 decode + 1 chunk row
-    _MIXED_MAX_CHUNK_TOKENS = 512   # largest captured chunk bucket (C in {256,512})
+
+    @classmethod
+    def _max_chunk_tokens(cls) -> int:
+        """Largest captured mixed-step chunk bucket (C). Was a hardcoded 512
+        constant; now derives from the same MSTAR_MIXED_CHUNK_SIZES-resolved
+        grid ThinkerSubmodule captured at boot (_resolve_mixed_chunk_sizes),
+        so the G1 chunk-size gate below — and MSTAR_COADMIT's budget clamp in
+        worker.py, which reads this via the class, not an instance — track any
+        grid growth automatically instead of silently going stale. Callable as
+        both ``self._max_chunk_tokens()`` and ``MicroScheduler._max_chunk_tokens()``
+        (worker.py needs the latter, from __init__, before a scheduler exists)."""
+        return max(_resolve_mixed_chunk_sizes())
 
     def _mixed_min_decode(self) -> int:
         """Occupancy floor for chain-folding (see has_mixed_opportunity).
@@ -405,7 +454,7 @@ class MicroScheduler:
         clen = fwd_info.step_metadata.get("prefill_chunk_len")
         if clen is None:
             return False  # unchunked full prefill — don't mix (bucket blow)
-        if int(clen) > self._MIXED_MAX_CHUNK_TOKENS:
+        if int(clen) > self._max_chunk_tokens():
             return False
         sc = fwd_info.sampling_config.get(node_name)
         if sc is not None and getattr(sc, "repetition_penalty", 1.0) != 1.0:
@@ -550,7 +599,7 @@ class MicroScheduler:
           * A node with BOTH a decode group and >=1 prefill_text chunk row.
           * The chunk row carries P1 chunk metadata (prefill_chunk_len set): a
             full unchunked prefill is not mixed (it would blow the token bucket).
-          * Chunk C <= _MIXED_MAX_CHUNK_TOKENS so (n + C) fits a captured bucket.
+          * Chunk C <= _max_chunk_tokens() so (n + C) fits a captured bucket.
           * Chunk request repetition_penalty == 1.0: a non-last chunk row's
             sampled token is discarded (postprocess drops it), but Sampler.sample
             adds every sampled token to the seen-token mask + advances the RNG

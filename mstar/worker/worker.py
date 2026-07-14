@@ -2151,13 +2151,20 @@ class Worker:
         The requested budget (default 32768, matching vLLM's ~32k unified per-
         step token budget) is HARD-CLAMPED to ``bs + max_captured_chunk`` — the
         largest mixed step the CUDA-graph grid actually captured. The chunk-size
-        cap (``_MIXED_MAX_CHUNK_TOKENS``, 512) is the real ceiling on a foldable
-        chunk; this clamp lands at 32 + 512 = 544, so the budget is never the
-        binding constraint for any chunk the capture already allows AND never
-        admits a fold whose bucket wasn't captured (the UNCAP IMA lesson). It is
-        thus never MORE restrictive than the V2 budget for a valid fold. Derived
-        from the scheduler's capture-mirror constants so it tracks any P3 grid
-        growth automatically.
+        cap (``MicroScheduler._max_chunk_tokens()``, 512 by default, wider under
+        MSTAR_MIXED_CHUNK_SIZES — see the s4 grid-growth report) is the real
+        ceiling on a foldable chunk; this clamp lands at 32 + that cap, so the
+        budget is never the binding constraint for any chunk the capture already
+        allows AND never admits a fold whose bucket wasn't captured (the UNCAP
+        IMA lesson). It is thus never MORE restrictive than the V2 budget for a
+        valid fold.
+
+        Previously this read a hardcoded ``_MIXED_MAX_CHUNK_TOKENS = 512`` class
+        CONSTANT, which did NOT track grid growth despite the docstring's claim
+        (the constant just sat there at 512 regardless of what got captured) —
+        fixed by calling ``_max_chunk_tokens()``, which resolves the same
+        MSTAR_MIXED_CHUNK_SIZES grid ThinkerSubmodule captured at boot, so this
+        now actually auto-widens the day the capture grid grows.
         """
         raw = os.environ.get("MSTAR_COADMIT_BUDGET_TOKENS")
         try:
@@ -2165,11 +2172,12 @@ class Worker:
         except (ValueError, AttributeError):
             want = 32768
         # bs = _MIXED_MAX_DECODE + 1 (31 decode rows + 1 chunk row = padded 32).
-        # Reference the class constants (not self.scheduler) so this is safe to
-        # call from __init__ before the scheduler instance is built.
+        # Reference the class (not self.scheduler) so this is safe to call from
+        # __init__ before the scheduler instance is built; _max_chunk_tokens()
+        # is a classmethod for exactly this reason.
         max_captured = (
             MicroScheduler._MIXED_MAX_DECODE + 1
-            + MicroScheduler._MIXED_MAX_CHUNK_TOKENS
+            + MicroScheduler._max_chunk_tokens()
         )
         return min(want, max_captured)
 
@@ -2186,7 +2194,7 @@ class Worker:
         self._coadmit_budget_tokens = self._compute_coadmit_budget()
         # V2 budget: safe to flip mid-run — it only gates whether/when an
         # already-mixable chunk folds; it bakes nothing into capture, and the
-        # bucket math (chunk C <= _MIXED_MAX_CHUNK_TOKENS) is unchanged. Reset
+        # bucket math (chunk C <= MicroScheduler._max_chunk_tokens()) is unchanged. Reset
         # the min-decode cache too since its default keys on the budget being on.
         self._mixed_budget_tokens = mixed_budget_tokens()
         if hasattr(self.scheduler, "_mixed_min_decode_cached"):
