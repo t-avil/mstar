@@ -668,7 +668,27 @@ class Worker:
         # is: record the side batch's completion_event on the side stream (see
         # _execute_on_gpu_thread), so the existing token-materialization wait
         # gates on the right stream.
-        self._side_prefill = os.environ.get("MSTAR_SIDE_PREFILL", "0") == "1"
+        # MSTAR_ENC_OVERLAP_V2 (default OFF): the next increment beyond
+        # MSTAR_ENCODER_ASYNC. In the encoff/PD split topology the encoders run
+        # on rank 0 and the Thinker on rank 1, so ENCODER_ASYNC already stops the
+        # encoder from contending with decode. What it does NOT fix: when the
+        # encoder's embeds arrive cross-rank at the Thinker, the freshly-ready
+        # vision/audio prefill still breaks the decode spec chain (a fairness
+        # yield) and runs STANDALONE on the default stream, freezing the
+        # in-flight decodes for that step (the residual "prefill freezes decode"
+        # serialization). V2 keeps the decode chain alive on encoder completion
+        # and routes the just-arrived prefill onto the SIDE stream so it overlaps
+        # decode instead of freezing it. It is built entirely on the
+        # MSTAR_SIDE_PREFILL substrate (side executor + side stream + reap/drain
+        # correctness gate), which V2 therefore activates. Read once here for the
+        # substrate; the behavior branch in run() re-reads MSTAR_ENC_OVERLAP_V2
+        # per-call so MSTAR_DYNFLAGS can A/B it. Byte-identical when off (the
+        # substrate is only built if MSTAR_SIDE_PREFILL was already set).
+        self._enc_overlap_v2 = os.environ.get("MSTAR_ENC_OVERLAP_V2", "0") == "1"
+        self._side_prefill = (
+            os.environ.get("MSTAR_SIDE_PREFILL", "0") == "1"
+            or self._enc_overlap_v2
+        )
         self._side_stream: "torch.cuda.Stream | None" = None
         # rids currently executing on the side stream — treated as in-flight
         # for deferred-remove safety (see _apply_pending_removes_safe_to_drop).
@@ -4340,9 +4360,12 @@ class Worker:
                 except Exception:
                     self._side_stream = torch.cuda.Stream(device=self.device)
             logger.info(
-                "Worker %s: MSTAR_SIDE_PREFILL enabled — prefill/encoder "
-                "batches run on a side stream concurrent with decode",
+                "Worker %s: side-stream prefill substrate enabled "
+                "(MSTAR_SIDE_PREFILL=%s, MSTAR_ENC_OVERLAP_V2=%s) — prefill/"
+                "encoder batches run on a side stream concurrent with decode",
                 self.worker_id,
+                os.environ.get("MSTAR_SIDE_PREFILL", "0"),
+                os.environ.get("MSTAR_ENC_OVERLAP_V2", "0"),
             )
 
         # MSTAR_SPEC_PEEK_FOR_FAIRNESS=1: only break the spec chain when
@@ -4567,8 +4590,26 @@ class Worker:
                         os.environ.get("MSTAR_COADMIT", "0") == "1"
                         and mixed_spec_enabled
                     )
+                    # MSTAR_ENC_OVERLAP_V2 (arrival-triggered side overlap). Only
+                    # meaningful with a live side substrate (executor + stream)
+                    # and a FREE side slot this step — otherwise there is nowhere
+                    # to overlap the prefill, so we leave the normal yield alone.
+                    # Read per-call so MSTAR_DYNFLAGS can A/B it.
+                    _enc_overlap_v2_on = (
+                        os.environ.get("MSTAR_ENC_OVERLAP_V2", "0") == "1"
+                        and self._side_prefill
+                        and side_executor is not None
+                        and pending_side is None
+                    )
+                    # V2 peeks even when we are ALREADY yielding for fairness —
+                    # that is exactly the case it converts into a side overlap.
+                    # COADMIT / ADMIT_FASTPATH only peek when NOT yielding.
+                    _v2_peek = _enc_overlap_v2_on and must_yield_for_fairness
                     new_req_ready = False
-                    if (_admit_fp_on or _coadmit_on) and not must_yield_away:
+                    if (
+                        ((_admit_fp_on or _coadmit_on) and not must_yield_away)
+                        or _v2_peek
+                    ):
                         new_req_ready = self.scheduler.has_new_request_ready(
                             self.worker_graphs_manager,
                             (pending.node_name, pending.graph_walk),
@@ -4581,6 +4622,37 @@ class Worker:
                     if _admit_fp_on and not must_yield_away and new_req_ready:
                         must_yield_away = True
                         self._ws_inc("_admit_fastpath")
+
+                    # MSTAR_ENC_OVERLAP_V2 (fix: encoder->Thinker handoff). A
+                    # brand-new prefill just became ready. In the encoff/PD split
+                    # topology has_new_request_ready() flips True *exactly* when
+                    # the encoder's embeds arrive cross-rank at the Thinker (the
+                    # prefill node is not ready until _check_ready_tensors has
+                    # received them), so this IS the encoder-completion trigger.
+                    # Instead of breaking the decode spec chain to run that
+                    # prefill standalone (freezing the in-flight decodes for the
+                    # prefill step), UNDO the fairness yield here: the decode
+                    # chain keeps speculating on the default stream and section 3b
+                    # dispatches the just-arrived prefill onto the side stream,
+                    # so encode (rank 0) AND prefill (rank 1 side stream) both
+                    # overlap decode continuation. Never suppresses the
+                    # consecutive-spec ceiling (that stays the starvation
+                    # backstop); guarded on a free side slot (checked in
+                    # _enc_overlap_v2_on) so the side dispatch can actually take
+                    # the prefill this step. ADMIT_FASTPATH's standalone yield, if
+                    # both flags are set, still wins (it ran just above); V2 only
+                    # acts on a still-standing fairness yield.
+                    if (
+                        _v2_peek
+                        and new_req_ready
+                        and must_yield_for_fairness
+                        and consecutive_spec_steps < max_consecutive_spec
+                    ):
+                        must_yield_for_fairness = False
+                        must_yield_away = (
+                            consecutive_spec_steps >= max_consecutive_spec
+                        )
+                        self._ws_inc("_enc_overlap_v2_defer")
 
                     # Mixed batch: the ready contending work is a mixable
                     # prefill CHUNK on the decode's own node. Do NOT yield-away
