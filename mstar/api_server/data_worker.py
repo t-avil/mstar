@@ -18,6 +18,7 @@ except (ImportError, RuntimeError, OSError):
     VideoDecoder = None
 
 from mstar.api_server.detok_proc import DetokClient
+from mstar.api_server.preproc_proc import PreprocClient, preprocess_tensors
 from mstar.api_server.request_types import (
     DataWorkerProfile,
     PendingDetok,
@@ -120,6 +121,40 @@ class PreprocessWorker:
                 "keeping detok inline",
             )
 
+        # MSTAR_PREPROC_PROC (default OFF): move the CPU-heavy request-side
+        # multimodal preprocessing (image decode/resize/patchify via load_image +
+        # process_prompt) off this (uvicorn/serve) process into a pool of child
+        # processes, so a burst of image requests stops spiking the serve process
+        # and starving the uvicorn/ZMQ-drain threads of the GIL. Read ONCE here
+        # (process topology is boot-time; see preproc_proc.py). Requires a real
+        # model with process_prompt; skipped for the dummy/None model. Composes
+        # with MSTAR_DETOK_PROC (both children coexist). A/B via two boots.
+        self.preproc_client: PreprocClient | None = None
+        preproc_on = os.environ.get("MSTAR_PREPROC_PROC", "0") == "1"
+        if preproc_on and model is not None:
+            num_procs = int(os.environ.get("MSTAR_PREPROC_PROCS", "4"))
+            # Per-child intra-op thread cap. Default: split the box across the
+            # pool so N children * threads ~= cores (0 in the env => auto here;
+            # a positive MSTAR_PREPROC_THREADS overrides). The preprocess is a
+            # torch/torchvision multi-thread burst, so an uncapped pool would
+            # oversubscribe and inflate latency.
+            num_threads = int(os.environ.get("MSTAR_PREPROC_THREADS", "0"))
+            if num_threads <= 0:
+                num_threads = max(1, (os.cpu_count() or num_procs) // max(1, num_procs))
+            self.preproc_client = PreprocClient(
+                model_name=model_name,
+                cache_dir=cache_dir,
+                model_kwargs=model_kwargs,
+                num_procs=num_procs,
+                num_threads=num_threads,
+                log_level=log_level,
+            )
+        elif preproc_on:
+            logger.warning(
+                "MSTAR_PREPROC_PROC=1 but no model with process_prompt is "
+                "available; keeping preprocessing inline",
+            )
+
         self.thread = threading.Thread(
             target=_preprocess_loop,
             kwargs=dict(
@@ -136,6 +171,7 @@ class PreprocessWorker:
                 model=model,
                 enable_prof=enable_prof,
                 detok_client=self.detok_client,
+                preproc_client=self.preproc_client,
             )
         )
         self.thread.start()
@@ -252,6 +288,12 @@ class PreprocessWorker:
         # child; any still-outstanding chunks are recovered inline in shutdown().
         if self.detok_client is not None:
             self.detok_client.shutdown()
+        # Tear down the preproc pool. Outstanding preproc jobs are simply
+        # dropped at shutdown (the server is going down; those requests are
+        # aborted/timed out by the normal shutdown path — the transport state
+        # they would need is being torn down too).
+        if self.preproc_client is not None:
+            self.preproc_client.shutdown()
 
 
 class PreprocessWorkerThread:
@@ -271,6 +313,7 @@ class PreprocessWorkerThread:
         model: Model | None = None,
         enable_prof: bool=False,
         detok_client: DetokClient | None = None,
+        preproc_client: PreprocClient | None = None,
     ):
         self.in_queue = in_queue
         self.result_tensor_queue = result_tensor_queue
@@ -291,6 +334,22 @@ class PreprocessWorkerThread:
         # tokenizer model => every path stays exactly as before.
         self.detok_client = detok_client
         self._detok_enabled = detok_client is not None
+
+        # MSTAR_PREPROC_PROC: when set, request-side multimodal preprocessing
+        # (load_* + process_prompt) runs in the child pool and its produced
+        # tensors come back here for admission. None => flag off / no model =>
+        # every request preprocesses inline exactly as before.
+        self.preproc_client = preproc_client
+        self._preproc_enabled = preproc_client is not None
+        # An audio-input request is NOT offloaded while the serve process would
+        # compute the log-mel on the GPU (MSTAR_GPU_MEL default on + CUDA
+        # present): a CUDA-hidden child would produce a CPU mel that is not
+        # bit-identical, so such requests stay inline (byte-identical). i2t
+        # (image+text) is unaffected — its preprocessing is CPU-deterministic.
+        self._serve_uses_gpu_mel = (
+            os.environ.get("MSTAR_GPU_MEL", "1") in ("1", "true", "True")
+            and torch.cuda.is_available()
+        )
 
         self.tensor_uuid_to_metadata_per_request = {}
 
@@ -368,64 +427,55 @@ class PreprocessWorkerThread:
         self._rid_to_seq_keys: dict[str, set] = {}
         self._rid_to_seq_uuid_keys: dict[str, set] = {}
 
+    def _should_offload(self, input: PreprocessInput) -> bool:
+        """Whether this request's preprocessing can go to the child pool.
+
+        Off unless the flag is on and the pool is healthy. Audio-input requests
+        stay inline while the serve process uses GPU mel (byte-identity — see
+        __init__). Everything else (i2t: image+text) is offloaded."""
+        if not self._preproc_enabled:
+            return False
+        if self._serve_uses_gpu_mel and "audio" in (input.input_modalities or []):
+            return False
+        return True
+
+    def _on_new_input(self, input: PreprocessInput):
+        """Dispatch a new request: to the pool when eligible, else inline."""
+        if self._should_offload(input) and self.preproc_client.submit(input):
+            return
+        # Flag off, not offloadable, or the pool has permanently failed.
+        self._process_input(input)
+
+    def _complete_preproc(self, comp: tuple):
+        """Admit a request whose preprocessing finished (pool or inline recovery)."""
+        kind = comp[0]
+        if kind == "ok":
+            _, input, tensors, input_metadata = comp
+            self._admit_request(input, tensors, input_metadata)
+        else:  # "inline" — child error or fallback recovery: run the full path
+            self._process_input(comp[1])
+
     def _process_input(
         self, input: PreprocessInput
     ):
-        tensors: NameToTensorList = {}
-        input_metadata = {}
+        # Inline path: load raw modality tensors + process_prompt, then admit.
+        # The load/process_prompt work is the exact same implementation the
+        # preproc child runs (shared preprocess_tensors — no drift, so an
+        # offloaded request produces byte-identical tensors).
+        tensors, input_metadata = preprocess_tensors(
+            self.model, input, self.device
+        )
+        self._admit_request(input, tensors, input_metadata)
 
-        # First, load raw modality tensors from file_paths (images, audio, video)
-        # so they can be passed to process_prompt() below.
-        if input.file_paths is not None:
-            for modality in input.file_paths:
-                key = f"{modality}_inputs"
-                tensors[key] = []
-                # TODO: maybe make a class of tensors_and_metadata later (figure out how to use metadata)
-                input_metadata[key] = []
-
-                for filepath in input.file_paths[modality]:
-                    # ---- Image ----
-                    if modality == "image":
-                        out = self.model.load_image(filepath, self.device)
-                        tensors[key].append(out.data)
-                        input_metadata[key].append(out.metadata)
-
-                    # ---- Audio ----
-                    elif modality == "audio":
-                        out = self.model.load_audio(filepath, self.device)
-                        tensors[key].append(out.data)
-                        input_metadata[key].append(out.metadata)
-
-                    # ---- Video ----
-                    elif modality == "video":
-                        out = self.model.load_video(filepath, self.device)
-                        tensors[key].append(out.data)
-                        input_metadata[key].append(out.metadata)
-
-
-        # Then, tokenize the prompt and let the model augment/transform the
-        # tensors dict (e.g., Qwen3-Omni needs to compute pixel_values,
-        # image_grid_thw, audio_features, audio_seqlens from the raw tensors
-        # loaded above).  process_prompt receives the raw multimodal tensors
-        # and returns any additional tensors to merge into the final dict.
-        if self.model is not None:
-            prompt_tensors = self.model.process_prompt(
-                input.text,
-                input.input_modalities,
-                input.output_modalities,
-                tensors=tensors,
-                input_metadata=input_metadata,
-                **(input.model_kwargs or {}),
-            )
-            if prompt_tensors:
-                tensors.update(prompt_tensors)
-        elif input.text is not None:
-            # Fallback: encode as UTF-8 bytes -> uint8 tensor
-            byte_data = input.text.encode("utf-8")
-            tensors["text_inputs"] = [torch.tensor(
-                list(byte_data), dtype=torch.uint8, device=self.device
-            )]
-
+    def _admit_request(
+        self,
+        input: PreprocessInput,
+        tensors: NameToTensorList,
+        input_metadata: dict,
+    ):
+        # Transport + conductor handoff. ALWAYS runs on this worker thread (it
+        # owns the tensor_manager and communicator), whether the tensors were
+        # produced inline or in the child pool.
         initial_signals = self.tensor_manager.store_and_return_tensor_info(
             request_id=input.request_id,
             tensors=tensors # dict(modality_input: list[tensors])
@@ -1026,17 +1076,32 @@ class PreprocessWorkerThread:
                 did_work = self._process_messages()
                 if not self.in_queue.empty():
                     did_work = True
-                    self._process_input(self.in_queue.get())
+                    self._on_new_input(self.in_queue.get())
+                # MSTAR_PREPROC_PROC: admit any requests whose off-process
+                # preprocessing finished (in submit order). No-op when the flag
+                # is off. Kept in the hot loop so completions drain promptly.
+                if self.preproc_client is not None:
+                    for comp in self.preproc_client.get_ready():
+                        did_work = True
+                        self._complete_preproc(comp)
                 if not self.result_tensor_queue.empty():
                     did_work = True
                     self._read_result_tensor(self.result_tensor_queue.get())
                 if not self.abort_request_queue.empty():
                     did_work = True
+                    abort_rid = self.abort_request_queue.get()
+                    # MSTAR_PREPROC_PROC: if this request is still being
+                    # preprocessed in the pool (not yet admitted), cancel it so
+                    # get_ready drops its completion instead of sending a
+                    # NEW_REQUEST *after* this ABORT (which would leave it
+                    # admitted-but-un-aborted). No-op when the flag is off.
+                    if self.preproc_client is not None:
+                        self.preproc_client.cancel_rid(abort_rid)
                     self.communicator.send(
                         "conductor",
                         ConductorMessage(
                             message_type=ConductorMessageType.ABORT_REQUEST,
-                            body=AbortRequest(request_id=self.abort_request_queue.get()),
+                            body=AbortRequest(request_id=abort_rid),
                         ),
                     )
                 if not self.discard_tensor_queue.empty():
