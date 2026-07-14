@@ -1597,7 +1597,44 @@ class ThinkerSubmodule(ARNodeSubmodule):
     # 258-token vision span): 31 decodes + 258 = 289 tokens overflowed the
     # 288 bucket by ONE token and padded to 544 (~88% waste) — measured as
     # the main cost of the first spec-fold A/B at B32.
-    MIXED_BATCH_CHUNK_SIZES = [256, 288, 512]
+    _MIXED_BATCH_CHUNK_SIZES_DEFAULT = [256, 288, 512]
+
+    @property
+    def MIXED_BATCH_CHUNK_SIZES(self) -> list[int]:
+        """Boot-time capture grid for the ``thinker_mixed`` chunk row C
+        (``MSTAR_MIXED_CHUNK_SIZES``, comma ints, e.g. "256,288,512,1024,2048").
+
+        P3 lever (see fix20/reports/fix1_coadmit.md gate G1): the mixed step is
+        a captured CUDA graph whose only chunk buckets are this list, so a
+        chunk larger than ``max(MIXED_BATCH_CHUNK_SIZES)`` can never fold into a
+        decode step no matter how large the admission budget is — routing it
+        into an uncaptured shape is the UNCAP-IMA failure the memory manager
+        cross-references. Raising the ceiling here is the only way past it.
+
+        Parsed values are UNIONed with the default set, never replacing it —
+        an override can only GROW the grid. This protects the 288 bucket
+        (the measured fix for the 258-token vision-span tail-merge case)
+        from being silently dropped by a caller who only meant to add a
+        bigger bucket on top. Each added size is one more capture in
+        ``get_cuda_graph_configs`` below (one more (bs=32, num_tokens) shape
+        for the CUDA-graph runner to warm up) — see the s4 report for the
+        GPU-memory and boot-time cost of growing this list.
+
+        Unset/empty/unparseable -> the untouched default (byte-identical).
+        Boot-time only: capture happens once at process start, so this is
+        not a dynflag — changing it requires a reboot.
+        """
+        raw = os.environ.get("MSTAR_MIXED_CHUNK_SIZES", "").strip()
+        if not raw:
+            return self._MIXED_BATCH_CHUNK_SIZES_DEFAULT
+        try:
+            vals = {int(x) for x in raw.split(",") if x.strip()}
+        except ValueError:
+            return self._MIXED_BATCH_CHUNK_SIZES_DEFAULT
+        vals = {v for v in vals if v > 0}
+        if not vals:
+            return self._MIXED_BATCH_CHUNK_SIZES_DEFAULT
+        return sorted(vals | set(self._MIXED_BATCH_CHUNK_SIZES_DEFAULT))
 
     # prefill_vision buckets are larger than text/audio because video
     # produces many vision tokens per request (UCF101 ≈ 1k–4k tokens; 8192
