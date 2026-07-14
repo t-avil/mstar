@@ -1741,6 +1741,7 @@ class ThinkerSubmodule(ARNodeSubmodule):
         }
         from mstar.model.qwen3_omni.qwen3_omni_model import (
             batch_vision_prefill_enabled,
+            mark_mixed_vision_provisioned,
             mixed_batch_enabled,
             mixed_batch_vision_enabled,
         )
@@ -1898,8 +1899,19 @@ class ThinkerSubmodule(ARNodeSubmodule):
         # additive splice, see thinker._deepstack_process). So when the vision
         # flag is on we build the mixed buckets with the vision packed builder
         # (adds deepstack_<i>) and the vision-shaped zero_padding_input.
+        # IMA safety (W5-P3-lite): record the ONE capture's ground truth so the
+        # scheduler routes a prefill_vision chunk into thinker_mixed ONLY when the
+        # deepstack statics were actually baked in here. False whenever no
+        # thinker_mixed graph exists (mixed_batch off) or it is the text-only
+        # signature (mixed_batch_vision off) — either way a live-flag flip after
+        # boot can never route to an unprovisioned graph. See
+        # qwen3_omni_model.mixed_vision_capture_provisioned.
+        mixed_vision_provisioned = (
+            mixed_batch_enabled() and mixed_batch_vision_enabled()
+        )
+        mark_mixed_vision_provisioned(mixed_vision_provisioned)
         if mixed_batch_enabled():
-            mixed_vision = mixed_batch_vision_enabled()
+            mixed_vision = mixed_vision_provisioned
             build_mixed_packed = (
                 self._build_prefill_vision_packed
                 if mixed_vision

@@ -237,6 +237,54 @@ def mixed_batch_vision_enabled() -> bool:
     )
 
 
+# --- W5-P3-lite capture-provisioning latch (IMA safety) ----------------------
+# ``mixed_batch_vision_enabled()`` reads the env LIVE, and MSTAR_DYNFLAGS mutates
+# os.environ mid-run for one-server A/Bs. So a boot-OFF -> runtime-ON flip of
+# MSTAR_MIXED_BATCH_VISION could make the scheduler start routing a
+# ``prefill_vision`` chunk into a ``thinker_mixed`` capture that was built WITHOUT
+# the per-layer ``deepstack_<i>`` static buffers. Those buffers are baked into the
+# graph's ``static_input_keys`` at capture time (submodules.get_cuda_graph_configs
+# / _build_prefill_vision_packed) and CANNOT be added afterwards; replaying a
+# vision chunk there gives ``preprocess`` no static buffer to copy deepstack into
+# — the UNCAP-IMA failure the project memory warns about.
+#
+# Routing therefore must gate on what the capture ACTUALLY provisioned, not on the
+# live flag. ``get_cuda_graph_configs`` records the truth once at boot via
+# ``mark_mixed_vision_provisioned``; the scheduler consults
+# ``mixed_vision_capture_provisioned`` (see MicroScheduler._mixed_chunk_walks).
+# This mirrors CudaGraphRunner._split_attn_env_snapshot, which process-statics the
+# same class of capture-baked flag against the same dynflag desync hazard.
+_MIXED_VISION_PROVISIONED: bool | None = None
+
+
+def mark_mixed_vision_provisioned(provisioned: bool) -> None:
+    """Record, at capture time, whether the ``thinker_mixed`` CUDA-graph capture
+    was built with per-layer deepstack static buffers (i.e. is able to replay a
+    ``prefill_vision`` chunk row). Called once from ``get_cuda_graph_configs``.
+
+    Immutable-by-convention after boot: the value reflects the ONE capture that
+    ran and must NOT track later env / dynflag changes — that immutability is the
+    whole point of the latch."""
+    global _MIXED_VISION_PROVISIONED
+    _MIXED_VISION_PROVISIONED = bool(provisioned)
+
+
+def mixed_vision_capture_provisioned() -> bool:
+    """True iff the captured ``thinker_mixed`` step actually carries deepstack
+    static buffers — the IMA-safe precondition for routing a ``prefill_vision``
+    chunk into it (see ``_MIXED_VISION_PROVISIONED``).
+
+    After boot the recorded capture truth is authoritative, so a runtime
+    MSTAR_MIXED_BATCH_VISION flip can never route to an unprovisioned graph.
+    Before any capture has run (value ``None`` — pure-CPU unit tests, or the
+    pre-capture boot window that never overlaps real scheduling) it falls back to
+    the live flag intent so flag-driven tests and boot ordering behave as written;
+    production routing only ever happens post-capture, where the record wins."""
+    if _MIXED_VISION_PROVISIONED is None:
+        return mixed_batch_vision_enabled()
+    return _MIXED_VISION_PROVISIONED
+
+
 def mixed_split_attn_enabled() -> bool:
     """W5 split attention (MSTAR_MIXED_SPLIT_ATTN): captured thinker_mixed
     steps plan their decode rows on a tensor-core DECODE wrapper and the chunk

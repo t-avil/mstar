@@ -373,14 +373,25 @@ class MicroScheduler:
 
     def _mixed_chunk_walks(self) -> set[str]:
         """Walks that may serve as a mixed step's single chunk row. prefill_text
-        always; prefill_vision only when MSTAR_MIXED_BATCH_VISION is on (the
-        vision chunk carries deepstack + MRoPE, replayable only by the
-        vision-capable mixed capture — see _try_assemble_mixed)."""
+        always; prefill_vision only when the vision-capable mixed capture exists.
+
+        A prefill_vision chunk carries per-layer deepstack + a custom MRoPE
+        advance, replayable ONLY by a thinker_mixed graph that baked the deepstack
+        static buffers at capture time. The hard gate is therefore
+        ``mixed_vision_capture_provisioned()`` (the boot-recorded capture truth),
+        NOT the live env flag: a runtime MSTAR_MIXED_BATCH_VISION ON-flip after a
+        vision-off boot must never add prefill_vision here — routing it to the
+        unprovisioned (text-signature) graph is the UNCAP-IMA failure. The live
+        ``mixed_batch_vision_enabled()`` is ANDed only to allow a safe-direction
+        runtime OFF-flip (stop routing even though the graph could still replay
+        it), which one-server dyn_ab A/Bs rely on. Shared by the peek, the
+        assembler, and the mid-chain pop, so all three agree."""
         from mstar.model.qwen3_omni.qwen3_omni_model import (
             mixed_batch_vision_enabled,
+            mixed_vision_capture_provisioned,
         )
         walks = {self._MIXED_CHUNK_WALK}
-        if mixed_batch_vision_enabled():
+        if mixed_vision_capture_provisioned() and mixed_batch_vision_enabled():
             walks.add(self._MIXED_VISION_CHUNK_WALK)
         return walks
 

@@ -20,9 +20,12 @@ import pytest
 
 torch = pytest.importorskip("torch")  # module import pulls torch transitively
 
+from mstar.model.qwen3_omni import qwen3_omni_model as _qom
 from mstar.model.qwen3_omni.qwen3_omni_model import (
+    mark_mixed_vision_provisioned,
     mixed_batch_spec_enabled,
     mixed_batch_vision_enabled,
+    mixed_vision_capture_provisioned,
 )
 from mstar.worker.micro_scheduler import MicroScheduler, ReadyNodeEntry
 
@@ -45,7 +48,13 @@ def clean_flags():
     saved = {k: os.environ.get(k) for k in _FLAG_ENV}
     for k in _FLAG_ENV:
         os.environ.pop(k, None)
+    # The capture-provisioning latch is a process global; reset it to the
+    # pre-capture state so a test that marks it can't leak into the next (which
+    # would then read a stale record instead of the None -> live-flag fallback).
+    saved_prov = _qom._MIXED_VISION_PROVISIONED
+    _qom._MIXED_VISION_PROVISIONED = None
     yield
+    _qom._MIXED_VISION_PROVISIONED = saved_prov
     for k, v in saved.items():
         if v is None:
             os.environ.pop(k, None)
@@ -475,3 +484,75 @@ def test_min_decode_override_precedence(clean_flags):
     assert _peek_scheduler()._mixed_min_decode() == 24   # eager default
     _set(MSTAR_MIXED_BATCH="1")                          # no eager policy
     assert _peek_scheduler()._mixed_min_decode() == 0
+
+
+# --- IMA safety: capture-provisioning latch ---------------------------------
+# The routing gate (_mixed_chunk_walks) must key off what the thinker_mixed
+# capture ACTUALLY provisioned (deepstack statics), not the live env flag. This
+# blocks the UNCAP-IMA hazard: MSTAR_DYNFLAGS can flip MSTAR_MIXED_BATCH_VISION on
+# AFTER a vision-off boot, and routing a prefill_vision chunk into the text-only
+# capture (no deepstack static buffer to copy into) would IMA / corrupt output.
+def test_provisioned_query_falls_back_to_flag_before_capture(clean_flags):
+    # Pre-capture (record None): the query reflects the live flag intent so CPU
+    # tests and boot ordering behave as written.
+    assert _qom._MIXED_VISION_PROVISIONED is None
+    _set(
+        MSTAR_MIXED_BATCH="1",
+        MSTAR_MIXED_BATCH_VISION="1",
+        MSTAR_CHUNKED_PREFILL_V2_VISION="1",
+    )
+    assert mixed_vision_capture_provisioned()
+    _set(MSTAR_MIXED_BATCH="1")  # flag off -> fallback off
+    assert not mixed_vision_capture_provisioned()
+
+
+def test_provisioned_record_is_authoritative_after_capture(clean_flags):
+    # After capture recorded a value, the live flag no longer changes the query.
+    mark_mixed_vision_provisioned(True)
+    _set(MSTAR_MIXED_BATCH="1")  # flag OFF but capture DID provision
+    assert mixed_vision_capture_provisioned()
+    mark_mixed_vision_provisioned(False)
+    _set(
+        MSTAR_MIXED_BATCH="1",
+        MSTAR_MIXED_BATCH_VISION="1",
+        MSTAR_CHUNKED_PREFILL_V2_VISION="1",
+    )  # flag ON but capture did NOT provision
+    assert not mixed_vision_capture_provisioned()
+
+
+def test_runtime_on_flip_after_vision_off_boot_is_ima_safe(clean_flags):
+    # Boot with vision OFF -> capture records False. A later dynflag ON-flip must
+    # NOT make the scheduler route a prefill_vision chunk into the unprovisioned
+    # (text-signature) thinker_mixed graph.
+    sched = _scheduler()
+    mark_mixed_vision_provisioned(False)  # booted vision-off
+    _set(
+        MSTAR_MIXED_BATCH="1",
+        MSTAR_MIXED_BATCH_VISION="1",       # flipped on at runtime
+        MSTAR_CHUNKED_PREFILL_V2_VISION="1",
+    )
+    entries, wgm = _entries_and_wgm("prefill_vision")
+    # A lone vision chunk is NOT admitted -> no mixed batch assembles.
+    assert sched._try_assemble_mixed(wgm, entries, max_batch_size=32) is None
+    # A text chunk still folds (the mixed capture itself is fine).
+    entries, wgm = _entries_and_wgm("prefill_text")
+    assert sched._try_assemble_mixed(wgm, entries, max_batch_size=32) is not None
+
+
+def test_provisioned_boot_routes_vision_even_if_flag_flipped_off(clean_flags):
+    # Boot vision-ON -> capture records True. Routing stays IMA-safe (the graph
+    # HAS deepstack), and honors a safe-direction runtime OFF-flip.
+    sched = _scheduler()
+    mark_mixed_vision_provisioned(True)
+    _set(
+        MSTAR_MIXED_BATCH="1",
+        MSTAR_MIXED_BATCH_VISION="1",
+        MSTAR_CHUNKED_PREFILL_V2_VISION="1",
+    )
+    entries, wgm = _entries_and_wgm("prefill_vision")
+    assert sched._try_assemble_mixed(wgm, entries, max_batch_size=32) is not None
+    # Safe-direction OFF-flip at runtime: stop routing vision (graph could still
+    # replay it, but the A/B asked for off).
+    os.environ["MSTAR_MIXED_BATCH_VISION"] = "0"
+    entries, wgm = _entries_and_wgm("prefill_vision")
+    assert sched._try_assemble_mixed(wgm, entries, max_batch_size=32) is None
