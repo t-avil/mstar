@@ -36,6 +36,7 @@ from mstar.engine.cuda_graph_config import (
 from mstar.engine.kv_store import KVCacheConfig, PagedAllocationManager
 from mstar.model.submodule_base import ARNodeInputs, ARNodeSubmodule, ModelInputsFromEngine, NodeSubmodule
 from mstar.profile.worker import ExecTimings
+from mstar.utils.mega_cache import boot_phase
 from mstar.utils.profiler import mark, range_pop, range_push
 from mstar.utils.sampling import (
     Sampler,
@@ -259,6 +260,15 @@ class CudaGraphRunner:
 
         self.memory_pool = torch.cuda.graphs.graph_pool_handle()
         mem_before = torch.cuda.memory_allocated(self.device)
+
+        # Boot-phase split. torch.compile wrappers are installed per-slot inside
+        # the capture loop and inductor compiles lazily on the first captured
+        # forward, so there is no clean compile/capture boundary; these two
+        # markers (first-occurrence-wins across submodules) bracket the point
+        # where wrapper setup ends and graph capture — which triggers the heavy
+        # lazy inductor compile — begins. See mstar.utils.mega_cache.
+        boot_phase("compile_done")
+        boot_phase("capture_start")
 
         for config in self.capture_configs:
             sizes = config.capture_batch_sizes or self.CAPTURE_BATCH_SIZES

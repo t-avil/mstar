@@ -50,6 +50,11 @@ from mstar.utils.ipc_format import (
     WorkerMessage,
     WorkerMessageType,
 )
+from mstar.utils.mega_cache import (
+    boot_phase,
+    load_mega_cache,
+    save_mega_cache,
+)
 from mstar.utils.profiler import range_pop, range_push
 from mstar.worker.emit_sidecar import (
     ITEM_INLINE,
@@ -161,6 +166,7 @@ class Worker:
         tcp_transfer_device="",
         dist_init_method=None
     ):
+        boot_phase("process_start")
         self.worker_id = worker_id
         self.device = device
         self.enable_nvtx = enable_nvtx
@@ -592,6 +598,10 @@ class Worker:
             enable_nvtx=self.enable_nvtx,
             enable_prof=self.enable_prof
         )
+        # EngineManager.build() has allocated + loaded all submodule weights
+        # onto the device; the heavy compile/capture is deferred to warmup_all()
+        # in run(). This is the weight-load boundary for boot-phase timing.
+        boot_phase("weights_loaded")
 
         self.worker_graphs_manager = WorkerGraphsManager(
             queues={
@@ -4291,8 +4301,16 @@ class Worker:
         # bootstrap completes within the retry budget.
         self.tp_groups.barrier_all()
 
+        # Hot-load persisted compile artifacts (inductor/dynamo/autotune) before
+        # the first torch.compile inside warmup_all(). Default off; a missing or
+        # stale artifact degrades to a normal cold compile. See mega_cache.
+        boot_phase("compile_start")
+        load_mega_cache(self.worker_id)
+
         # CUDA graph capture before entering the main loop
         self.engine_manager.warmup_all()
+        # All torch.compile + inductor + CUDA-graph capture is done here.
+        boot_phase("capture_done")
 
         # Sync every worker before the main loop opens. Per-batch-size
         # captures inside CudaGraphRunner are already barriered on the
@@ -4316,6 +4334,13 @@ class Worker:
                 body=SetupDone(worker_id=self.worker_id),
             ),
         )
+        boot_phase("ready")
+
+        # Persist compile artifacts for the next boot. Done after SETUP_DONE so
+        # the first (cold) boot's readiness isn't delayed by the write; skips
+        # entirely once the artifact exists (steady-state boots do no I/O), so
+        # only the first boot at a given git sha pays this. Default off.
+        save_mega_cache(self.worker_id)
 
         # The async worker path needs decode submission to return quickly so
         # the main loop can overlap queue/tensor polling and post-processing
