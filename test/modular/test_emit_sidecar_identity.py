@@ -44,6 +44,8 @@ from mstar.conductor.request_info import CurrentForwardPassInfo
 from mstar.graph.base import GraphEdge, TensorPointerInfo
 from mstar.graph.loop_indices import NestedLoopIndices
 from mstar.worker.emit_sidecar import (
+    SIDECAR_WALKS,
+    SIDECAR_WALKS_I2T_EXTRA,
     SidecarClient,
     SidecarRecordBuilder,
     SidecarState,
@@ -127,6 +129,13 @@ class _StubWorker:
         self._slim_emit = True
         self._slim_emit2 = True
         self._fast_send = False
+        # Pre-existing drift fix: MSTAR_SCHED_PACK landed after this stub was
+        # written and _inline_emit_uuids now reads it unconditionally
+        # (worker.py:1461). Default off, matching the flag's own default, so
+        # this stub exercises the byte-identical-off path like every other
+        # flag here.
+        self._sched_pack = False
+        self._inline_dual = False
         self._slim_emit_sent: set[tuple[str, str]] = set()
         self._slim_emit_loop_layout: dict[tuple[str, str], tuple] = {}
         self._sidecar_client: SidecarRecordBuilder | None = None
@@ -656,6 +665,208 @@ def test_rid_remove_drops_sidecar_state():
     assert state.slim_sent == set()
     assert state.slim_layout == {}
     assert state.edge_templates == {}
+
+
+# ---------------------------------------------------------------------------
+# MSTAR_SIDECAR_I2T: admission walk-gate widening (worker.py _add_new_request
+# builds ``my_walks`` per rid, per worker, then checks ``my_walks <=
+# self._sidecar_walks``; these tests exercise that exact subset semantics
+# with representative ``my_walks`` sets rather than standing up a full
+# Worker/conductor, since the admission plumbing around it — engine_manager,
+# tensor_manager, RDMA reads — is unrelated to the walk-gate decision itself).
+# ---------------------------------------------------------------------------
+
+def test_sidecar_walks_i2t_extra_composition():
+    """The widened set adds exactly the vision walks, on top of the
+    untouched base set (flag-off admission decisions are unaffected — see
+    worker.py's ``self._sidecar_walks = SIDECAR_WALKS`` when
+    MSTAR_SIDECAR_I2T=0)."""
+    assert SIDECAR_WALKS == {"thinker_decode", "prefill_text", "thinker_mixed"}
+    assert SIDECAR_WALKS_I2T_EXTRA == {
+        "prefill_vision", "prefill_multimodal", "encode_vision",
+    }
+    assert SIDECAR_WALKS.isdisjoint(SIDECAR_WALKS_I2T_EXTRA)
+
+
+def test_sidecar_admission_gate_i2t_walks():
+    """Mirrors worker.py:_add_new_request's admission check
+    (``my_walks <= self._sidecar_walks``) for representative ``my_walks``
+    sets, without standing up a full Worker."""
+    base = SIDECAR_WALKS
+    widened = SIDECAR_WALKS | SIDECAR_WALKS_I2T_EXTRA
+
+    # A pure-decode worker (e.g. the decode rank of qwen3omni_2gpu_pd.yaml,
+    # or any topology where prefill and decode are on separate node_groups):
+    # every request type, i2t included, already clears the BASE set — the
+    # new flag changes nothing here (decode was never the problem).
+    decode_only = {"thinker_decode"}
+    assert decode_only <= base
+    assert decode_only <= widened
+
+    # A vision-only prefill worker (prefill_vision isolated on its own
+    # node_group, no other modality sharing the rank): excluded by the base
+    # set, admitted once MSTAR_SIDECAR_I2T widens it.
+    vision_prefill_only = {"prefill_vision"}
+    assert not (vision_prefill_only <= base)
+    assert vision_prefill_only <= widened
+
+    # Merged prefill (MSTAR_MERGED_PREFILL): same story.
+    merged_prefill_only = {"prefill_multimodal"}
+    assert not (merged_prefill_only <= base)
+    assert merged_prefill_only <= widened
+
+    # Chunked vision (MSTAR_CHUNKED_PREFILL_V2_VISION): the rid's worker
+    # graphs span BOTH "encode_vision" and "prefill_vision" on this worker;
+    # both must be allowed or the subset check correctly stays excluded.
+    chunked_vision = {"encode_vision", "prefill_vision"}
+    assert not (chunked_vision <= base)
+    assert chunked_vision <= widened
+
+    # Safety invariant (E4b): i2s (image input, SPEECH output) still touches
+    # Talker/Code2Wav walks on any worker that also hosts them (e.g. the
+    # colocated qwen3omni_colocated.yaml topology, where Thinker and Talker
+    # share one node_group/worker) — those walks are NOT in either set, so
+    # i2s stays excluded from the sidecar regardless of the flag. This is
+    # what makes the widening safe without a separate "is this i2t vs i2s"
+    # check: the existing whole-rid subset semantics already enforce it.
+    i2s_shared_worker = {
+        "prefill_vision", "thinker_decode",
+        "talker_prefill", "talker_decode",
+    }
+    assert not (i2s_shared_worker <= base)
+    assert not (i2s_shared_worker <= widened)
+
+    # Same invariant for s2t sharing a worker with vision walks (e.g. the
+    # PD-disagg prefill rank, which bundles prefill_text/prefill_audio/
+    # prefill_vision on one node_group per qwen3omni_2gpu_pd.yaml): audio
+    # stays out of scope for THIS flag (a separate idea's territory) even
+    # though vision is now admitted in isolation.
+    prefill_rank_with_audio = {"prefill_text", "prefill_audio", "prefill_vision"}
+    assert not (prefill_rank_with_audio <= base)
+    assert not (prefill_rank_with_audio <= widened)
+
+
+def _prefill_vision_routing(rid: str) -> NodeOutputRouting:
+    """Shape of prefill_vision's (and prefill_multimodal's) Thinker node
+    output (qwen3_omni_model.py's ``prefill_vision`` Sequential): one
+    prem-less EMIT_TO_CLIENT "new_token" text edge (the request's FIRST
+    token — prefill is single-shot, nothing prematerialized ahead of it,
+    same as ``_prefill_routing`` above) PLUS the two StreamingGraphEdges to
+    the Talker partition (thinker_states / thinker_mask), which land in
+    ``to_workers`` when Talker is on a different worker (mirrors
+    ``_terminal_routing``'s peer-worker signal). This is the row shape
+    MSTAR_SIDECAR_I2T newly admits into the sidecar."""
+    emit_uuid = f"uuid-vision-emit-{rid}"
+    return NodeOutputRouting(
+        routed_to_this_worker_graph=[],
+        is_first_tp_rank=True,
+        persist=[],
+        to_workers={"worker_1": [
+            GraphEdge(
+                next_node="Talker", name="thinker_states",
+                tensor_info=[_tpi(f"uuid-states-{rid}")],
+            ),
+            GraphEdge(
+                next_node="Talker", name="thinker_mask",
+                tensor_info=[_tpi(f"uuid-mask-{rid}")],
+            ),
+        ]},
+        emit_to_client=[GraphEdge(
+            next_node="EMIT_TO_CLIENT", name=TOKEN_EDGE,
+            tensor_info=[_tpi(emit_uuid)], output_modality="text",
+        )],
+        new_token_outputs=[GraphEdge(
+            next_node="EMIT_TO_CLIENT", name=TOKEN_EDGE,
+            tensor_info=[_tpi(emit_uuid)], conductor_new_token=True,
+        )],
+    )
+
+
+def test_prefill_vision_shaped_row_byte_identical():
+    """The row MSTAR_SIDECAR_I2T newly admits (first-token emit off a
+    prefill_vision walk, including its peer-worker Talker signal) goes
+    through the SAME item-processing code as any other sidecar-scoped row —
+    no new branch was added, only the admission gate moved. Runs it as the
+    rid's first (single-shot) step, then two ordinary decode steps, so the
+    scenario matches a real i2t rid's life: one prefill_vision row followed
+    by thinker_decode rows, all on one sidecar-scoped rid.
+
+    NOTE on the one documented byte-level exception: the message that ships
+    the FIRST inline template immediately after an earlier NON-inline row
+    for the same (rid, name) is value-identical but not byte-identical
+    across the two paths — a PRE-EXISTING Stage-1 gap, unrelated to
+    MSTAR_SIDECAR_I2T (repros with plain prefill_text/thinker_decode, zero
+    vision involvement: the interned name string ships in the earlier
+    record's ``new_names``, so the later record's template ``GraphEdge``
+    references a name reconstructed from a SEPARATE pickle round-trip and
+    loses the cross-field identity legacy gets for free in one process —
+    see fix20/ideas/s2-sidecar-i2t.md "risks"). No prior test caught it
+    because every existing scenario either keeps a rid in one population
+    from its first step, or never continues a non-inline row's rid into a
+    later inline step for the same name. It affects every modality at the
+    prefill-row -> first-decode-token transition, not just i2t; not fixed
+    here (out of this change's scope) but pinned as value-equal so a real
+    regression (wrong VALUES, not just wrong bytes) still fails loudly."""
+    rid = "rid-i2t"
+    steps = [
+        [(rid, _prefill_vision_routing(rid), _prefill_nli(), None)],
+        [(rid, _steady_routing(rid, 0), _nli(0), {TOKEN_EDGE: [1000]})],
+        [(rid, _steady_routing(rid, 1), _nli(1), {TOKEN_EDGE: [1001]})],
+    ]
+    legacy, sidecar_worker, state, _ = _run_scenario([rid], steps)
+    assert _stream(sidecar_worker.communicator.sent, "api_server") == []
+    assert _stream(sidecar_worker.communicator.sent, "conductor") == []
+    legacy_msgs = [m for d, m in legacy.communicator.sent if d == "api_server"]
+    sidecar_msgs = [m for d, m in state.communicator.sent if d == "api_server"]
+    assert len(legacy_msgs) == len(sidecar_msgs) == 3
+    # Step 0 (the prefill_vision row itself) and step 2 (an ordinary slim
+    # steady step) are fully byte-identical; step 1 (the post-non-inline
+    # template) is the documented value-only exception above.
+    assert pickle.dumps(legacy_msgs[0]) == pickle.dumps(sidecar_msgs[0])
+    assert legacy_msgs[1] == sidecar_msgs[1]
+    assert pickle.dumps(legacy_msgs[2]) == pickle.dumps(sidecar_msgs[2])
+    _assert_worker_never_wrote_accumulators(sidecar_worker)
+    # The peer-worker (Talker) signal from the prefill_vision row must have
+    # gone out, byte-identical to legacy, on both paths.
+    peer_msgs = [
+        m for d, m in sidecar_worker.communicator.sent if d == "worker_1"
+    ]
+    assert len(peer_msgs) == 1
+    assert peer_msgs[0].body.request_id == rid
+    assert (
+        _stream(sidecar_worker.communicator.sent, "worker_1")
+        == _stream(legacy.communicator.sent, "worker_1")
+    )
+
+
+def test_prefill_shaped_then_inline_template_pickle_gap_is_preexisting():
+    """Pins the pre-existing gap documented above using ONLY
+    already-shipped walk semantics (prefill_text/thinker_decode shape, no
+    vision, no MSTAR_SIDECAR_I2T-specific code) — proof it predates and is
+    independent of this change: a prefill-shaped (non-inline) row followed
+    by an inline decode step for the same rid+name was simply never
+    exercised by the original Stage-1 suite (every non-inline scenario
+    there stops after the disqualified row or belongs to a rid that never
+    continues). Documents current behavior (value-equal, one byte-level
+    exception) rather than asserting it is desirable; a future fix to
+    ``SidecarState``/``SidecarRecordBuilder`` that preserves cross-record
+    name identity would tighten this to full byte-identity and should
+    update this test."""
+    rid = "rid-p"
+    steps = [
+        [(rid, _prefill_routing(rid), _prefill_nli(), None)],
+        [(rid, _steady_routing(rid, 0), _nli(0), {TOKEN_EDGE: [1000]})],
+        [(rid, _steady_routing(rid, 1), _nli(1), {TOKEN_EDGE: [1001]})],
+    ]
+    legacy, sidecar_worker, state, _ = _run_scenario([rid], steps)
+    legacy_msgs = [m for d, m in legacy.communicator.sent if d == "api_server"]
+    sidecar_msgs = [m for d, m in state.communicator.sent if d == "api_server"]
+    byte_identical = [
+        pickle.dumps(a) == pickle.dumps(b)
+        for a, b in zip(legacy_msgs, sidecar_msgs)
+    ]
+    assert byte_identical == [True, False, True]
+    assert all(a == b for a, b in zip(legacy_msgs, sidecar_msgs))
 
 
 # ---------------------------------------------------------------------------
