@@ -362,6 +362,62 @@ def mixed_budget_tokens() -> int:
     return v if v > 0 else 0
 
 
+def eager_fold_enabled() -> bool:
+    """EAGER FOLD FALLBACK (idea o1): co-admit a brand-new request's FIRST
+    prefill chunk into the running decode step even when the chunk is LARGER than
+    the largest captured mixed bucket (``MicroScheduler._MIXED_MAX_CHUNK_TOKENS``
+    = 512), by running that ONE step EAGER — a single uncaptured varlen forward
+    over the decode rows + the full chunk row (vLLM's exact unified-step shape).
+
+    Motivation: the captured mixed fold (MSTAR_MIXED_BATCH / _SPEC / COADMIT) is
+    hard-capped at C <= 512 because its only chunk buckets are {256, 512} (a
+    larger chunk would route to an uncaptured graph = the UNCAP IMA hazard). On
+    the ship config (MSTAR_PREFILL_CHUNK_TOKENS=2048) an i2t text prefill chunk
+    is up to 2048 tokens, so it can NEVER fold today and instead runs standalone,
+    FREEZING the concurrent decodes for that step. vLLM avoids exactly this by
+    folding a full prefill into the decode step — because vLLM's prefill runs
+    EAGER (dynamic per-step shape). This flag gives M* the same escape hatch: for
+    a chunk in (512, MSTAR_EAGER_FOLD_MAX_CHUNK], assemble a ``thinker_mixed``
+    batch and let it run eager (no captured graph matches, so
+    ``KVCacheEngine.execute_forward`` falls to ``_execute_batched`` — the existing
+    eager varlen path that already handles the ``thinker_mixed`` graph_walk).
+
+    Byte-identical when off: the scheduler never relaxes the 512 chunk cap and the
+    worker never breaks the decode chain for an eager fold, so every captured /
+    spec / coadmit path is unchanged. When on it is a strict EXTENSION of
+    ``MSTAR_MIXED_BATCH`` (the assembly machinery it reuses), so it ANDs with
+    ``mixed_batch_enabled()``. The eager step is slower per-step than a replay, so
+    the worker gates it to brand-new requests (fwd_index==0) and caps its
+    frequency (MSTAR_EAGER_FOLD_MIN_GAP). Text chunks only unless the boot-time
+    ``MSTAR_MIXED_BATCH_VISION`` flag is on (a vision chunk needs deepstack, which
+    ``preprocess`` assembles for a mixed step only under that flag).
+    """
+    return _envflag("MSTAR_EAGER_FOLD") and mixed_batch_enabled()
+
+
+def eager_fold_max_chunk() -> int:
+    """Largest chunk C (tokens) the EAGER FOLD path (MSTAR_EAGER_FOLD) will
+    co-admit into an eager mixed step. A chunk above this stays on today's
+    standalone path (so an arbitrarily large prefill never builds one pathological
+    eager step — bounded like vLLM's practical image/prompt sizes, and keeping the
+    FlashInfer prefill workspace within the same envelope the standalone prefill
+    already uses). Default 2048 = the largest ``PREFILL_TOKEN_BUCKETS`` entry, so
+    it covers every chunk the default planner emits (ship
+    MSTAR_PREFILL_CHUNK_TOKENS=2048). Raise it only alongside a larger prefill
+    chunk cap. Read via MSTAR_EAGER_FOLD_MAX_CHUNK.
+    """
+    import os as _os
+
+    raw = _os.environ.get("MSTAR_EAGER_FOLD_MAX_CHUNK")
+    if raw is None:
+        return 2048
+    try:
+        v = int(raw.strip())
+    except ValueError:
+        return 2048
+    return v if v > 0 else 2048
+
+
 def prefill_chunk_tokens() -> int:
     """Cap on chunk size C for chunked prefill. The planner picks the largest
     ``ThinkerSubmodule.PREFILL_TOKEN_BUCKETS`` entry <= min(remaining, this cap),

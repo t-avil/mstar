@@ -4422,6 +4422,11 @@ class Worker:
         )
         mixed_spec_enabled = _mixed_batch_spec_enabled()
         consecutive_spec_steps = 0
+        # EAGER FOLD (MSTAR_EAGER_FOLD, idea o1): steps since the last eager fold,
+        # for the frequency cap (MSTAR_EAGER_FOLD_MIN_GAP). Start high so the
+        # first eligible arrival folds immediately; reset to 0 when we break the
+        # chain for an eager fold.
+        steps_since_eager_fold = 1 << 30
         yield_away_from_target: tuple[str, str] | None = None
         # MSTAR_SCHED_PACK (b): fairness-peek exponential backoff state
         # (mirrors the fold-peek backoff — doubling skip window after
@@ -4829,6 +4834,46 @@ class Worker:
                             break_chain_for_mixed = True
                     else:
                         break_chain_for_mixed = False
+
+                    # EAGER FOLD (MSTAR_EAGER_FOLD, idea o1). The captured mixed
+                    # fold above (_peek_hit, C<=512) could not claim this step for
+                    # this arrival — either no chunk was ready or its chunk is
+                    # LARGER than the captured cap. A brand-new large chunk
+                    # (512 < C <= MSTAR_EAGER_FOLD_MAX_CHUNK) would otherwise run
+                    # STANDALONE and freeze the concurrent decodes for that step
+                    # (the i2t TTFT tail vLLM avoids by folding a full prefill
+                    # EAGER). Break the decode chain and ARM the scheduler so the
+                    # next get_next_batch (non-spec path, this same iteration once
+                    # pending un-flags) assembles decode + the large chunk into a
+                    # thinker_mixed step whose token count matches NO captured
+                    # graph -> execute_forward runs it eager (_execute_batched).
+                    # Overrides a pending yield-away (incl. ADMIT_FASTPATH's) for
+                    # this arrival: folding beats standalone. Gated to arrivals
+                    # (fwd_index==0, inside the peek) and throttled to one per
+                    # MIN_GAP spec steps (an eager step is slower than a replay, so
+                    # spacing protects decode throughput). Off -> the peek returns
+                    # False, so byte-identical.
+                    steps_since_eager_fold += 1
+                    if (
+                        not speculate_into_mixed
+                        and not break_chain_for_mixed
+                        and os.environ.get("MSTAR_EAGER_FOLD", "0") == "1"
+                    ):
+                        _ef_gap = int(
+                            os.environ.get("MSTAR_EAGER_FOLD_MIN_GAP", "8") or "8"
+                        )
+                        if (
+                            steps_since_eager_fold >= _ef_gap
+                            and self.scheduler.has_eager_fold_opportunity(
+                                self.worker_graphs_manager,
+                                (pending.node_name, pending.graph_walk),
+                            )
+                        ):
+                            must_yield_away = False
+                            break_chain_for_mixed = True
+                            self.scheduler._eager_fold_armed = True
+                            steps_since_eager_fold = 0
+                            self._ws_inc("_eager_fold")
 
                     if not must_yield_away and not break_chain_for_mixed:
                         if self.enable_nvtx:
