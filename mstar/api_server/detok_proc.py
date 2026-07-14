@@ -337,6 +337,14 @@ def run_detok_proc(
     except Exception:
         pass
 
+    # MSTAR_BURST_CAP (default off): cap this pure-CPU detok child's thread
+    # fan-out (postprocess/decode). No-op when off.
+    try:
+        from mstar.utils.burst_cap import apply_process_thread_cap
+        apply_process_thread_cap("detok")
+    except Exception:
+        pass
+
     from mstar.model.registry import HF_MODELS, get_model_class
 
     # Build the SAME lightweight tokenizer-only instance the serve process uses

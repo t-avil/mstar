@@ -646,6 +646,14 @@ def run_sidecar(
     from mstar.utils.logging_config import quiet_noisy_loggers
     quiet_noisy_loggers()
 
+    # MSTAR_BURST_CAP (default off): cap this pure-CPU sidecar's thread
+    # fan-out. No-op when off.
+    try:
+        from mstar.utils.burst_cap import apply_process_thread_cap
+        apply_process_thread_cap("sidecar")
+    except Exception:
+        pass
+
     stop_requested = False
 
     def _request_stop(signum, frame):

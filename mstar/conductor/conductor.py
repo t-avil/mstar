@@ -119,6 +119,13 @@ def _worker_process_target(
     )
     quiet_noisy_loggers()
 
+    # MSTAR_BURST_CAP (default off): bound the worker's host-CPU thread
+    # fan-out (host-side plan/reshape/sampling work around the GPU forward).
+    # The GPU forward is unaffected — this only caps CPU intra-op threads.
+    # No-op when off. Applied before Worker init / any torch parallel work.
+    from mstar.utils.burst_cap import apply_process_thread_cap
+    apply_process_thread_cap("worker")
+
     from mstar.worker.worker import Worker
     logger.debug("Launching worker %s with graph nodes %s", worker_id, str(
         [set(wg.section.get_nodes()) for wg in my_worker_graphs]

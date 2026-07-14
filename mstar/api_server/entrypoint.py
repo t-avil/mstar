@@ -77,6 +77,11 @@ def _conductor_process_target(
         force=True,
     )
     quiet_noisy_loggers()
+    # MSTAR_BURST_CAP (default off): cap the conductor's host-CPU thread
+    # fan-out. Re-applied here (not just inherited) so a per-role override
+    # MSTAR_BURST_THREADS_CONDUCTOR takes effect. No-op when off.
+    from mstar.utils.burst_cap import apply_process_thread_cap
+    apply_process_thread_cap("conductor")
     # Read yaml early to extract optional `model_kwargs:` section for the model
     # constructor. Lets a yaml override init-time model parameters (e.g.
     # Pi05's action_horizon for the DROID benchmark variant) without code
@@ -926,6 +931,14 @@ def main(argv: list[str] | None = None):
         format="%(asctime)s %(levelname)s [api_server] %(name)s: %(message)s",
     )
     quiet_noisy_loggers()
+
+    # MSTAR_BURST_CAP (default off): bound this process's torch/OMP thread
+    # fan-out so the preprocess wave (image resize + HF feature-extract) draws
+    # a small, constant host-CPU slice instead of grabbing all cores. No-op
+    # when off. Applied here (not in APIServer.__init__) so the env vars are
+    # set BEFORE the conductor is spawned and inherits them.
+    from mstar.utils.burst_cap import apply_process_thread_cap
+    apply_process_thread_cap("api_server")
 
     with open(args.config) as f:
         config = yaml.safe_load(f)
