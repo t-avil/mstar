@@ -102,3 +102,55 @@ stack re-bench thorough at end (n=96/256 + s2t guard cell).
 | w4 | dt_s2t_guard | .42s | 34.61 | tok=720.10 | load=83.34 |
 - 22:04Z BENCH4 (detok boot): dt_base1 0.70s/5.48/922@98, dt_base2 4.93/6.02/1046@91 — both beat same-load prior-boot cells (7.41s/732@100): #13 POSITIVE-LEAN (lottery caveat). s2t guard PASS 0.42s/34.61/720@83 (no regression). DONE sniper hunting (load<27 gate; load 66 falling).
 - 22:42Z Server died 22:24 (graceful SIGTERM ~30min post-boot, wrapper-trap pattern; NOT idle_guard — no KILL line, guard only WARNed 22:27). STRATEGY FLIP: no warm servers; watch_boot_run.sh launched (boots best stack DETOK+CPUSET only when load<27 falling x2 + GPUs free + RAM>=200G; runs up to 6 DONE cells; tears down after window; zero idle by construction; log fix20/window.log). bench4 chain killed.
+| bisectcap | A_known | DIED | 22:04:52Z |
+| bisectcap | B_merged | DIED | 22:16:28Z |
+| bisectcache | E_owncache | READY | 22:34:34Z |
+| bisectcache | F_sharedclean | SKIP_BUSY |
+- 22:47Z ROOT CAUSE CONFIRMED: two-source inductor cache merge (fix20+godv9) = poisoned kernels = silent capture-phase native aborts (A/B/session1 deaths). E_owncache (per-worktree cache) READY in ~10min incl. 0.04s compile. FIX: per-worktree caches seeded by rsync from a same-code donor; NEVER merge caches across build dirs. Reaped 76860 orphaned tim shm segs. GPUs 6,7 taken by root sglang+Megatron 22:25 — session1b waits for next window (queues ready).
+| bisect2 | G_noinfra | READY | 01:38:58Z |
+| bisect2 | I_phases | READY | 02:05:59Z |
+| bisect2 | J_mega | DIED | 02:11:16Z |
+- 02:22Z BISECT2 VERDICT: G_noinfra READY, I_phases READY, J_mega DIED -> CULPRIT = MEGA_CACHE hook (kills capture even with NO artifact file — load path no-op — so bug is hook init at capture site in infra/boot-cache's cuda_graph_runner integration; serverlog fix20/bisect2_J_mega.serverlog). Ideas-all stack GPU-boots CLEAN. session1 relaunched with INFRA=phases-only (session1c).
+- 02:40Z CORRECTION (megacache-fix agent): all tonight's 'capture deaths' were MY watchdogs killing healthy boots — capture on ideas-all full grids = 8-12min SILENT (J_mega log shows capture_done t=517/717s + ready + graceful shutdown; I/J serverlogs were the same boot; missing artifact = zero torch calls proven by CPU repro). Mega-cache EXONERATED, restored to session1. Cache-poisoning verdict also downgraded to UNPROVEN (A_known had a shorter 10-min window than E's 12.5). Boot7 stall guard relaxed 6->18min; ready windows already 35min. session1d watcher armed. LESSON: never watchdog a phase you haven't measured; BOOT_PHASES now gives real phase durations.
+| b6 | A_i2t_B1 | ttft=?/? | itl=?/? | rps=? | tok=? | load=16.28 |
+| b6 | A_i2t_B2 | ttft=?/? | itl=?/? | rps=? | tok=? | load=15.31 |
+| b6 | A_i2t_B32 | ttft=?/? | itl=?/? | rps=? | tok=? | load=14.96 |
+| b6 | A_s2t_B32 | ttft=?/? | itl=?/? | rps=? | tok=? | load=14.85 |
+| b6 | A_coadeager_on | ttft=?/? | itl=?/? | rps=? | tok=? | load=14.58 |
+| b6 | A_coadeager_off | ttft=?/? | itl=?/? | rps=? | tok=? | load=15.80 |
+| b6 | A_encv2_on | ttft=?/? | itl=?/? | rps=? | tok=? | load=15.07 |
+| b6 | A_encv2_off | ttft=?/? | itl=?/? | rps=? | tok=? | load=15.29 |
+| b6 | A_wgd_on | ttft=?/? | itl=?/? | rps=? | tok=? | load=15.35 |
+| b6 | A_wgd_off | ttft=?/? | itl=?/? | rps=? | tok=? | load=15.07 |
+| b6 | A_slim_on | ttft=?/? | itl=?/? | rps=? | tok=? | load=22.93 |
+| b6 | A_slim_off | ttft=?/? | itl=?/? | rps=? | tok=? | load=21.11 |
+| b7 | B_i2t_B1 | ttft=0.093/0.137 | itl=0.004/0.005 | rps=1.13 | tok=207.67 | load=21.42 |
+| b7 | B_i2t_B2 | ttft=0.104/0.134 | itl=0.005/0.007 | rps=1.96 | tok=339.73 | load=18.09 |
+| b7 | B_i2t_B32 | ttft=0.164/2.382 | itl=0.015/0.041 | rps=8.99 | tok=1595.06 | load=19.86 |
+| b7 | B_s2t_B32 | ttft=0.379/0.790 | itl=0.018/0.064 | rps=38.84 | tok=813.68 | load=18.66 |
+| b7 | B_stack_on1 | ttft=?/? | itl=?/? | rps=? | tok=? | load=13.82 |
+| b7 | B_stack_off1 | ttft=?/? | itl=?/? | rps=? | tok=? | load=14.21 |
+| b7 | B_stack_on2 | ttft=?/? | itl=?/? | rps=? | tok=? | load=13.48 |
+| b7 | B_stack_off2 | ttft=?/? | itl=?/? | rps=? | tok=? | load=13.63 |
+| b7 | B_stack_B32_n96 | ttft=?/? | itl=?/? | rps=? | tok=? | load=13.88 |
+| b6 | A_i2t_B1 | ttft=0.289/0.302 | itl=0.004/0.005 | rps=0.94 | tok=170.23 | load=32.77 |
+| b6 | A_i2t_B2 | ttft=0.315/0.489 | itl=0.005/0.006 | rps=1.57 | tok=274.26 | load=32.85 |
+| b6 | A_i2t_B32 | ttft=6.004/6.659 | itl=0.005/0.002 | rps=4.92 | tok=863.40 | load=65.79 |
+| b6 | A_s2t_B32 | ttft=0.267/0.609 | itl=0.021/0.061 | rps=41.63 | tok=873.06 | load=49.83 |
+| b6 | A_coadeager_on | ttft=5.739/5.841 | itl=0.004/0.006 | rps=4.73 | tok=824.27 | load=61.23 |
+| b6 | A_coadeager_off | ttft=6.249/6.353 | itl=0.003/0.006 | rps=4.59 | tok=788.37 | load=74.80 |
+| b6 | A_encv2_on | ttft=6.079/6.191 | itl=0.003/0.006 | rps=4.66 | tok=803.54 | load=118.12 |
+| b6 | A_encv2_off | ttft=6.533/6.617 | itl=0.004/0.007 | rps=4.56 | tok=785.16 | load=103.58 |
+| b6 | A_wgd_on | ttft=5.624/5.715 | itl=0.003/0.006 | rps=5.01 | tok=869.27 | load=87.79 |
+| b6 | A_wgd_off | ttft=6.145/6.276 | itl=0.003/0.007 | rps=4.65 | tok=807.91 | load=86.63 |
+| b6 | A_slim_on | ttft=5.924/6.040 | itl=0.004/0.006 | rps=4.75 | tok=804.60 | load=89.93 |
+| b6 | A_slim_off | ttft=6.314/6.451 | itl=0.002/0.006 | rps=4.42 | tok=765.26 | load=87.81 |
+| b7 | B_i2t_B1 | ttft=0.090/0.106 | itl=0.004/0.005 | rps=1.16 | tok=209.94 | load=21.82 |
+| b7 | B_i2t_B2 | ttft=0.100/0.120 | itl=0.005/0.007 | rps=1.95 | tok=346.24 | load=20.58 |
+| b7 | B_i2t_B32 | ttft=0.163/2.479 | itl=0.014/0.040 | rps=9.41 | tok=1654.37 | load=53.29 |
+| b7 | B_s2t_B32 | ttft=0.301/0.695 | itl=0.021/0.055 | rps=39.70 | tok=831.47 | load=38.34 |
+| b7 | B_stack_on1 | ttft=1.403/2.654 | itl=0.012/0.047 | rps=8.01 | tok=1404.55 | load=42.50 |
+| b7 | B_stack_off1 | ttft=0.996/2.486 | itl=0.013/0.042 | rps=8.04 | tok=1401.36 | load=41.33 |
+| b7 | B_stack_on2 | ttft=1.101/2.768 | itl=0.013/0.037 | rps=7.82 | tok=1357.93 | load=29.38 |
+| b7 | B_stack_off2 | ttft=1.131/2.630 | itl=0.014/0.043 | rps=7.67 | tok=1328.90 | load=37.49 |
+| b7 | B_stack_B32_n96 | ttft=0.195/2.417 | itl=0.016/0.041 | rps=8.53 | tok=1511.46 | load=48.88 |

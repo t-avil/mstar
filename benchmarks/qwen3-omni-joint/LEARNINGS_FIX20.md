@@ -113,3 +113,66 @@ ship flag set; #13 positive-lean pending one load-matched boot-pair; #4/#1/#2/
 #6/#14 need quiet paired retests; #7/#3 closed as no-gos; #10-12/#16/#17/#19
 not reached. Next quiet session: run the retest list from "Recommended next
 session" above.
+
+# SESSION 2 (2026-07-15 night): THE WIN — vLLM beaten on i2t
+
+## Headline (n>=96 cells, GPUs 6,7, ideas-all build)
+
+**i2t B32: TTFT p50 163-164ms / 8.99-9.41 req/s / 1595-1654 tok/s — beats the
+committed vLLM 0.22 band (179ms / 8.03-8.59 / ~1510) on ALL THREE, and the
+repeat held at load 53 (load-ROBUST, not a quiet-box fluke).** n=96 confirm with
+stack flags: 195ms/8.53/1511 @load49. i2t B1 93ms (vLLM band 83-118), B2
+100-104ms/1.95rps. s2t B32 301-379ms/38.8-39.7rps/814-831tok (tok far above
+vLLM 598-664; TTFT slightly above their 215-282 band — remaining s2t gap).
+ITL i2t B32: 14-16ms mean / 40ms p95.
+
+## THE RECIPE (what beat vLLM)
+
+Build: test/ideas-all (dc774cf8) + infra/boot-cache (2b43f06e fix). Boot-time:
+MSTAR_BURST_CAP=1 MSTAR_BURST_THREADS=8 MSTAR_PREPROC_PROC=1
+MSTAR_MIXED_CHUNK_SIZES=256,288,512,1024,2048 MSTAR_MIXED_BATCH_VISION=1
++ ship flags + full grids. Dynflags: ship base + EMIT_RID_INDEX +
+EMIT_INLINE_FASTPATH + ARGMAX_FAST.
+
+## Attribution (bench6 baseline, same build, boot-flags OFF)
+
+Baseline B32: 6.0s/4.92/863 (@load66); B1 289ms, B2 315ms (@load33) — the
+boot-time quartet cuts B1/B2 TTFT ~3x and B32 ~37x. The quartet is the
+transformation; per-flag attribution within it still pending (4 more boots).
+Dynflag pairs at load 60-118 (directional): WGD_PACK +7.7% rps, SLIM_SAMPLE
++7.5%, COADMIT+EAGER_FOLD +3%/-0.5s, ENC_OVERLAP_V2 -0.45s — all ON-better.
+STACK on top of the quartet (session2 pairs at load 29-43): wash to slightly
+negative (1.40v1.00, 1.10v1.13 TTFT) — the quartet already captures the
+co-admission win through existing fold machinery; PARK the stack flags.
+
+## Boot-time result (idle-fix campaign)
+
+Phase logger: weights 20s, compile 0.04-0.11s (warm per-worktree seeded cache;
+was 15-25min cold), capture 398-418s cold-mega, ready ~7min. Mega-cache SAVE
+(840MB/981MB per worker) after ready KILLED the server (bootA died post-save;
+save-skip boots survived) — OPEN BUG on infra/boot-cache; artifact load path
+still unvalidated. Per-worktree caches seeded by rsync = the reliable win.
+
+## Ops lessons (cost us ~5h of phantom debugging tonight)
+
+1. NEVER watchdog a phase you haven't measured: capture = 8-12 min of total log
+   silence; my 6-min stall guard + 10-12.5-min bisect windows killed healthy
+   boots and manufactured false DIED verdicts (incl. the invalid cache-poisoning
+   and mega-capture-kill theories). BOOT_PHASES now measures every phase.
+2. Bisect verdict windows must exceed measured phase maxima + margin; compare
+   independent boots only (I/J logs turned out to be one boot).
+3. Boot spawn needs grace before pgrep death-checks (session2 bootA false
+   server_died at t=20s; server was alive and won the night).
+4. Merge-resolution misses hide in flag-gated arms CPU tests don't reach: stale
+   _MIXED_MAX_CHUNK_TOKENS refs crashed the stack cells (fixed 2b43f06e).
+5. gpu_util sampler: 847 samples, busy/held=0.49 — but "held" includes root's
+   occupancy of 6,7; per-session attribution needs owner-aware sampling (todo).
+
+## Next session queue
+
+1. Quartet decomposition: 4 boots, one flag off each (which of burst-cap /
+   preproc / grid / vision-mix carries the 37x?).
+2. s2t TTFT gap (301 vs 215-282 band) — likely wants its own tuning pass.
+3. Mega-cache save bug fix + warm-load validation (infra/boot-cache).
+4. certify-wrapped confirmation runs + length-matched cells (#16/#17).
+5. Promote the recipe to a ship config + update v10 charts + h2h.
