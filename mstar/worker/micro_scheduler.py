@@ -651,7 +651,7 @@ class MicroScheduler:
             return False  # TP mixed batches are P3
 
         eager_cap = eager_fold_max_chunk()
-        capture_cap = self._MIXED_MAX_CHUNK_TOKENS
+        capture_cap = self._max_chunk_tokens()
         chunk_walks = self._mixed_chunk_walks()
         node_partition = worker_graphs_manager.get_partition_for_node(
             decode_node_name
@@ -787,7 +787,7 @@ class MicroScheduler:
                         e.request_id, node_partition,
                     )
                     clen = fwd_info.step_metadata.get("prefill_chunk_len")
-                    if clen is not None and int(clen) > self._MIXED_MAX_CHUNK_TOKENS:
+                    if clen is not None and int(clen) > self._max_chunk_tokens():
                         chunk_entry = e
                         break
             if chunk_entry is None:
