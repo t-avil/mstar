@@ -938,7 +938,31 @@ class ThinkerSubmodule(ARNodeSubmodule):
             vals = sorted({int(x) for x in raw.split(",") if x.strip()})
         except ValueError:
             return default
+        # Guard: a zero/negative entry would request a bs<=0 capture and kill
+        # the boot inside graph capture; keep only positive sizes.
+        vals = [v for v in vals if v > 0]
         return vals or default
+
+    @staticmethod
+    def _env_buckets(name: str, default: list) -> list:
+        """Override a packed-prefill TOKEN-bucket grid via env (comma ints,
+        e.g. MSTAR_PREFILL_BUCKETS=128,...,4096,8192). Needed so multi-request
+        text/audio prefill packing (wide MSTAR_PREFILL_BATCH_SIZES) has a
+        captured bucket big enough for bs x ~330-token prompts; the default
+        grid tops out at 2048 which caps packing at ~bs6. The largest bucket
+        is load-bearing (everything pads up to it), so an override that
+        lowers the max is rejected. Empty/unset -> default."""
+        raw = os.environ.get(name, "").strip()
+        if not raw:
+            return default
+        try:
+            vals = sorted({int(x) for x in raw.split(",") if x.strip()})
+        except ValueError:
+            return default
+        vals = [v for v in vals if v > 0]
+        if not vals or max(vals) < max(default):
+            return default
+        return vals
 
     def _build_prefill_text_packed(
         self, num_tokens: int, device: torch.device,
@@ -1049,7 +1073,9 @@ class ThinkerSubmodule(ARNodeSubmodule):
         """
         prefill_text_packed = {
             num_tokens: self._build_prefill_text_packed(num_tokens, device)
-            for num_tokens in self.PREFILL_TOKEN_BUCKETS
+            for num_tokens in self._env_buckets(
+                "MSTAR_PREFILL_BUCKETS", self.PREFILL_TOKEN_BUCKETS
+            )
         }
         prefill_vision_packed = {
             num_tokens: self._build_prefill_vision_packed(num_tokens, device)
