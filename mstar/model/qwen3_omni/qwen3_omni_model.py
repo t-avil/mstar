@@ -199,18 +199,28 @@ def _resolve_local_hf_snapshot(repo_id: str, cache_dir: str | None = None) -> st
     return str(Path(local_dir))
 
 
-# GPU image preprocessing: the CPU round-trip to HF's Qwen2VLImageProcessor is the
-# biggest I2T TTFT cost (~175 ms). MSTAR_GPU_IMAGE_PREPROCESS=1 runs the identical
-# algorithm on-GPU (torchvision bicubic resize, same kernel HF calls); grid_thw is
-# bit-exact, pixel_values cos>0.9999. =0 restores the byte-identical HF CPU path.
+# On-device image preprocessing: the round-trip through HF's Qwen2VLImageProcessor
+# was the biggest I2T TTFT cost (~175 ms). ``_gpu_image_preprocess`` runs the
+# identical algorithm with torch/torchvision ops on whatever device the image is
+# on (same bicubic kernel HF's fast backend calls); grid_thw is bit-exact,
+# pixel_values cos>0.9999. It has been the default (ON) since it landed; the old
+# MSTAR_GPU_IMAGE_PREPROCESS=0 HF-CPU fallback branch was removed in the eiv2
+# baseline cleanup (it was reachable only via that env var, nothing in the repo
+# set it, and the on-device path does not require CUDA).
 
 
-def _gpu_image_preprocess_enabled() -> bool:
+def _check_gpu_image_preprocess_not_disabled() -> None:
     import os
 
-    # ON by default (benchmarked canonical config); MSTAR_GPU_IMAGE_PREPROCESS=0
-    # falls back to the byte-identical HF CPU image processor.
-    return os.environ.get("MSTAR_GPU_IMAGE_PREPROCESS", "1") != "0"
+    if os.environ.get("MSTAR_GPU_IMAGE_PREPROCESS", "1") == "0":
+        raise RuntimeError(
+            "The MSTAR_GPU_IMAGE_PREPROCESS=0 fallback (HF CPU image "
+            "preprocessing) was removed in the eiv2 baseline cleanup; unset "
+            "MSTAR_GPU_IMAGE_PREPROCESS to use the on-device preprocessing "
+            "path (numerically validated vs HF: grid_thw bit-exact, "
+            "pixel_values cos>0.9999). To reproduce the old HF-CPU path, "
+            "check out commit 4c33b33a or earlier."
+        )
 
 
 def _smart_resize(
@@ -1363,25 +1373,10 @@ class Qwen3OmniModel(Model):
         raw_audio_inputs = tensors.get("audio_inputs", [])
         raw_video_inputs = tensors.get("video_inputs", [])
 
-        # When GPU image preprocessing is enabled we keep the raw GPU tensors
-        # and never round-trip through CPU/numpy (see _gpu_image_preprocess).
-        gpu_img_preprocess = _gpu_image_preprocess_enabled()
-
-        pil_images: list = []
-        if not gpu_img_preprocess:
-            for img in raw_image_inputs:
-                # data_worker.py provides images as (C, H, W) float32 in [0, 1]
-                # on the GPU.  HF processors expect PIL/numpy uint8 (H, W, C)
-                # in [0, 255] -- otherwise the default do_rescale=True double-
-                # rescales and the model sees a near-zero (essentially black)
-                # tensor regardless of the actual image content.
-                if img.dtype.is_floating_point:
-                    img_u8 = (img * 255.0).clamp(0, 255).to(torch.uint8)
-                else:
-                    img_u8 = img
-                if img_u8.dim() == 3 and img_u8.shape[0] in (1, 3):
-                    img_u8 = img_u8.permute(1, 2, 0)  # CHW -> HWC
-                pil_images.append(img_u8.cpu().contiguous().numpy())
+        # Images are preprocessed on-device by _gpu_image_preprocess (no
+        # CPU/numpy round-trip through the HF image processor). Hard-error if
+        # someone asks for the removed HF-CPU fallback.
+        _check_gpu_image_preprocess_not_disabled()
 
         # GPU log-mel is opt-in (MSTAR_GPU_MEL=1) and only when CUDA is present in
         # this worker; otherwise the raw audio is converted to numpy for the HF
@@ -1418,8 +1413,6 @@ class Qwen3OmniModel(Model):
         # Functionally, both approaches end up with the same set of
         # embeddings in the KV cache (text + modality content).  Stripping
         # the placeholders avoids noise from the unfilled embeddings.
-        # if self._processor is not None:
-            # try:
         system_text = (
             "You are Qwen, a virtual human developed by the "
             "Qwen team, Alibaba Group, capable of perceiving "
@@ -1452,8 +1445,8 @@ class Qwen3OmniModel(Model):
         if self._processor is None:
             # __init__ sets _processor=None and warns if AutoProcessor fails to
             # load. Fail fast with a clear message instead of a cryptic
-            # AttributeError on the first request (the old commented-out guard
-            # promised a tokenizer fallback that was never wired up).
+            # AttributeError on the first request (a raw-tokenizer fallback was
+            # promised historically but never wired up).
             raise RuntimeError(
                 "Qwen3-Omni processor failed to load at init; cannot build the "
                 "chat-template prompt. Check the checkpoint/processor files."
@@ -1539,30 +1532,23 @@ class Qwen3OmniModel(Model):
         result["video_grid_thw"] = []
         result["pixel_values_videos"] = []
 
-        # Run image_processor / feature_extractor SEPARATELY for the
+        # Run image preprocessing / feature_extractor SEPARATELY for the
         # modality outputs.  These don't touch text_inputs.
-        if gpu_img_preprocess:
-            # GPU path: process each image fully on-device (no CPU round-trip).
-            img_proc = self._processor.image_processor
-            for img in raw_image_inputs:
-                pv, grid_thw = _gpu_image_preprocess(
-                    img,
-                    patch_size=img_proc.patch_size,
-                    temporal_patch_size=img_proc.temporal_patch_size,
-                    merge_size=img_proc.merge_size,
-                    min_pixels=img_proc.size["shortest_edge"],
-                    max_pixels=img_proc.size["longest_edge"],
-                    image_mean=img_proc.image_mean,
-                    image_std=img_proc.image_std,
-                )
-                result["pixel_values"].append(pv)
-                result["image_grid_thw"] += list(grid_thw)
-        else:
-            for img in pil_images:
-                img_proc = self._processor.image_processor
-                img_out = img_proc(images=[img], return_tensors="pt")
-                result["pixel_values"].append(img_out["pixel_values"])
-                result["image_grid_thw"] += img_out["image_grid_thw"]
+        # Images: process each one fully on-device (no CPU round-trip).
+        img_proc = self._processor.image_processor
+        for img in raw_image_inputs:
+            pv, grid_thw = _gpu_image_preprocess(
+                img,
+                patch_size=img_proc.patch_size,
+                temporal_patch_size=img_proc.temporal_patch_size,
+                merge_size=img_proc.merge_size,
+                min_pixels=img_proc.size["shortest_edge"],
+                max_pixels=img_proc.size["longest_edge"],
+                image_mean=img_proc.image_mean,
+                image_std=img_proc.image_std,
+            )
+            result["pixel_values"].append(pv)
+            result["image_grid_thw"] += list(grid_thw)
 
         if _use_gpu_mel:
             for waveform in raw_audio_inputs:
