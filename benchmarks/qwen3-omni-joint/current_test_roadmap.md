@@ -861,3 +861,16 @@ FUSED_KV_HANDOFF=1, BATCH_VISION_PREFILL, VIS/PREFILL grids 1-32, PREFILL_BUCKET
 ..16384 (+pinned/rendezvous defaults). Remaining losses: s2t TTFT (100-462 vs 53-217),
 s2t B2 rps (8.02 vs 9.14), low-batch tok (ITL floor residue ~1.5ms vs vLLM).
 Data: kvhandoff_20260716/.
+
+## ★★★ FINAL SHIP CERT (2026-07-16 12:45, SINGLE BOOT, load 16-19) ★★★
+Ship set: MOE_FP8, ORDERED_EMIT, FAST_POSTPROC, BATCH_EMIT, SLIM_EMIT, PREPROC_WORKERS=8,
+INGRAPH_GREEDY=1, FUSED_KV_HANDOFF=1, BATCH_VISION_PREFILL, grids 1-32, BUCKETS..16384.
+        rps            tok           ttft         itl        (W = beats vLLM 0.22)
+i2t B1  0.92 W         162           78 W         5.75
+i2t B32 9.85 W (+18%)  1720 (-2.8%)  175 W        15.17 W
+s2t B32 44.44 W (+44%) 935 W (+25%)  349          15.75 W
+i2t TTFT SWEPT all batches (78-175 vs 87-179). req/s won 8/12 cells (B2/B8 i2t + B2/B4
+s2t hair-behind). ITL won B8+ both paths. Parity: 24/24 on every validated flag.
+Remaining honest gaps: s2t TTFT all batches (94-349 vs 53-217, multi-hop pipeline
+structural), s2t B2/B4 rps margin, low-batch tok (ITL floor residue ~1ms vs vLLM).
+Data: final_ship_20260716/. Loop day complete.
