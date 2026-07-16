@@ -1,0 +1,20 @@
+`trust_remote_code` is not supported anymore.
+Please check that the Hugging Face dataset 'ethz/food101' isn't based on a loading script and remove `trust_remote_code`.
+If the dataset is based on a loading script, please ask the dataset author to remove it and convert it to a standard format like Parquet.
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'interleaved'}
+
+--- Benchmark Results (wall time: 17.42s) ---
+Closed-Loop Benchmark Results (64 requests, max_concurrency=8)
+──────────────────────────────────────────────────
+Request type breakdown: image_to_text=64
+Requests : 64/64 succeeded
+TTFT (text)  : mean=0.140s  p50=0.102s  p95=0.398s  p99=0.406s
+E2E          : mean=2.054s  p50=2.252s  p95=3.003s  p99=3.319s
+ITL  (text)  : mean=0.011s  p50=0.010s  p95=0.015s  p99=0.044s
+Text tokens: 11347 total (177.3 avg/req)
+Output bytes (text): 49171 total (11347 chunks)
+Throughput: 3.67 req/s (successful only)
+Throughput: 651.51 text tok/s
+Total wall time: 17.42s
+
+Saved 64 outputs to /m-coriander/coriander/tim/rm_out/sidecar_perf/i2t_B8/

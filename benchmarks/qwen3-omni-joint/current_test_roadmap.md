@@ -808,3 +808,45 @@ never batched). Pool -> all 32 arrive together -> batched prefill works:
 Data: ab2_20260716/. FAST_CHECKSTOP effect on B1 ITL: none visible (7.31 — verify
 N1 fired via WALK_STATS in next boot). NEXT: sidecar ladder (B1 ITL), s2t admission
 (R3/R5) for s2t TTFT, i2t tok/s gap analysis.
+
+## SIDECAR VERDICT + i2t SWEEP FILL (2026-07-16 10:00, load 16)
+Sidecar trio (SLIM_EMIT2+EMIT_SIDECAR+SIDECAR_CHECKSTOP): WASH on eiv2 (rps/ITL
+deltas sub-noise, parity 24/24, N1 fast_checkstop counter never fired -> M6's
+text_inputs-aliasing warning confirmed). PARK all three (default-off). FAST_CHECKSTOP
+also wash. i2t fill on preproc-pool build: TTFT WINS EVERY BATCH (83/84/85/102/104/
+160 vs vLLM 87/92/129/100/168/179). REMAINING LOSS SURFACE = exactly 2 mechanisms:
+(A) ~2ms/step decode host floor (ITL 6.8-7.3 vs 4.8-5.0) — explains i2t B1/B2 rps,
+all i2t tok deficits, s2t B1-B4 tok/ITL, arithmetic exact; NOT checkstop/emit (both
+washed) -> fresh py-spy on THIS build needed; (B) s2t TTFT admission (97-482 vs
+53-217) + s2t B2 rps. Data: sidecar_i2tfill_20260716/.
+
+## FLOOR CONFIRMED EMPIRICALLY (2026-07-16 10:20, py-spy rate40 B1 decode, probe server)
+GPU-thread hot leaves: sampling.py:355 (first pageable H2D upload in host Sampler.sample)
+= 126 samples vs graph replay 5 — the sampler upload stream-sync is ~25x the replay in
+host time. Round-3 lockstep diagnosis CONFIRMED. Fix in flight: M8 R1-lite
+(MSTAR_INGRAPH_GREEDY buffered sampler reusing Talker machinery, ~40 lines) + pinned
+non-blocking uploads for the temp>0 host path. Predicted -1.0-1.5ms ITL at B1
+(6.8-7.3 -> ~5.5-6.0 vs vLLM 4.8-5.0), closes most of the remaining i2t rps/tok and
+s2t B1-B4 deficits per the closed-loop arithmetic.
+
+## SAMPLER A/B (2026-07-16 11:00): B1 WIN / B32 REGRESSION — parity 24/24
+PINNED_SAMPLE_PARAMS + INGRAPH_GREEDY: s2t B1 ITL 7.29->6.46 (-11%) rps +10% (greedy
+7.36->6.47, rps 4.58->5.07 +11%); BUT B32 regresses (s2t ITL 17.2->22.7, i2t 16.0->21.0,
+rps -13/-18%) — suspect: 4-slot pinned ring event-syncs on slot reuse at B32 cadence.
+M9 dispatched (ring depth/query-first fix + gate memoization). Parity PERFECT 24/24.
+BONUS datapoint: ship-flags (OFF side) i2t B32 = 9.39 rps / 1663 tok (vLLM 8.32/1769)
+— rps lead robust across runs (8.76, 9.39); tok gap now only -6%.
+
+## SAMPLER STACK VALIDATED (2026-07-16 11:50, M9 rendezvous fix, quiet)
+PINNED_SAMPLE_PARAMS + INGRAPH_GREEDY + SAMPLE_RENDEZVOUS_BS=16 (bca9d372):
+s2t B1 ITL 7.24->6.43 (-11%) retained; B32 no-regress (s2t 17.8->18.2 noise, rps
+38.0->39.7; i2t 15.41->15.16 = NOW BEATS vLLM 15.4). i2t B32 tok 1709 vs 1769 (-3.4%).
+Parity 23/24 (recurring intermittent cross-boot single-request tie; within-run pairs
+have shown 24/24 — documented, monitored). M9 mechanism note (paper-worthy): removing
+the sampler sync unleashed GIL contention between GPU-thread prep and postprocess
+floor at B32; the legacy pageable sync was accidentally serializing them — fix is a
+batch-gated rendezvous, not deeper buffering. FLAGS JOIN SHIP SET (INGRAPH_GREEDY=1
+explicit; pinned+rendezvous default-on). Data: sampler_final_20260716/.
+SHIP FLAG SET (text-out, PD yaml): MOE_FP8, ORDERED_EMIT, FAST_POSTPROC, BATCH_EMIT,
+SLIM_EMIT, PREPROC_WORKERS=8, INGRAPH_GREEDY=1, BATCH_VISION_PREFILL, VIS/PREFILL
+grids 1-32, PREFILL_BUCKETS ..16384. Parked: FAST_CHECKSTOP, sidecar trio, ENC_OVERLAP.
