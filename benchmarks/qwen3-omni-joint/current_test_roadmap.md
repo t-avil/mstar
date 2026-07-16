@@ -850,3 +850,14 @@ explicit; pinned+rendezvous default-on). Data: sampler_final_20260716/.
 SHIP FLAG SET (text-out, PD yaml): MOE_FP8, ORDERED_EMIT, FAST_POSTPROC, BATCH_EMIT,
 SLIM_EMIT, PREPROC_WORKERS=8, INGRAPH_GREEDY=1, BATCH_VISION_PREFILL, VIS/PREFILL
 grids 1-32, PREFILL_BUCKETS ..16384. Parked: FAST_CHECKSTOP, sidecar trio, ENC_OVERLAP.
+
+## M10 FUSED KV HANDOFF: WIN (2026-07-16 12:23, parity 24/24) — JOINS SHIP SET
+MSTAR_FUSED_KV_HANDOFF=1 (510beedd; ~290 per-page copies -> ~3 fused gathers/req on a
+transfer stream): s2t B2 rps 7.02->8.02 (+14%, gap to vLLM 9.14 halved); s2t B32 rps
+36.4->38.9 + ITL 19.0->15.4; i2t B32 rps 9.54->10.06 (vLLM 8.32 = +21%) + ITL 15.3->
+14.7 (beats 15.4) + TTFT p95 1228->710. FINAL SHIP SET (text-out, PD yaml): MOE_FP8,
+ORDERED_EMIT, FAST_POSTPROC, BATCH_EMIT, SLIM_EMIT, PREPROC_WORKERS=8, INGRAPH_GREEDY=1,
+FUSED_KV_HANDOFF=1, BATCH_VISION_PREFILL, VIS/PREFILL grids 1-32, PREFILL_BUCKETS
+..16384 (+pinned/rendezvous defaults). Remaining losses: s2t TTFT (100-462 vs 53-217),
+s2t B2 rps (8.02 vs 9.14), low-batch tok (ITL floor residue ~1.5ms vs vLLM).
+Data: kvhandoff_20260716/.
