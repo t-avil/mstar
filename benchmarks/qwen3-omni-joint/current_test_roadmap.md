@@ -874,3 +874,16 @@ s2t hair-behind). ITL won B8+ both paths. Parity: 24/24 on every validated flag.
 Remaining honest gaps: s2t TTFT all batches (94-349 vs 53-217, multi-hop pipeline
 structural), s2t B2/B4 rps margin, low-batch tok (ITL floor residue ~1ms vs vLLM).
 Data: final_ship_20260716/. Loop day complete.
+
+## LENGTH ARTIFACT AUDIT (2026-07-16 15:40) — HONESTY CORRECTION, from committed data
+vLLM outputs run systematically LONGER: i2t L≈203 vs ours ≈176 (+15%); s2t ≈23 vs
+≈20-21. Same model+nominal params → likely serving-default divergence (their sampling
+defaults vs ours; investigate temp/top_k/top_p defaults both stacks). CONSEQUENCE:
+rps comparisons are length-biased in OUR favor. Length-normalized (tok_s/L_vllm):
+i2t B32 rps +18% -> ≈+2% (near-tie); s2t B32 +44% -> ≈+32% (real win). tok/s and ITL
+columns are length-neutral and stand. HONEST HEADLINE: s2t B32 +25% tok/s / +32%
+rps-normalized; i2t TTFT sweep genuine; ITL wins genuine; i2t B32 ≈ tie. The remaining
+true fight = ITL floor (researcher's A' package) + s2t TTFT (B package). For the
+writeup: report tok/s+ITL as primary (length-neutral), rps with the length caveat, or
+re-cert with pinned output lengths (--output-len-min/max + ignore_eos) on OUR side
+matched to vLLM's committed L.
