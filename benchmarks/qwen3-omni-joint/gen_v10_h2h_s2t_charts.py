@@ -78,6 +78,15 @@ def sweepbatch(f, d):
 
 best = collect(glob.glob(os.path.join(BEST_DIR, "s2t_B*/results.json")), bestbatch)
 enc = collect(sum((glob.glob(g) for g in ENC_GLOBS), []), sweepbatch)
+# OWNER RULE (2026-07-16): the encoders-implemented series must come from COMMITTED
+# data (encoders-implemeneted-benchmarked branch, commit f4d8fa15, system=mstar_new),
+# not local sweep dirs. ENC_COMMITTED_JSON points at the extracted committed series.
+import json as _json
+_encj = os.environ.get("ENC_COMMITTED_JSON")
+if _encj:
+    _all = _json.load(open(_encj))
+    _key = "s2t" if "s2t" in os.path.basename(__file__) else "i2t"
+    enc = {int(b): v for b, v in _all[_key].items()}
 V9 = json.load(open("chart_v9_h2h_s2t_data.json"))
 vllm = {int(k): v for k, v in V9["vllm022"].items() if v}
 
