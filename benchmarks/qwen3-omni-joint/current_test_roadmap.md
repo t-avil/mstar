@@ -808,3 +808,14 @@ never batched). Pool -> all 32 arrive together -> batched prefill works:
 Data: ab2_20260716/. FAST_CHECKSTOP effect on B1 ITL: none visible (7.31 — verify
 N1 fired via WALK_STATS in next boot). NEXT: sidecar ladder (B1 ITL), s2t admission
 (R3/R5) for s2t TTFT, i2t tok/s gap analysis.
+
+## SIDECAR VERDICT + i2t SWEEP FILL (2026-07-16 10:00, load 16)
+Sidecar trio (SLIM_EMIT2+EMIT_SIDECAR+SIDECAR_CHECKSTOP): WASH on eiv2 (rps/ITL
+deltas sub-noise, parity 24/24, N1 fast_checkstop counter never fired -> M6's
+text_inputs-aliasing warning confirmed). PARK all three (default-off). FAST_CHECKSTOP
+also wash. i2t fill on preproc-pool build: TTFT WINS EVERY BATCH (83/84/85/102/104/
+160 vs vLLM 87/92/129/100/168/179). REMAINING LOSS SURFACE = exactly 2 mechanisms:
+(A) ~2ms/step decode host floor (ITL 6.8-7.3 vs 4.8-5.0) — explains i2t B1/B2 rps,
+all i2t tok deficits, s2t B1-B4 tok/ITL, arithmetic exact; NOT checkstop/emit (both
+washed) -> fresh py-spy on THIS build needed; (B) s2t TTFT admission (97-482 vs
+53-217) + s2t B2 rps. Data: sidecar_i2tfill_20260716/.
