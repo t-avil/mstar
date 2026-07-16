@@ -47,6 +47,9 @@ from mstar.utils.sampling import SamplingConfig
 
 logger = logging.getLogger(__name__)
 
+import os as _os
+_CONDUCTOR_EVENT_WAIT = _os.environ.get("MSTAR_CONDUCTOR_EVENT_WAIT", "0") == "1"
+
 
 def _req_id_to_seed(req_id: str):
     """Map a request id to a 32-bit seed.
@@ -1140,4 +1143,11 @@ class Conductor:
                 if self.enable_nvtx:
                     range_pop()
 
-            time.sleep(0.001)
+            # MSTAR_CONDUCTOR_EVENT_WAIT=1: block on the zmq poller (wakes in
+            # microseconds when a message arrives) instead of an unconditional
+            # 1ms sleep per loop — the sleep adds up to ~1ms latency to EVERY
+            # conductor turnaround (2-3 per request TTFT). Flag off = legacy.
+            if _CONDUCTOR_EVENT_WAIT:
+                self.communicator.wait_for_work(1)
+            else:
+                time.sleep(0.001)
