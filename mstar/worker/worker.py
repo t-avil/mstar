@@ -540,6 +540,14 @@ class Worker:
             self._pending_removes.add(body.request_id)
             return
 
+        # SLIM_EMIT bookkeeping: purge this rid's sent-template keys on the
+        # DIRECT remove path too (the deferred-remove path already purges);
+        # without this, entries leak forever under MSTAR_SLIM_EMIT=1.
+        if self._slim_emit and self._slim_emit_sent:
+            self._slim_emit_sent = {
+                k for k in self._slim_emit_sent if k[0] != body.request_id
+            }
+
         # If we are the TP leader for this request, signal the followers to
         # remove it too. Followers defer removal until they get this message
         # (see the guard at the top of this method) so they can't tear down
@@ -1417,8 +1425,9 @@ class Worker:
           tensors are complete before a peer reads them, and TP>1 would let
           ranks disagree on collective ordering across streams — both are
           exactly the machinery this minimal variant refuses to port, so the
-          flag silently stays off in those topologies (PD-disaggregated /
-          TP configs);
+          flag silently stays off on workers where the Thinker is remote or
+          TP>1. NOTE: on the 2-GPU PD yaml the gate PASSES on rank 0 (the
+          prefill Thinker is colocated with the encoders there);
         - in-flight requests on this worker <= N (the graveyard gate: keeps
           the side stream off the loaded path where the global godv9 variant
           collapsed s2t B32 by contending with prefill).
