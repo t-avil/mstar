@@ -1,0 +1,457 @@
+{
+  "system": "ours",
+  "inference_system": "ours",
+  "model": "Qwen3Omni",
+  "request_type": "image_to_text",
+  "profiling_type": "closed_loop",
+  "num_requests": 50,
+  "num_warmup": 10,
+  "completed": 50,
+  "failed": 0,
+  "wall_time_s": 14.614857896998728,
+  "jct_mean_ms": 1147.894998700067,
+  "jct_median_ms": 1186.097518000679,
+  "jct_p90_ms": 1697.1658905000368,
+  "jct_p95_ms": 1756.6237185504178,
+  "jct_p99_ms": 1772.1343075195728,
+  "request_throughput": 3.421175926060005,
+  "text_token_throughput": 574.8944026151232,
+  "audio_seconds_throughput": null,
+  "audio_duration_mean_s": null,
+  "batch_size": 1,
+  "max_concurrency": 4,
+  "ttft": {
+    "text": {
+      "mean": 0.11241921374003142,
+      "p50": 0.10630391200083977,
+      "higher_is_better": false,
+      "p95": 0.1693378281509466,
+      "p99": 0.21069575392974002,
+      "p05": null,
+      "p10": null
+    }
+  },
+  "itl": {
+    "text": {
+      "mean": 0.006191476517360474,
+      "p50": 0.0056541044996265555,
+      "higher_is_better": false,
+      "p95": 0.010003450298790994,
+      "p99": 0.022303320059236284,
+      "p05": null,
+      "p10": null
+    }
+  },
+  "e2e_latency": {
+    "mean": 1.1478949987000668,
+    "p50": 1.1828399335008726,
+    "higher_is_better": false,
+    "p95": 1.7566237185504179,
+    "p99": 1.7721343075195728,
+    "p05": null,
+    "p10": null
+  },
+  "rtf": null,
+  "per_request": [
+    {
+      "request_id": 0,
+      "jct_ms": 1134.6402230010426,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 826
+      }
+    },
+    {
+      "request_id": 1,
+      "jct_ms": 1402.751364001233,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 936
+      }
+    },
+    {
+      "request_id": 2,
+      "jct_ms": 1691.0206219999964,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 1081
+      }
+    },
+    {
+      "request_id": 3,
+      "jct_ms": 1752.4733070004004,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 1053
+      }
+    },
+    {
+      "request_id": 4,
+      "jct_ms": 510.1226469996618,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 309
+      }
+    },
+    {
+      "request_id": 5,
+      "jct_ms": 1517.4768220003898,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 951
+      }
+    },
+    {
+      "request_id": 6,
+      "jct_ms": 1690.110289999211,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 1160
+      }
+    },
+    {
+      "request_id": 7,
+      "jct_ms": 916.2786810011312,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 586
+      }
+    },
+    {
+      "request_id": 8,
+      "jct_ms": 1552.3682570001256,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 1160
+      }
+    },
+    {
+      "request_id": 9,
+      "jct_ms": 843.7919039988628,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 527
+      }
+    },
+    {
+      "request_id": 10,
+      "jct_ms": 1192.1475160015689,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 714
+      }
+    },
+    {
+      "request_id": 11,
+      "jct_ms": 1585.7848120012932,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 1025
+      }
+    },
+    {
+      "request_id": 12,
+      "jct_ms": 1597.969202999593,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 1071
+      }
+    },
+    {
+      "request_id": 13,
+      "jct_ms": 1319.7009729992715,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 891
+      }
+    },
+    {
+      "request_id": 14,
+      "jct_ms": 344.7837169987906,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 209
+      }
+    },
+    {
+      "request_id": 15,
+      "jct_ms": 1325.2708969994274,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 850
+      }
+    },
+    {
+      "request_id": 16,
+      "jct_ms": 929.1208100003132,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 642
+      }
+    },
+    {
+      "request_id": 17,
+      "jct_ms": 1261.0997939991648,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 828
+      }
+    },
+    {
+      "request_id": 18,
+      "jct_ms": 1186.097518000679,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 730
+      }
+    },
+    {
+      "request_id": 19,
+      "jct_ms": 795.9057120006037,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 511
+      }
+    },
+    {
+      "request_id": 20,
+      "jct_ms": 1032.3105600000417,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 667
+      }
+    },
+    {
+      "request_id": 21,
+      "jct_ms": 1599.135065000155,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 1040
+      }
+    },
+    {
+      "request_id": 22,
+      "jct_ms": 1426.7494159994385,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 912
+      }
+    },
+    {
+      "request_id": 23,
+      "jct_ms": 1215.7280179999361,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 732
+      }
+    },
+    {
+      "request_id": 24,
+      "jct_ms": 485.0295490014105,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 315
+      }
+    },
+    {
+      "request_id": 25,
+      "jct_ms": 1303.3406480008125,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 822
+      }
+    },
+    {
+      "request_id": 26,
+      "jct_ms": 1321.850586000437,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 768
+      }
+    },
+    {
+      "request_id": 27,
+      "jct_ms": 514.1027999998187,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 324
+      }
+    },
+    {
+      "request_id": 28,
+      "jct_ms": 1096.1352590002207,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 657
+      }
+    },
+    {
+      "request_id": 29,
+      "jct_ms": 618.4472669992829,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 365
+      }
+    },
+    {
+      "request_id": 30,
+      "jct_ms": 1759.450232000745,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 1057
+      }
+    },
+    {
+      "request_id": 31,
+      "jct_ms": 1389.1174590007722,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 907
+      }
+    },
+    {
+      "request_id": 32,
+      "jct_ms": 990.7449290003569,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 647
+      }
+    },
+    {
+      "request_id": 33,
+      "jct_ms": 1134.6893059999275,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 739
+      }
+    },
+    {
+      "request_id": 34,
+      "jct_ms": 710.060548999536,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 354
+      }
+    },
+    {
+      "request_id": 35,
+      "jct_ms": 1774.3416849989444,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 1094
+      }
+    },
+    {
+      "request_id": 36,
+      "jct_ms": 1769.8368330002268,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 1085
+      }
+    },
+    {
+      "request_id": 37,
+      "jct_ms": 1025.1192659998196,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 674
+      }
+    },
+    {
+      "request_id": 38,
+      "jct_ms": 638.1821459999628,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 399
+      }
+    },
+    {
+      "request_id": 39,
+      "jct_ms": 494.37834699892846,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 300
+      }
+    },
+    {
+      "request_id": 40,
+      "jct_ms": 1679.2306860006647,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 1088
+      }
+    },
+    {
+      "request_id": 41,
+      "jct_ms": 1753.169091000018,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 1070
+      }
+    },
+    {
+      "request_id": 42,
+      "jct_ms": 964.5402789992659,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 661
+      }
+    },
+    {
+      "request_id": 43,
+      "jct_ms": 1134.6150150002359,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 785
+      }
+    },
+    {
+      "request_id": 44,
+      "jct_ms": 433.7938219996431,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 226
+      }
+    },
+    {
+      "request_id": 45,
+      "jct_ms": 883.1671400002961,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 568
+      }
+    },
+    {
+      "request_id": 46,
+      "jct_ms": 1196.356869999363,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 786
+      }
+    },
+    {
+      "request_id": 47,
+      "jct_ms": 878.8331010000547,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 543
+      }
+    },
+    {
+      "request_id": 48,
+      "jct_ms": 1179.5823490010662,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 848
+      }
+    },
+    {
+      "request_id": 49,
+      "jct_ms": 443.79659299920604,
+      "type": "image_to_text",
+      "output_bytes": {
+        "text": 276
+      }
+    }
+  ]
+}
