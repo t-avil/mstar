@@ -819,3 +819,12 @@ also wash. i2t fill on preproc-pool build: TTFT WINS EVERY BATCH (83/84/85/102/1
 all i2t tok deficits, s2t B1-B4 tok/ITL, arithmetic exact; NOT checkstop/emit (both
 washed) -> fresh py-spy on THIS build needed; (B) s2t TTFT admission (97-482 vs
 53-217) + s2t B2 rps. Data: sidecar_i2tfill_20260716/.
+
+## FLOOR CONFIRMED EMPIRICALLY (2026-07-16 10:20, py-spy rate40 B1 decode, probe server)
+GPU-thread hot leaves: sampling.py:355 (first pageable H2D upload in host Sampler.sample)
+= 126 samples vs graph replay 5 — the sampler upload stream-sync is ~25x the replay in
+host time. Round-3 lockstep diagnosis CONFIRMED. Fix in flight: M8 R1-lite
+(MSTAR_INGRAPH_GREEDY buffered sampler reusing Talker machinery, ~40 lines) + pinned
+non-blocking uploads for the temp>0 host path. Predicted -1.0-1.5ms ITL at B1
+(6.8-7.3 -> ~5.5-6.0 vs vLLM 4.8-5.0), closes most of the remaining i2t rps/tok and
+s2t B1-B4 deficits per the closed-loop arithmetic.
