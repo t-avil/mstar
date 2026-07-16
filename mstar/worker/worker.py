@@ -2539,10 +2539,29 @@ class Worker:
         # too. Tag absent (flag off / gate failed): byte-identical path.
         enc_overlap = bool(batch_N.node_batch.metadata.get("enc_overlap"))
 
+        # MSTAR_DECODE_SYNCFREE effect 2: for token-only thinker_decode steps
+        # the completion-event HARD sync below is skipped and the sampled-
+        # token D2H (which feeds BOTH check_stop and the inline emit ints) is
+        # deferred: enqueued on the side copy stream gated on the completion
+        # event, consumed at _await_checkstop via poll-then-block — vLLM's
+        # get_output() semantics (their .tolist() also blocks on the copy
+        # event when consuming step N's output while N+1 executes). Every
+        # host read of this step's tokens goes through that copy; everything
+        # else routing touches is reference/metadata-only (store uses
+        # skip_cuda_sync, emit uses the prematerialized ints), so no reader
+        # needs the full-stream sync. The EOS decision keeps its existing
+        # one-step-late-with-trim shape: spec step N+1 is already in flight
+        # when this step's stops are computed, and the <=1 overshoot step's
+        # outputs are popped above (speculative_new_iter + _pending_loop_
+        # stops) before routing/emit — byte-identical output, greedy and
+        # temp>0 alike. Steps with non-token outputs (audio thinker_states →
+        # Talker) keep the legacy sync: their cross-walk consumers rely on it.
+        syncfree_defer = self._syncfree_token_only_decode(batch_N, output)
+
         # Wait for batch N's completion event before proceeding
         # TODO: may need to refine this based on how it affects performance?
         if torch.cuda.is_available() and batch_N.batch.node_objects \
-                and not enc_overlap:
+                and not enc_overlap and not syncfree_defer:
             if output.completion_event is not None:
                 if self.enable_nvtx:
                     range_push("worker.postprocess.completion_event_sync", synchronize=False)
@@ -2574,7 +2593,7 @@ class Worker:
                     self._fast_checkstop
                     and batch_N.graph_walk == "thinker_decode"
                 ),
-                defer=self._sidecar_checkstop,
+                defer=self._sidecar_checkstop or syncfree_defer,
             )
         )
 
@@ -2588,7 +2607,7 @@ class Worker:
         # poll the deferred copy (or fall back to a counted blocking wait)
         # before computing stops. No deferred/late decision — that is the V1
         # identity failure the design forbids (§6.2).
-        if self._sidecar_checkstop:
+        if self._sidecar_checkstop or syncfree_defer:
             self._await_checkstop(cpu_output)
 
         new_stops = self._compute_new_stops(batch_N, engine, cpu_output)
@@ -2941,6 +2960,33 @@ class Worker:
                     new_stops[rid] = {"thinker_decode_loop"}
             return new_stops
         return engine.check_stop_for_batch(batch_N.node_batch, cpu_output)
+
+    def _syncfree_token_only_decode(
+        self, batch_N: PendingBatch, output: NodeOutput,
+    ) -> bool:
+        """MSTAR_DECODE_SYNCFREE gate for the postprocess deferral: True iff
+        the flag is on, this is a thinker_decode step, and EVERY rid's output
+        dict carries only the sampled token (``new_token`` plus its
+        ``text_inputs`` alias from ``ThinkerSubmodule.postprocess``). Audio
+        requests add ``thinker_states``/``thinker_mask`` for the Talker and
+        keep the legacy completion sync — their cross-walk/SHM consumers
+        rely on it. O(B) dict-key scans, no GPU reads."""
+        if not (
+            self._decode_syncfree
+            and batch_N.graph_walk == "thinker_decode"
+            and torch.cuda.is_available()
+            and output.completion_event is not None
+        ):
+            return False
+        per_rid = output.per_request_output_tensors
+        for rid in batch_N.node_batch.request_ids:
+            d = per_rid.get(rid)
+            if not isinstance(d, dict):
+                return False
+            for name in d:
+                if name not in ("new_token", "text_inputs"):
+                    return False
+        return True
 
     def _checkstop_barrier(
         self, side: "torch.cuda.Stream", defer: bool,
