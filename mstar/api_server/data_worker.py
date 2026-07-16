@@ -1,5 +1,6 @@
 
 
+import collections
 import logging
 import os
 import queue
@@ -162,10 +163,23 @@ class PreprocessWorker:
         results = []
         while not self.output_queue.empty():
             result: ResultChunk = self.output_queue.get()
-            self.per_request_reading_tensors[result.request_id] -= 1
+            # Tolerant decrement: a LATE chunk can land after cleanup_request
+            # popped this rid's counter (in-flight SHM read completing in the
+            # main-thread-pop -> worker-thread-cleanup window; ordered emit
+            # widens it by holding+late-flushing chunks). A bare subscript
+            # here raised KeyError and aborted the whole drain loop, dropping
+            # every other request's queued chunks with it.
+            cnt = self.per_request_reading_tensors.get(result.request_id)
+            if cnt is None:
+                logger.debug(
+                    "Dropping late chunk for cleaned-up request %s",
+                    result.request_id,
+                )
+                continue
+            self.per_request_reading_tensors[result.request_id] = cnt - 1
             logger.debug(
                 "Data worker reading queue for request %s decreased to length %d",
-                result.request_id,  self.per_request_reading_tensors[result.request_id]
+                result.request_id, cnt - 1,
             )
             results.append(result)
         return results
@@ -240,6 +254,25 @@ class PreprocessWorkerThread:
         # Owned by PreprocessWorker (main thread); used only from this thread.
         self.communicator = communicator
         self.tensor_manager = tensor_manager
+
+        # MSTAR_ORDERED_EMIT: emit ResultChunks per (rid, modality) in ARRIVAL
+        # order rather than read-completion order. Without this, chunks emit
+        # in whatever order their async SHM reads complete — under load a
+        # slow fetch (e.g. the prefill step's first token) lands 1..k later
+        # chunks late, so the client stream shows the FIRST generated token
+        # displaced mid-sentence (or, when the request finishes first,
+        # missing entirely). Default OFF = current behavior.
+        self._ordered_emit = os.environ.get("MSTAR_ORDERED_EMIT", "0") == "1"
+        self._ordered_emit_debug = (
+            os.environ.get("MSTAR_ORDERED_EMIT_DEBUG", "0") == "1"
+        )
+        # (rid, modality) -> deque of entries in arrival order. Entry:
+        # {"ready": bool, "uuid_order": [uuid,...], "chunks": {uuid: chunk},
+        #  "pending": set[uuid]}
+        self._emit_fifos: dict[tuple[str, str], collections.deque] = {}
+        # (rid, uuid) -> [(fifo_key, entry), ...] so read completions find
+        # their entry.
+        self._uuid_to_emit_entry: dict[tuple[str, str], list] = {}
 
     def _process_input(
         self, input: PreprocessInput
@@ -384,6 +417,73 @@ class PreprocessWorkerThread:
         for tensor_info in result.graph_edge.tensor_info:
             self.tensor_uuid_to_metadata_per_request[result.request_id][
                 tensor_info.uuid] = result.metadata
+        if self._ordered_emit:
+            key = (result.request_id, result.modality)
+            uuids = [info.uuid for info in result.graph_edge.tensor_info]
+            entry = {
+                # A signal-only emit edge (no tensor_info — e.g. the leading
+                # text_output marker) transports nothing: it is trivially
+                # ready, else it wedges the FIFO head forever (no read will
+                # ever complete it) and every later chunk is held until the
+                # request's TTL drops them (observed: all-empty responses).
+                "ready": not uuids,
+                "uuid_order": uuids,
+                "chunks": {},
+                "pending": set(uuids),
+            }
+            self._emit_fifos.setdefault(key, collections.deque()).append(entry)
+            for u in uuids:
+                waiters = self._uuid_to_emit_entry.setdefault(
+                    (result.request_id, u), []
+                )
+                if waiters and self._ordered_emit_debug:
+                    logger.warning(
+                        "ORDEMIT alias (multi-waiter) rid=%s uuid=%s n=%d",
+                        result.request_id, u, len(waiters) + 1,
+                    )
+                # List-valued: the SAME uuid can be referenced by MULTIPLE
+                # arrival entries (aliased emit edges / re-sends); one read
+                # completion must satisfy every waiter or the orphaned
+                # earlier entry wedges the FIFO head forever.
+                waiters.append((key, entry))
+            if self._ordered_emit_debug:
+                logger.warning(
+                    "ORDEMIT arrival SHM rid=%s uuids=%s fifo_len=%d",
+                    result.request_id, uuids, len(self._emit_fifos[key]),
+                )
+            if entry["ready"]:
+                # Signal-only entry: pop it (and any ready run) promptly so
+                # it never lingers at the head.
+                self._flush_emit_fifo(key)
+
+    def _flush_emit_fifo(self, key: tuple[str, str]) -> None:
+        """Emit the head-run of ready entries for one (rid, modality) FIFO.
+
+        Arrival order == the producing worker's send order (single ZMQ FIFO
+        per rid), so draining ready heads preserves true token order; an
+        unread SHM entry at the head holds everything behind it until its
+        read lands (at most the transport latency — the same latency that
+        today reorders instead).
+        """
+        fifo = self._emit_fifos.get(key)
+        if fifo is None:
+            return
+        n_emitted = 0
+        while fifo and fifo[0]["ready"]:
+            entry = fifo.popleft()
+            for u in entry["uuid_order"]:
+                chunk = entry["chunks"].get(u)
+                if chunk is not None:
+                    self.out_queue.put(chunk)
+                    n_emitted += 1
+        if self._ordered_emit_debug:
+            logger.warning(
+                "ORDEMIT flush key=%s emitted=%d held=%d head_pending=%s",
+                key, n_emitted, len(fifo),
+                (sorted(fifo[0]["pending"]) if fifo else None),
+            )
+        if not fifo:
+            self._emit_fifos.pop(key, None)
 
     def _discard_result_tensor(
         self, result: ResultTensors
@@ -412,8 +512,16 @@ class PreprocessWorkerThread:
                         tensor, modality
                     )
 
-                    chunk_metadata = self.tensor_uuid_to_metadata_per_request[request_id][
-                        tensor_info.uuid] or {}
+                    # Tolerant metadata lookup: a duplicate completion for an
+                    # aliased/re-sent uuid (or a completion racing cleanup)
+                    # finds the key already deleted below — a bare double
+                    # subscript raised KeyError and killed the whole
+                    # ready-tensor sweep for every other request.
+                    chunk_metadata = (
+                        self.tensor_uuid_to_metadata_per_request
+                        .get(request_id, {})
+                        .get(tensor_info.uuid)
+                    ) or {}
                     # Audio is emitted as headerless 16-bit PCM; surface the
                     # model's output sample rate so clients can wrap it.
                     if modality == "audio" and self.model is not None:
@@ -422,14 +530,52 @@ class PreprocessWorkerThread:
                             "sample_rate": self.model.get_output_sample_rate("audio"),
                         }
 
-                    self.out_queue.put(ResultChunk(
+                    chunk = ResultChunk(
                         request_id=request_id,
                         modality=modality,
                         data=postprocessed,
                         metadata=chunk_metadata,
-                    ))
-                    del self.tensor_uuid_to_metadata_per_request[request_id][
-                        tensor_info.uuid]
+                    )
+                    waiters = (
+                        self._uuid_to_emit_entry.pop(
+                            (request_id, tensor_info.uuid), None,
+                        )
+                        if self._ordered_emit else None
+                    )
+                    if self._ordered_emit and self._ordered_emit_debug:
+                        logger.warning(
+                            "ORDEMIT completion rid=%s uuid=%s waiters=%s",
+                            request_id, tensor_info.uuid,
+                            len(waiters) if waiters else 0,
+                        )
+                    if waiters:
+                        # MSTAR_ORDERED_EMIT: attach to every arrival-ordered
+                        # entry waiting on this uuid; flush each FIFO whose
+                        # entry became ready at the head.
+                        for key, entry in waiters:
+                            entry["chunks"][tensor_info.uuid] = chunk
+                            entry["pending"].discard(tensor_info.uuid)
+                            if not entry["pending"]:
+                                entry["ready"] = True
+                                self._flush_emit_fifo(key)
+                    elif not self._ordered_emit:
+                        # Flag off: emit directly, as before ordered emit.
+                        self.out_queue.put(chunk)
+                    else:
+                        # Ordered emit ON but no waiters: every SHM arrival
+                        # registers waiters under the flag, so this is either
+                        # a DUPLICATE completion for an aliased/re-sent uuid
+                        # (the first completion already emitted for every
+                        # waiter — emitting again would deliver a duplicate
+                        # token) or an entry dropped by request cleanup (rid
+                        # dead). Drop, don't emit.
+                        logger.debug(
+                            "ORDEMIT dropping waiterless completion rid=%s "
+                            "uuid=%s", request_id, tensor_info.uuid,
+                        )
+                    self.tensor_uuid_to_metadata_per_request.get(
+                        request_id, {}
+                    ).pop(tensor_info.uuid, None)
                     self.tensor_manager.dereference(
                         request_id=request_id,
                         uuid=tensor_info.uuid
@@ -486,6 +632,28 @@ class PreprocessWorkerThread:
                     self.tensor_manager.cleanup_request(req_id)
                     if req_id in self.tensor_uuid_to_metadata_per_request:
                         del self.tensor_uuid_to_metadata_per_request[req_id]
+                    if self._ordered_emit:
+                        # Drop this rid's held-back entries and uuid refs; a
+                        # late read for a dropped entry is waiterless and gets
+                        # dropped in _process_read_tensors (rid is dead).
+                        for key in [
+                            k for k in self._emit_fifos if k[0] == req_id
+                        ]:
+                            if self._ordered_emit_debug:
+                                fifo = self._emit_fifos.get(key)
+                                logger.warning(
+                                    "ORDEMIT cleanup-drop key=%s held=%d "
+                                    "head_pending=%s",
+                                    key, len(fifo) if fifo else 0,
+                                    (sorted(fifo[0]["pending"])
+                                     if fifo else None),
+                                )
+                            self._emit_fifos.pop(key, None)
+                        for uk in [
+                            k for k in self._uuid_to_emit_entry
+                            if k[0] == req_id
+                        ]:
+                            self._uuid_to_emit_entry.pop(uk, None)
                 did_work = did_work or self._process_read_tensors()
             except Exception:
                 logger.exception("PreprocessWorkerThread error")
