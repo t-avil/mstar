@@ -1,0 +1,20 @@
+`trust_remote_code` is not supported anymore.
+Please check that the Hugging Face dataset 'openslr/librispeech_asr' isn't based on a loading script and remove `trust_remote_code`.
+If the dataset is based on a loading script, please ask the dataset author to remove it and convert it to a standard format like Parquet.
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'interleaved', 'mrope_section'}
+
+--- Benchmark Results (wall time: 5.54s) ---
+Closed-Loop Benchmark Results (96 requests, max_concurrency=8)
+──────────────────────────────────────────────────
+Request type breakdown: audio_to_text=96
+Requests : 96/96 succeeded
+TTFT (text)  : mean=0.213s  p50=0.213s  p95=0.317s  p99=0.370s
+E2E          : mean=0.442s  p50=0.423s  p95=0.618s  p99=0.737s
+ITL  (text)  : mean=0.011s  p50=0.009s  p95=0.040s  p99=0.055s
+Text tokens: 2033 total (21.2 avg/req)
+Output bytes (text): 9473 total (2033 chunks)
+Throughput: 17.34 req/s (successful only)
+Throughput: 367.19 text tok/s
+Total wall time: 5.54s
+
+Saved 96 outputs to /m-coriander/coriander/tim/rm_out/cert_eiv2/s2t_B8_r1/

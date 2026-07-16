@@ -1,0 +1,25 @@
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/m-coriander/coriander/tim/bench-v2/benchmark/runner.py", line 717, in <module>
+    asyncio.run(main())
+  File "/home/tim/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/home/tim/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/m-coriander/coriander/tim/bench-v2/benchmark/runner.py", line 713, in main
+    await benchmark.run()
+  File "/m-coriander/coriander/tim/bench-v2/benchmark/runner.py", line 468, in run
+    dataset = self._get_dataset()
+              ^^^^^^^^^^^^^^^^^^^
+  File "/m-coriander/coriander/tim/bench-v2/benchmark/runner.py", line 190, in _get_dataset
+    return SeedTTSDataset(
+           ^^^^^^^^^^^^^^^
+  File "/m-coriander/coriander/tim/bench-v2/benchmark/dataset.py", line 1023, in __init__
+    raise FileNotFoundError(
+FileNotFoundError: Seed-TTS meta not found: /home/tim/seedtts-cache/en/meta.lst. Expected layout: <root>/en/meta.lst from github.com/BytedanceSpeech/seed-tts-eval. If you have a local copy, point --seed-tts-dir at the directory that contains the en/ subfolder.
