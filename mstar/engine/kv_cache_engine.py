@@ -653,6 +653,14 @@ class KVCacheEngine(BaseEngine):
             advance_event=batch.metadata.get("advance_event"),
             launch_started_event=batch.metadata.get("launch_started_event"),
             exec_timings=batch.exec_timings if self.enable_profile else None,
+            # MSTAR_DECODE_SYNCFREE: the runner publishes the device
+            # token-feed location into the batch metadata before signaling
+            # advance_event (no-op when the flag is off). NOTE: on the
+            # execute_with_max_batch_size chunked path every chunk writes the
+            # same metadata dict (last writer wins) — the worker's gate
+            # requires the published rid set to cover the WHOLE step, so
+            # chunked steps always fall back to the legacy path.
+            feed_metadata=batch.metadata,
         )
 
         return NodeOutput(per_request_output_tensors=batched_output)

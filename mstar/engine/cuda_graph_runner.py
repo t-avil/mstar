@@ -195,6 +195,25 @@ class CudaGraphRunner:
     # the pinned-copy and argmax kernel savings); batches below it keep full
     # run-ahead. 0 disables (never rendezvous). Tune per workload.
     SAMPLE_RENDEZVOUS_BS = int(os.environ.get("MSTAR_SAMPLE_RENDEZVOUS_BS", "16"))
+    # Q2 (strategy_v11/round4 §Q2, MSTAR_DECODE_SYNCFREE): sync-free decode
+    # tail. When on, decode replays publish a DEVICE-resident next-token feed
+    # location (a persistent [max_bs] int64 buffer, written right after
+    # sampling with one device→device copy) into the batch metadata BEFORE
+    # ``advance_event`` fires. The worker's main thread can then build step
+    # N+1's loop-back ``text_inputs`` as views into this buffer and submit
+    # N+1 gated on ``advance_event`` alone — no ``future(N).result()`` wait,
+    # no D2H→host-int→H2D round-trip on the token-feed critical path. Value
+    # correctness is pure default-stream ordering: the feed-buffer write is
+    # enqueued by step N's ``_sample_and_remap`` (GPU executor thread) and
+    # every consumer read (step N+1's ``embed_tokens`` in prepare_inputs /
+    # preprocess) is enqueued later on the same thread and stream. A single
+    # buffer suffices — write(N) → read(N+1) → write(N+1) serialize on the
+    # default stream; nothing reads the buffer from a side stream (emit /
+    # check_stop D2H read the per-step ``sampled`` views, which stay fresh
+    # allocations exactly as with the flag off). NO capture changes: the
+    # captured graphs are byte-identical in both flag states, and with the
+    # flag off (default) no code below runs.
+    DECODE_SYNCFREE = os.environ.get("MSTAR_DECODE_SYNCFREE", "0") == "1"
 
     def __init__(
         self,
@@ -270,6 +289,17 @@ class CudaGraphRunner:
         # detour (see ``invalidate_fullstep_feed``) forces a re-seed from the
         # host-threaded tokens. None = buffer not trustworthy.
         self._fullstep_feed_rids: tuple[str, ...] | None = None
+        # MSTAR_DECODE_SYNCFREE: persistent device buffer the sampled tokens
+        # are mirrored into each decode step (see DECODE_SYNCFREE above).
+        # Lazily allocated [max_bs] int64 — both sampler paths
+        # (``sample_greedy`` argmax and host ``Sampler.sample``) return int64
+        # per their documented contracts, so one dtype covers both.
+        # COMPOSED with MSTAR_FULLSTEP_DECODE: on steps where the in-graph
+        # fullstep sample fired, the published feed points at the in-graph
+        # ``__fullstep_tokens__`` output instead and this buffer is not
+        # written (see the syncfree publish block in _run_basic_batched);
+        # it still backs every host-sampled / non-greedy syncfree step.
+        self._syncfree_token_buf: "torch.Tensor | None" = None
 
         self.max_bs = max(
             [max(config.capture_batch_sizes or self.CAPTURE_BATCH_SIZES)
@@ -1284,8 +1314,14 @@ class CudaGraphRunner:
         advance_event: "object | None" = None,
         launch_started_event: "object | None" = None,
         exec_timings: ExecTimings | None = None,
+        feed_metadata: dict | None = None,
     ) -> dict:
         """Look up the matching captured graph and dispatch on config type.
+
+        ``feed_metadata`` (MSTAR_DECODE_SYNCFREE): the NodeBatch metadata
+        dict; decode replays publish the device token-feed location into it
+        before signaling ``advance_event`` (see DECODE_SYNCFREE). Ignored
+        (and never written) when the flag is off or for prefill configs.
 
         ``slot`` selects one of NUM_SLOTS captured graphs for this key.
         When ``None``, the runner advances the per-key counter itself —
@@ -1339,6 +1375,7 @@ class CudaGraphRunner:
                 advance_event=advance_event,
                 launch_started_event=launch_started_event,
                 exec_timings=exec_timings,
+                feed_metadata=feed_metadata,
             )
         if cfg_type == CudaGraphConfigType.FLASH_INFER_PACKED:
             return self._run_flashinfer_packed(
@@ -1362,6 +1399,7 @@ class CudaGraphRunner:
         advance_event: "object | None" = None,
         launch_started_event: "object | None" = None,
         exec_timings: ExecTimings | None = None,
+        feed_metadata: dict | None = None,
     ) -> dict:
         """Decode-style replay. Pads real inputs to padded_bs by cloning the capture
         template, then routes through submodule.preprocess (which re-plans attention
@@ -1542,6 +1580,64 @@ class CudaGraphRunner:
             if self.enable_nvtx:
                 range_pop(synchronize=False)
 
+            # MSTAR_DECODE_SYNCFREE: publish the device token-feed location
+            # for this step. MUST happen strictly BEFORE advance_event.set()
+            # — the worker's main thread reads the metadata right after the
+            # event wait (Event.set/wait is the happens-before edge). Placed
+            # AFTER replay() so a pre-replay failure (KV alloc during
+            # preprocess/plan raises before this line) can never leave a
+            # published feed for a step that produced no tokens: the worker
+            # falls back to the legacy future-gated path whenever the key is
+            # absent. Only the batched-logits sampling path mirrors tokens
+            # into the buffer, so gate on the sentinel being a captured
+            # output. thinker_decode only — Talker/other AR walks never feed
+            # a worker-side speculative loop-back this way, so skipping them
+            # keeps the flag zero-overhead there.
+            #
+            # COMPOSED (MSTAR_FULLSTEP_DECODE + MSTAR_DECODE_SYNCFREE): when
+            # the fullstep in-graph argmax fired for this batch
+            # (``fullstep_tokens is not None``), the replay ALREADY wrote the
+            # sampled ids into the interned ``next_token_ids`` feed buffer
+            # and exposed them via the ``__fullstep_tokens__`` static output
+            # — a runner-side mirror into ``_syncfree_token_buf`` would be a
+            # redundant second d2d copy of the same values. So publish the
+            # in-graph output directly and leave ``syncfree_feed_buf`` None
+            # (which also disables the mirror in _sample_and_remap: no
+            # double-copy). Value correctness at publish time is stream
+            # order: the in-graph write is enqueued by replay(), strictly
+            # before any worker-side read of the views. The next write to
+            # this slot's output tensor is a later replay on the same
+            # stream, enqueued after step N+1's consume — same single-buffer
+            # serialization argument as DECODE_SYNCFREE's own buffer.
+            # Syncfree's worker side (advance_event-gated submit, deferred
+            # D2H consume) is unchanged and applies to BOTH feed sources;
+            # non-greedy / host-sampled steps still take the mirror path
+            # below even when fullstep is enabled.
+            syncfree_feed_buf: "torch.Tensor | None" = None
+            if (
+                self.DECODE_SYNCFREE
+                and feed_metadata is not None
+                and key.graph_walk == "thinker_decode"
+                and static_output.get("__batched_logits__") is not None
+                and torch.cuda.is_available()
+            ):
+                if fullstep_tokens is not None:
+                    feed_metadata["syncfree_feed"] = {
+                        "buf": fullstep_tokens[:real_bs],
+                        "rids": tuple(request_ids),
+                    }
+                else:
+                    buf = self._syncfree_token_buf
+                    if buf is None:
+                        buf = self._syncfree_token_buf = torch.zeros(
+                            self.max_bs, dtype=torch.int64, device=self.device,
+                        )
+                    syncfree_feed_buf = buf[:real_bs]
+                    feed_metadata["syncfree_feed"] = {
+                        "buf": syncfree_feed_buf,
+                        "rids": tuple(request_ids),
+                    }
+
             # Signal that alloc_manager state for batch_N is now
             # post-advance. plan_executor's pre_plan(batch_(N+1)) waits on this
             # event instead of prev_future, so plan() starts ~tens of µs into
@@ -1575,6 +1671,11 @@ class CudaGraphRunner:
                 # snapshots it (all-greedy batches only; non-greedy host
                 # path gets None and re-seeds the feed next step).
                 fullstep_tokens=fullstep_tokens,
+                # MSTAR_DECODE_SYNCFREE mirror target. None whenever fullstep
+                # sampled in-graph (the publish block above pointed the feed
+                # at __fullstep_tokens__ instead — no double-copy) or when
+                # the flag/gates are off.
+                syncfree_feed_buf=syncfree_feed_buf,
             )
             if self.enable_nvtx:
                 range_pop(synchronize=False)
@@ -1994,8 +2095,25 @@ class CudaGraphRunner:
         inputs: list[ARNodeInputs] | None = None,
         graph_sampler: "CudaGraphableSampler | None" = None,
         fullstep_tokens: torch.Tensor | None = None,
+        syncfree_feed_buf: "torch.Tensor | None" = None,
     ) -> dict:
         """Sample logits + copy non-logit per-rid outputs, remapping dummy → real rids.
+
+        ``syncfree_feed_buf`` (MSTAR_DECODE_SYNCFREE): when set, the sampled
+        tokens are ALSO mirrored into this persistent device buffer with one
+        device→device copy (default stream) — the published next-token feed
+        the worker aliases into step N+1's inputs. The per-rid output views
+        stay exactly what they were flag-off (fresh ``sampled`` allocations),
+        so routing / emit / check_stop D2H are untouched.
+
+        ``fullstep_tokens`` (MSTAR_FULLSTEP_DECODE) and ``syncfree_feed_buf``
+        are mutually exclusive by construction: when the in-graph fullstep
+        sample fired, the caller published the feed straight from
+        ``__fullstep_tokens__`` and passes ``syncfree_feed_buf=None`` — the
+        in-graph ``next_token_ids.copy_`` already fed the next step, so no
+        mirror copy runs here (composed mode, no double-copy). On non-greedy
+        or non-fullstep steps ``fullstep_tokens`` is None and the syncfree
+        mirror below is the (only) feed writer.
 
         Fast path: a __batched_logits__ sentinel holding [padded_bs, V] lets us
         sample once via Sampler.sample without per-rid concat. Fallback path
@@ -2081,6 +2199,15 @@ class CudaGraphRunner:
                 used_greedy = False
             else:
                 used_greedy = True
+            if syncfree_feed_buf is not None:
+                # MSTAR_DECODE_SYNCFREE: mirror the sampled tokens into the
+                # published feed buffer. Enqueued on the default stream from
+                # the GPU executor thread, so it is ordered BEFORE step N+1's
+                # embed_tokens read of the same buffer (also default stream,
+                # same thread) — the worker-side views are aliases whose
+                # values become correct by stream order, never by host sync.
+                # int64 both paths (sample_greedy / Sampler.sample contracts).
+                syncfree_feed_buf.copy_(sampled.reshape(-1))
             self._maybe_sample_rendezvous(sampled, used_greedy, len(request_ids))
             sampled_views = sampled.split(1)
             outputs = {

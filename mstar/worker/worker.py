@@ -303,6 +303,46 @@ class Worker:
         # the next step records it again, so only one copy is ever in flight.
         self._checkstop_event: "torch.cuda.Event | None" = None
 
+        # MSTAR_DECODE_SYNCFREE — Q2 (strategy_v11/round4): sync-free decode
+        # tail, the vLLM-parity step mechanics (GPU-resident token feed +
+        # copy-stream D2H + submit-on-event). Three effects, all gated on the
+        # thinker_decode loop-back speculation path and all falling back to
+        # the byte-identical legacy path when any gate fails:
+        #   1. The speculative decode step N+1 is submitted as soon as
+        #      advance_event(N) fires AND the runner has published the device
+        #      token-feed location (cuda_graph_runner.DECODE_SYNCFREE) —
+        #      instead of waiting on future(N).result() and threading the
+        #      sampled-token tensors host-side. The loop-back ``text_inputs``
+        #      become views into the published device buffer; values are
+        #      correct by default-stream ordering, the host never reads them.
+        #   2. postprocess skips the completion-event hard sync and defers
+        #      the check_stop/emit D2H consume (side stream + event,
+        #      poll-then-block at the consumption point) for token-only
+        #      decode steps — see _postprocess_batch.
+        #   3. The EOS decision keeps today's one-step-late-with-trim
+        #      semantics (the spec step N+1 is already in flight when N's
+        #      stops are computed; _pending_loop_stops pops the <=1 overshoot
+        #      step's outputs before routing/emit) — byte-identical output.
+        # Read ONCE (static — it changes worker-loop control flow).
+        self._decode_syncfree = (
+            os.environ.get("MSTAR_DECODE_SYNCFREE", "0") == "1"
+        )
+        if self._decode_syncfree:
+            logger.info(
+                "Worker %s: MSTAR_DECODE_SYNCFREE=1 — speculative decode "
+                "steps submit on advance_event with a device-resident token "
+                "feed; postprocess defers the sampled-token D2H consume.",
+                worker_id,
+            )
+            if not self._inline_emit:
+                logger.warning(
+                    "Worker %s: MSTAR_DECODE_SYNCFREE=1 without "
+                    "MSTAR_INLINE_EMIT/MSTAR_BATCH_EMIT — the emit path "
+                    "still does per-tensor .cpu() reads, so the deferred-D2H "
+                    "part of the win is mostly forfeited. Early submit still "
+                    "applies.", worker_id,
+                )
+
         # MSTAR_ENC_OVERLAP=<N>: batch-gated encoder side-stream overlap.
         # When N>0 and this worker's in-flight request count is <= N, an
         # audio_encoder / vision_encoder walk is tagged on the main thread
@@ -2499,10 +2539,29 @@ class Worker:
         # too. Tag absent (flag off / gate failed): byte-identical path.
         enc_overlap = bool(batch_N.node_batch.metadata.get("enc_overlap"))
 
+        # MSTAR_DECODE_SYNCFREE effect 2: for token-only thinker_decode steps
+        # the completion-event HARD sync below is skipped and the sampled-
+        # token D2H (which feeds BOTH check_stop and the inline emit ints) is
+        # deferred: enqueued on the side copy stream gated on the completion
+        # event, consumed at _await_checkstop via poll-then-block — vLLM's
+        # get_output() semantics (their .tolist() also blocks on the copy
+        # event when consuming step N's output while N+1 executes). Every
+        # host read of this step's tokens goes through that copy; everything
+        # else routing touches is reference/metadata-only (store uses
+        # skip_cuda_sync, emit uses the prematerialized ints), so no reader
+        # needs the full-stream sync. The EOS decision keeps its existing
+        # one-step-late-with-trim shape: spec step N+1 is already in flight
+        # when this step's stops are computed, and the <=1 overshoot step's
+        # outputs are popped above (speculative_new_iter + _pending_loop_
+        # stops) before routing/emit — byte-identical output, greedy and
+        # temp>0 alike. Steps with non-token outputs (audio thinker_states →
+        # Talker) keep the legacy sync: their cross-walk consumers rely on it.
+        syncfree_defer = self._syncfree_token_only_decode(batch_N, output)
+
         # Wait for batch N's completion event before proceeding
         # TODO: may need to refine this based on how it affects performance?
         if torch.cuda.is_available() and batch_N.batch.node_objects \
-                and not enc_overlap:
+                and not enc_overlap and not syncfree_defer:
             if output.completion_event is not None:
                 if self.enable_nvtx:
                     range_push("worker.postprocess.completion_event_sync", synchronize=False)
@@ -2534,7 +2593,7 @@ class Worker:
                     self._fast_checkstop
                     and batch_N.graph_walk == "thinker_decode"
                 ),
-                defer=self._sidecar_checkstop,
+                defer=self._sidecar_checkstop or syncfree_defer,
             )
         )
 
@@ -2548,7 +2607,7 @@ class Worker:
         # poll the deferred copy (or fall back to a counted blocking wait)
         # before computing stops. No deferred/late decision — that is the V1
         # identity failure the design forbids (§6.2).
-        if self._sidecar_checkstop:
+        if self._sidecar_checkstop or syncfree_defer:
             self._await_checkstop(cpu_output)
 
         new_stops = self._compute_new_stops(batch_N, engine, cpu_output)
@@ -2902,6 +2961,33 @@ class Worker:
             return new_stops
         return engine.check_stop_for_batch(batch_N.node_batch, cpu_output)
 
+    def _syncfree_token_only_decode(
+        self, batch_N: PendingBatch, output: NodeOutput,
+    ) -> bool:
+        """MSTAR_DECODE_SYNCFREE gate for the postprocess deferral: True iff
+        the flag is on, this is a thinker_decode step, and EVERY rid's output
+        dict carries only the sampled token (``new_token`` plus its
+        ``text_inputs`` alias from ``ThinkerSubmodule.postprocess``). Audio
+        requests add ``thinker_states``/``thinker_mask`` for the Talker and
+        keep the legacy completion sync — their cross-walk/SHM consumers
+        rely on it. O(B) dict-key scans, no GPU reads."""
+        if not (
+            self._decode_syncfree
+            and batch_N.graph_walk == "thinker_decode"
+            and torch.cuda.is_available()
+            and output.completion_event is not None
+        ):
+            return False
+        per_rid = output.per_request_output_tensors
+        for rid in batch_N.node_batch.request_ids:
+            d = per_rid.get(rid)
+            if not isinstance(d, dict):
+                return False
+            for name in d:
+                if name not in ("new_token", "text_inputs"):
+                    return False
+        return True
+
     def _checkstop_barrier(
         self, side: "torch.cuda.Stream", defer: bool,
     ) -> "torch.cuda.Event | None":
@@ -3237,6 +3323,93 @@ class Worker:
             )
             phase_buf.clear()
 
+        def _submit_speculation(speculation: Speculation) -> PendingBatch | None:
+            """Finalize + submit an already-threaded speculative batch on the
+            GPU executor. Extracted verbatim from the post-``future.result()``
+            block so the legacy path and the MSTAR_DECODE_SYNCFREE early
+            path (which submits BEFORE awaiting future(N)) share one
+            submission seam — flag-off behavior is unchanged.
+
+            Returns the spec ``PendingBatch``, or None when every continuing
+            rid was dropped post-threading (legacy path only; the syncfree
+            gate never drops)."""
+            from mstar.utils.profiler import range_pop, range_push
+
+            spec_batch = speculation.scheduled_batch
+            spec_node_batch = speculation.node_batch
+            # set node._speculatively_scheduled to true, so that it doesn't
+            # accidentally get put on the ready queue while already executing
+            for node in spec_batch.node_objects.values():
+                # this does not include the dropped rids
+                node._speculatively_scheduled = True
+
+            if spec_batch.node_objects:
+                if self.enable_nvtx:
+                    range_push("worker.submit_spec", synchronize=False)
+                _t0 = _time.perf_counter() if phase_period else 0.0
+                # If pre-plan was dispatched but the spec_batch
+                # composition changed, fall back to inline planning
+                if speculation.plan_future is not None and speculation.dropped:
+                    speculation.plan_future.result()
+                    self._reset_skip_plan_flags(speculation.node_batch)
+                    speculation.plan_future = None
+
+                # Attach a fresh advance_event to this batch so
+                # the NEXT iter's plan_executor can gate on
+                # advance_seq_lens(THIS batch).
+                spec_advance_event = threading.Event()
+                spec_node_batch.metadata["advance_event"] = spec_advance_event
+
+                # Block the main thread until the GPU executor
+                # thread is about to launch CUDA kernels (set
+                # deep in the engine: before graph.replay() in
+                # CudaGraphRunner, or before forward/forward_batched
+                # in the eager AR path).
+                spec_launch_started_event = threading.Event()
+                spec_node_batch.metadata["launch_started_event"] = spec_launch_started_event
+                # MSTAR_ENC_OVERLAP gate (no-op when flag off):
+                # yield-away speculation can pick an encoder walk
+                # while an AR loop runs — exactly the low-batch
+                # overlap case.
+                self._maybe_tag_enc_overlap(
+                    spec_batch, spec_node_batch
+                )
+                spec_future = gpu_executor.submit(
+                    self._execute_on_gpu_thread,
+                    spec_batch, spec_node_batch,
+                    speculation.plan_future,
+                    spec_advance_event,
+                )
+                self.wakeup_event.register_future(spec_future)
+                if self.enable_nvtx:
+                    range_pop(synchronize=False)
+                    range_push("worker.gpu_submit_queued", synchronize=False)
+                spec_launch_started_event.wait(timeout=0.005)
+                if phase_period:
+                    _phase_record("submit_spec", _time.perf_counter() - _t0)
+                if self.enable_nvtx:
+                    range_pop(synchronize=False)
+                return PendingBatch(
+                    batch=spec_batch,
+                    node_batch=spec_node_batch,
+                    node_name=spec_batch.node_name,
+                    partition=speculation.partition,
+                    graph_walk=spec_batch.graph_walk,
+                    future=spec_future,
+                    speculative_new_iter=speculation.is_new_iter,
+                    loop_name=speculation.loop_name,
+                )
+            elif speculation.plan_future is not None:
+                # All continuing rids were dropped post-thread,
+                # so no spec batch was submitted. Drain the
+                # orphaned pre-plan future and reset the engine's
+                # skip flags so the next plan_attention call
+                # recomputes from scratch instead of trusting
+                # stale wrapper buffers from this aborted spec.
+                speculation.plan_future.result()
+                self._reset_skip_plan_flags(speculation.node_batch)
+            return None
+
         _housekeep_ctr = 0
         while True:
             from mstar.utils.profiler import range_pop, range_push
@@ -3391,7 +3564,90 @@ class Worker:
                 # asap, then post-process N (fast then slow) overlapping
                 # with GPU(N+1).
                 spec_pending = None
+                syncfree_submitted = False
                 if pending is not None:
+                    # MSTAR_DECODE_SYNCFREE early submit: gate spec-N+1's
+                    # submission on advance_event(N) + the runner-published
+                    # device token feed instead of future(N).result(). The
+                    # loop-back ``text_inputs`` become device VIEWS into the
+                    # published buffer — the host never reads the token, and
+                    # step N+1's embed_tokens read is ordered behind step N's
+                    # feed write by default-stream order. This removes the
+                    # future-wakeup + host token-threading from the
+                    # GPU-thread's inter-step critical path (N+1 is already
+                    # queued on the executor when N's call returns).
+                    # Every gate failure falls through to the legacy path
+                    # below, byte-identical. Gates:
+                    #   * same-node thinker_decode loop-back speculation
+                    #     whose consumed edges are exactly the token feed
+                    #     (audio Thinker→Talker edges have a different
+                    #     next_node and never appear in consumed_edges);
+                    #   * runner published a feed covering the WHOLE step
+                    #     (absent on: flag-off runner, eager/sequential/
+                    #     chunked execution, pre-replay alloc failure) and
+                    #     every continuing rid is in it.
+                    if (
+                        self._decode_syncfree
+                        and speculation is not None
+                        and not speculation.is_yield_away
+                        and speculation.is_same_node
+                        and pending.graph_walk == "thinker_decode"
+                        and speculation.scheduled_batch.node_objects
+                        and speculation.consumed_edges
+                        and all(
+                            name == "text_inputs"
+                            for name, _ in speculation.consumed_edges
+                        )
+                    ):
+                        adv = pending.node_batch.metadata.get("advance_event")
+                        if adv is not None:
+                            _t0 = _time.perf_counter() if phase_period else 0.0
+                            adv_ok = adv.wait(timeout=10.0)
+                            if phase_period:
+                                _phase_record(
+                                    "syncfree_wait_adv",
+                                    _time.perf_counter() - _t0,
+                                )
+                            feed = (
+                                pending.node_batch.metadata.get("syncfree_feed")
+                                if adv_ok else None
+                            )
+                            if feed is not None:
+                                feed_rids: tuple = feed["rids"]
+                                feed_idx = {
+                                    r: i for i, r in enumerate(feed_rids)
+                                }
+                                if (
+                                    len(feed_rids)
+                                    == len(pending.node_batch.request_ids)
+                                    and all(
+                                        r in feed_idx
+                                        for r in speculation.continuing_rids
+                                    )
+                                ):
+                                    buf = feed["buf"]
+                                    per_inputs = (
+                                        speculation.node_batch
+                                        .per_request_input_tensors
+                                    )
+                                    for rid in speculation.continuing_rids:
+                                        i = feed_idx[rid]
+                                        per_inputs[rid]["text_inputs"] = [
+                                            buf[i:i + 1]
+                                        ]
+                                    # Feed covers every continuing rid by
+                                    # construction — nothing can drop.
+                                    speculation.dropped = set()
+                                    spec_pending = _submit_speculation(
+                                        speculation
+                                    )
+                                    syncfree_submitted = True
+                                    self._ws_inc("syncfree_submit")
+                                else:
+                                    self._ws_inc("syncfree_feed_mismatch")
+                            else:
+                                self._ws_inc("syncfree_no_feed")
+
                     if self.enable_nvtx:
                         range_push("worker.await_gpu", synchronize=False)
                     _t0 = _time.perf_counter() if phase_period else 0.0
@@ -3402,11 +3658,44 @@ class Worker:
                         range_pop(synchronize=False)
 
                     # set node._speculatively_scheduled to false, since
-                    # the node has just completed
-                    for node in pending.batch.node_objects.values():
-                        node._speculatively_scheduled = False
+                    # the node has just completed. On the same-node loop-back
+                    # path the spec batch shares GraphNode objects with
+                    # pending; legacy order is False (pending, here) then
+                    # True (spec, at submit) so shared nodes end True. The
+                    # syncfree path already submitted (set True), so skip the
+                    # reset for nodes owned by the in-flight spec to land on
+                    # the identical final state.
+                    if syncfree_submitted:
+                        _spec_node_ids = {
+                            id(n)
+                            for n in speculation.scheduled_batch
+                            .node_objects.values()
+                        }
+                        for node in pending.batch.node_objects.values():
+                            if id(node) not in _spec_node_ids:
+                                node._speculatively_scheduled = False
+                    else:
+                        for node in pending.batch.node_objects.values():
+                            node._speculatively_scheduled = False
 
                     if output.allocation_failed:
+                        if syncfree_submitted:
+                            # Unreachable by construction: the runner
+                            # publishes the feed strictly AFTER preprocess/
+                            # plan (where KV alloc failures raise) and the
+                            # whole-step rid gate rejects chunked execution,
+                            # so a published feed implies the step replayed.
+                            # If we ever get here the in-flight spec batch
+                            # was built on rolled-back alloc state — fail
+                            # loud instead of silently corrupting streams.
+                            raise RuntimeError(
+                                "MSTAR_DECODE_SYNCFREE: allocation failure "
+                                "surfaced on a step whose speculative "
+                                "successor was already submitted "
+                                f"(node={pending.node_name}, "
+                                f"walk={pending.graph_walk}); state may be "
+                                "inconsistent — aborting this iteration."
+                            )
                         # KV-cache OOM on pending. ``_handle_allocation_failure``
                         # offloads or holds the failed rids and pushes their
                         # GraphNodes back to the scheduler queue.
@@ -3439,83 +3728,11 @@ class Worker:
                                         self._return_speculative_streaming_edge(rid, edge)
                                 speculation = None
 
-                    if speculation is not None:
-                        spec_batch = speculation.scheduled_batch
-                        spec_node_batch = speculation.node_batch
+                    if speculation is not None and not syncfree_submitted:
                         # Promote per-rid speculative_signals → real inputs
                         if not speculation.is_yield_away:
                             self._thread_outputs_to_speculative(speculation, output)
-                        # set node._speculatively_scheduled to true, so that it doesn't
-                        # accidentally get put on the ready queue while already executing
-                        for node in spec_batch.node_objects.values():
-                            # this does not include the dropped rids
-                            node._speculatively_scheduled = True
-
-                        if spec_batch.node_objects:
-                            if self.enable_nvtx:
-                                range_push("worker.submit_spec", synchronize=False)
-                            _t0 = _time.perf_counter() if phase_period else 0.0
-                            # If pre-plan was dispatched but the spec_batch
-                            # composition changed, fall back to inline planning
-                            if speculation.plan_future is not None and speculation.dropped:
-                                speculation.plan_future.result()
-                                self._reset_skip_plan_flags(speculation.node_batch)
-                                speculation.plan_future = None
-
-                            # Attach a fresh advance_event to this batch so
-                            # the NEXT iter's plan_executor can gate on
-                            # advance_seq_lens(THIS batch).
-                            spec_advance_event = threading.Event()
-                            spec_node_batch.metadata["advance_event"] = spec_advance_event
-
-                            # Block the main thread until the GPU executor
-                            # thread is about to launch CUDA kernels (set
-                            # deep in the engine: before graph.replay() in
-                            # CudaGraphRunner, or before forward/forward_batched
-                            # in the eager AR path).
-                            spec_launch_started_event = threading.Event()
-                            spec_node_batch.metadata["launch_started_event"] = spec_launch_started_event
-                            # MSTAR_ENC_OVERLAP gate (no-op when flag off):
-                            # yield-away speculation can pick an encoder walk
-                            # while an AR loop runs — exactly the low-batch
-                            # overlap case.
-                            self._maybe_tag_enc_overlap(
-                                spec_batch, spec_node_batch
-                            )
-                            spec_future = gpu_executor.submit(
-                                self._execute_on_gpu_thread,
-                                spec_batch, spec_node_batch,
-                                speculation.plan_future,
-                                spec_advance_event,
-                            )
-                            self.wakeup_event.register_future(spec_future)
-                            if self.enable_nvtx:
-                                range_pop(synchronize=False)
-                                range_push("worker.gpu_submit_queued", synchronize=False)
-                            spec_launch_started_event.wait(timeout=0.005)
-                            if phase_period:
-                                _phase_record("submit_spec", _time.perf_counter() - _t0)
-                            if self.enable_nvtx:
-                                range_pop(synchronize=False)
-                            spec_pending = PendingBatch(
-                                batch=spec_batch,
-                                node_batch=spec_node_batch,
-                                node_name=spec_batch.node_name,
-                                partition=speculation.partition,
-                                graph_walk=spec_batch.graph_walk,
-                                future=spec_future,
-                                speculative_new_iter=speculation.is_new_iter,
-                                loop_name=speculation.loop_name,
-                            )
-                        elif speculation.plan_future is not None:
-                            # All continuing rids were dropped post-thread,
-                            # so no spec batch was submitted. Drain the
-                            # orphaned pre-plan future and reset the engine's
-                            # skip flags so the next plan_attention call
-                            # recomputes from scratch instead of trusting
-                            # stale wrapper buffers from this aborted spec.
-                            speculation.plan_future.result()
-                            self._reset_skip_plan_flags(speculation.node_batch)
+                        spec_pending = _submit_speculation(speculation)
 
                     # Post-process N (routing stage) — runs concurrently with
                     # GPU(N+1) if we submitted one above. Skipped on
