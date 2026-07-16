@@ -836,3 +836,17 @@ rps -13/-18%) — suspect: 4-slot pinned ring event-syncs on slot reuse at B32 c
 M9 dispatched (ring depth/query-first fix + gate memoization). Parity PERFECT 24/24.
 BONUS datapoint: ship-flags (OFF side) i2t B32 = 9.39 rps / 1663 tok (vLLM 8.32/1769)
 — rps lead robust across runs (8.76, 9.39); tok gap now only -6%.
+
+## SAMPLER STACK VALIDATED (2026-07-16 11:50, M9 rendezvous fix, quiet)
+PINNED_SAMPLE_PARAMS + INGRAPH_GREEDY + SAMPLE_RENDEZVOUS_BS=16 (bca9d372):
+s2t B1 ITL 7.24->6.43 (-11%) retained; B32 no-regress (s2t 17.8->18.2 noise, rps
+38.0->39.7; i2t 15.41->15.16 = NOW BEATS vLLM 15.4). i2t B32 tok 1709 vs 1769 (-3.4%).
+Parity 23/24 (recurring intermittent cross-boot single-request tie; within-run pairs
+have shown 24/24 — documented, monitored). M9 mechanism note (paper-worthy): removing
+the sampler sync unleashed GIL contention between GPU-thread prep and postprocess
+floor at B32; the legacy pageable sync was accidentally serializing them — fix is a
+batch-gated rendezvous, not deeper buffering. FLAGS JOIN SHIP SET (INGRAPH_GREEDY=1
+explicit; pinned+rendezvous default-on). Data: sampler_final_20260716/.
+SHIP FLAG SET (text-out, PD yaml): MOE_FP8, ORDERED_EMIT, FAST_POSTPROC, BATCH_EMIT,
+SLIM_EMIT, PREPROC_WORKERS=8, INGRAPH_GREEDY=1, BATCH_VISION_PREFILL, VIS/PREFILL
+grids 1-32, PREFILL_BUCKETS ..16384. Parked: FAST_CHECKSTOP, sidecar trio, ENC_OVERLAP.
