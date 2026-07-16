@@ -3028,6 +3028,12 @@ class Worker:
             if uniform_key == "new_token":
                 out._checkstop_flat = flat_cpu
                 out._checkstop_rids = rids
+                # Mechanism-alive counter (MSTAR_WALK_STATS=1): whether the
+                # uniform probe actually matches production decode outputs
+                # (ThinkerSubmodule.postprocess also aliases text_inputs into
+                # the per-rid dict, which would fail the single-key probe).
+                # No counter, no verdict on the flag's A/B.
+                self._ws_inc("fast_checkstop_steps")
             return out
 
         cpu_per_rid: dict = {}
