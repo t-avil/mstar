@@ -274,9 +274,57 @@ class PreprocessWorkerThread:
         # their entry.
         self._uuid_to_emit_entry: dict[tuple[str, str], list] = {}
 
+        # MSTAR_PREPROC_WORKERS=<N>: parallelize the CPU-heavy half of request
+        # preprocessing (image decode + bicubic resize, audio mel, HF chat
+        # template + tokenization — all GIL-releasing C/Rust/torch ops) across
+        # N pool threads. At B32 the single consumer loop serializes ~35% of
+        # TTFT behind other requests' preprocessing (per-request profiles:
+        # recv->preprocess-done p50 1.7s / max 8.1s at i2t B32).
+        #
+        # Only the pure-CPU stage (_preprocess_cpu: model.load_* +
+        # model.process_prompt) runs in the pool. The transport/handoff stage
+        # (_finalize_input: tensor_manager SHM store + persist refs +
+        # NEW_REQUEST send) stays on THIS thread — tensor_manager and
+        # communicator are single-thread-owned (see PreprocessWorker.__init__)
+        # — and runs in ARRIVAL order (FIFO head-drain of completed futures),
+        # so the conductor sees exactly today's NEW_REQUEST ordering.
+        #
+        # Default 1 = today's inline single-thread path, byte-identical (no
+        # pool is created and _process_input runs synchronously as before).
+        try:
+            n_preproc = int(os.environ.get("MSTAR_PREPROC_WORKERS", "1"))
+        except ValueError:
+            n_preproc = 1
+        self._preproc_workers = max(1, n_preproc)
+        self._preproc_pool = None
+        # Arrival-ordered (input, future) pairs; finalized head-first.
+        self._preproc_fifo: collections.deque = collections.deque()
+        if self._preproc_workers > 1:
+            from concurrent.futures import ThreadPoolExecutor
+            self._preproc_pool = ThreadPoolExecutor(
+                max_workers=self._preproc_workers,
+                thread_name_prefix="mstar-preproc",
+            )
+
     def _process_input(
         self, input: PreprocessInput
     ):
+        tensors, input_metadata = self._preprocess_cpu(input)
+        self._finalize_input(input, tensors, input_metadata)
+
+    def _preprocess_cpu(
+        self, input: PreprocessInput
+    ) -> tuple[NameToTensorList, dict]:
+        """CPU-heavy preprocessing stage — safe to run in a pool thread.
+
+        Touches only per-request locals plus read-only shared objects:
+        self.model (HF fast tokenizer is Rust Send+Sync; the processor's
+        image/feature/video sub-processors are stateless per call;
+        _gpu_image_preprocess is a free function over torch ops) and
+        self.device. Does NOT touch tensor_manager or communicator — those
+        are single-thread-owned and used only from _finalize_input on the
+        worker loop thread.
+        """
         tensors: NameToTensorList = {}
         input_metadata = {}
 
@@ -332,6 +380,17 @@ class PreprocessWorkerThread:
                 list(byte_data), dtype=torch.uint8, device=self.device
             )]
 
+        return tensors, input_metadata
+
+    def _finalize_input(
+        self,
+        input: PreprocessInput,
+        tensors: NameToTensorList,
+        input_metadata: dict,
+    ):
+        """Handoff stage — MUST run on the worker loop thread, in arrival
+        order: tensor_manager SHM store/persist and the conductor
+        NEW_REQUEST send are single-thread-owned."""
         initial_signals = self.tensor_manager.store_and_return_tensor_info(
             request_id=input.request_id,
             tensors=tensors # dict(modality_input: list[tensors])
@@ -693,9 +752,14 @@ class PreprocessWorkerThread:
             did_work = False
             try:
                 did_work = self._process_messages()
-                if not self.in_queue.empty():
-                    did_work = True
-                    self._process_input(self.in_queue.get())
+                if self._preproc_pool is None:
+                    # MSTAR_PREPROC_WORKERS<=1: today's inline path, one
+                    # request preprocessed per loop iteration on this thread.
+                    if not self.in_queue.empty():
+                        did_work = True
+                        self._process_input(self.in_queue.get())
+                else:
+                    did_work = self._pump_preproc_pool() or did_work
                 if not self.result_tensor_queue.empty():
                     did_work = True
                     self._read_result_tensor(self.result_tensor_queue.get())
@@ -745,4 +809,42 @@ class PreprocessWorkerThread:
 
             if not did_work:
                 time.sleep(0.001)
+
+        if self._preproc_pool is not None:
+            # Same shutdown semantics as the inline path: inputs still queued
+            # (or mid-flight) at stop are dropped, nothing new is sent.
+            self._preproc_pool.shutdown(wait=False, cancel_futures=True)
+
+    def _pump_preproc_pool(self) -> bool:
+        """MSTAR_PREPROC_WORKERS>1: feed the pool and drain completed heads.
+
+        Submits every queued PreprocessInput immediately (submission is
+        cheap; the pool bounds concurrency), then finalizes futures strictly
+        from the FIFO head so NEW_REQUEST messages reach the conductor in
+        arrival order exactly as the single-thread path does. A slow head
+        (e.g. a many-image request) briefly holds finished later requests'
+        finalize — bounded by one preprocess, versus today where it holds
+        their entire preprocessing.
+        """
+        did_work = False
+        while not self.in_queue.empty():
+            did_work = True
+            inp = self.in_queue.get()
+            fut = self._preproc_pool.submit(self._preprocess_cpu, inp)
+            self._preproc_fifo.append((inp, fut))
+        while self._preproc_fifo and self._preproc_fifo[0][1].done():
+            did_work = True
+            inp, fut = self._preproc_fifo.popleft()
+            exc = fut.exception()
+            if exc is not None:
+                # Mirror the inline path's failure mode (run()'s broad
+                # try/except): log and drop this request, keep serving.
+                logger.error(
+                    "Preprocess failed for request %s", inp.request_id,
+                    exc_info=exc,
+                )
+                continue
+            tensors, input_metadata = fut.result()
+            self._finalize_input(inp, tensors, input_metadata)
+        return did_work
 
