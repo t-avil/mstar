@@ -66,3 +66,13 @@ P1 [in progress] boot flagship, clean baseline i2t B1/B16/B32 matched-protocol +
 P2 A/B cheap levers on same/fresh server (fused-KV, moonshot decode, enc-overlap) at the
    honest-loss cells (B1/B8/B16 tok-s+ITL; B32 tok-s). Keep GPUs busy (warm-server cells).
 P3 stack winners → full sweep (warmup 10, n≥20 then 96) → 4-in-1 charts → parity → push best.
+
+## ===== FINAL DELIVERED STATE (2026-07-16 ~21:20Z) =====
+BEST i2t BUILD: wt-boot-cache @2b43f06e + configs/qwen3omni_2gpu_pd.yaml + image-preprocess pool.
+i2t WON: tok/s +6/+27/+36/+35/+11% (B1/4/8/16/32); req/s +33..62%; ITL win all; TTFT win B1-B16, ~tie B32.
+s2t: req/s+tok/s+ITL WON (ITL 4x), TTFT LOSES all (structural single-GPU audio prefill) = latency-primary deficit.
+PUSHED: bench/i2t-preproc-pd, bench/s2t-pd -> merged into `benchmarks`. Charts committed (4-in-1 per path).
+KEY INSIGHTS: (1) image-preprocess pool mandatory (fix20 COMMON omits it = the abyss);
+(2) B32 "TTFT abyss" was preproc-off + too-small-n; at n>=96 steady-state TTFT ~200ms;
+(3) throughput host-load-tail-sensitive -> median of >=3 repeats mandatory; (4) greedy deterministic 20/20.
+IN FLIGHT: enc-async probe (i2t B32 TTFT tie->win?; s2t TTFT lever tradeoff).
