@@ -828,3 +828,11 @@ host time. Round-3 lockstep diagnosis CONFIRMED. Fix in flight: M8 R1-lite
 non-blocking uploads for the temp>0 host path. Predicted -1.0-1.5ms ITL at B1
 (6.8-7.3 -> ~5.5-6.0 vs vLLM 4.8-5.0), closes most of the remaining i2t rps/tok and
 s2t B1-B4 deficits per the closed-loop arithmetic.
+
+## SAMPLER A/B (2026-07-16 11:00): B1 WIN / B32 REGRESSION — parity 24/24
+PINNED_SAMPLE_PARAMS + INGRAPH_GREEDY: s2t B1 ITL 7.29->6.46 (-11%) rps +10% (greedy
+7.36->6.47, rps 4.58->5.07 +11%); BUT B32 regresses (s2t ITL 17.2->22.7, i2t 16.0->21.0,
+rps -13/-18%) — suspect: 4-slot pinned ring event-syncs on slot reuse at B32 cadence.
+M9 dispatched (ring depth/query-first fix + gate memoization). Parity PERFECT 24/24.
+BONUS datapoint: ship-flags (OFF side) i2t B32 = 9.39 rps / 1663 tok (vLLM 8.32/1769)
+— rps lead robust across runs (8.76, 9.39); tok gap now only -6%.
