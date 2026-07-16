@@ -1,4 +1,5 @@
 import logging
+import os
 import queue
 import threading
 from abc import ABC, abstractmethod
@@ -318,8 +319,33 @@ class CudaIpcKVTransferEngine(KVTransferEngine):
         self._pending: list[Future] = []
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
 
+        # MSTAR_FUSED_KV_HANDOFF=1: replace the per-(layer, page) Python loop
+        # of tiny .to() copies in _do_read (~2 kernels x num_layers x pages
+        # ~= 290 launches/request, each with an intermediate alloc, all on the
+        # executor thread's DEFAULT stream) with a handful of index-based
+        # batched copies (gather over the page dim, one flattened cross-device
+        # copy, scatter into local pages) on a DEDICATED transfer stream.
+        # Default OFF; flag-off path is byte-identical to the legacy loop.
+        self._fused_handoff = (
+            os.environ.get("MSTAR_FUSED_KV_HANDOFF", "0") == "1"
+        )
+        # Lazily-created per-device transfer streams (local device + the
+        # IPC-mapped producer device when it differs). Guarded by a lock:
+        # _do_read runs on up to max_workers executor threads.
+        self._transfer_streams: dict[int, torch.cuda.Stream] = {}
+        self._transfer_stream_lock = threading.Lock()
+
     def get_kv_transfer_info(self) -> CudaIpcKVTransferInfo:
         return self._transfer_info
+
+    def _get_transfer_stream(self, device: torch.device) -> torch.cuda.Stream:
+        idx = torch.device(device).index
+        with self._transfer_stream_lock:
+            stream = self._transfer_streams.get(idx)
+            if stream is None:
+                stream = torch.cuda.Stream(device=device)
+                self._transfer_streams[idx] = stream
+            return stream
 
     def read_batched_async(
         self, remote_kv_info: CudaIpcKVTransferInfo,
@@ -334,12 +360,9 @@ class CudaIpcKVTransferEngine(KVTransferEngine):
         self._pending = [f for f in self._pending if not f.done()]
         return future
 
-    def _do_read(
-        self, remote_kv_info: CudaIpcKVTransferInfo,
-        read_info: list[KVReadInfo],
-        event: torch.Event=None
-    ):
-        event.synchronize()
+    def _rebuild_remote_tensor(
+        self, remote_kv_info: CudaIpcKVTransferInfo
+    ) -> torch.Tensor:
         dtype = getattr(torch, remote_kv_info.dtype.split(".")[-1])
         (
             storage_device,
@@ -358,7 +381,7 @@ class CudaIpcKVTransferEngine(KVTransferEngine):
         # in the rest of the function, we are only copying the right pages to
         # self._device. In fact, in testing, we see it is faster to call
         # rebuild_cuda_tensor on the whole KV cache instead of just the slice we need.
-        tensor = rebuild_cuda_tensor(
+        return rebuild_cuda_tensor(
             torch.Tensor,
             remote_kv_info.size,
             remote_kv_info.stride,
@@ -376,6 +399,21 @@ class CudaIpcKVTransferEngine(KVTransferEngine):
             event_sync_required,
         )
 
+    def _do_read(
+        self, remote_kv_info: CudaIpcKVTransferInfo,
+        read_info: list[KVReadInfo],
+        event: torch.Event=None
+    ):
+        if self._fused_handoff:
+            plans = self._plan_fused_read(read_info)
+            if plans is not None:
+                return self._do_read_fused(remote_kv_info, plans, event)
+
+        # Legacy path (flag off, or unfusable structure): byte-identical to
+        # the original per-(layer, page) loop on the default stream.
+        event.synchronize()
+        tensor = self._rebuild_remote_tensor(remote_kv_info)
+
         for info in read_info:
             slice = tensor[
                 info.layer_idx, info.remote_page_idx,
@@ -385,6 +423,134 @@ class CudaIpcKVTransferEngine(KVTransferEngine):
                 info.layer_idx, info.local_page_idx,
                 info.token_start:info.token_end
             ] = slice
+
+    def _plan_fused_read(
+        self, read_info: list[KVReadInfo]
+    ) -> list[tuple[int, int, int | None, list[int], list[int]]] | None:
+        """Group the per-(layer, page) read ops into fused index-copy plans.
+
+        Returns a list of ``(token_start, token_end, layer_idx, local_pages,
+        remote_pages)`` tuples. ``layer_idx is None`` means every layer shares
+        the same page list (the common start_async_retrieve shape: pages x
+        all layers), so one flattened gather over dims (layer, page) covers
+        the whole group. Otherwise one plan entry per layer (pages may be
+        non-contiguous either way — that is why the legacy code loops — so
+        the fused form always goes through index tensors, never assumes
+        contiguity).
+
+        Returns ``None`` if a fused index copy could not reproduce the loop
+        byte-for-byte (duplicate destination pages within one group would
+        make index_put_ ordering undefined); the caller then falls back to
+        the legacy loop.
+        """
+        num_layers = self._kv_cache.shape[0]
+        groups: dict[tuple[int, int], dict[int, list[tuple[int, int]]]] = {}
+        for info in read_info:
+            groups.setdefault(
+                (info.token_start, info.token_end), {}
+            ).setdefault(info.layer_idx, []).append(
+                (info.local_page_idx, info.remote_page_idx)
+            )
+
+        plans: list[tuple[int, int, int | None, list[int], list[int]]] = []
+        for (token_start, token_end), per_layer in groups.items():
+            first = next(iter(per_layer.values()))
+            if len(per_layer) == num_layers and all(
+                pairs == first for pairs in per_layer.values()
+            ):
+                local_pages = [p[0] for p in first]
+                if len(set(local_pages)) != len(local_pages):
+                    return None
+                plans.append((
+                    token_start, token_end, None,
+                    local_pages, [p[1] for p in first],
+                ))
+            else:
+                for layer_idx, pairs in per_layer.items():
+                    local_pages = [p[0] for p in pairs]
+                    if len(set(local_pages)) != len(local_pages):
+                        return None
+                    plans.append((
+                        token_start, token_end, layer_idx,
+                        local_pages, [p[1] for p in pairs],
+                    ))
+        return plans
+
+    def _do_read_fused(
+        self, remote_kv_info: CudaIpcKVTransferInfo,
+        plans: list[tuple[int, int, int | None, list[int], list[int]]],
+        event: torch.Event = None,
+    ):
+        """Fused KV handoff on a dedicated transfer stream.
+
+        Copies exactly the same byte regions as the legacy loop
+        (``kv[l, page, token_start:token_end]`` per (layer, page)), but as a
+        few index-based batched copies instead of ~2 kernels per (layer,
+        page):
+
+          gather remote pages (index over the page dim, on the producer
+          device's transfer stream) -> one contiguous cross-device copy ->
+          index_put_ scatter into the local pages (local transfer stream).
+
+        Event ordering:
+        - Producer-side data readiness comes from the existing contract (the
+          producer default-stream-syncs before publishing seq_info; see
+          start_async_retrieve), unchanged.
+        - Consumer-side WAR hazard on the destination pages: the transfer
+          stream waits on ``event`` (recorded on the caller's current stream
+          in read_batched_async) via a GPU-side stream wait — no host block,
+          no default-stream sync.
+        - Completion: a done-event recorded on the transfer stream is
+          host-synchronized before this method returns, so the pending-read
+          Future resolves only when the KV bytes are in place on device.
+          check_retrieve_ready() / wait_for_retrieves() / sync_retrieve()
+          poll exactly that Future, so their gating semantics still hold
+          (strictly stronger than the legacy enqueue-only completion).
+        """
+        tensor = self._rebuild_remote_tensor(remote_kv_info)
+        local_stream = self._get_transfer_stream(self._device)
+        remote_stream = (
+            local_stream if tensor.device == self._device
+            else self._get_transfer_stream(tensor.device)
+        )
+        done_event = torch.cuda.Event()
+        with torch.cuda.stream(local_stream), torch.cuda.stream(remote_stream):
+            # Stage the page-index tensors first: they touch no KV pages, so
+            # they may be enqueued before the WAR ordering point.
+            staged = []
+            for token_start, token_end, layer_idx, local_pages, remote_pages in plans:
+                local_idx = torch.tensor(
+                    local_pages, dtype=torch.long, device=self._device
+                )
+                remote_idx = torch.tensor(
+                    remote_pages, dtype=torch.long, device=tensor.device
+                )
+                staged.append(
+                    (token_start, token_end, layer_idx, local_idx, remote_idx)
+                )
+            # All destination-page writes are ordered after the caller's
+            # stream point (GPU-side wait; the executor thread does not
+            # block here).
+            if event is not None:
+                local_stream.wait_event(event)
+            for token_start, token_end, layer_idx, local_idx, remote_idx in staged:
+                if layer_idx is None:
+                    src = tensor[:, remote_idx, token_start:token_end]
+                    if src.device != self._device:
+                        src = src.to(self._device, non_blocking=True)
+                    self._kv_cache[:, local_idx, token_start:token_end] = src
+                else:
+                    src = tensor[layer_idx, remote_idx, token_start:token_end]
+                    if src.device != self._device:
+                        src = src.to(self._device, non_blocking=True)
+                    self._kv_cache[layer_idx, local_idx, token_start:token_end] = src
+            done_event.record(local_stream)
+        # Host-confirm device completion before the Future resolves: the
+        # readiness signal the scheduler polls is future.done(), so it must
+        # mean bytes-in-place, not merely enqueued. Blocks only this
+        # executor thread; main/GPU threads and the default stream are
+        # untouched.
+        done_event.synchronize()
 
     def shutdown(self):
         for fut in self._pending:
