@@ -34,6 +34,38 @@ class CommProtocol(Enum):
     SHM = "SHM"
 
 
+def resolve_tcp_port(entity_id: str) -> int:
+    """Deterministic TCP port for an entity under MSTAR_ZMQ_TRANSPORT=TCP.
+    Module-level so senders that build their own sockets (e.g. the emit
+    sidecar's bounded PUSH) resolve the same port as ZMQCommunicator."""
+    base_port = int(os.getenv("MSTAR_ZMQ_TCP_BASE_PORT", "19000"))
+    if entity_id == "api_server":
+        return base_port
+    if entity_id == "conductor":
+        return base_port + 1
+    if entity_id == "api_server_preprocess_worker":
+        return base_port + 2
+    if entity_id.startswith("worker_"):
+        rank = entity_id.removeprefix("worker_")
+        if rank.isdigit():
+            return base_port + 100 + int(rank)
+    return base_port + 1000 + (sum(entity_id.encode("utf-8")) % 1000)
+
+
+def resolve_endpoint(
+    entity_id: str, protocol: CommProtocol, ipc_socket_path_prefix: str
+) -> str:
+    """Endpoint string for an entity's PULL socket. Module-level twin of
+    ZMQCommunicator._endpoint (which delegates here) for callers that need
+    the endpoint without constructing a full communicator."""
+    if protocol == CommProtocol.IPC:
+        return f"ipc://{ipc_socket_path_prefix}/{entity_id}.ipc"
+    if protocol == CommProtocol.TCP:
+        host = os.getenv("MSTAR_ZMQ_TCP_HOST", "127.0.0.1")
+        return f"tcp://{host}:{resolve_tcp_port(entity_id)}"
+    raise NotImplementedError(f"Protocol {protocol} not yet supported yet")
+
+
 class ZMQCommunicator(BaseCommunicator):
     def __init__(
         self,
@@ -81,40 +113,34 @@ class ZMQCommunicator(BaseCommunicator):
 
     def wait_for_work(self, timeout_ms=50):
         events = dict(self.poller.poll(timeout=timeout_ms))
-        if self.event.fd in events:
+        # self.event is None unless register_event_for_poll was called (the
+        # worker registers one; the emit sidecar's plain communicator
+        # doesn't) — an unguarded attribute access would kill the sidecar
+        # poll loop on its first idle wait.
+        if self.event is not None and self.event.fd in events:
             self.event.drain()
 
     def _endpoint(self, entity_id: str) -> str:
-        if self.protocol == CommProtocol.IPC:
-            return f"ipc://{self.ipc_socket_path_prefix}/{entity_id}.ipc"
-        if self.protocol == CommProtocol.TCP:
-            host = os.getenv("MSTAR_ZMQ_TCP_HOST", "127.0.0.1")
-            return f"tcp://{host}:{self._tcp_port(entity_id)}"
-        raise NotImplementedError(f"Protocol {self.protocol} not yet supported yet")
+        return resolve_endpoint(
+            entity_id, self.protocol, self.ipc_socket_path_prefix
+        )
 
     @staticmethod
     def _tcp_port(entity_id: str) -> int:
-        base_port = int(os.getenv("MSTAR_ZMQ_TCP_BASE_PORT", "19000"))
-        if entity_id == "api_server":
-            return base_port
-        if entity_id == "conductor":
-            return base_port + 1
-        if entity_id == "api_server_preprocess_worker":
-            return base_port + 2
-        if entity_id.startswith("worker_"):
-            rank = entity_id.removeprefix("worker_")
-            if rank.isdigit():
-                return base_port + 100 + int(rank)
-        return base_port + 1000 + (sum(entity_id.encode("utf-8")) % 1000)
+        return resolve_tcp_port(entity_id)
 
     # def get_session_id(self) -> str:
     #     return self.session_id
 
     def send(self, entity_id: str, msg):
         # TODO: maybe serialize to JSON instead if more efficient
+        # Pass msg itself, not str(msg): %s stringifies lazily only when
+        # DEBUG is enabled, whereas str(msg) here built the full recursive
+        # dataclass repr (e.g. a whole step's ResultTensorsBatch) on every
+        # send even with logging off. Identical log output when enabled.
         logger.debug(
             "%s to send a message %s to entity %s",
-            self.my_id, str(msg), entity_id
+            self.my_id, msg, entity_id
         )
         if entity_id not in self.push_sockets:
             sock = self.context.socket(zmq.PUSH)
@@ -133,9 +159,11 @@ class ZMQCommunicator(BaseCommunicator):
                 messages.append(self.pull_socket.recv_pyobj(
                     flags=zmq.NOBLOCK
                 ))
+                # Lazy %s, same reason as in send(): no eager repr of the
+                # received message when DEBUG is off.
                 logger.debug(
                     "%s to received message %s",
-                    self.my_id, str(messages[-1])
+                    self.my_id, messages[-1]
                 )
             except zmq.Again:
                 # zmq.Again actually means no messages left to read

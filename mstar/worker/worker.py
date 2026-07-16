@@ -33,6 +33,7 @@ from mstar.model.base import Model, WorkerGraph
 from mstar.profile.worker import WorkerProfileInfo
 from mstar.streaming.stream_buffer import StreamBuffer
 from mstar.utils.ipc_format import (
+    AbortRequest,
     ConductorMessage,
     ConductorMessageType,
     InputSignals,
@@ -49,6 +50,7 @@ from mstar.utils.ipc_format import (
     WorkerMessageType,
 )
 from mstar.utils.profiler import range_pop, range_push
+from mstar.worker.emit_sidecar import ITEM_INLINE, SIDECAR_WALKS, SidecarClient
 from mstar.worker.engine_manager import EngineManager
 from mstar.worker.micro_scheduler import MicroScheduler, ScheduledBatch
 from mstar.worker.node_manager_utils import (
@@ -173,6 +175,22 @@ class Worker:
         )
         self._slim_emit_sent: set[tuple[str, str]] = set()
 
+        # MSTAR_SLIM_EMIT2 (requires MSTAR_SLIM_EMIT): slim items carry
+        # loop_key (plain ints) instead of a pickled NestedLoopIndices, and
+        # skip building the unused full ResultTensors on the slim hit path.
+        # loop_key is sent ONLY while the step's loop layout still matches the
+        # template step's (checked per step below); otherwise the item falls
+        # back to the full loop_indices object. Default OFF.
+        self._slim_emit2 = (
+            os.environ.get("MSTAR_SLIM_EMIT2", "0") == "1" and self._slim_emit
+        )
+        # (rid, edge_name) -> (loop_name_order list, loop_indices key tuple)
+        # captured from the template step's NestedLoopIndices — the same
+        # object the api server caches, so key order matches through pickle.
+        self._slim_emit_loop_layout: dict[
+            tuple[str, str], tuple[list, tuple]
+        ] = {}
+
         # Fast path: memoize the per-rid store_and_populate_graph_edges work in
         # _postprocess_batch so a continuing steady-state decode step replays a
         # cached routing-metadata plan (uuid + tensor payload swapped) instead of
@@ -194,6 +212,96 @@ class Worker:
             os.environ.get("MSTAR_FAST_CHECKSTOP", "0") == "1"
         )
         self._thinker_eos_id: int | None = None
+
+        # MSTAR_WALK_STATS: named diagnostic counters (see _ws_inc). This
+        # branch has no scheduler stats line, so the dict is dumped by the
+        # run loop's low-cadence housekeeping block instead. Default OFF
+        # (None): every _ws_inc call is a no-op.
+        self._walk_stats: dict[str, int] | None = (
+            {} if os.environ.get("MSTAR_WALK_STATS", "0") == "1" else None
+        )
+
+        # MSTAR_EMIT_SIDECAR — Stage 1 of godv9 docs/SIDECAR_DESIGN.md: exile
+        # emit message construction, the api_server transport, the
+        # WGD-feeding accumulators (pending_new_tokens / current_output_chunks
+        # / output_loop_indices), and WGD assembly to a per-worker pure-CPU
+        # sidecar PROCESS, for requests whose worker graphs on this worker
+        # all live on the text walks (SIDECAR_WALKS). Default OFF; when off
+        # every code path below is untouched.
+        #
+        # Read ONCE — static for the process (a spawned process cannot
+        # follow runtime flag flips; A/B via two-server alternation).
+        #
+        # Requires the winning emit stack: sidecar-side construction is
+        # pinned to BATCH+SLIM+SLIM2 semantics, so enabling it without those
+        # flags would make the flag-on byte stream diverge from the baseline
+        # it must match — refuse loudly instead of diverging quietly.
+        # (_slim_emit2 already implies _slim_emit implies _batch_emit.)
+        self._emit_sidecar = os.environ.get("MSTAR_EMIT_SIDECAR", "0") == "1"
+        if self._emit_sidecar and not self._slim_emit2:
+            logger.critical(
+                "MSTAR_EMIT_SIDECAR=1 requires MSTAR_BATCH_EMIT, "
+                "MSTAR_SLIM_EMIT and MSTAR_SLIM_EMIT2 all on; disabling the "
+                "sidecar — worker %s stays on the legacy emit path.",
+                worker_id,
+            )
+            self._emit_sidecar = False
+        # rids whose emit/WGD path the sidecar owns (decided ONCE at
+        # admission, see _add_new_request), and rids stranded by a sidecar
+        # failure (client-bound output dropped while the conductor processes
+        # our ABORT_REQUEST — their stream cannot be resumed).
+        self._sidecar_rids: set[str] = set()
+        self._sidecar_condemned: set[str] = set()
+        self._sidecar_client: SidecarClient | None = None
+        if self._emit_sidecar:
+            # Spawned here so the child's import cost (~seconds) hides
+            # behind weight load / CUDA-graph capture (~minutes).
+            self._sidecar_client = SidecarClient(
+                worker_id=worker_id,
+                socket_path_prefix=socket_path_prefix,
+                log_level=logging.getLevelName(
+                    logging.getLogger().getEffectiveLevel()
+                ),
+            )
+
+        # MSTAR_SIDECAR_CHECKSTOP — Stage 2 (godv9 SIDECAR_DESIGN §6.2):
+        # deferred-consume of the check_stop D→H. Instead of blocking the main
+        # thread on ``side.synchronize()`` (the ~1.1-2.1 ms graph-tail wait),
+        # record an event after the side-stream copy, run the cheap per-rid
+        # Python that follows, then POLL ``event.query()`` at the consumption
+        # point. Ready => consume this step with no wait; not ready => fall
+        # back to a blocking wait (counted) so the stop DECISION is always
+        # made this step from this step's tokens. Stop-state computation +
+        # application stay synchronous and worker-side; only the WAIT moves.
+        # max_tokens enforcement is a pure counter and never touches this
+        # D→H, so a stalled copy can never cause runaway.
+        #
+        # The checkstop_deferred_consume / checkstop_sync_fallback counters
+        # (MSTAR_WALK_STATS=1) make the conversion observable; if fallbacks
+        # dominate, the wait was load-bearing graph-tail and this is
+        # correctly a no-op, not a regression (the fallback path is
+        # byte-identical to flag-off).
+        #
+        # Read ONCE (static — it changes the postprocess control flow, not a
+        # tunable). Requires CUDA; on a CPU worker it is a no-op because
+        # there is no completion event to defer on.
+        self._sidecar_checkstop = (
+            os.environ.get("MSTAR_SIDECAR_CHECKSTOP", "0") == "1"
+        )
+        # Shadow mode (mandatory before any perf cell): when on, the legacy
+        # SYNCHRONOUS check_stop is recomputed alongside the deferred path
+        # and the two stop sets are asserted equal, mismatches logged at
+        # WARNING with a checkstop_shadow_mismatch counter. Legacy stays
+        # authoritative while shadowing, so a bug surfaces as a logged
+        # mismatch, never a corrupted stream.
+        self._sidecar_checkstop_shadow = (
+            self._sidecar_checkstop
+            and os.environ.get("MSTAR_SIDECAR_CHECKSTOP_SHADOW", "0") == "1"
+        )
+        # Reusable side-stream event for the deferred check_stop copy. One
+        # event suffices: each step consumes (queries or waits on) it before
+        # the next step records it again, so only one copy is ever in flight.
+        self._checkstop_event: "torch.cuda.Event | None" = None
 
         # MSTAR_ENC_OVERLAP=<N>: batch-gated encoder side-stream overlap.
         # When N>0 and this worker's in-flight request count is <= N, an
@@ -507,6 +615,31 @@ class Worker:
             self.worker_graphs_manager.per_request_info[body.request_id].sharding_config
         )
 
+        # MSTAR_EMIT_SIDECAR: decide sidecar scope ONCE per rid, from the
+        # FULL worker_graph_to_workers map (the conductor sends the same map
+        # on every partition's NewRequest), so a later partition's add can
+        # never flip a rid between owners mid-flight — the split-brain trap
+        # of SIDECAR_DESIGN §0. Scoped ⇔ every walk this rid can EVER run on
+        # THIS worker is a text walk (E4b lesson: audio walks stay exactly
+        # flat — one set-membership test per admission is the whole tax).
+        if (
+            self._sidecar_client is not None
+            and body.request_id not in self._sidecar_rids
+        ):
+            my_walks: set[str] = set()
+            wg_to_walks = (
+                self.worker_graphs_manager.all_worker_graph_ids_to_graph_walks
+            )
+            for wg_id, wg_workers in body.worker_graph_to_workers.items():
+                if self.worker_id in wg_workers:
+                    my_walks |= wg_to_walks.get(wg_id, set())
+            if my_walks and my_walks <= SIDECAR_WALKS:
+                reg = self._sidecar_client.register_rid(body.request_id)
+                if self._sidecar_client.send(reg):
+                    self._sidecar_rids.add(body.request_id)
+                else:
+                    self._disable_sidecar("rid registration send failed")
+
         # Create StreamBuffers for consumer connections on this worker
         for conn in self._my_consumer_connections:
             req_info = self.worker_graphs_manager.per_request_info[body.request_id]
@@ -560,6 +693,13 @@ class Worker:
             self._slim_emit_sent = {
                 k for k in self._slim_emit_sent if k[0] != body.request_id
             }
+        # MSTAR_SLIM_EMIT2 layout entries ride the same lifecycle; not
+        # nested under _slim_emit so a flag flip can't strand them.
+        if self._slim_emit_loop_layout:
+            self._slim_emit_loop_layout = {
+                k: v for k, v in self._slim_emit_loop_layout.items()
+                if k[0] != body.request_id
+            }
 
         # If we are the TP leader for this request, signal the followers to
         # remove it too. Followers defer removal until they get this message
@@ -589,6 +729,16 @@ class Worker:
         self.tensor_manager.cleanup_request(body.request_id)
         self.profile_info.pop_request(body.request_id)
         self.streaming_buffers.pop(body.request_id, None)
+
+        # MSTAR_EMIT_SIDECAR: rid teardown drops the sidecar's per-rid state
+        # (accumulators, slim protocol entries, cached edge templates).
+        if body.request_id in self._sidecar_rids:
+            self._sidecar_rids.discard(body.request_id)
+            if self._sidecar_client is not None:
+                rec = self._sidecar_client.remove_rid(body.request_id)
+                if not self._sidecar_client.send(rec):
+                    self._disable_sidecar("rid removal send failed")
+        self._sidecar_condemned.discard(body.request_id)
 
         for node_name in self.engine_manager.lru_tracked_nodes():
             self._last_active.pop((body.request_id, node_name), None)
@@ -1199,29 +1349,42 @@ class Worker:
                     request_id=request_id, loop_indices=nested_loop_indices,
                     output_name=graph_edge.name
                 )
-                metadata: dict = {}
                 edge_inline = self._inline_emit and bool(graph_edge.tensor_info) and all(
                     info.uuid in inline_uuids for info in graph_edge.tensor_info
                 )
+                tkey = (request_id, graph_edge.name)
+                slim_hit = (
+                    self._slim_emit and batch_collector is not None
+                    and edge_inline and tkey in self._slim_emit_sent
+                )
+                metadata: dict = {}
+                inline_vals: list | None = None
                 if edge_inline:
                     # Carry the token values inline; the consumer skips the
                     # SHM fetch entirely. dtype/shape come from tensor_info
                     # on the (still-attached) graph_edge, so the consumer
                     # reconstructs a byte-identical tensor for postprocess.
+                    inline_vals = prematerialized_new_tokens[graph_edge.name]
                     metadata = {
-                        "inline_values": {
-                            graph_edge.name: prematerialized_new_tokens[graph_edge.name]
-                        }
+                        "inline_values": {graph_edge.name: inline_vals}
                     }
                     for info in graph_edge.tensor_info:
                         local_release[info.uuid] = local_release.get(info.uuid, 0) + 1
-                result_tensors = ResultTensors(
-                    request_id=request_id,
-                    modality=graph_edge.output_modality,
-                    graph_edge=graph_edge,
-                    loop_indices=nested_loop_indices,
-                    metadata=metadata
-                )
+                # MSTAR_SLIM_EMIT2: on the slim steady path the full
+                # ResultTensors below is provably unused (the hit branch
+                # appends a SlimResultTokens and the immediate-send else is
+                # unreachable when batch_collector/edge_inline hold) — skip
+                # building it.
+                if self._slim_emit2 and slim_hit:
+                    result_tensors = None
+                else:
+                    result_tensors = ResultTensors(
+                        request_id=request_id,
+                        modality=graph_edge.output_modality,
+                        graph_edge=graph_edge,
+                        loop_indices=nested_loop_indices,
+                        metadata=metadata
+                    )
                 if batch_collector is not None and edge_inline:
                     # Coalesced path: defer to a single result_tensors_batch
                     # message built by the caller after the rid loop. Only
@@ -1234,16 +1397,50 @@ class Worker:
                     # token values. Skips pickling a GraphEdge per rid per
                     # step (the bulk of send_outputs' main-thread cost).
                     if self._slim_emit:
-                        tkey = (request_id, graph_edge.name)
-                        if tkey in self._slim_emit_sent:
+                        if slim_hit:
+                            # MSTAR_SLIM_EMIT2: carry the loop state as plain
+                            # ints when the step's layout (loop_name_order
+                            # content + loop_indices key ORDER) still matches
+                            # the template step's — the consumer's rebuild
+                            # from its cached template is then value-identical
+                            # (verified round-trip incl. max /
+                            # label_context_gt). Any drift: full object.
+                            loop_key = None
+                            if self._slim_emit2:
+                                layout = self._slim_emit_loop_layout.get(tkey)
+                                if (
+                                    layout is not None
+                                    and nested_loop_indices.loop_name_order
+                                    == layout[0]
+                                    and tuple(
+                                        nested_loop_indices.loop_indices.keys()
+                                    ) == layout[1]
+                                ):
+                                    loop_key = (
+                                        nested_loop_indices.wg_fwd_pass_idx,
+                                        *nested_loop_indices.loop_indices.values(),
+                                    )
+                            # inline_vals is always set here: slim_hit
+                            # implies edge_inline.
                             batch_collector.append(SlimResultTokens(
                                 request_id=request_id,
                                 name=graph_edge.name,
-                                values=metadata["inline_values"][graph_edge.name],
-                                loop_indices=nested_loop_indices,
+                                values=inline_vals,
+                                loop_indices=(
+                                    None if loop_key is not None
+                                    else nested_loop_indices
+                                ),
+                                loop_key=loop_key,
                             ))
                         else:
                             self._slim_emit_sent.add(tkey)
+                            if self._slim_emit2:
+                                # Capture the template's loop layout (copies:
+                                # the NLI is fresh per step but not owned).
+                                self._slim_emit_loop_layout[tkey] = (
+                                    list(nested_loop_indices.loop_name_order),
+                                    tuple(nested_loop_indices.loop_indices.keys()),
+                                )
                             batch_collector.append(result_tensors)
                     else:
                         batch_collector.append(result_tensors)
@@ -1318,6 +1515,238 @@ class Worker:
                 ),
             )
             self.communicator.send("conductor", message)
+
+    def _send_outputs_sidecar(
+        self, request_id: str, outputs: NodeOutputRouting,
+        nested_loop_indices: NestedLoopIndices,
+        partition_name: str | None = None,
+        prematerialized_new_tokens: dict[str, list[int]] | None = None,
+        node_speculatively_scheduled: bool = False,
+        build_record: bool = True,
+    ) -> tuple | None:
+        """MSTAR_EMIT_SIDECAR twin of ``_send_outputs`` for sidecar-scoped
+        rids. Returns this rid's entry for the step record (or None).
+
+        Every worker-side effect of ``_send_outputs`` is kept byte-identical
+        — peer-worker INPUT_SIGNALS sends, persist buffering, streaming
+        routing, the inline-emit producer-ref release — and every
+        client-bound effect becomes a record field (SIDECAR_DESIGN §4.3):
+
+        - ``buffer_new_tokens``            -> entry new-token field
+        - ``buffer_output_signals``        -> derived by the sidecar from
+                                              item order
+        - ``register_output_loop_indices`` -> derived from each item's
+                                              loop ints
+        - emit construction + api_server send -> sidecar (items)
+        - WGD flush/assembly + conductor send -> sidecar (boundary field)
+
+        The worker NEVER writes pending_new_tokens / current_output_chunks /
+        output_loop_indices for a scoped rid — steady, boundary and
+        non-inline paths alike ride the record, so WGD is assembled from a
+        single owner (the design's hardest invariant, §0).
+
+        ``build_record=False`` (rid condemned by a sidecar failure): perform
+        only the worker-side effects and return None — the client-bound
+        stream is intentionally dropped while the rid is failed fast via
+        ABORT_REQUEST (a resumed stream would need the dead sidecar's
+        accumulator state).
+
+        Record cheapness (§4.2): items are tuples of ints and interned
+        indices; the only non-scalar payloads are the token lists (the SAME
+        list objects as the new-token field, so the record pickle memoizes
+        them) and a GraphEdge at boundary rate (first inline template per
+        (rid, name), or a non-inline edge whose fresh tensor_info the
+        consumer must fetch via SHM — the record just moves that pickle one
+        hop).
+        """
+        client = self._sidecar_client
+        # Peer-worker routing stays on the worker: it feeds next-step
+        # readiness on other workers (scheduler contract, design §3.2).
+        for worker_id, edges in outputs.to_workers.items():
+            message = WorkerMessage(
+                message_type=WorkerMessageType.INPUT_SIGNALS,
+                body=InputSignals(
+                    request_id=request_id,
+                    inputs=edges,
+                    request_info=self.worker_graphs_manager.get_fwd_info(request_id, partition_name),
+                    partition_name=partition_name
+                ),
+            )
+            self.communicator.send(worker_id, message)
+
+        # Persist accumulation stays worker-side (§4.3 moves only the three
+        # WGD accumulators); the flushed dict ships in the boundary field
+        # below so the sidecar's WGD carries it exactly as legacy's did.
+        if outputs.persist:
+            self.worker_graphs_manager.buffer_persist_signals(
+                request_id, outputs.persist
+            )
+
+        new_tokens_field: list | None = None
+        if outputs.new_token_outputs:
+            # Same name-dedup + D2H fallback as the legacy buffer_new_tokens
+            # feeding — the fallback ``.cpu()`` is a CUDA read and can only
+            # live on the worker. Extend-once-per-name matches the legacy
+            # per-signal buffer_new_tokens fix (d4a39135).
+            name_to_new_token: dict = {}
+            for signal in outputs.new_token_outputs:
+                if signal.name in name_to_new_token:
+                    continue # don't double-count new tokens
+                if (
+                    prematerialized_new_tokens is not None
+                    and signal.name in prematerialized_new_tokens
+                ):
+                    new_tokens = prematerialized_new_tokens[signal.name]
+                else:
+                    new_tokens = []  # list[int]
+                    for tensor_info in signal.tensor_info:
+                        tensor = self.tensor_manager.get_tensor(
+                            request_id=request_id,
+                            uuid=tensor_info.uuid
+                        )
+                        new_tokens.extend(tensor.cpu().numpy().tolist())
+                name_to_new_token[signal.name] = new_tokens
+            if build_record and name_to_new_token:
+                new_tokens_field = [
+                    (client.name_idx(name), toks)
+                    for name, toks in name_to_new_token.items()
+                ]
+
+        items: list | None = None
+        if outputs.emit_to_client:
+            # Same inline set as _register_outputs' SHM-skip decision — the
+            # record's inline flag is DERIVED from the worker's
+            # tensor-lifecycle decision (§4.3).
+            inline_uuids = self._inline_emit_uuids(
+                outputs, prematerialized_new_tokens
+            )
+            if build_record:
+                items = []
+                rid_idx = client.rid_idx(request_id)
+                layout_idx = client.layout_idx(nested_loop_indices)
+                wg_fwd = nested_loop_indices.wg_fwd_pass_idx
+                loop_vals = tuple(nested_loop_indices.loop_indices.values())
+            local_release: dict[str, int] = {}
+            for graph_edge in outputs.emit_to_client:
+                edge_inline = self._inline_emit and bool(graph_edge.tensor_info) and all(
+                    info.uuid in inline_uuids for info in graph_edge.tensor_info
+                )
+                inline_vals: list | None = None
+                if edge_inline:
+                    inline_vals = prematerialized_new_tokens[graph_edge.name]
+                    for info in graph_edge.tensor_info:
+                        local_release[info.uuid] = local_release.get(info.uuid, 0) + 1
+                if build_record:
+                    name_idx = client.name_idx(graph_edge.name)
+                    items.append((
+                        name_idx,
+                        ITEM_INLINE if edge_inline else 0,
+                        inline_vals,
+                        layout_idx, wg_fwd, loop_vals,
+                        graph_edge if client.ship_edge(
+                            rid_idx, name_idx, edge_inline
+                        ) else None,
+                    ))
+            # Producer-side ref release for inline uuids, identical to
+            # legacy — tensor lifecycle never leaves the worker.
+            for uuid, n in local_release.items():
+                self.tensor_manager.dereference(request_id, uuid, n=n)
+
+        # Streaming stays worker-side (audio rides these; on the scoped text
+        # walks both are empty in steady state). Same code as legacy
+        # _send_outputs (pre_read_register + _route_streaming_tensor).
+        req_info = self.worker_graphs_manager.per_request_info[request_id]
+        for edge in outputs.streaming_local:
+            stream_buf = req_info.stream_buffers[edge.name]
+            for info in edge.tensor_info:
+                stream_buf.pre_read_register(info.uuid)
+            self._route_streaming_tensor(request_id, edge)
+        for worker_id, edges in outputs.streaming_to_workers.items():
+            message = WorkerMessage(
+                message_type=WorkerMessageType.INPUT_SIGNALS,
+                body=InputSignals(
+                    request_id=request_id,
+                    inputs=edges,
+                    request_info=self.worker_graphs_manager.get_fwd_info(request_id, partition_name),
+                    partition_name=partition_name
+                ),
+            )
+            self.communicator.send(worker_id, message)
+
+        boundary: tuple | None = None
+        if outputs.completed_worker_graph_ids:
+            fwd_info = self.worker_graphs_manager.get_fwd_info(request_id, partition_name)
+            if partition_name is None:
+                partition_name = getattr(fwd_info, 'partition_name', 'default')
+            p_done = (
+                req_info.per_partition_info[partition_name].stream_partition_done
+                and not node_speculatively_scheduled
+            )
+            stream_consumed = {}
+            for edge_name, sbuf in req_info.stream_buffers.items():
+                stream_consumed[edge_name] = sbuf._consumed
+            if build_record:
+                # The worker-only WGD fields (design §4.2 boundary record).
+                # The sidecar merges them with ITS accumulators and sends
+                # the WORKER_GRAPHS_DONE (the conductor tolerates late WGD:
+                # conductor.py's unknown-rid guard).
+                boundary = (
+                    outputs.completed_worker_graph_ids,
+                    outputs.is_first_tp_rank,
+                    self.worker_graphs_manager.flush_persist_signals(request_id),
+                    self.worker_graphs_manager.get_seq_info(request_id, partition_name),
+                    partition_name,
+                    p_done,
+                    stream_consumed,
+                    self.profile_info.per_rid_graph_timings.get(request_id, {}),
+                    self.tensor_manager.get_rx_info(request_id),
+                    self.tensor_manager.get_tx_info(request_id),
+                )
+
+        if not build_record or (
+            new_tokens_field is None and not items and boundary is None
+        ):
+            return None
+        return (client.rid_idx(request_id), new_tokens_field, items, boundary)
+
+    def _disable_sidecar(self, reason: str) -> None:
+        """Permanent fallback (SIDECAR_DESIGN §7): the sidecar died or its
+        queue hit HWM. Legacy path for all new work; in-flight sidecar-owned
+        rids have emit/WGD state stranded in the dead process and cannot be
+        reconstructed — fail them fast via the conductor's abort path rather
+        than letting them ride the api_server's 15 s TTL. No
+        restart-and-resume: resuming means replaying accumulator state,
+        which is the split-brain trap again."""
+        client = self._sidecar_client
+        if client is None:
+            return
+        self._sidecar_client = None
+        logger.critical(
+            "Worker %s: emit sidecar disabled (%s; hwm_trips=%d, "
+            "records_sent=%d) — failing %d in-flight sidecar-owned "
+            "request(s) fast and falling back to the legacy emit path",
+            self.worker_id, reason, client.hwm_trips, client.records_sent,
+            len(self._sidecar_rids),
+        )
+        if client.hwm_trips:
+            # Mechanism counter rides WALK_STATS (design §7) — no counter,
+            # no verdict.
+            self._ws_inc("_sidecar_hwm_trips")
+        for rid in self._sidecar_rids:
+            self.communicator.send("conductor", ConductorMessage(
+                message_type=ConductorMessageType.ABORT_REQUEST,
+                body=AbortRequest(request_id=rid),
+            ))
+        self._sidecar_condemned |= self._sidecar_rids
+        self._sidecar_rids.clear()
+        client.shutdown()
+
+    def _ws_inc(self, key: str) -> None:
+        """MSTAR_WALK_STATS: bump a named diagnostic counter (no-op when off).
+        Counters are dumped by the run loop's low-cadence housekeeping
+        block."""
+        if self._walk_stats is not None:
+            self._walk_stats[key] = self._walk_stats.get(key, 0) + 1
 
     # ------------------------------------------------------------------
     # Main loop — async scheduling
@@ -2090,13 +2519,12 @@ class Worker:
             range_pop(synchronize=False)
             range_push("worker.postprocess.check_stop", synchronize=False)
 
-        for rid, req_info in batch_N.node_batch.per_request_info.items():
-            new_iters = self.worker_graphs_manager.get_dynamic_loop_iters(
-                rid, partition=batch_N.partition,
-            )
-            req_info.dynamic_loop_iter_counts.update(new_iters)
-
-        # Check for stops
+        # Check for stops. MSTAR_SIDECAR_CHECKSTOP (design §6.2): enqueue the
+        # side-stream check_stop D→H WITHOUT blocking, run the cheap per-rid
+        # dynamic-loop-iter Python (overlapping the in-flight copy), then poll
+        # the copy event and decide THIS step. Flag off: prematerialize blocks
+        # inline and the two independent loops below are output-identical
+        # regardless of order.
         engine = self.engine_manager.get_engine(batch_N.node_name)
         cpu_output = (
             output if enc_overlap
@@ -2106,9 +2534,48 @@ class Worker:
                     self._fast_checkstop
                     and batch_N.graph_walk == "thinker_decode"
                 ),
+                defer=self._sidecar_checkstop,
             )
         )
+
+        for rid, req_info in batch_N.node_batch.per_request_info.items():
+            new_iters = self.worker_graphs_manager.get_dynamic_loop_iters(
+                rid, partition=batch_N.partition,
+            )
+            req_info.dynamic_loop_iter_counts.update(new_iters)
+
+        # Same-step barrier: the stop DECISION must read this step's tokens, so
+        # poll the deferred copy (or fall back to a counted blocking wait)
+        # before computing stops. No deferred/late decision — that is the V1
+        # identity failure the design forbids (§6.2).
+        if self._sidecar_checkstop:
+            self._await_checkstop(cpu_output)
+
         new_stops = self._compute_new_stops(batch_N, engine, cpu_output)
+
+        # Shadow (design §8, mandatory pre-perf): recompute the stop set from a
+        # forced-synchronous D→H of the SAME GPU outputs and assert agreement.
+        # Legacy stays authoritative — a bug surfaces as a logged mismatch +
+        # counter, never a corrupted stream. A mismatch here means the deferred
+        # copy event reported ready before the copy truly landed.
+        if self._sidecar_checkstop_shadow and not enc_overlap:
+            ref_output = self._prematerialize_for_check_stop(
+                output,
+                batch_fast=(
+                    self._fast_checkstop
+                    and batch_N.graph_walk == "thinker_decode"
+                ),
+                defer=False,
+            )
+            ref_stops = self._compute_new_stops(batch_N, engine, ref_output)
+            if ref_stops != new_stops:
+                self._ws_inc("checkstop_shadow_mismatch")
+                logger.warning(
+                    "MSTAR_SIDECAR_CHECKSTOP shadow mismatch (walk=%s): "
+                    "deferred=%s reference=%s",
+                    batch_N.graph_walk, new_stops, ref_stops,
+                )
+                new_stops = ref_stops
 
         if self.enable_nvtx:
             range_pop(synchronize=False)
@@ -2279,7 +2746,34 @@ class Worker:
         batch_collector: list[ResultTensors] | None = (
             [] if self._batch_emit else None
         )
+        # MSTAR_EMIT_SIDECAR: rid entries for this step's record. Scoped
+        # rids' emit/WGD work is diverted to _send_outputs_sidecar (record
+        # fields); unscoped rids take the legacy path below untouched. A rid
+        # is in exactly one population for its whole life (decided at
+        # admission), so each (rid, name) stream stays on ONE FIFO and the
+        # slim-template protocol holds on both.
+        sidecar_entries: list | None = (
+            [] if (self._sidecar_rids or self._sidecar_condemned) else None
+        )
         for rid, routing in routing_per_request.items():
+            if sidecar_entries is not None and (
+                rid in self._sidecar_rids or rid in self._sidecar_condemned
+            ):
+                # A condemned rid (sidecar died mid-flight) keeps its
+                # worker-side effects (build_record=False) but its
+                # client-bound record is dropped — it is being failed fast
+                # via ABORT_REQUEST and its stream cannot be resumed.
+                entry = self._send_outputs_sidecar(
+                    rid, routing,
+                    nested_loop_indices=per_req_nested_idxs[rid],
+                    partition_name=batch_N.partition,
+                    prematerialized_new_tokens=prem_per_request[rid],
+                    node_speculatively_scheduled=batch_N.batch.node_objects[rid]._speculatively_scheduled,
+                    build_record=(rid in self._sidecar_rids),
+                )
+                if entry is not None:
+                    sidecar_entries.append(entry)
+                continue
             self._send_outputs(
                 rid, routing,
                 nested_loop_indices=per_req_nested_idxs[rid],
@@ -2297,6 +2791,15 @@ class Worker:
                     body=ResultTensorsBatch(items=batch_collector),
                 ),
             )
+        if sidecar_entries:
+            # One compact record per step (design §4.2). A failed NOBLOCK
+            # send is a sidecar failure: permanent fallback, never a block.
+            if self._sidecar_client.send(
+                self._sidecar_client.build_step(sidecar_entries)
+            ):
+                self._ws_inc("_sidecar_step_records")
+            else:
+                self._disable_sidecar("step record send failed")
 
         if self.enable_nvtx:
             range_pop(synchronize=False)
@@ -2399,10 +2902,52 @@ class Worker:
             return new_stops
         return engine.check_stop_for_batch(batch_N.node_batch, cpu_output)
 
+    def _checkstop_barrier(
+        self, side: "torch.cuda.Stream", defer: bool,
+    ) -> "torch.cuda.Event | None":
+        """Terminate the side-stream check_stop D→H (MSTAR_SIDECAR_CHECKSTOP).
+
+        Legacy (``defer=False``): block the main thread on the copy exactly as
+        before and return None — byte-identical to the flag-off path.
+
+        Deferred (``defer=True``): record a reusable event on the side stream
+        and return it WITHOUT blocking. The caller runs the cheap per-rid Python
+        that follows (overlapping the in-flight copy) and then polls the event
+        at ``_await_checkstop`` — ready => consume with no wait, else a counted
+        blocking fallback. One event suffices: the copy is consumed before the
+        next step records it again."""
+        if not defer:
+            side.synchronize()
+            return None
+        ev = self._checkstop_event
+        if ev is None:
+            ev = self._checkstop_event = torch.cuda.Event()
+        ev.record(side)
+        return ev
+
+    def _await_checkstop(self, cpu_output: NodeOutput) -> None:
+        """Barrier before the first read of a deferred check_stop copy
+        (MSTAR_SIDECAR_CHECKSTOP). Poll the copy event: ready => consume this
+        step with no wait (checkstop_deferred_consume); not ready => block on it
+        (checkstop_sync_fallback) so the stop DECISION is still made this step
+        from this step's tokens (the same-step rule — no deferred decision, the
+        V1 identity trap). No-op when there was no deferred copy (non-CUDA path,
+        an enc_overlap walk, or an early return in
+        _prematerialize_for_check_stop)."""
+        ev = getattr(cpu_output, "_checkstop_event", None)
+        if ev is None:
+            return
+        if ev.query():
+            self._ws_inc("checkstop_deferred_consume")
+        else:
+            ev.synchronize()
+            self._ws_inc("checkstop_sync_fallback")
+
     def _prematerialize_for_check_stop(
         self,
         output: NodeOutput,
         batch_fast: bool = False,
+        defer: bool = False,
     ) -> NodeOutput:
         """Side-stream D→H of every CUDA tensor in
         ``output.per_request_output_tensors`` so the subsequent
@@ -2464,7 +3009,7 @@ class Worker:
                     "check_stop_flat", flat_gpu.shape, flat_gpu.dtype,
                 )
                 flat_cpu.copy_(flat_gpu, non_blocking=True)
-            side.synchronize()
+            ev = self._checkstop_barrier(side, defer)
             cpu_fast: dict = {
                 r: {uniform_key: [flat_cpu[i:i + 1]]}
                 for i, r in enumerate(rids)
@@ -2476,6 +3021,7 @@ class Worker:
                 alloc_failed_request_id=output.alloc_failed_request_id,
                 completion_event=output.completion_event,
             )
+            out._checkstop_event = ev
             # N1 (MSTAR_FAST_CHECKSTOP): stash the flat pinned buffer + rid
             # order so check_stop can do ONE tolist() + int compares instead
             # of a per-rid .item() (+ attr chains) x bs.
@@ -2510,15 +3056,17 @@ class Worker:
                         else:
                             new_list.append(t)
                     cpu_per_rid[rid][name] = new_list
-        side.synchronize()
+        ev = self._checkstop_barrier(side, defer)
 
-        return NodeOutput(
+        out = NodeOutput(
             per_request_output_tensors=cpu_per_rid,
             allocation_failed=output.allocation_failed,
             alloc_pages_short=output.alloc_pages_short,
             alloc_failed_request_id=output.alloc_failed_request_id,
             completion_event=output.completion_event,
         )
+        out._checkstop_event = ev
+        return out
 
     def _apply_pending_removes_safe_to_drop(
         self, in_flight_rids: set[str]
@@ -2532,6 +3080,13 @@ class Worker:
             if self._slim_emit and self._slim_emit_sent:
                 self._slim_emit_sent = {
                     k for k in self._slim_emit_sent if k[0] != rid
+                }
+            # MSTAR_SLIM_EMIT2 layout entries ride the same lifecycle; not
+            # nested under _slim_emit so a flag flip can't strand them.
+            if self._slim_emit_loop_layout:
+                self._slim_emit_loop_layout = {
+                    k: v for k, v in self._slim_emit_loop_layout.items()
+                    if k[0] != rid
                 }
             self._remove_request(RemoveRequest(request_id=rid, source=MessageSource.SELF))
 
@@ -2676,10 +3231,36 @@ class Worker:
             )
             phase_buf.clear()
 
+        _housekeep_ctr = 0
         while True:
             from mstar.utils.profiler import range_pop, range_push
             try:
                 _iter_start = _time.perf_counter() if phase_period else 0.0
+                # Low-cadence housekeeping (every 50 iters, ~0.4 s at the
+                # 8.8 ms B32 step; a stat/branch otherwise).
+                _housekeep_ctr += 1
+                if _housekeep_ctr % 50 == 0:
+                    # MSTAR_EMIT_SIDECAR death watch (SIDECAR_DESIGN §7): a
+                    # dead sidecar (or an earlier HWM trip) flips us to the
+                    # legacy path with a CRITICAL log and fail-fast aborts —
+                    # never a hang.
+                    if (
+                        self._sidecar_client is not None
+                        and not self._sidecar_client.healthy()
+                    ):
+                        self._disable_sidecar(
+                            "sidecar process died or send queue hit HWM"
+                        )
+                    # MSTAR_WALK_STATS: periodic counter dump (this branch
+                    # has no scheduler stats line to ride).
+                    if (
+                        self._walk_stats
+                        and _housekeep_ctr % 2000 == 0
+                    ):
+                        logger.warning(
+                            "Worker %s walk stats: %s",
+                            self.worker_id, dict(sorted(self._walk_stats.items())),
+                        )
                 self._apply_pending_removes_safe_to_drop(
                     self._in_flight_rids
                 )

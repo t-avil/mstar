@@ -30,6 +30,7 @@ from mstar.api_server.request_types import (
     SlimResultTokens,
 )
 from mstar.communication.communicator import CommProtocol, ZMQCommunicator
+from mstar.graph.loop_indices import NestedLoopIndices
 from mstar.model.registry import HF_MODELS
 from mstar.profile.display import pretty_print_profile
 from mstar.profile.format import OutputInfo, RequestProfile, RequestTiming
@@ -363,11 +364,32 @@ class APIServer:
             return None
         edge = _copy.copy(tmpl.graph_edge)
         edge.tensor_info = list(tmpl.graph_edge.tensor_info)
+        loop_indices = item.loop_indices
+        loop_key = getattr(item, "loop_key", None)
+        if loop_key is not None:
+            # MSTAR_SLIM_EMIT2: rebuild the NestedLoopIndices from the
+            # template's layout + the item's ints. The worker only sends
+            # loop_key while the step's layout (loop_name_order content +
+            # loop_indices key order, both preserved through pickle) matches
+            # the template step's, so this is value-identical to the object
+            # it replaced (incl. max / label_context_gt semantics).
+            tmpl_li = tmpl.loop_indices.loop_indices
+            if len(loop_key) - 1 != len(tmpl_li):
+                logger.warning(
+                    "SLIM_EMIT2: loop_key arity mismatch for (%s, %s); dropping item",
+                    item.request_id, item.name,
+                )
+                return None
+            loop_indices = NestedLoopIndices(
+                loop_name_order=list(tmpl.loop_indices.loop_name_order),
+                loop_indices=dict(zip(tmpl_li.keys(), loop_key[1:])),
+                wg_fwd_pass_idx=loop_key[0],
+            )
         return ResultTensors(
             request_id=item.request_id,
             modality=tmpl.modality,
             graph_edge=edge,
-            loop_indices=item.loop_indices,
+            loop_indices=loop_indices,
             metadata={"inline_values": {item.name: item.values}},
         )
 
