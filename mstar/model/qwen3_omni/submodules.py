@@ -396,6 +396,15 @@ class ThinkerSubmodule(ARNodeSubmodule):
         self.model = thinker_model  # Qwen3OmniThinkerModel
         self.config = config
 
+        # MSTAR_FULLSTEP_DECODE (moonshot A'): self-feeding thinker_decode.
+        # Cached once at construction — the flag gates per-step hot paths
+        # (prepare_inputs / preprocess / forward_batched) and must not
+        # re-read the environment every token.
+        from mstar.model.qwen3_omni.qwen3_omni_model import (
+            fullstep_decode_enabled,
+        )
+        self._fullstep_decode = fullstep_decode_enabled()
+
         # Pre-compute inverse frequencies for 3D MRoPE
         self._inv_freq: torch.Tensor | None = None
 
@@ -527,7 +536,6 @@ class ThinkerSubmodule(ARNodeSubmodule):
             token_id = inputs["text_inputs"][0].to(device)  # (1,) or scalar
             if token_id.dim() == 0:
                 token_id = token_id.unsqueeze(0)
-            embeds = self.model.model.embed_tokens(token_id)
 
             # Next MRoPE position for all 3 components: read from the
             # per-request cache-manager state (kept in sync by the
@@ -538,6 +546,23 @@ class ThinkerSubmodule(ARNodeSubmodule):
                 device=device,
             )  # (3, 1)
 
+            if self._fullstep_decode:
+                # MSTAR_FULLSTEP_DECODE: carry the raw token id — the decode
+                # forward embeds it in-graph from the shared static
+                # ``next_token_ids`` buffer, so no host-side embed_tokens
+                # launch per rid per step. ``input_embeds`` stays None; the
+                # fullstep ``preprocess``/``forward``/``forward_batched``
+                # never read it for this walk.
+                return ARNodeInputs(
+                    input_seq_len=1,
+                    input_ids=token_id,
+                    custom_pos_ids=pos_ids,
+                    tensor_inputs={
+                        "masks_for_talker": self._get_decode_thinker_mask(device)
+                    }
+                )
+
+            embeds = self.model.model.embed_tokens(token_id)
             return ARNodeInputs(
                 input_seq_len=1,
                 input_embeds=embeds,
@@ -720,6 +745,53 @@ class ThinkerSubmodule(ARNodeSubmodule):
         inputs: list[ARNodeInputs],
     ) -> dict[str, torch.Tensor | Any]: # input name to tensor
         device = self.get_device()
+
+        if self._fullstep_decode and graph_walk == "thinker_decode":
+            # MSTAR_FULLSTEP_DECODE: no host-built input_embeds, no eager
+            # compute_3d_cos_sin — the decode forward embeds the token and
+            # computes cos/sin IN-GRAPH from these two tensors. Both become
+            # interned static buffers in the CUDA-graph runner:
+            #   next_token_ids [bs] int64 — the token feed. On self-feeding
+            #     steady-state steps the graph itself wrote it after the
+            #     previous replay, and the runner skips this copy entirely.
+            #   pos_3d [bs, 3] float32 — 3D MRoPE positions; the graph
+            #     self-advances it (+1/step) so steady-state steps skip the
+            #     copy too. float32 is exact for integer positions < 2^24.
+            #     Layout is (bs, 3) — NOT the (3, seq) convention — because
+            #     the runner's ``_intern_static_buffer`` shares one max-bucket
+            #     allocation across bs buckets by slicing the LEADING dim, so
+            #     the bucket-varying dim must come first. The forward
+            #     transposes back before ``compute_3d_cos_sin``.
+            seq_lens = [inp.input_seq_len for inp in inputs]
+            next_token_ids = torch.cat([
+                inp.input_ids for inp in inputs
+            ], dim=0)  # (bs,)
+            pos_3d = torch.cat([
+                inp.custom_pos_ids for inp in inputs
+            ], dim=1).t().contiguous()  # (bs, 3)
+
+            cache_manager = engine_inputs.cache_manager
+            assert cache_manager is not None
+            cache_manager.set_active_label("main")
+            cache_manager.plan_attention(
+                seq_lens=seq_lens, is_causal=True, label="main"
+            )
+            cache_manager.plan_rope(
+                seq_lens=seq_lens, pos_ids=None, label="main"
+            )
+            return {
+                "next_token_ids": next_token_ids,
+                "pos_3d": pos_3d,
+                "mrope_section": self.MROPE_SECTION,
+                "seq_lens": seq_lens,
+                "masks_for_talker": {
+                    rid: inp.tensor_inputs.get("masks_for_talker")
+                    for (rid, inp) in zip(
+                        engine_inputs.request_ids, inputs, strict=True
+                    )
+                },
+            }
+
         # Concatenate across requests
         input_embeds = torch.cat([
             inp.input_embeds for inp in inputs
@@ -854,6 +926,21 @@ class ThinkerSubmodule(ARNodeSubmodule):
         audio_output = request_info.step_metadata.get(
             "audio_output", True,
         )
+
+        # MSTAR_FULLSTEP_DECODE: the sequential-eager fallback receives the
+        # fullstep preprocess dict (next_token_ids + pos_3d, no input_embeds
+        # / cos_3d / sin_3d) — build the same inputs the batched/captured
+        # path builds, with identical ops => identical values.
+        next_token_ids = kwargs.pop("next_token_ids", None)
+        pos_3d = kwargs.pop("pos_3d", None)
+        if graph_walk == "thinker_decode" and next_token_ids is not None:
+            input_embeds = self.model.model.embed_tokens(next_token_ids)
+            cos_3d, sin_3d = compute_3d_cos_sin(
+                pos_3d.t(),  # (bs, 3) -> (3, bs)
+                self._get_inv_freq(input_embeds.device),
+                mrope_section=mrope_section or self.MROPE_SECTION,
+                target_dtype=input_embeds.dtype,
+            )
 
         cos_sin_3d = (cos_3d, sin_3d) if cos_3d is not None else None
 
@@ -1112,6 +1199,14 @@ class ThinkerSubmodule(ARNodeSubmodule):
                 labels=["main"],
                 single_request_inputs=ARNodeInputs(
                     input_seq_len=1,
+                    # MSTAR_FULLSTEP_DECODE: the fullstep preprocess reads
+                    # ``input_ids`` (token feed) instead of ``input_embeds``;
+                    # the template must carry it so capture-time preprocess
+                    # and replay-time padding-slot clones have the field.
+                    input_ids=(
+                        torch.zeros((1,), dtype=torch.long, device=device)
+                        if self._fullstep_decode else None
+                    ),
                     input_embeds=torch.zeros(
                         (1, self.config.thinker_hidden_size),
                         device=device, dtype=torch.bfloat16
@@ -1258,6 +1353,31 @@ class ThinkerSubmodule(ARNodeSubmodule):
         # expects. None for non-vision walks → model skips the splice.
         deepstack = self._collect_deepstack_kwargs(kwargs)
 
+        # MSTAR_FULLSTEP_DECODE (moonshot A'): the decode step's inputs are
+        # built IN-GRAPH from two static buffers instead of host-prepared
+        # tensors. ``next_token_ids`` [bs] holds the token feed (written
+        # GPU-side after/inside the previous step for self-feeding batches,
+        # re-seeded by the runner's static-buffer copy otherwise);
+        # ``pos_3d`` [bs, 3] holds the 3D MRoPE positions (leading-dim-first
+        # layout for the runner's shared-buffer interning; transposed back
+        # here) and self-advances +1/step below (decode text positions move
+        # all 3 dims by exactly 1). Every op here — embed_tokens gather,
+        # compute_3d_cos_sin (matmul / cat / cos / sin), the += on a static
+        # buffer — is CUDA-graph capturable; the same code runs eagerly for
+        # the batched fallback path with fresh (non-static) tensors,
+        # producing identical values.
+        next_token_ids = kwargs.pop("next_token_ids", None)
+        pos_3d = kwargs.pop("pos_3d", None)
+        fullstep = (not is_prefill) and next_token_ids is not None
+        if fullstep:
+            input_embeds = self.model.model.embed_tokens(next_token_ids)
+            cos_3d, sin_3d = compute_3d_cos_sin(
+                pos_3d.t(),  # (bs, 3) -> (3, bs)
+                self._get_inv_freq(input_embeds.device),
+                mrope_section=mrope_section or self.MROPE_SECTION,
+                target_dtype=input_embeds.dtype,
+            )
+
         cos_sin_3d = (cos_3d, sin_3d) if cos_3d is not None else None
         cache_manager = engine_inputs.cache_manager
         hidden, layer_0_embed, layer_n_hidden = self.model(
@@ -1322,6 +1442,16 @@ class ThinkerSubmodule(ARNodeSubmodule):
         # Expose the stacked [B, V] tensor under a sentinel key so the CUDA
         # graph runner can sample directly without concatenating per-rid slices.
         outputs["__batched_logits__"] = logits
+
+        if fullstep:
+            # Self-advance the 3D MRoPE positions for the next decode step
+            # (captured: the static buffer moves +1 on every replay, so
+            # steady-state steps skip the host-side pos copy entirely).
+            # Mirrors the host bookkeeping — advance_seq_lens moves
+            # position_id_start by seq_len (=1) after every replay — so a
+            # re-seed at any point writes exactly the value the buffer
+            # already holds.
+            pos_3d += 1
         return outputs
 
     def unpack_packed_outputs(

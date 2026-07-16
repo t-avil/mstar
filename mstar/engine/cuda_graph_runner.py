@@ -100,6 +100,15 @@ class CudaGraphData:
     # which slot a given iter targets.
     next_slot: int = 0
     applied_penalty_in_graph: bool = False
+    # MSTAR_FULLSTEP_DECODE (moonshot A'): True when the capture's preprocess
+    # emitted ``next_token_ids`` — the self-feeding decode contract. The
+    # captured forward builds its own inputs from the static buffers
+    # (token feed + self-advancing pos_3d), so on steady-state all-greedy
+    # steps the runner skips EVERY static-input copy and the sampled token
+    # is fed GPU-side into the next replay. The static buffers are interned
+    # per (config_idx, key), i.e. SHARED across NUM_SLOTS slots and across
+    # bs buckets, which is what makes the cross-slot feed valid.
+    self_feeding: bool = False
 
 
 @dataclass(frozen=True)
@@ -253,6 +262,14 @@ class CudaGraphRunner:
         # SAMPLE_RENDEZVOUS_BS). Single GPU-thread user; re-recorded only
         # after the previous synchronize returned, so reuse is race-free.
         self._rendezvous_event: "torch.cuda.Event | None" = None
+        # MSTAR_FULLSTEP_DECODE: rid tuple whose sampled tokens currently sit
+        # in the shared static ``next_token_ids`` feed buffer (written by the
+        # last successful all-greedy self-feeding replay). A replay whose rid
+        # tuple matches may SKIP all static-input copies (the graph feeds
+        # itself); any mismatch, non-greedy step, replay failure, or eager
+        # detour (see ``invalidate_fullstep_feed``) forces a re-seed from the
+        # host-threaded tokens. None = buffer not trustworthy.
+        self._fullstep_feed_rids: tuple[str, ...] | None = None
 
         self.max_bs = max(
             [max(config.capture_batch_sizes or self.CAPTURE_BATCH_SIZES)
@@ -538,7 +555,8 @@ class CudaGraphRunner:
         config: CudaGraphConfig,
         bs: int,
         slots: list[CudaGraphSlot],
-        applied_penalty_in_graph: bool=False
+        applied_penalty_in_graph: bool=False,
+        self_feeding: bool=False,
     ) -> None:
         """Register a populated CudaGraphData under all replay graph walks.
 
@@ -563,7 +581,8 @@ class CudaGraphRunner:
                 bs=bs,
                 slots=slots,
                 next_slot=0,
-                applied_penalty_in_graph=applied_penalty_in_graph
+                applied_penalty_in_graph=applied_penalty_in_graph,
+                self_feeding=self_feeding,
             )
 
     def _capture_slots(
@@ -586,6 +605,7 @@ class CudaGraphRunner:
         captured_slots: list[CudaGraphSlot] = []
         dummy_rids_to_free: list[list[str]] = []
         applied_penalty_in_graph = False
+        self_feeding = False
 
         try:
             for slot_idx in range(self.NUM_SLOTS):
@@ -643,10 +663,19 @@ class CudaGraphRunner:
 
                 applied_penalty_in_graph = applied_penalty_in_graph or \
                     spec.engine_inputs.sampler.applied_penalty_in_graph
+                # MSTAR_FULLSTEP_DECODE contract: a BASIC_BATCHED capture
+                # whose preprocess emitted ``next_token_ids`` is a
+                # self-feeding decode capture — the graph builds its own
+                # inputs from the (shared, interned) static buffers.
+                self_feeding = self_feeding or (
+                    "next_token_ids"
+                    in spec.slot_static_inputs.get("static_input_keys", [])
+                )
 
             self._register_graph_data(
                 key=key, config=config, bs=key.bs, slots=captured_slots,
-                applied_penalty_in_graph=applied_penalty_in_graph
+                applied_penalty_in_graph=applied_penalty_in_graph,
+                self_feeding=self_feeding,
             )
         finally:
             for rids in dummy_rids_to_free:
@@ -1175,6 +1204,20 @@ class CudaGraphRunner:
             for label in graph_data.config.labels:
                 self.alloc_manager.reset_label(rid, label, free=True)
 
+    def invalidate_fullstep_feed(self) -> None:
+        """MSTAR_FULLSTEP_DECODE: mark the static token-feed buffer stale.
+
+        Must be called whenever a decode step for this submodule executes
+        OUTSIDE the captured self-feeding replay (eager batched / sequential
+        fallback, e.g. a bs>max-capture burst or a transient graph miss):
+        the eager step consumes and produces tokens without touching the
+        interned static buffer, so a later replay with a coincidentally
+        identical rid tuple must NOT trust the buffer's (now two-steps-old)
+        contents. Cheap and idempotent; the next replay simply re-seeds via
+        the normal static-buffer copy.
+        """
+        self._fullstep_feed_rids = None
+
     def run(
         self,
         graph_walk: str,
@@ -1289,6 +1332,25 @@ class CudaGraphRunner:
         capture_template = static["capture_template"]
         config_labels = graph_data.config.labels
 
+        # MSTAR_FULLSTEP_DECODE (moonshot A'): for a self-feeding capture on
+        # an all-greedy batch whose rid tuple matches the tokens currently in
+        # the shared static feed buffer, the graph feeds itself — SKIP every
+        # static-input copy (token feed was written GPU-side after the
+        # previous replay; pos_3d self-advanced in-graph). Any mismatch
+        # re-seeds from the host-threaded tokens via the normal copy path.
+        # The feed marker is pessimistically cleared here and re-validated on
+        # the success path, so a replay failure can never leave a stale
+        # "trustworthy" marker behind.
+        rid_key = tuple(request_ids)
+        fullstep_greedy = (
+            graph_data.self_feeding
+            and slot_data.static_outputs.get("__batched_logits__") is not None
+            and self._is_all_greedy_no_penalty(request_ids)
+        )
+        self_feed = fullstep_greedy and self._fullstep_feed_rids == rid_key
+        if graph_data.self_feeding:
+            self._fullstep_feed_rids = None
+
         # Swap-and-restore must be paired: if any step between swap and restore
         # raises (e.g., submodule.preprocess hitting an insufficient-KV alloc
         # failure), the dummy slots are still aliased to real RequestState
@@ -1372,14 +1434,18 @@ class CudaGraphRunner:
                 range_pop(synchronize=False)
 
             # --- Step 3: Copy real packed tensors into static buffers ---
+            # Self-feeding steady state: the captured graph owns ALL its
+            # static inputs (token feed written GPU-side, pos_3d
+            # self-advanced in-graph), so the whole copy loop is skipped.
             if self.enable_nvtx:
                 range_push("cg.copy_inputs", synchronize=False)
-            for k in static_input_keys:
-                real_val = real_inputs.get(k)
-                if real_val is None or not isinstance(real_val, torch.Tensor):
-                    continue
-                static_buf = preprocessed[k]
-                static_buf[:real_val.shape[0]].copy_(real_val)
+            if not self_feed:
+                for k in static_input_keys:
+                    real_val = real_inputs.get(k)
+                    if real_val is None or not isinstance(real_val, torch.Tensor):
+                        continue
+                    static_buf = preprocessed[k]
+                    static_buf[:real_val.shape[0]].copy_(real_val)
             if self.enable_nvtx:
                 range_pop(synchronize=False)
                 range_pop(synchronize=False)
@@ -1457,9 +1523,21 @@ class CudaGraphRunner:
                 # pageable H2D uploads. Decode-style (BASIC_BATCHED) path
                 # only — prefill keeps the host path.
                 graph_sampler=engine_inputs.sampler,
+                # MSTAR_FULLSTEP_DECODE: shared static token-feed buffer for
+                # the GPU-side sampled-token writeback (all-greedy batches
+                # of a self-feeding capture only).
+                feed_buf=(
+                    preprocessed["next_token_ids"] if fullstep_greedy else None
+                ),
             )
             if self.enable_nvtx:
                 range_pop(synchronize=False)
+
+            if fullstep_greedy:
+                # The feed buffer now holds this batch's sampled tokens
+                # (written GPU-side) — the next replay with this exact rid
+                # tuple may self-feed.
+                self._fullstep_feed_rids = rid_key
 
             success = True
             return outputs
@@ -1869,6 +1947,7 @@ class CudaGraphRunner:
         submodule: ARNodeSubmodule,
         inputs: list[ARNodeInputs] | None = None,
         graph_sampler: "CudaGraphableSampler | None" = None,
+        feed_buf: torch.Tensor | None = None,
     ) -> dict:
         """Sample logits + copy non-logit per-rid outputs, remapping dummy → real rids.
 
@@ -1892,7 +1971,25 @@ class CudaGraphRunner:
         if batched_logits is not None:
             stacked_logits = batched_logits[:len(request_ids)]
             sampled = None
-            if (
+            if feed_buf is not None and graph_sampler is not None:
+                # MSTAR_FULLSTEP_DECODE (A1): all-greedy batch of a
+                # self-feeding capture. Sample via the capture-safe argmax
+                # short-circuit and write the token ids straight back into
+                # the shared static ``next_token_ids`` buffer — a tiny
+                # async device→device copy, never read by the host — so the
+                # NEXT replay's in-graph embed_tokens consumes them without
+                # any host-side token threading. (A2 moves both the argmax
+                # and this writeback inside the captured region.)
+                sampled = graph_sampler.sample_greedy(stacked_logits)
+                feed_buf[:sampled.shape[0]].copy_(sampled)
+                # Same per-rid philox bookkeeping as the R1-lite branch
+                # below: greedy never consumes the RNG stream, but a rid
+                # whose config later flips to temp>0 must resume on the
+                # host path with the offset it would have had flag-off.
+                step_offset = self.sampler._step_offset
+                for rid in request_ids:
+                    step_offset[rid] = step_offset.get(rid, 0) + 1
+            elif (
                 self.INGRAPH_GREEDY
                 and graph_sampler is not None
                 and self._is_all_greedy_no_penalty(request_ids)

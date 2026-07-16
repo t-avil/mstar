@@ -114,6 +114,27 @@ def vllm_audio_sentinels_enabled() -> bool:
     return _envflag("MSTAR_VLLM_AUDIO_SENTINELS")
 
 
+def fullstep_decode_enabled() -> bool:
+    """MSTAR_FULLSTEP_DECODE: self-feeding, sync-free ``thinker_decode`` step
+    (moonshot A' — strategy_v11/round4). When ON:
+
+    - ``prepare_inputs``/``preprocess`` emit the raw next-token ids
+      (``next_token_ids``) and 3D MRoPE positions (``pos_3d``) instead of
+      host-built ``input_embeds`` + eager ``compute_3d_cos_sin`` outputs;
+    - the batched decode forward embeds the token and computes cos/sin
+      IN-GRAPH, and advances ``pos_3d`` in-graph (+1/step, all 3 dims);
+    - the CUDA-graph runner writes the sampled token back into the shared
+      static ``next_token_ids`` buffer GPU-side (all-greedy batches), so on
+      steady-state decode steps the host never touches the token to build
+      the next step — replay N+1 reads the feed written after replay N.
+
+    Default OFF -> byte-identical legacy path (host embeds + static-buffer
+    copies each step). Greedy-only fast path: mixed / temp>0 batches keep
+    today's host sampling and re-seed the feed buffer every step.
+    """
+    return _envflag("MSTAR_FULLSTEP_DECODE")
+
+
 def batch_vision_prefill_enabled() -> bool:
     """When ON, allow the Thinker ``prefill_vision`` walk to batch more than
     one request per step (like ``prefill_audio`` / ``prefill_text`` already

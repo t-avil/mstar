@@ -835,6 +835,12 @@ class KVCacheEngine(BaseEngine):
                 if self.enable_nvtx:
                     range_pop(synchronize=False)
         elif submodule.can_batch(batch, node_inputs):
+            # MSTAR_FULLSTEP_DECODE: an eager step bypasses the runner's
+            # interned static token-feed buffer — a later replay must not
+            # trust it even if the rid tuple matches (no-op when the flag /
+            # self-feeding captures are absent).
+            if submod_mgmt.cuda_graph_runner is not None:
+                submod_mgmt.cuda_graph_runner.invalidate_fullstep_feed()
             if self.enable_nvtx:
                 range_push("kv_cache.batched_path", synchronize=False)
             try:
@@ -845,6 +851,9 @@ class KVCacheEngine(BaseEngine):
                 if self.enable_nvtx:
                     range_pop(synchronize=False)
         else:
+            # See the batched branch — same eager-detour invalidation.
+            if submod_mgmt.cuda_graph_runner is not None:
+                submod_mgmt.cuda_graph_runner.invalidate_fullstep_feed()
             if self.enable_nvtx:
                 range_push("kv_cache.sequential_path", synchronize=False)
             try:
