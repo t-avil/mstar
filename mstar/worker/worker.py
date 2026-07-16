@@ -1004,8 +1004,14 @@ class Worker:
                         new_tokens.extend(tensor.cpu().numpy().tolist())
                 name_to_new_token[signal.name] = new_tokens
 
+                # Buffer ONLY this signal's tokens. buffer_new_tokens EXTENDs
+                # pending state and this block runs once per signal — passing
+                # the ACCUMULATED dict re-extended every earlier name's tokens
+                # once per later signal (duplicated tokens whenever a step
+                # carries >1 distinct new-token signal name). Byte-identical
+                # for single-name steps.
                 self.worker_graphs_manager.buffer_new_tokens(
-                    request_id, name_to_new_token
+                    request_id, {signal.name: new_tokens}
                 )
 
         if outputs.emit_to_client:
