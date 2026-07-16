@@ -924,6 +924,22 @@ class ThinkerSubmodule(ARNodeSubmodule):
             return self._PREFILL_VISION_TOKEN_BUCKETS_ALIGNED
         return self._PREFILL_VISION_TOKEN_BUCKETS_BASE
 
+    @staticmethod
+    def _env_batch_sizes(name: str, default: list) -> list:
+        """Override a prefill capture_batch_sizes grid via env (comma ints).
+        Experimental: push i2t prefill batching past bs=4 to batch more images'
+        prefills per forward (vLLM-style). Each added size captures more graphs
+        = more memory (OOM risk on the 30B Thinker); expand incrementally.
+        Empty/unset -> default."""
+        raw = os.environ.get(name, "").strip()
+        if not raw:
+            return default
+        try:
+            vals = sorted({int(x) for x in raw.split(",") if x.strip()})
+        except ValueError:
+            return default
+        return vals or default
+
     def _build_prefill_text_packed(
         self, num_tokens: int, device: torch.device,
     ) -> dict[str, torch.Tensor]:
@@ -1043,7 +1059,9 @@ class ThinkerSubmodule(ARNodeSubmodule):
             batch_vision_prefill_enabled,
         )
         prefill_vision_capture_bs = (
-            self.PREFILL_VISION_BATCH_CAPTURE_BATCH_SIZES
+            self._env_batch_sizes(
+                "MSTAR_VIS_BATCH_SIZES", self.PREFILL_VISION_BATCH_CAPTURE_BATCH_SIZES
+            )
             if batch_vision_prefill_enabled()
             else self.PREFILL_VISION_CAPTURE_BATCH_SIZES
         )
@@ -1092,7 +1110,9 @@ class ThinkerSubmodule(ARNodeSubmodule):
                 labels=["main"],
                 compile=True,
                 causal_attention=True,
-                capture_batch_sizes=self.PREFILL_CAPTURE_BATCH_SIZES,
+                capture_batch_sizes=self._env_batch_sizes(
+                    "MSTAR_PREFILL_BATCH_SIZES", self.PREFILL_CAPTURE_BATCH_SIZES
+                ),
                 zero_padding_input=ARNodeInputs(
                     input_seq_len=0,
                     input_embeds=torch.zeros(
