@@ -408,6 +408,32 @@ class PreprocessWorkerThread:
         self, result: ResultTensors
     ):
         result.graph_edge.name = f"{result.modality}_output"
+        # Inline fast path: token values arrived in the message metadata, so
+        # there is no SHM tensor to fetch and no producer ack to send. The
+        # producer already released its tensor_store ref locally.
+        if result.metadata and "inline_values" in result.metadata:
+            if self._ordered_emit:
+                # Enqueue at the FIFO tail; emits only once every earlier
+                # arrival for this (rid, modality) has emitted.
+                key = (result.request_id, result.modality)
+                chunks = self._build_inline_chunks(result)
+                entry = {
+                    "ready": True,
+                    "uuid_order": list(range(len(chunks))),
+                    "chunks": dict(enumerate(chunks)),
+                    "pending": set(),
+                }
+                self._emit_fifos.setdefault(key, collections.deque()).append(entry)
+                if self._ordered_emit_debug:
+                    logger.warning(
+                        "ORDEMIT arrival INLINE rid=%s n_chunks=%d fifo_len=%d",
+                        result.request_id, len(chunks),
+                        len(self._emit_fifos[key]),
+                    )
+                self._flush_emit_fifo(key)
+            else:
+                self._emit_inline_result(result)
+            return
         self.tensor_manager.start_read_tensors(
             request_id=result.request_id,
             graph_edges=[result.graph_edge],
@@ -456,6 +482,59 @@ class PreprocessWorkerThread:
                 # it never lingers at the head.
                 self._flush_emit_fifo(key)
 
+    def _emit_inline_result(self, result: ResultTensors):
+        """Produce ResultChunk(s) directly from inline token values.
+
+        Mirrors _process_read_tensors' emission but skips the transport
+        fetch: one chunk per tensor_info entry (so per_request_reading_tensors,
+        bumped by len(tensor_info) in new_result_tensors, balances exactly),
+        each reconstructed as a byte-identical tensor from the inline ints
+        using the tensor_info dtype/shape and run through the same postprocess.
+        """
+        for chunk in self._build_inline_chunks(result):
+            self.out_queue.put(chunk)
+
+    def _build_inline_chunks(self, result: ResultTensors) -> list[ResultChunk]:
+        """Construct the ResultChunk list for an inline-values message
+        (shared by the immediate path and MSTAR_ORDERED_EMIT's FIFO path)."""
+        modality = result.graph_edge.name.replace("_output", "")
+        # The producer keys inline_values by the pre-rename edge name; there is
+        # exactly one entry (this edge). Fall back to the single value list.
+        inline_map: dict = result.metadata["inline_values"]
+        values = next(iter(inline_map.values())) if inline_map else []
+        chunk_metadata = {
+            k: v for k, v in (result.metadata or {}).items()
+            if k != "inline_values"
+        }
+        # Keep parity with _process_read_tensors' audio enrichment: an audio
+        # item emitted inline must carry sample_rate too, or clients fall
+        # back to a hardcoded rate and mis-wrap the PCM. (Today only integer
+        # text tokens ride inline, but the two chunk-assembly paths must not
+        # diverge on this field.)
+        if modality == "audio" and self.model is not None:
+            chunk_metadata = {
+                **chunk_metadata,
+                "sample_rate": self.model.get_output_sample_rate("audio"),
+            }
+        chunks: list[ResultChunk] = []
+        for tensor_info in result.graph_edge.tensor_info:
+            n = 1
+            for d in tensor_info.dims:
+                n *= int(d)
+            ints = values[:n]
+            values = values[n:]
+            tensor = torch.tensor(ints, dtype=tensor_info.dtype).reshape(
+                tensor_info.dims
+            )
+            postprocessed = self.model.postprocess(tensor, modality)
+            chunks.append(ResultChunk(
+                request_id=result.request_id,
+                modality=modality,
+                data=postprocessed,
+                metadata=chunk_metadata,
+            ))
+        return chunks
+
     def _flush_emit_fifo(self, key: tuple[str, str]) -> None:
         """Emit the head-run of ready entries for one (rid, modality) FIFO.
 
@@ -488,6 +567,12 @@ class PreprocessWorkerThread:
     def _discard_result_tensor(
         self, result: ResultTensors
     ):
+        # Inline messages carry no transported tensors: the producer never
+        # registered them for send and already released its ref locally, so
+        # there is nothing to ack. Acking would deref uuids the producer
+        # doesn't hold — make discard a no-op for inline-only messages.
+        if result.metadata and "inline_values" in result.metadata:
+            return
         # The request is gone, so don't start a read — just ack the tensors back
         # to the producing worker so it can free the source buffers.
         self.tensor_manager.ack_unread_tensors(
