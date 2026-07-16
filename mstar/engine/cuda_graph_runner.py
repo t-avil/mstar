@@ -37,7 +37,13 @@ from mstar.engine.kv_store import KVCacheConfig, PagedAllocationManager
 from mstar.model.submodule_base import ARNodeInputs, ARNodeSubmodule, ModelInputsFromEngine, NodeSubmodule
 from mstar.profile.worker import ExecTimings
 from mstar.utils.profiler import mark, range_pop, range_push
-from mstar.utils.sampling import Sampler, SamplerBuffers, SamplingConfig, make_sampler_from_buffers
+from mstar.utils.sampling import (
+    CudaGraphableSampler,
+    Sampler,
+    SamplerBuffers,
+    SamplingConfig,
+    make_sampler_from_buffers,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +158,15 @@ class CudaGraphRunner:
     # races with torch.compile's autotune state — verify capture succeeds
     # before claiming the perf win).
     NUM_SLOTS = int(os.environ.get("MSTAR_NUM_SLOTS", "2"))
+    # R1-lite (strategy_v11/round3 §A.4): for ALL-GREEDY decode batches, sample
+    # via the per-step CudaGraphableSampler's argmax short-circuit instead of
+    # the legacy host Sampler, whose six pageable H2D param uploads
+    # (mstar/utils/sampling.py, Sampler.sample) stream-sync the host to full
+    # graph completion every step — serializing the whole post-replay tail
+    # into ITL. Replay-time swap only: capture is untouched in both flag
+    # states, and with the flag off (default) the code path is byte-identical
+    # to before. Mixed / temp>0 batches always keep the host path.
+    INGRAPH_GREEDY = os.environ.get("MSTAR_INGRAPH_GREEDY", "0") == "1"
 
     def __init__(
         self,
@@ -1407,6 +1422,12 @@ class CudaGraphRunner:
                 slot_data=slot_data,
                 submodule=submodule,
                 inputs=inputs,
+                # R1-lite: hand the per-step buffered sampler (built above at
+                # engine_inputs construction) to the sampling step so
+                # all-greedy decode batches can skip the host Sampler's
+                # pageable H2D uploads. Decode-style (BASIC_BATCHED) path
+                # only — prefill keeps the host path.
+                graph_sampler=engine_inputs.sampler,
             )
             if self.enable_nvtx:
                 range_pop(synchronize=False)
@@ -1739,6 +1760,29 @@ class CudaGraphRunner:
         if self.enable_nvtx:
             range_pop(synchronize=False)
 
+    def _is_all_greedy_no_penalty(self, request_ids: list[str]) -> bool:
+        """CPU-only gate for the R1-lite greedy sampling path.
+
+        True iff every request in the batch is greedy (temperature == 0) with
+        repetition_penalty disabled — the subset where argmax over the raw
+        logits is exactly the host ``Sampler``'s semantics (greedy rows ignore
+        top_k/top_p: the fused prep kernel one-hots the argmax before the
+        FlashInfer sampler, and any top-k/top-p filter keeps the single
+        1.0-prob token). A penalty != 1.0 both changes the argmax input and
+        needs the host path's seen-mask updates, so it disqualifies. Mixed
+        batches (any temp>0 rid) return False and take the host path
+        unchanged — the parity-safe subset from round3 §A.4.
+
+        Reads the host Sampler's per-rid configs: plain dict lookups, no GPU
+        work, no sync.
+        """
+        configs = self.sampler._sampling_config
+        for rid in request_ids:
+            cfg = configs.get(rid)
+            if cfg is None or cfg.temperature != 0 or cfg.repetition_penalty != 1.0:
+                return False
+        return True
+
     def _sample_and_remap(
         self,
         request_ids: list[str],
@@ -1748,6 +1792,7 @@ class CudaGraphRunner:
         slot_data: CudaGraphSlot,
         submodule: ARNodeSubmodule,
         inputs: list[ARNodeInputs] | None = None,
+        graph_sampler: "CudaGraphableSampler | None" = None,
     ) -> dict:
         """Sample logits + copy non-logit per-rid outputs, remapping dummy → real rids.
 
@@ -1770,20 +1815,51 @@ class CudaGraphRunner:
         batched_logits = static_output.get("__batched_logits__")
         if batched_logits is not None:
             stacked_logits = batched_logits[:len(request_ids)]
-            # FlashInfer's top-p / top-k sampling reuses an internal output
-            # buffer across calls, so iter-N's ``sampled`` tensor address
-            # equals iter-(N+k)'s for some small k. With speculation,
-            # iter-N's sampled view is held in the routing path (read by
-            # slow_post for emit_to_client + check_stop) past the time
-            # iter-(N+k) overwrites the buffer — slow_post then reads
-            # iter-(N+k)'s token as if it were iter-N's, emitting the same
-            # token twice and producing the mid-sequence "X X Y Y Z Z"
-            # duplication seen on Qwen3-Omni audio output.
-            #
-            # The .clone() snapshots the sampled value into a fresh
-            # allocation that lives as long as the Python view, breaking
-            # the alias.
-            sampled = self.sampler.sample(request_ids, stacked_logits).clone()
+            sampled = None
+            if (
+                self.INGRAPH_GREEDY
+                and graph_sampler is not None
+                and self._is_all_greedy_no_penalty(request_ids)
+            ):
+                # R1-lite (MSTAR_INGRAPH_GREEDY): all-greedy decode batch —
+                # sample via the per-step buffered sampler's argmax
+                # short-circuit. Pure device ops: no per-step sampling-param
+                # H2D, no pageable-copy stream sync, so the GPU thread
+                # returns (and future(N) resolves) at ENQUEUE time instead of
+                # at full-graph completion — the pipeline the double-buffer /
+                # pre-plan design was built for actually engages. The
+                # sampled-token D2H for emit/check_stop is untouched: it
+                # still happens downstream, batched + pinned + event-gated
+                # (_d2h_new_tokens / FAST_CHECKSTOP).
+                #
+                # No .clone() needed on this path: argmax returns a fresh
+                # allocation per call (see sample_greedy docstring), so the
+                # FlashInfer output-buffer alias hazard documented below
+                # does not exist here.
+                sampled = graph_sampler.sample_greedy(stacked_logits)
+                # Mirror the host path's per-rid RNG offset bookkeeping so a
+                # request whose config later flips to temp>0 resumes on the
+                # host path with the exact philox offset it would have had
+                # flag-off. Greedy never reads the offset, so this is pure
+                # CPU dict work.
+                step_offset = self.sampler._step_offset
+                for rid in request_ids:
+                    step_offset[rid] = step_offset.get(rid, 0) + 1
+            if sampled is None:
+                # FlashInfer's top-p / top-k sampling reuses an internal output
+                # buffer across calls, so iter-N's ``sampled`` tensor address
+                # equals iter-(N+k)'s for some small k. With speculation,
+                # iter-N's sampled view is held in the routing path (read by
+                # slow_post for emit_to_client + check_stop) past the time
+                # iter-(N+k) overwrites the buffer — slow_post then reads
+                # iter-(N+k)'s token as if it were iter-N's, emitting the same
+                # token twice and producing the mid-sequence "X X Y Y Z Z"
+                # duplication seen on Qwen3-Omni audio output.
+                #
+                # The .clone() snapshots the sampled value into a fresh
+                # allocation that lives as long as the Python view, breaking
+                # the alias.
+                sampled = self.sampler.sample(request_ids, stacked_logits).clone()
             sampled_views = sampled.split(1)
             outputs = {
                 rid: {"new_token": [view]}

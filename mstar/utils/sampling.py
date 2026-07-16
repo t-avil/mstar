@@ -625,6 +625,39 @@ class CudaGraphableSampler(BaseSampler):
         return codes
 
     @torch.compiler.disable
+    def sample_greedy(self, logits: torch.Tensor) -> torch.Tensor:
+        """vLLM-style greedy short-circuit: argmax over raw logits.
+
+        Used by the runner's R1-lite path (``MSTAR_INGRAPH_GREEDY``) for
+        decode batches where EVERY request is greedy (temperature == 0,
+        repetition_penalty == 1). Bypasses the softmax-prep Triton kernel and
+        the FlashInfer sampler entirely — pure device ops (argmax + optional
+        TP broadcast), zero host→GPU parameter traffic, no stream sync. Also
+        CUDA-graph-capturable, so R1-full can later move this call inside the
+        captured region unchanged.
+
+        Parity vs the host ``Sampler``: for a greedy request the host path
+        one-hots the argmax inside ``fused_temperature_softmax``
+        (first-occurrence tie-break, same as ``torch.argmax``) and FlashInfer
+        deterministically returns that index; top_k/top_p filters keep the
+        single 1.0-prob token, so both paths emit the argmax of the same raw
+        logits. Exact fp ties are the only divergence risk (both tie-break to
+        the first index) — gate any perf claim on the token-level parity run.
+
+        ``offset_buf`` is deliberately NOT advanced: greedy never consumes the
+        philox stream (the caller maintains the host sampler's per-rid
+        ``_step_offset`` bookkeeping so a mid-request config flip to temp>0
+        resumes on the host path with the offset it would have had flag-off).
+
+        Returns [batch_size] int64 (same contract as ``sample``). The output
+        is a fresh allocation each call — unlike FlashInfer's reused sampling
+        output buffer, it never aliases a later step's tokens, so callers do
+        not need the defensive ``.clone()``.
+        """
+        tokens = torch.argmax(logits, dim=-1)
+        return self._broadcast_tokens(tokens)
+
+    @torch.compiler.disable
     def sample_with_config(
         self, logits: torch.Tensor,
         temperature: float,
