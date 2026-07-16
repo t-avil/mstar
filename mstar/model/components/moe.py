@@ -57,6 +57,7 @@ flag on the block.
 from __future__ import annotations
 
 import logging
+import os
 
 import torch
 import torch.nn.functional as F
@@ -202,6 +203,59 @@ def _dispatch(
     return dispatch_experts_fused(
         hidden_states, gate_up_proj, down_proj,
         num_experts, selected_experts, routing_weights,
+    )
+
+
+# --------------------------------------------------------------------------
+# Optional block-fp8 (w8a8) expert dispatch. At decode the routed-expert
+# GEMMs are memory-bound on expert weight reads, so halving weight bytes
+# (bf16 -> fp8_e4m3 with per-(128,128)-block scales) roughly halves the MoE
+# slice of the step. Weights are quantized lazily on first forward (before
+# CUDA graph capture, which happens after warmup) and the bf16 originals are
+# freed to reclaim VRAM.
+# --------------------------------------------------------------------------
+def _moe_fp8_flag(env_name: str) -> bool:
+    return _HAS_FUSED and os.environ.get(env_name, "0") == "1"
+
+
+def _ensure_fp8_experts(experts: nn.Module):
+    cached = getattr(experts, "_fp8_cache", None)
+    if cached is not None:
+        return cached
+    from mstar.utils.fused_moe.fp8 import per_block_cast_to_fp8_weight
+
+    w1, s1 = per_block_cast_to_fp8_weight(experts.gate_up_proj.data)
+    w2, s2 = per_block_cast_to_fp8_weight(experts.down_proj.data)
+    # Free the bf16 originals: every later forward uses only the fp8 copies.
+    experts.gate_up_proj.data = experts.gate_up_proj.data.new_empty(0)
+    experts.down_proj.data = experts.down_proj.data.new_empty(0)
+    experts._fp8_cache = (w1, s1, w2, s2)
+    logger.info(
+        "MoE experts quantized to block-fp8 w8a8: w1 %s, w2 %s",
+        tuple(w1.shape), tuple(w2.shape),
+    )
+    return experts._fp8_cache
+
+
+@torch.compiler.disable
+def _dispatch_fp8(
+    experts: nn.Module,
+    hidden_states: torch.Tensor,
+    selected_experts: torch.Tensor,
+    routing_weights: torch.Tensor,
+    reduce_results: bool = True,
+) -> torch.Tensor:
+    # compiler.disable (same pattern as FlashInferDecodeWrapper.run): the
+    # lazy quantization mutates module state (frees the bf16 params), which
+    # dynamo must not trace — re-tracing a later bucket otherwise sees the
+    # freed size-0 param and inductor fails the capture.
+    from mstar.utils.fused_moe.fp8 import fused_experts_fp8
+
+    w1, s1, w2, s2 = _ensure_fp8_experts(experts)
+    return fused_experts_fp8(
+        hidden_states, w1, s1, w2, s2,
+        routing_weights, selected_experts,
+        reduce_results=reduce_results,
     )
 
 
@@ -455,10 +509,15 @@ class ParallelSparseMoeBlock(nn.Module):
         routing_weights, selected_experts, router_states_next = self.gate(flat, router_states)
 
         if self.comm_group.world_size == 1:
-            out = _dispatch(
-                flat, self.experts.gate_up_proj, self.experts.down_proj,
-                self.num_experts, selected_experts, routing_weights,
-            )
+            if _moe_fp8_flag("MSTAR_MOE_FP8") and flat.is_cuda:
+                out = _dispatch_fp8(
+                    self.experts, flat, selected_experts, routing_weights,
+                )
+            else:
+                out = _dispatch(
+                    flat, self.experts.gate_up_proj, self.experts.down_proj,
+                    self.num_experts, selected_experts, routing_weights,
+                )
         else:
             out = self._dispatch_tp(flat, routing_weights, selected_experts)
         out = out.view(input_shape)
@@ -472,10 +531,16 @@ class ParallelSparseMoeBlock(nn.Module):
         from mstar.utils.fused_moe import fused_experts, moe_sum_reduce_triton
 
         # (tokens, top_k, hidden) — partial results before reduce
-        cache3 = fused_experts(
-            flat, self.experts.gate_up_proj, self.experts.down_proj,
-            routing_weights, selected_experts, reduce_results=False,
-        )
+        if _moe_fp8_flag("MSTAR_MOE_FP8") and flat.is_cuda:
+            cache3 = _dispatch_fp8(
+                self.experts, flat, selected_experts, routing_weights,
+                reduce_results=False,
+            )
+        else:
+            cache3 = fused_experts(
+                flat, self.experts.gate_up_proj, self.experts.down_proj,
+                routing_weights, selected_experts, reduce_results=False,
+            )
         output = torch.empty_like(flat)
         moe_sum_reduce_triton(cache3, output, routed_scaling_factor=1.0)
         self.comm_group.all_reduce(output)
@@ -564,10 +629,15 @@ class ParallelSparseMoeBlockWithSharedExpert(nn.Module):
 
         routing_weights, selected_experts, router_states_next = self.gate(flat, router_states)
         if self.comm_group.world_size == 1:
-            routed = _dispatch(
-                flat, self.experts.gate_up_proj, self.experts.down_proj,
-                self.num_experts, selected_experts, routing_weights,
-            )
+            if _moe_fp8_flag("MSTAR_MOE_FP8_TALKER") and flat.is_cuda:
+                routed = _dispatch_fp8(
+                    self.experts, flat, selected_experts, routing_weights,
+                )
+            else:
+                routed = _dispatch(
+                    flat, self.experts.gate_up_proj, self.experts.down_proj,
+                    self.num_experts, selected_experts, routing_weights,
+                )
         else:
             routed = self._dispatch_tp(flat, routing_weights, selected_experts)
         shared_gate = torch.sigmoid(self.shared_expert_gate(flat))
@@ -581,10 +651,16 @@ class ParallelSparseMoeBlockWithSharedExpert(nn.Module):
     ) -> torch.Tensor:
         from mstar.utils.fused_moe import fused_experts, moe_sum_reduce_triton
 
-        cache3 = fused_experts(
-            flat, self.experts.gate_up_proj, self.experts.down_proj,
-            routing_weights, selected_experts, reduce_results=False,
-        )
+        if _moe_fp8_flag("MSTAR_MOE_FP8_TALKER") and flat.is_cuda:
+            cache3 = _dispatch_fp8(
+                self.experts, flat, selected_experts, routing_weights,
+                reduce_results=False,
+            )
+        else:
+            cache3 = fused_experts(
+                flat, self.experts.gate_up_proj, self.experts.down_proj,
+                routing_weights, selected_experts, reduce_results=False,
+            )
         output = torch.empty_like(flat)
         moe_sum_reduce_triton(cache3, output, routed_scaling_factor=1.0)
         self.comm_group.all_reduce(output)
