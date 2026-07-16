@@ -16,6 +16,7 @@ Usage:
 """
 
 import logging
+import os
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
@@ -26,6 +27,28 @@ import triton
 import triton.language as tl
 
 logger = logging.getLogger(__name__)
+
+# Host-path sampling-param upload mode (see Sampler._upload_params). Default
+# ON: stage the six per-step params through a persistent pinned ring and copy
+# non_blocking, so the host never enters the pageable-copy
+# cudaStreamSynchronize that parks it until the whole decode graph completes.
+# Set MSTAR_PINNED_SAMPLE_PARAMS=0 to restore the legacy pageable uploads
+# (byte-identical values either way; this flag only changes the transfer
+# mechanism, for A/B).
+_PINNED_SAMPLE_PARAMS = os.environ.get("MSTAR_PINNED_SAMPLE_PARAMS", "1") == "1"
+
+# (name, pinned staging dtype) for the six per-step sampling params, in the
+# order Sampler.sample consumes them. Fixed dtypes are safe: sample_tokens
+# normalizes temperature/top_p/repetition_penalty through _to_tensor(float32)
+# and top_k to int32 before any kernel reads them.
+_PARAM_SPECS: tuple = (
+    ("temperature", torch.float32),
+    ("top_k", torch.int32),
+    ("top_p", torch.float32),
+    ("r_pen", torch.float32),
+    ("seed", torch.long),
+    ("rand_offset", torch.long),
+)
 
 
 @triton.autotune(
@@ -304,6 +327,16 @@ class Sampler(BaseSampler):
     # (seed, offset=0) draws repeat forever and stable logits never reach EOS.
     _step_offset: dict[str, int] = field(default_factory=dict)
     tp_group: "TPCommGroup | None" = None  # noqa: F821
+    # Persistent pinned staging ring for the six per-step sampling-param
+    # uploads (see _upload_params). Lazily (re)built on first use / growth.
+    _param_slots: list = field(default_factory=list, repr=False)
+    _param_slot_idx: int = field(default=0, repr=False)
+
+    # Ring depth for the pinned staging slots. The graph double-buffer
+    # (NUM_SLOTS=2) caps useful host run-ahead at ~2 in-flight decode steps,
+    # so by the time a slot comes around again its reuse event is ~4 steps
+    # stale and the guarding synchronize is a no-op.
+    _NUM_PARAM_SLOTS = 4
 
     def add_request(self, request_id: str):
         self._sampling_config[request_id] = SamplingConfig()
@@ -341,6 +374,102 @@ class Sampler(BaseSampler):
                 device=self.device
             )
 
+    def _acquire_param_slot(self, batch_size: int) -> dict:
+        """Rotate to the next pinned staging slot, growing capacity if needed.
+
+        Growth reallocates the whole ring (old slots — including ones with
+        in-flight copies — stay safe: torch's caching host allocator records
+        stream uses of pinned blocks and defers reuse until the copies
+        complete). Reusing a slot waits on the event recorded after its last
+        copies; steady-state that event is ``_NUM_PARAM_SLOTS`` steps old and
+        long complete, so the wait is a no-op — it exists to make host-side
+        rewrite-while-copy-in-flight provably impossible.
+        """
+        cap = (
+            self._param_slots[0]["temperature"].shape[0]
+            if self._param_slots else 0
+        )
+        if cap < batch_size:
+            new_cap = max(batch_size, cap * 2, 8)
+            self._param_slots = [
+                {
+                    **{
+                        name: torch.empty(new_cap, dtype=dtype, pin_memory=True)
+                        for name, dtype in _PARAM_SPECS
+                    },
+                    "event": torch.cuda.Event(),
+                    "recorded": False,
+                }
+                for _ in range(self._NUM_PARAM_SLOTS)
+            ]
+            self._param_slot_idx = 0
+        slot = self._param_slots[self._param_slot_idx]
+        self._param_slot_idx = (self._param_slot_idx + 1) % len(self._param_slots)
+        if slot["recorded"]:
+            slot["event"].synchronize()
+        return slot
+
+    def _upload_params(
+        self,
+        configs: list[SamplingConfig],
+        request_ids: list[str],
+        device: torch.device,
+    ) -> tuple[torch.Tensor, ...]:
+        """Upload the six per-step sampling params as one pinned+async batch.
+
+        Legacy path (``MSTAR_PINNED_SAMPLE_PARAMS=0`` or non-CUDA device):
+        ``torch.tensor(..., device=cuda)`` — a pageable H2D per param, each a
+        ``cudaMemcpyAsync`` + ``cudaStreamSynchronize``; the first sync parks
+        the host until *everything* already queued on the stream (i.e. the
+        whole decode graph) completes. That serializes the entire post-replay
+        host tail into ITL (round3_floor_admission.md §A, slice S1).
+
+        Pinned path: write each param row into a persistent pinned slot, then
+        ``.to(device, non_blocking=True)`` — stream-ordered async copies, the
+        host never blocks. Use-after-free safety:
+          - Device side: the copies and every eager sample kernel that reads
+            the resulting tensors are enqueued on the same stream, so stream
+            order guarantees the params are materialized before any read; the
+            device tensors stay referenced by the caller through the whole
+            ``sample_tokens`` call, and the caching allocator's stream-ordered
+            reuse makes the eventual free safe.
+          - Host side: the pinned rows persist on ``self`` and rotate through
+            a ring guarded by per-slot CUDA events (``_acquire_param_slot``),
+            so a slot is never rewritten while its previous copies are in
+            flight.
+        """
+        rows = (
+            [c.temperature for c in configs],
+            [c.top_k for c in configs],
+            [c.top_p for c in configs],
+            [c.repetition_penalty for c in configs],
+            [c.seed for c in configs],
+            [self._step_offset.get(rid, 0) for rid in request_ids],
+        )
+        if not _PINNED_SAMPLE_PARAMS or device.type != "cuda":
+            # Exact legacy construction (dtype inference included) so the
+            # flag-off path is unchanged.
+            return (
+                torch.tensor(rows[0], device=device),
+                torch.tensor(rows[1], device=device, dtype=torch.int32),
+                torch.tensor(rows[2], device=device),
+                torch.tensor(rows[3], device=device),
+                torch.tensor(rows[4], device=device, dtype=torch.long),
+                torch.tensor(rows[5], device=device, dtype=torch.long),
+            )
+        bs = len(configs)
+        slot = self._acquire_param_slot(bs)
+        out = []
+        for row, (name, dtype) in zip(rows, _PARAM_SPECS, strict=True):
+            staged = slot[name]
+            staged[:bs].copy_(torch.tensor(row, dtype=dtype))  # CPU->pinned, no GPU
+            out.append(staged[:bs].to(device, non_blocking=True))
+        # Mark the stream point after which this slot's pinned rows may be
+        # rewritten (consumed by _acquire_param_slot on slot reuse).
+        slot["event"].record(torch.cuda.current_stream(device))
+        slot["recorded"] = True
+        return tuple(out)
+
     def sample(
         self, request_ids: list[str], logits: torch.Tensor, **kwargs
     ) -> torch.Tensor:
@@ -352,14 +481,8 @@ class Sampler(BaseSampler):
         the hot path doesn't need.
         """
         configs = [self._sampling_config[rid] for rid in request_ids]
-        temperature = torch.tensor([c.temperature for c in configs], device=logits.device)
-        top_k = torch.tensor([c.top_k for c in configs], device=logits.device, dtype=torch.int32)
-        top_p = torch.tensor([c.top_p for c in configs], device=logits.device)
-        r_pen = torch.tensor([c.repetition_penalty for c in configs], device=logits.device)
-        seed = torch.tensor([c.seed for c in configs], device=logits.device, dtype=torch.long)
-        rand_offset = torch.tensor(
-            [self._step_offset.get(rid, 0) for rid in request_ids],
-            device=logits.device, dtype=torch.long,
+        temperature, top_k, top_p, r_pen, seed, rand_offset = self._upload_params(
+            configs, request_ids, logits.device,
         )
 
         any_rep_pen = any(c.repetition_penalty != 1.0 for c in configs)
