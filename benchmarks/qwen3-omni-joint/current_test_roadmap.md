@@ -780,3 +780,31 @@ default-stream else at :2390-2395; fetched var never used). The measured effects
 Clean batch-gated reimpl on eiv2: MSTAR_ENC_OVERLAP=<N> (commit 8c518dce, +204 LOC,
 in-flight<=N gate, TP==1 + Thinker-local guard, blanket default-stream join, flag-off
 byte-identical). A/B in flight: s2t B1/B2 target, B32 guard, greedy-B1 parity pair.
+
+## TTFT DECOMPOSITION (2026-07-16, --log-stats, n=480 reqs, M4-off boot) — ABYSS NAMED
+
+i2t B32 (n=288, p50): recv->preprocess 1741ms (max 8112!) | ingest->first-chunk 1645 |
+own walks ~554 (vision_encoder 411 fwd=366, prefills 143). => the "6s abyss" =
+~2s CLIENT-SIDE PREPROCESS SERIALIZATION (single PreprocessWorkerThread in
+data_worker.py) + ~1.6s walk queueing + 0.5s real work. s2t B32 (n=192): preprocess
+fine (81ms p50), ingest->first-chunk 543ms = admission/queueing is the whole gap
+vs vLLM 217. ALSO: thinker_decode post*=8.76ms/step avg on this M4-off boot (what
+M4 removes); M4 tradeoff logged (s2t B32 +21% rps, i2t B32 TTFT p50 4.8->6.1 but
+rps +10%).
+FIXES DISPATCHED: F1 = MSTAR_PREPROC_WORKERS pool (M7 agent); F2 = admission
+(R3 merged-walk yaml fix / R5 gang admission) next. M6 (FAST_CHECKSTOP+sidecar)
+still porting for the B1 ITL ladder.
+
+## *** i2t ABYSS SOLVED (2026-07-16 09:39, quiet load 17, tree @2d56cace) ***
+MSTAR_PREPROC_WORKERS=8 (+FAST_CHECKSTOP): the single-thread preprocess was
+DE-BATCHING the pipeline (requests dribbled into the conductor -> vision prefills
+never batched). Pool -> all 32 arrive together -> batched prefill works:
+  i2t B32: TTFT 4800-6100 -> 160ms (vLLM 179 BEATEN); rps 8.76 (vLLM 8.32 BEATEN)
+  i2t B16: TTFT 770 -> 104ms (vLLM 168 BEATEN); rps 6.05 (vLLM 5.62 BEATEN)
+  tok/s still -11/-12% (1554 vs 1769; 1060 vs 1185) + ITL ~-9% = remaining i2t cells.
+  s2t B32 unchanged (451 TTFT — preproc was never s2t's problem); s2t B2 rps dipped
+  7.45 vs cert 8.05 (watch); parity 23/24 cross-boot greedy (1 differ = recurring
+  pattern, investigate whether boot-level nondeterminism vs flag effect).
+Data: ab2_20260716/. FAST_CHECKSTOP effect on B1 ITL: none visible (7.31 — verify
+N1 fired via WALK_STATS in next boot). NEXT: sidecar ladder (B1 ITL), s2t admission
+(R3/R5) for s2t TTFT, i2t tok/s gap analysis.
