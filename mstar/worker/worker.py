@@ -182,6 +182,19 @@ class Worker:
         # TensorCommunicationManager.store_and_populate_graph_edges_fast.
         self._fast_postproc = os.environ.get("MSTAR_FAST_POSTPROC", "0") == "1"
 
+        # N1 (MSTAR_FAST_CHECKSTOP): batched int-compare stop check for
+        # uniform thinker_decode steps (one tolist over the pinned buffer
+        # instead of per-rid .item()). On this branch the flag ALSO gates the
+        # batched one-cat + one-pinned-copy D→H in
+        # _prematerialize_for_check_stop (upstream godv9 ships that copy
+        # batching unconditionally for thinker_decode; here it is flag-gated
+        # so the flag-off path stays byte-identical to this branch's pre-port
+        # behavior — the per-tensor pinned-copy loop). Default OFF.
+        self._fast_checkstop = (
+            os.environ.get("MSTAR_FAST_CHECKSTOP", "0") == "1"
+        )
+        self._thinker_eos_id: int | None = None
+
         # MSTAR_ENC_OVERLAP=<N>: batch-gated encoder side-stream overlap.
         # When N>0 and this worker's in-flight request count is <= N, an
         # audio_encoder / vision_encoder walk is tagged on the main thread
@@ -2087,9 +2100,15 @@ class Worker:
         engine = self.engine_manager.get_engine(batch_N.node_name)
         cpu_output = (
             output if enc_overlap
-            else self._prematerialize_for_check_stop(output)
+            else self._prematerialize_for_check_stop(
+                output,
+                batch_fast=(
+                    self._fast_checkstop
+                    and batch_N.graph_walk == "thinker_decode"
+                ),
+            )
         )
-        new_stops = engine.check_stop_for_batch(batch_N.node_batch, cpu_output)
+        new_stops = self._compute_new_stops(batch_N, engine, cpu_output)
 
         if self.enable_nvtx:
             range_pop(synchronize=False)
@@ -2339,9 +2358,51 @@ class Worker:
             )
         return buffers[index]
 
+    def _compute_new_stops(
+        self, batch_N: PendingBatch, engine, cpu_output: NodeOutput,
+    ) -> dict:
+        """Stop-state COMPUTATION: pure int/counter compares over the
+        prematerialized CPU tokens. Extracted from ``_postprocess_batch`` so
+        the N1 fast path and the legacy engine path share one seam. No CUDA
+        reads here beyond ``.tolist()`` on the already-copied pinned buffers —
+        the copy must be complete before this is called (the caller's barrier
+        guarantees it)."""
+        flat = getattr(cpu_output, "_checkstop_flat", None)
+        if self._fast_checkstop and flat is not None:
+            # N1 fast path: uniform thinker_decode new-token batch. Semantics
+            # identical to ThinkerSubmodule.check_stop (token == im_end and
+            # not ignore_eos, or iter+1 >= max_tokens), but one tolist()
+            # covers the whole batch and the compares are pure ints.
+            tokens = flat.tolist()
+            eos_id = self._thinker_eos_id
+            if eos_id is None:
+                submod = engine.submodule_management[
+                    batch_N.node_name
+                ].submodule
+                eos_id = self._thinker_eos_id = submod.config.im_end_token_id
+            new_stops = {}
+            per_info = batch_N.node_batch.per_request_info
+            for i, rid in enumerate(cpu_output._checkstop_rids):
+                info = per_info.get(rid)
+                if info is None:
+                    continue
+                if (
+                    (
+                        int(tokens[i]) == eos_id
+                        and not info.sampling_config["Thinker"].ignore_eos
+                    )
+                    or info.dynamic_loop_iter_counts.get(
+                        "thinker_decode_loop", 0
+                    ) + 1 >= info.max_tokens
+                ):
+                    new_stops[rid] = {"thinker_decode_loop"}
+            return new_stops
+        return engine.check_stop_for_batch(batch_N.node_batch, cpu_output)
+
     def _prematerialize_for_check_stop(
         self,
         output: NodeOutput,
+        batch_fast: bool = False,
     ) -> NodeOutput:
         """Side-stream D→H of every CUDA tensor in
         ``output.per_request_output_tensors`` so the subsequent
@@ -2369,6 +2430,59 @@ class Worker:
             self._d2h_stream = torch.cuda.Stream(device=self.device)
         side = self._d2h_stream
         side.wait_event(output.completion_event)
+
+        # Fast path (N1, MSTAR_FAST_CHECKSTOP): the common AR-decode shape is
+        # exactly one small same-shaped tensor per rid under one key
+        # (new_token). Batch the whole step into a single cat + one pinned
+        # D2H instead of a per-rid copy loop (32 tiny copies/step at B32).
+        # ``batch_fast`` is flag- AND walk-gated by the caller
+        # (thinker_decode only): on Talker steps the per-step probe cost
+        # outweighs the copy savings (godv9 qb_queue1.log attribution).
+        per_rid = output.per_request_output_tensors
+        rids = list(per_rid.keys())
+        uniform_key: str | None = None
+        if batch_fast and rids and all(
+            isinstance(per_rid[r], dict)
+            and len(per_rid[r]) == 1
+            and isinstance(next(iter(per_rid[r].values())), list)
+            and len(next(iter(per_rid[r].values()))) == 1
+            and torch.is_tensor(next(iter(per_rid[r].values()))[0])
+            and next(iter(per_rid[r].values()))[0].is_cuda
+            and next(iter(per_rid[r].values()))[0].numel() == 1
+            for r in rids
+        ):
+            keys = {next(iter(per_rid[r].keys())) for r in rids}
+            dtypes = {next(iter(per_rid[r].values()))[0].dtype for r in rids}
+            if len(keys) == 1 and len(dtypes) == 1:
+                uniform_key = next(iter(keys))
+        if uniform_key is not None:
+            with torch.cuda.stream(side):
+                flat_gpu = torch.cat(
+                    [next(iter(per_rid[r].values()))[0].reshape(1) for r in rids]
+                )
+                flat_cpu = self._get_pinned_d2h_buffer(
+                    "check_stop_flat", flat_gpu.shape, flat_gpu.dtype,
+                )
+                flat_cpu.copy_(flat_gpu, non_blocking=True)
+            side.synchronize()
+            cpu_fast: dict = {
+                r: {uniform_key: [flat_cpu[i:i + 1]]}
+                for i, r in enumerate(rids)
+            }
+            out = NodeOutput(
+                per_request_output_tensors=cpu_fast,
+                allocation_failed=output.allocation_failed,
+                alloc_pages_short=output.alloc_pages_short,
+                alloc_failed_request_id=output.alloc_failed_request_id,
+                completion_event=output.completion_event,
+            )
+            # N1 (MSTAR_FAST_CHECKSTOP): stash the flat pinned buffer + rid
+            # order so check_stop can do ONE tolist() + int compares instead
+            # of a per-rid .item() (+ attr chains) x bs.
+            if uniform_key == "new_token":
+                out._checkstop_flat = flat_cpu
+                out._checkstop_rids = rids
+            return out
 
         cpu_per_rid: dict = {}
         buffer_indices: dict[tuple[str, torch.dtype, tuple[int, ...]], int] = defaultdict(int)
