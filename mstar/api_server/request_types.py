@@ -25,6 +25,42 @@ class ResultTensors:
 
 
 @dataclass
+class SlimResultTokens:
+    """MSTAR_SLIM_EMIT steady-state item: token values only.
+
+    After the FIRST full ``ResultTensors`` for a (request_id, name) pair has
+    been sent (the "template"), later steps of the same inline emit edge carry
+    only this — the api server synthesizes a full ``ResultTensors`` from its
+    cached template plus these values. Pickling a full GraphEdge per rid per
+    step was the bulk of the worker's send_outputs cost (~3.4 ms/step main
+    thread at i2t B32).
+    """
+    request_id: str
+    name: str
+    values: list
+    loop_indices: NestedLoopIndices
+
+
+@dataclass
+class ResultTensorsBatch:
+    """Coalesced inline emit_to_client results for one decode step.
+
+    Carries the qualifying inline-emit ``ResultTensors`` of a single step
+    across all requests in the batch, sent as ONE APIServerMessage instead
+    of one per request (see MSTAR_BATCH_EMIT). Every item MUST be an
+    inline-values result (no transported SHM tensors), so the api-server
+    discard path stays a no-op per item. Items can have different
+    request_ids and different rid-status on the api side, so each is routed
+    individually — this is purely a transport-level fan-in / fan-out.
+
+    With MSTAR_SLIM_EMIT, items may also be ``SlimResultTokens`` — the
+    consumer synthesizes the full item from its per-(rid, name) template
+    (guaranteed to precede slim items: same FIFO ZMQ stream).
+    """
+    items: list = field(default_factory=list)
+
+
+@dataclass
 class RequestComplete:
     """Signals that a request has finished processing."""
     request_id: str
@@ -42,8 +78,8 @@ class RequestComplete:
 @dataclass
 class APIServerMessage:
     """Envelope for messages received by the API server."""
-    message_type: str  # "result_tensors" | "request_complete" | "setup_done"
-    body: ResultTensors | RequestComplete | None = None  # None for setup_done message
+    message_type: str  # "result_tensors" | "result_tensors_batch" | "request_complete" | "setup_done"
+    body: ResultTensors | ResultTensorsBatch | RequestComplete | None = None  # None for setup_done message
 
 
 @dataclass
