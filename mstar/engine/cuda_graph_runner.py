@@ -1218,6 +1218,60 @@ class CudaGraphRunner:
         """
         self._fullstep_feed_rids = None
 
+    def _fullstep_pre_replay(
+        self,
+        graph_data: CudaGraphData,
+        slot_data: CudaGraphSlot,
+        request_ids: list[str],
+    ) -> tuple["torch.Tensor | None", bool]:
+        """MSTAR_FULLSTEP_DECODE: decide this replay's self-feeding fast path
+        and pessimistically consume the feed marker.
+
+        Returns ``(fullstep_tokens, self_feed)``:
+
+        - ``fullstep_tokens`` — the per-slot ``__fullstep_tokens__`` static
+          output when the in-graph sample is authoritative for this batch
+          (self-feeding capture AND all-greedy), else None. None also means
+          "re-seed the feed buffer every step" (non-greedy host sampling).
+        - ``self_feed`` — True iff the tokens currently in the shared static
+          feed buffer were written by the last successful replay for EXACTLY
+          this rid tuple, so every static-input copy can be skipped.
+
+        The marker is cleared here and only re-established by
+        ``_fullstep_mark_fed`` on the success path — a replay that raises
+        anywhere in between (alloc failure, plan failure) can never leave a
+        stale "trustworthy" marker behind. EOS one-step-late interplay
+        (moonshot A3): a finishing request's overshoot step runs through
+        here like any other step; once the worker trims the stopped rid
+        (``_pending_loop_stops`` overstay branch in ``_postprocess_batch``),
+        the next batch's rid tuple no longer matches and the feed re-seeds
+        from the host-threaded tokens — the token the overshoot step fed
+        for the stopped rid is never consumed.
+        """
+        if not graph_data.self_feeding:
+            return None, False
+        prev_feed = self._fullstep_feed_rids
+        self._fullstep_feed_rids = None
+        fullstep_tokens = slot_data.static_outputs.get("__fullstep_tokens__")
+        if (
+            fullstep_tokens is None
+            # Defensive: the emitted token must come from the same fast path
+            # that fed the buffer — a capture missing the batched-logits
+            # sentinel would emit via the per-rid fallback (host sample) and
+            # desynchronize feed vs emit. Fullstep captures always emit both.
+            or slot_data.static_outputs.get("__batched_logits__") is None
+            or not self._is_all_greedy_no_penalty(request_ids)
+        ):
+            return None, False
+        return fullstep_tokens, prev_feed == tuple(request_ids)
+
+    def _fullstep_mark_fed(self, request_ids: list[str]) -> None:
+        """MSTAR_FULLSTEP_DECODE: record that the shared static feed buffer
+        now holds this batch's in-graph-sampled tokens (success path of an
+        all-greedy self-feeding replay). The next replay with this exact
+        rid tuple may skip its static-input copies."""
+        self._fullstep_feed_rids = tuple(request_ids)
+
     def run(
         self,
         graph_walk: str,
@@ -1335,26 +1389,13 @@ class CudaGraphRunner:
         # MSTAR_FULLSTEP_DECODE (moonshot A'): for a self-feeding capture on
         # an all-greedy batch whose rid tuple matches the tokens currently in
         # the shared static feed buffer, the graph feeds itself — SKIP every
-        # static-input copy (token feed was written GPU-side after the
-        # previous replay; pos_3d self-advanced in-graph). Any mismatch
-        # re-seeds from the host-threaded tokens via the normal copy path.
-        # The feed marker is pessimistically cleared here and re-validated on
-        # the success path, so a replay failure can never leave a stale
-        # "trustworthy" marker behind.
-        rid_key = tuple(request_ids)
-        # A2: ``__fullstep_tokens__`` is the in-graph argmax output — its
-        # presence proves this capture sampled AND fed the token buffer
-        # INSIDE the replay (per-slot static output tensor; the feed buffer
-        # itself is shared across slots via interning).
-        fullstep_tokens = slot_data.static_outputs.get("__fullstep_tokens__")
-        fullstep_greedy = (
-            graph_data.self_feeding
-            and fullstep_tokens is not None
-            and self._is_all_greedy_no_penalty(request_ids)
+        # static-input copy (token feed written in-graph by the previous
+        # replay; pos_3d self-advanced in-graph). Any mismatch re-seeds from
+        # the host-threaded tokens via the normal copy path. See
+        # ``_fullstep_pre_replay`` for the marker/consume semantics.
+        fullstep_tokens, self_feed = self._fullstep_pre_replay(
+            graph_data, slot_data, request_ids,
         )
-        self_feed = fullstep_greedy and self._fullstep_feed_rids == rid_key
-        if graph_data.self_feeding:
-            self._fullstep_feed_rids = None
 
         # Swap-and-restore must be paired: if any step between swap and restore
         # raises (e.g., submodule.preprocess hitting an insufficient-KV alloc
@@ -1532,19 +1573,17 @@ class CudaGraphRunner:
                 # sampled and fed the token buffer inside the replay —
                 # hand the static output over so the sampling step just
                 # snapshots it (all-greedy batches only; non-greedy host
-                # path ignores it and re-seeds the feed next step).
-                fullstep_tokens=(
-                    fullstep_tokens if fullstep_greedy else None
-                ),
+                # path gets None and re-seeds the feed next step).
+                fullstep_tokens=fullstep_tokens,
             )
             if self.enable_nvtx:
                 range_pop(synchronize=False)
 
-            if fullstep_greedy:
-                # The feed buffer now holds this batch's sampled tokens
-                # (written GPU-side) — the next replay with this exact rid
-                # tuple may self-feed.
-                self._fullstep_feed_rids = rid_key
+            if fullstep_tokens is not None:
+                # The feed buffer now holds this batch's in-graph-sampled
+                # tokens — the next replay with this exact rid tuple may
+                # self-feed.
+                self._fullstep_mark_fed(request_ids)
 
             success = True
             return outputs
