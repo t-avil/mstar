@@ -79,3 +79,36 @@ KEY MEASUREMENT INSIGHT: B32 "TTFT abyss" was TWO artifacts: (1) preproc pool OF
 default) = 3477ms -> fixed by pool; (2) too-small n (32-50) = ramp-up-dominated 949ms ->
 at n=96 steady-state continuous batching TTFT p50 ~200ms. Throughput is host-load tail-
 sensitive -> median of >=3 repeats under monitored load mandatory. Chart: i2t_FINAL_pd_vs_vllm.png.
+
+### ★★ s2t (speech→text) — PD build, n=96, median of 3 repeats (+ B32 n=256)
+| b | req/s Δ | tok/s Δ | TTFT M*/vLLM | ITL M*/vLLM |
+| 1 | +49% | +27% | 77/66 LOSE | 5.0/5.0 tie |
+| 4 | +16% | -1% | 125/60 LOSE | 6.7/9.0 W |
+| 8 | +46% | +27% | 172/143 LOSE| 7.5/15 W |
+|16 | +80% | +59% | 228/191 LOSE| 8.3/23 W |
+|32 | +40%(n96)/+51%(n256) | +22%/+30% | 499/217 LOSE| 6.6/29 W |
+VERDICT: s2t wins req/s + tok/s + ITL (ITL huge: M* ~5-8ms vs vLLM up to 29ms = 4x faster
+decode). LOSES TTFT every batch (single-GPU audio prefill serialization, same structural
+class as i2t B32). s2t is latency-PRIMARY (TTFT+ITL) -> SPLIT: ITL win, TTFT deficit = s2t
+NOT cleanly won on primary. TTFT lever (MSTAR_ENCODER_ASYNC) helps TTFT but regresses s2t
+throughput (documented tradeoff) -> s2t TTFT is the focused open problem. Chart: s2t_FINAL_pd_vs_vllm.png.
+
+### ★★ ENC-ASYNC (MSTAR_ENCODER_ASYNC=1) — i2t-ONLY win (completes i2t sweep), DESTROYS s2t
+Boot: PD + preproc + MSTAR_ENCODER_ASYNC=1 (port 8347).
+i2t B32 (3 reps): tok/s +11.3/+10.2/+15.4% (unchanged vs no-encasync +11%); TTFT p50 216/161/168
+  -> median 168ms < vLLM 179 < no-encasync 204. => enc-async turns i2t B32 TTFT tie->WIN.
+i2t B16: tok/s +35.7% (no regression). => enc-async is a clean i2t upgrade (B32 TTFT tie->win).
+s2t B8: req/s +45.6%->+22.9%, tok/s +27->+7.7%, TTFT 172->235 (WORSE), ITL 7.5->8.2.
+s2t B32: req/s +40%->+3.6%, tok/s +22%->-9.3%, TTFT 499->540, ITL 6.6->15.6 (COLLAPSE).
+=> enc-async REGRESSES s2t badly (confirms prior note). MODALITY-GATED: use enc-async for i2t,
+   NOT for s2t. (PD is already text-out-only per-modality; topology/flags per modality.)
+VERDICT: BEST i2t = PD + preproc + ENC_ASYNC (wins EVERY metric EVERY batch incl B32 TTFT 168).
+         BEST s2t = PD + preproc (NO enc-async).
+
+### CORRECTION — enc-async NOT adopted (fuller data)
+First 3 B32 reps gave TTFT median 168 (<179) but the clean 3-rep SWEEP gives B32 TTFT median
+**200ms** (high variance 161-216) — enc-async does NOT reliably push i2t B32 TTFT below vLLM
+179; tok/s only marginal (+11->+13%). Determinism held (i2t B1 16/16). And it DESTROYS s2t.
+=> enc-async REJECTED (marginal for i2t, harmful for s2t). BEST i2t stays PD + preproc.
+i2t B32 TTFT (~200 median) is a genuine ~tie neither PD nor enc-async decisively flips =
+structural single-GPU-prefill limit (vLLM uses 2-GPU TP prefill; M* TP regresses host-bound decode).
