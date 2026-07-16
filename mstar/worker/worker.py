@@ -182,6 +182,44 @@ class Worker:
         # TensorCommunicationManager.store_and_populate_graph_edges_fast.
         self._fast_postproc = os.environ.get("MSTAR_FAST_POSTPROC", "0") == "1"
 
+        # MSTAR_ENC_OVERLAP=<N>: batch-gated encoder side-stream overlap.
+        # When N>0 and this worker's in-flight request count is <= N, an
+        # audio_encoder / vision_encoder walk is tagged on the main thread
+        # (``_maybe_tag_enc_overlap``) to run on a dedicated low-priority CUDA
+        # stream (``_execute_on_gpu_thread``), and its postprocess skips the
+        # host completion-event sync + check_stop D2H prematerialization. The
+        # join is a GPU-side event fence recorded on the default stream right
+        # after launch, so the dependent Thinker prefill (and every other
+        # default-stream reader) still consumes complete embeds — only the
+        # HOST stops waiting, letting the worker loop route outputs, build and
+        # plan the prefill, and service other walks while encoder kernels run.
+        # Default OFF (0): no walk is ever tagged, behavior byte-identical.
+        # Gate rationale (graveyard): the global godv9 ENCODER_ASYNC variant
+        # collapsed s2t B32 49->26 rps by contending with prefill on the
+        # loaded path; gating at N<=2 keeps this strictly off the loaded path
+        # while keeping the low-batch TTFT win.
+        try:
+            self._enc_overlap_n = int(
+                os.environ.get("MSTAR_ENC_OVERLAP", "0") or "0"
+            )
+        except ValueError:
+            self._enc_overlap_n = 0
+        self._enc_overlap_stream: "torch.cuda.Stream | None" = None
+        # (event, node_batch, output) triples kept alive until the side-stream
+        # work completes. Postprocess no longer host-syncs these walks, so
+        # dropping the refs at the usual time could let the caching allocator
+        # reuse input/output blocks while encoder kernels are still in flight.
+        # Touched only on the GPU executor thread (max_workers=1) — no lock.
+        self._enc_overlap_holds: list = []
+        # Lazy one-shot topology check (see _maybe_tag_enc_overlap).
+        self._enc_overlap_local_ok: bool | None = None
+        if self._enc_overlap_n > 0:
+            logger.info(
+                "Worker %s: MSTAR_ENC_OVERLAP=%d — encoder walks overlap on a "
+                "low-priority side stream when in-flight requests <= %d",
+                worker_id, self._enc_overlap_n, self._enc_overlap_n,
+            )
+
         if self.device.type == "cuda" and self.device.index is not None:
             torch.cuda.set_device(self.device)
 
@@ -1340,6 +1378,88 @@ class Worker:
         engine = self.engine_manager.get_engine(spec_node_batch.node_name)
         engine.reset_pre_plan_for_batch(spec_node_batch)
 
+    def _get_enc_overlap_stream(self) -> "torch.cuda.Stream | None":
+        """Lazily allocate the low-priority CUDA stream for MSTAR_ENC_OVERLAP.
+
+        priority=0 is the LOWEST priority in CUDA's numbering (lower number =
+        higher priority; the default-stream work we overlap keeps winning SM
+        arbitration when contended). Falls back to a plain side stream if the
+        installed torch build rejects the kwargs; returns None without CUDA.
+        """
+        if not torch.cuda.is_available():
+            return None
+        if self._enc_overlap_stream is None:
+            try:
+                self._enc_overlap_stream = torch.cuda.Stream(
+                    device=self.device, priority=0,
+                )
+            except (TypeError, RuntimeError):
+                self._enc_overlap_stream = torch.cuda.Stream()
+        return self._enc_overlap_stream
+
+    def _maybe_tag_enc_overlap(
+        self, batch: ScheduledBatch, node_batch: NodeBatch
+    ) -> None:
+        """MAIN-THREAD gate for MSTAR_ENC_OVERLAP: tag an encoder walk for
+        side-stream execution when the worker is lightly loaded.
+
+        Runs on the main thread (right before gpu_executor.submit) because the
+        in-flight registry is mutated there — reading it from the GPU thread
+        would race add/remove handling. Flag off (N<=0) returns before any
+        state is touched, so the flag-off path is byte-identical.
+
+        Conditions, all required:
+        - MSTAR_ENC_OVERLAP=N > 0 and CUDA available;
+        - the walk is an ``audio_encoder`` / ``vision_encoder`` node;
+        - one-shot topology check: the consuming ``Thinker`` node is hosted on
+          THIS worker and encoder/Thinker TP world_size == 1. Cross-worker
+          edges rely on the postprocess host-sync to guarantee the advertised
+          tensors are complete before a peer reads them, and TP>1 would let
+          ranks disagree on collective ordering across streams — both are
+          exactly the machinery this minimal variant refuses to port, so the
+          flag silently stays off in those topologies (PD-disaggregated /
+          TP configs);
+        - in-flight requests on this worker <= N (the graveyard gate: keeps
+          the side stream off the loaded path where the global godv9 variant
+          collapsed s2t B32 by contending with prefill).
+        """
+        if self._enc_overlap_n <= 0:
+            return
+        if batch.node_name not in ("audio_encoder", "vision_encoder"):
+            return
+        if not torch.cuda.is_available():
+            return
+        if self._enc_overlap_local_ok is None:
+            local_nodes: set[str] = set()
+            for q in self.worker_graphs_manager.queues.values():
+                local_nodes |= getattr(q, "nodes", set())
+            thinker_local = "Thinker" in local_nodes
+            tp_ok = True
+            for node in ("audio_encoder", "vision_encoder", "Thinker"):
+                try:
+                    cfg = self.tp_groups.get_tp_config_for_node(node)
+                    if cfg is not None and cfg.world_size > 1:
+                        tp_ok = False
+                except Exception:
+                    # Node absent from the TP table — nothing to veto.
+                    pass
+            self._enc_overlap_local_ok = thinker_local and tp_ok
+            if not self._enc_overlap_local_ok:
+                logger.warning(
+                    "Worker %s: MSTAR_ENC_OVERLAP=%d requested but disabled "
+                    "on this worker (Thinker local=%s, tp_ok=%s) — encoder "
+                    "walks stay on the default stream",
+                    self.worker_id, self._enc_overlap_n, thinker_local, tp_ok,
+                )
+        if not self._enc_overlap_local_ok:
+            return
+        in_flight: set[str] = set()
+        for q in self.worker_graphs_manager.queues.values():
+            in_flight.update(q.per_request_queues.keys())
+        if len(in_flight) > self._enc_overlap_n:
+            return
+        node_batch.metadata["enc_overlap"] = True
+
     def _execute_on_gpu_thread(
         self,
         batch: ScheduledBatch,
@@ -1387,7 +1507,64 @@ class Worker:
                 synchronize=False,
             )
 
+        # MSTAR_ENC_OVERLAP: walks tagged by _maybe_tag_enc_overlap (main
+        # thread, gate: encoder node + in-flight <= N + local Thinker) run on
+        # the dedicated low-priority side stream. Untagged walks (flag off,
+        # gate failed) take the unchanged default-stream path below.
+        enc_overlap_stream = None
+        if node_batch.metadata.get("enc_overlap"):
+            enc_overlap_stream = self._get_enc_overlap_stream()
+            if enc_overlap_stream is None:
+                # CUDA flipped unavailable between tag and execution — clear
+                # the tag so postprocess keeps its normal sync behavior.
+                node_batch.metadata.pop("enc_overlap", None)
+
         try:
+            if enc_overlap_stream is not None:
+                default_stream = torch.cuda.default_stream(self.device)
+                # Input fence: the walk's inputs were produced / H2D-copied on
+                # the default stream (main-thread _build_node_batch, upstream
+                # walks) — the side stream must observe them before the
+                # encoder kernels read.
+                enc_overlap_stream.wait_stream(default_stream)
+                enc_output = None
+                try:
+                    # Same engine call, same kernels, same per-request order —
+                    # only the launch stream differs, so numerics are
+                    # untouched (CUDA-graph replays carry no stream affinity;
+                    # eager launches are stream-agnostic).
+                    with torch.cuda.stream(enc_overlap_stream):
+                        enc_output = engine.execute_with_max_batch_size(
+                            node_batch
+                        )
+                finally:
+                    # Join + safety, on EVERY path (also if the engine
+                    # raised mid-launch — partially enqueued side-stream
+                    # kernels still need the fence and the liveness hold):
+                    enc_event = torch.cuda.Event()
+                    enc_event.record(enc_overlap_stream)
+                    # The join the dependent prefill needs: every kernel /
+                    # copy enqueued on the default stream AFTER this point
+                    # (Thinker prefill consuming the embeds, D2H reads, ...)
+                    # is ordered behind the encoder. GPU-side only — the
+                    # host does not wait, which is the whole point.
+                    default_stream.wait_event(enc_event)
+                    # Liveness hold: postprocess skips the host sync for this
+                    # walk, so node_batch/output refs can drop while the
+                    # side-stream kernels are still in flight; holding them
+                    # here (drained once complete) keeps the caching
+                    # allocator from recycling input/output blocks under a
+                    # running kernel. GPU-thread-only list — no lock.
+                    self._enc_overlap_holds = [
+                        h for h in self._enc_overlap_holds
+                        if not h[0].query()
+                    ]
+                    self._enc_overlap_holds.append(
+                        (enc_event, node_batch, enc_output)
+                    )
+                enc_output.completion_event = enc_event
+                return enc_output
+
             output = engine.execute_with_max_batch_size(node_batch)
             if torch.cuda.is_available():
                 event = torch.cuda.Event()
@@ -1859,9 +2036,22 @@ class Worker:
             range_pop(synchronize=False)
             range_push("worker.postprocess.synchronize_completion_event", synchronize=False)
 
+        # MSTAR_ENC_OVERLAP: a tagged encoder walk ran on the side stream and
+        # its join is the GPU-side default-stream fence recorded on the GPU
+        # thread right after launch — skipping the host sync below is the
+        # overlap (routing + prefill build/plan proceed while encoder kernels
+        # run). Values stay correct: every default-stream reader is ordered
+        # behind the encoder by the fence, and liveness is covered by
+        # _enc_overlap_holds. check_stop for encoder submodules is the
+        # value-free base no-op, so the D2H prematerialize (which would
+        # host-block on the encoder via its side.synchronize()) is skipped
+        # too. Tag absent (flag off / gate failed): byte-identical path.
+        enc_overlap = bool(batch_N.node_batch.metadata.get("enc_overlap"))
+
         # Wait for batch N's completion event before proceeding
         # TODO: may need to refine this based on how it affects performance?
-        if torch.cuda.is_available() and batch_N.batch.node_objects:
+        if torch.cuda.is_available() and batch_N.batch.node_objects \
+                and not enc_overlap:
             if output.completion_event is not None:
                 if self.enable_nvtx:
                     range_push("worker.postprocess.completion_event_sync", synchronize=False)
@@ -1886,7 +2076,10 @@ class Worker:
 
         # Check for stops
         engine = self.engine_manager.get_engine(batch_N.node_name)
-        cpu_output = self._prematerialize_for_check_stop(output)
+        cpu_output = (
+            output if enc_overlap
+            else self._prematerialize_for_check_stop(output)
+        )
         new_stops = engine.check_stop_for_batch(batch_N.node_batch, cpu_output)
 
         if self.enable_nvtx:
@@ -2572,6 +2765,13 @@ class Worker:
                             # in the eager AR path).
                             spec_launch_started_event = threading.Event()
                             spec_node_batch.metadata["launch_started_event"] = spec_launch_started_event
+                            # MSTAR_ENC_OVERLAP gate (no-op when flag off):
+                            # yield-away speculation can pick an encoder walk
+                            # while an AR loop runs — exactly the low-batch
+                            # overlap case.
+                            self._maybe_tag_enc_overlap(
+                                spec_batch, spec_node_batch
+                            )
                             spec_future = gpu_executor.submit(
                                 self._execute_on_gpu_thread,
                                 spec_batch, spec_node_batch,
@@ -2688,6 +2888,8 @@ class Worker:
                 # advance_seq_lens.
                 fallthrough_advance_event = threading.Event()
                 node_batch.metadata["advance_event"] = fallthrough_advance_event
+                # MSTAR_ENC_OVERLAP gate (no-op when flag off).
+                self._maybe_tag_enc_overlap(batch, node_batch)
                 future = gpu_executor.submit(
                     self._execute_on_gpu_thread, batch, node_batch,
                     None, fallthrough_advance_event,
