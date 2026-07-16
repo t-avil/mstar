@@ -1444,6 +1444,26 @@ class ThinkerSubmodule(ARNodeSubmodule):
         outputs["__batched_logits__"] = logits
 
         if fullstep:
+            # A2 — in-graph greedy sample + token feed (the Talker's proven
+            # in-graph pattern, ``_forward_decode_like``): argmax the raw
+            # logits with the capture-safe ``sample_greedy`` (parity-exact
+            # vs the host path for all-greedy batches — the host one-hots
+            # the same argmax; first-occurrence tie-break both sides) and
+            # write the sampled ids back into the shared static
+            # ``next_token_ids`` buffer so the NEXT replay's embed_tokens
+            # reads them with zero host involvement. For non-greedy batches
+            # the runner ignores ``__fullstep_tokens__`` and host-samples
+            # from ``__batched_logits__``; the in-graph write is then
+            # harmlessly overwritten by the runner's re-seed copy before the
+            # next replay. The eager batched fallback passes the host
+            # ``Sampler`` (no capture-safe ``sample_greedy`` contract), so
+            # the isinstance gate skips sampling there and the engine's
+            # host sampling runs as today.
+            sampler = engine_inputs.sampler
+            if isinstance(sampler, CudaGraphableSampler):
+                sampled = sampler.sample_greedy(logits)
+                next_token_ids.copy_(sampled)
+                outputs["__fullstep_tokens__"] = sampled
             # Self-advance the 3D MRoPE positions for the next decode step
             # (captured: the static buffer moves +1 on every replay, so
             # steady-state steps skip the host-side pos copy entirely).

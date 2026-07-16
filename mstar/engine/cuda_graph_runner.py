@@ -1342,9 +1342,14 @@ class CudaGraphRunner:
         # the success path, so a replay failure can never leave a stale
         # "trustworthy" marker behind.
         rid_key = tuple(request_ids)
+        # A2: ``__fullstep_tokens__`` is the in-graph argmax output — its
+        # presence proves this capture sampled AND fed the token buffer
+        # INSIDE the replay (per-slot static output tensor; the feed buffer
+        # itself is shared across slots via interning).
+        fullstep_tokens = slot_data.static_outputs.get("__fullstep_tokens__")
         fullstep_greedy = (
             graph_data.self_feeding
-            and slot_data.static_outputs.get("__batched_logits__") is not None
+            and fullstep_tokens is not None
             and self._is_all_greedy_no_penalty(request_ids)
         )
         self_feed = fullstep_greedy and self._fullstep_feed_rids == rid_key
@@ -1523,11 +1528,13 @@ class CudaGraphRunner:
                 # pageable H2D uploads. Decode-style (BASIC_BATCHED) path
                 # only — prefill keeps the host path.
                 graph_sampler=engine_inputs.sampler,
-                # MSTAR_FULLSTEP_DECODE: shared static token-feed buffer for
-                # the GPU-side sampled-token writeback (all-greedy batches
-                # of a self-feeding capture only).
-                feed_buf=(
-                    preprocessed["next_token_ids"] if fullstep_greedy else None
+                # MSTAR_FULLSTEP_DECODE (A2): the in-graph argmax already
+                # sampled and fed the token buffer inside the replay —
+                # hand the static output over so the sampling step just
+                # snapshots it (all-greedy batches only; non-greedy host
+                # path ignores it and re-seeds the feed next step).
+                fullstep_tokens=(
+                    fullstep_tokens if fullstep_greedy else None
                 ),
             )
             if self.enable_nvtx:
@@ -1947,7 +1954,7 @@ class CudaGraphRunner:
         submodule: ARNodeSubmodule,
         inputs: list[ARNodeInputs] | None = None,
         graph_sampler: "CudaGraphableSampler | None" = None,
-        feed_buf: torch.Tensor | None = None,
+        fullstep_tokens: torch.Tensor | None = None,
     ) -> dict:
         """Sample logits + copy non-logit per-rid outputs, remapping dummy → real rids.
 
@@ -1971,17 +1978,16 @@ class CudaGraphRunner:
         if batched_logits is not None:
             stacked_logits = batched_logits[:len(request_ids)]
             sampled = None
-            if feed_buf is not None and graph_sampler is not None:
-                # MSTAR_FULLSTEP_DECODE (A1): all-greedy batch of a
-                # self-feeding capture. Sample via the capture-safe argmax
-                # short-circuit and write the token ids straight back into
-                # the shared static ``next_token_ids`` buffer — a tiny
-                # async device→device copy, never read by the host — so the
-                # NEXT replay's in-graph embed_tokens consumes them without
-                # any host-side token threading. (A2 moves both the argmax
-                # and this writeback inside the captured region.)
-                sampled = graph_sampler.sample_greedy(stacked_logits)
-                feed_buf[:sampled.shape[0]].copy_(sampled)
+            if fullstep_tokens is not None:
+                # MSTAR_FULLSTEP_DECODE (A2): the captured replay already
+                # argmax-sampled and wrote the token feed IN-GRAPH — zero
+                # eager sampling launches here. Snapshot the per-slot static
+                # output with one tiny clone: downstream consumers (routing,
+                # side-stream D2H for emit/check_stop, speculation
+                # threading) hold the value past the next replay of this
+                # slot, which overwrites the static tensor — same alias
+                # rationale as the FlashInfer .clone() below.
+                sampled = fullstep_tokens[:len(request_ids)].clone()
                 # Same per-rid philox bookkeeping as the R1-lite branch
                 # below: greedy never consumes the RNG stream, but a rid
                 # whose config later flips to temp>0 must resume on the
