@@ -38,6 +38,7 @@ from mstar.model.submodule_base import ARNodeInputs, ARNodeSubmodule, ModelInput
 from mstar.profile.worker import ExecTimings
 from mstar.utils.profiler import mark, range_pop, range_push
 from mstar.utils.sampling import (
+    _PINNED_SAMPLE_PARAMS,
     CudaGraphableSampler,
     Sampler,
     SamplerBuffers,
@@ -167,6 +168,24 @@ class CudaGraphRunner:
     # states, and with the flag off (default) the code path is byte-identical
     # to before. Mixed / temp>0 batches always keep the host path.
     INGRAPH_GREEDY = os.environ.get("MSTAR_INGRAPH_GREEDY", "0") == "1"
+    # Batch-scaled step rendezvous for the no-host-sync sampling paths
+    # (MSTAR_INGRAPH_GREEDY argmax and MSTAR_PINNED_SAMPLE_PARAMS uploads).
+    # Mechanism of the B32 regression those paths caused: the legacy pageable
+    # upload's per-step stream-sync parked the GPU executor thread (GIL
+    # released) until graph(N) completed, so exactly ONE Python thread was
+    # runnable at any instant — the main thread's O(B) postprocess floor
+    # (_postprocess_batch / check_stop D2H / zmq, ~26ms/step at B32) ran
+    # uncontended while the GPU thread slept, and vice versa. Removing the
+    # sync resolves future(N) at enqueue time, which is a pure win at small B
+    # (GPU launch gap eliminated, B1 ITL −11%) but at large B puts the GPU
+    # thread's O(B) per-rid prep Python (swap-states / replan / restore) in
+    # permanent GIL contention with the main thread's O(B) postprocess Python
+    # — at the B32 CPU floor the convoying lands directly in ITL (+33%).
+    # Fix: batches >= this threshold re-park the GPU thread on a post-sample
+    # event (same rendezvous point the legacy sync provided, still keeping
+    # the pinned-copy and argmax kernel savings); batches below it keep full
+    # run-ahead. 0 disables (never rendezvous). Tune per workload.
+    SAMPLE_RENDEZVOUS_BS = int(os.environ.get("MSTAR_SAMPLE_RENDEZVOUS_BS", "16"))
 
     def __init__(
         self,
@@ -224,6 +243,16 @@ class CudaGraphRunner:
         # Plan-overlap stream. Lazily created the first time pre_plan
         # is called from Worker.plan_executor.
         self._plan_stream: "torch.cuda.Stream | None" = None
+        # Memo for _is_all_greedy_no_penalty: (sampler config generation,
+        # rid tuple) -> verdict. Steady-state decode repeats the same batch
+        # composition for many steps, so the per-step O(B) config scan
+        # collapses to one tuple compare. Invalidated by ANY sampler config
+        # change via the generation counter.
+        self._greedy_gate_memo: tuple | None = None
+        # Reusable event for the batch-scaled sample rendezvous (see
+        # SAMPLE_RENDEZVOUS_BS). Single GPU-thread user; re-recorded only
+        # after the previous synchronize returned, so reuse is race-free.
+        self._rendezvous_event: "torch.cuda.Event | None" = None
 
         self.max_bs = max(
             [max(config.capture_batch_sizes or self.CAPTURE_BATCH_SIZES)
@@ -1774,14 +1803,61 @@ class CudaGraphRunner:
         unchanged — the parity-safe subset from round3 §A.4.
 
         Reads the host Sampler's per-rid configs: plain dict lookups, no GPU
-        work, no sync.
+        work, no sync. Cost is O(B) dict.gets (~µs at B32 — measured-by-reading
+        trivial), but steady-state decode repeats the same rid set for many
+        steps, so the verdict is memoized per (sampler config generation, rid
+        tuple) and the common case is one tuple compare. The generation
+        counter bumps on every add_request / remove_request / set_config, so
+        a mid-request config flip (e.g. temp 0 -> 0.7) invalidates the memo
+        the moment it lands — never a stale True.
         """
+        gen = self.sampler._config_generation
+        key = tuple(request_ids)
+        memo = self._greedy_gate_memo
+        if memo is not None and memo[0] == gen and memo[1] == key:
+            return memo[2]
         configs = self.sampler._sampling_config
+        verdict = True
         for rid in request_ids:
             cfg = configs.get(rid)
             if cfg is None or cfg.temperature != 0 or cfg.repetition_penalty != 1.0:
-                return False
-        return True
+                verdict = False
+                break
+        self._greedy_gate_memo = (gen, key, verdict)
+        return verdict
+
+    def _maybe_sample_rendezvous(
+        self, sampled: torch.Tensor, used_greedy: bool, batch_size: int,
+    ) -> None:
+        """Re-park the GPU thread at graph completion for LARGE batches on the
+        no-host-sync sampling paths (see SAMPLE_RENDEZVOUS_BS for the full
+        mechanism writeup of the B32 regression this fixes).
+
+        Records an event after the sampling kernels are enqueued and
+        synchronizes it — wall-clock identical to where the legacy pageable
+        upload's cudaStreamSynchronize parked the thread, so future(N) again
+        resolves at graph-N completion and the main thread's O(B) postprocess
+        floor runs without GIL contention from the GPU thread's O(B) prep.
+        The pinned-copy and greedy-argmax savings are preserved either way.
+
+        No-op when: threshold disabled (0), batch below threshold, the batch
+        used the legacy synchronous upload anyway (flag off + host path — the
+        pageable copies already synced), or CPU-only execution.
+        """
+        if (
+            self.SAMPLE_RENDEZVOUS_BS <= 0
+            or batch_size < self.SAMPLE_RENDEZVOUS_BS
+            or not (used_greedy or _PINNED_SAMPLE_PARAMS)
+            or not sampled.is_cuda
+        ):
+            return
+        ev = self._rendezvous_event
+        if ev is None:
+            ev = self._rendezvous_event = torch.cuda.Event()
+        ev.record(torch.cuda.current_stream(sampled.device))
+        # Releases the GIL for the duration (torch C++ side), exactly like
+        # the legacy pageable-upload sync did.
+        ev.synchronize()
 
     def _sample_and_remap(
         self,
@@ -1860,6 +1936,10 @@ class CudaGraphRunner:
                 # allocation that lives as long as the Python view, breaking
                 # the alias.
                 sampled = self.sampler.sample(request_ids, stacked_logits).clone()
+                used_greedy = False
+            else:
+                used_greedy = True
+            self._maybe_sample_rendezvous(sampled, used_greedy, len(request_ids))
             sampled_views = sampled.split(1)
             outputs = {
                 rid: {"new_token": [view]}
@@ -1918,6 +1998,7 @@ class CudaGraphRunner:
             # held in routing aliases iter-(N+k)'s value once that iter
             # samples.
             sampled = self.sampler.sample(request_ids, stacked_logits).clone()
+            self._maybe_sample_rendezvous(sampled, False, len(request_ids))
             for i, rid in enumerate(request_ids):
                 outputs[rid] = {"new_token": [sampled[i:i+1]]}
         else:

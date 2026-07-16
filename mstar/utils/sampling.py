@@ -37,6 +37,14 @@ logger = logging.getLogger(__name__)
 # mechanism, for A/B).
 _PINNED_SAMPLE_PARAMS = os.environ.get("MSTAR_PINNED_SAMPLE_PARAMS", "1") == "1"
 
+# Depth of the pinned staging ring (slots). Deep enough that slot reuse never
+# waits even if host run-ahead deepens beyond today's ~1-step pipeline (the
+# worker's per-step completion_event sync bounds it; R1-full / deeper
+# speculation may not). Slots are allocated lazily on first use, so a deep
+# ring costs nothing until actually cycled through. Floor of 2: a 1-slot ring
+# would rewrite the row a possibly in-flight copy is still reading.
+_PINNED_RING_SLOTS = max(2, int(os.environ.get("MSTAR_PINNED_RING", "16")))
+
 # (name, pinned staging dtype) for the six per-step sampling params, in the
 # order Sampler.sample consumes them. Fixed dtypes are safe: sample_tokens
 # normalizes temperature/top_p/repetition_penalty through _to_tensor(float32)
@@ -328,17 +336,26 @@ class Sampler(BaseSampler):
     _step_offset: dict[str, int] = field(default_factory=dict)
     tp_group: "TPCommGroup | None" = None  # noqa: F821
     # Persistent pinned staging ring for the six per-step sampling-param
-    # uploads (see _upload_params). Lazily (re)built on first use / growth.
+    # uploads (see _upload_params). ``_PINNED_RING_SLOTS`` deep; each slot's
+    # pinned rows are allocated lazily on the slot's first (or grown) use —
+    # cudaHostAlloc device-syncs, so eager 16x6 upfront allocation would stall
+    # the stream for nothing on paths that rarely sample.
     _param_slots: list = field(default_factory=list, repr=False)
     _param_slot_idx: int = field(default=0, repr=False)
-
-    # Ring depth for the pinned staging slots. The graph double-buffer
-    # (NUM_SLOTS=2) caps useful host run-ahead at ~2 in-flight decode steps,
-    # so by the time a slot comes around again its reuse event is ~4 steps
-    # stale and the guarding synchronize is a no-op.
-    _NUM_PARAM_SLOTS = 4
+    # High-water per-slot capacity hint so late-allocated slots start at the
+    # size the workload already reached instead of re-growing one by one.
+    _param_cap: int = field(default=0, repr=False)
+    # Count of slot reuses whose event was NOT yet complete (i.e. the host
+    # actually blocked). Steady-state this must stay ~0; a growing count on a
+    # live run means run-ahead outpaces the ring — raise MSTAR_PINNED_RING.
+    _param_slot_blocks: int = field(default=0, repr=False)
+    # Bumped on every add/remove/set_config so callers (e.g. the runner's
+    # all-greedy gate memo) can cache per-batch-composition verdicts and
+    # invalidate on any config change.
+    _config_generation: int = field(default=0, repr=False)
 
     def add_request(self, request_id: str):
+        self._config_generation += 1
         self._sampling_config[request_id] = SamplingConfig()
         self._seen_token_mask[request_id] =  SeenTokenMask.new(
             request_id,
@@ -352,6 +369,7 @@ class Sampler(BaseSampler):
         return self._seen_token_mask[request_id]
 
     def remove_request(self, request_id: str):
+        self._config_generation += 1
         if request_id in self._sampling_config:
             del self._sampling_config[request_id]
         if request_id in self._seen_token_mask:
@@ -359,6 +377,7 @@ class Sampler(BaseSampler):
         self._step_offset.pop(request_id, None)
 
     def set_config(self, request_id: str, **kwargs):
+        self._config_generation += 1
         old_vocab_size = self._sampling_config[request_id].vocab_size
         curr_config = asdict(self._sampling_config[request_id])
         kwargs = {k: arg for k, arg in kwargs.items() if k in curr_config.keys()}
@@ -375,38 +394,52 @@ class Sampler(BaseSampler):
             )
 
     def _acquire_param_slot(self, batch_size: int) -> dict:
-        """Rotate to the next pinned staging slot, growing capacity if needed.
+        """Rotate to the next pinned staging slot, allocating/growing lazily.
 
-        Growth reallocates the whole ring (old slots — including ones with
-        in-flight copies — stay safe: torch's caching host allocator records
-        stream uses of pinned blocks and defers reuse until the copies
-        complete). Reusing a slot waits on the event recorded after its last
-        copies; steady-state that event is ``_NUM_PARAM_SLOTS`` steps old and
-        long complete, so the wait is a no-op — it exists to make host-side
+        Reuse guard: a slot whose last copies may still be in flight is
+        event-checked with ``query()`` first — steady-state the event is
+        ``_PINNED_RING_SLOTS`` sample-calls stale and long complete, so the
+        common path is a single non-blocking query. Only when the query says
+        incomplete do we ``synchronize()`` (counted in ``_param_slot_blocks``
+        — a growing count on a live run means run-ahead outpaces the ring;
+        raise ``MSTAR_PINNED_RING``). The guard exists to make host-side
         rewrite-while-copy-in-flight provably impossible.
+
+        Per-slot lazy (re)allocation: only the slot being handed out gets its
+        pinned rows (re)allocated, sized to the ring-wide high-water mark
+        ``_param_cap`` so slots converge to one size. Growing AFTER the event
+        wait means the slot provably has no in-flight copies when its old
+        rows are dropped (and torch's caching host allocator would defer
+        pinned-block reuse across streams anyway). cudaHostAlloc device-syncs,
+        so allocating one slot at a time instead of the whole ring keeps the
+        (rare) growth stall minimal.
         """
-        cap = (
-            self._param_slots[0]["temperature"].shape[0]
-            if self._param_slots else 0
-        )
-        if cap < batch_size:
-            new_cap = max(batch_size, cap * 2, 8)
+        if not self._param_slots:
             self._param_slots = [
-                {
-                    **{
-                        name: torch.empty(new_cap, dtype=dtype, pin_memory=True)
-                        for name, dtype in _PARAM_SPECS
-                    },
-                    "event": torch.cuda.Event(),
-                    "recorded": False,
-                }
-                for _ in range(self._NUM_PARAM_SLOTS)
+                {"cap": 0, "event": torch.cuda.Event(), "recorded": False}
+                for _ in range(_PINNED_RING_SLOTS)
             ]
             self._param_slot_idx = 0
         slot = self._param_slots[self._param_slot_idx]
         self._param_slot_idx = (self._param_slot_idx + 1) % len(self._param_slots)
-        if slot["recorded"]:
+        if slot["recorded"] and not slot["event"].query():
+            # Host actually has to wait: the GPU has not yet consumed this
+            # slot's previous copies. Blocks only until the stream reaches the
+            # slot's last upload point (a stream position one full ring cycle
+            # old — strictly earlier than the legacy pageable upload's
+            # sync-to-stream-tail ever waited for).
+            self._param_slot_blocks += 1
             slot["event"].synchronize()
+        if slot["cap"] < batch_size:
+            self._param_cap = max(batch_size, self._param_cap, slot["cap"] * 2, 8)
+            for name, dtype in _PARAM_SPECS:
+                slot[name] = torch.empty(
+                    self._param_cap, dtype=dtype, pin_memory=True
+                )
+            slot["cap"] = self._param_cap
+            # Fresh rows have no in-flight copies; the old event (if any)
+            # refers to the dropped tensors.
+            slot["recorded"] = False
         return slot
 
     def _upload_params(
