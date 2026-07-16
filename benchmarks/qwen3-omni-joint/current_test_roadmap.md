@@ -719,3 +719,64 @@ rm_out/final (pd3c: i2t B1-B32 x3 repeats + s2t B1..B32), medians.
   (on only when <=2 in flight) is the follow-up worth building.
 SHIP CONFIG UNCHANGED: PD + ORDERED_EMIT + BATCH_VISION + bs32 grids;
 enc-async/merged/dual/mixed all off. v10 charts stand as the certified view.
+
+## SESSION 2026-07-16: encoders-implemented-v2 branch built, verified, first-benched
+
+BRANCH encoders-implemented-v2 (worktree mstar-eiv2) = baseline 4c33b33a + 8 commits
+(+612/-96 LOC): cleanup (dead HF-CPU image fallback), fp8 MoE (MSTAR_MOE_FP8), ordered
+emit, batch-vision + grid overrides, PD yaml (config-only!), V1/V2/V3 review fixes
+(boot guard, PREFILL_BUCKETS token override, dup-token fix, recompile_limit 256).
+3 movers + 3 harsh verifiers; all verdicts APPROVE(-with-fixes, applied). Key verifier
+findings: PD is genuinely config-only on baseline; ordered-emit port verbatim-faithful;
+cudagraph/compile fear UNFOUNDED (v2 most-captured family; ITL gap = host-Python floor);
+certified fp8 1.13x rode fused-topk -> re-measure demanded.
+
+FIRST BENCH (load 60-175 CONTAMINATED — like-for-like only, NOT certification):
+- v2 booted clean first try (PD+fp8+grids), 0 errors, all 24 cells rc=0.
+- fp8 A/B @i2t B32: WASH under load (4.24 off vs 4.14 on rps) — V1's warning stands.
+- vs godv9-ship SAME-NIGHT same-load: i2t B32 TTFT 4375 vs 6301 (v2 WINS -31%);
+  s2t B32 rps 29.6 vs 34.3 (v2 -14%); i2t B32 ITL 13.8 vs 4.3 (decode stack missing).
+- vs vLLM (quiet refs, unfair tonight): v2 ITL WINS s2t B8-32 + i2t B32 (13.8<15.4!
+  V3 predicted 18-25); everything else loses under this load.
+VERDICT: v2 skeleton is sound and V3's plan is confirmed — next commit = R1 batched/
+exiled postprocess (the ~13ms host slice); then quiet-host certification run.
+Charts: eiv2_h2h_{i2t,s2t}_2x2.png (enc series = committed f4d8fa15 per owner rule).
+
+## SPEECH GATE (2026-07-16): PD must NOT serve speech-out — topology-per-modality
+
+3-way A/B on eiv2 (s2s libri, t2s seed-tts; GPUs 6,7):
+              s2s B32 rps / TTFT_a / ITL_a     t2s B8 rps / TTFT_a
+ PD-base       8.41 / 2299 / 588               (t2s failed-path, n/a)
+ PD-speech    10.72 / 1594 / 534               0.64 / 671
+ colocated    12.38 / 1745 / 310               1.09 / 356
+- PD-base loses s2s -32% rps; talker-on-rank1 variant (e79cc825) recovers part at B32
+  but still -13% vs colo and WORSE at B8; t2s on PD -41% at B8.
+- Cause: speech-out is talker/codec-bound; the duplicated Thinker buys nothing there
+  and the pipeline balance of the default colo layout wins.
+VERDICT: topology-per-modality — PD yaml for text-out (i2t/s2t), colocated for
+speech-out (s2s/t2s/i2s). Deployment routes by requested output modality. PD is never
+"forever enabled" globally. (Owner gate satisfied.)
+
+## M4 DECODE STACK A/B (2026-07-16, eiv2, PD yaml, fresh boot/side)
+OFF->ON (FAST_POSTPROC+BATCH_EMIT+SLIM_EMIT): s2t B32 30.35->36.87 rps (+21%),
+632->772 tok/s (+22%), ITL 21.9->16.4 (-25%), TTFT 443->365; i2t B32 ITL 11.4->7.9.
+CAVEAT: ON side ran at lower host load (40-62 vs 63-114) — quiet-host cert required
+before claiming magnitudes; direction is decisive. vs vLLM committed: ON wins s2t
+B8-32 rps+ITL, B16-32 tok/s; REMAINING s2t losses = TTFT all batches (135-365 vs
+66-217) + B1 marginal. M4 flags join the text-out ship set.
+NEXT: s2t TTFT levers — verify proposer-2's ENCODER_ASYNC side-stream fall-through
+claim (worker.py:2368-2395 in godv9; eiv2 has no enc-async — a CLEAN reimpl may be
+better than a port), or admission timing. Then quiet-host certification of the full
+eiv2 ship (text: PD+M4; speech: colocated) + commit to benchmarks branch.
+
+## GRAVEYARD CORRECTION (2026-07-16): ENCODER_ASYNC tombstone was wrong
+
+M5 code forensics: godv9's MSTAR_ENCODER_ASYNC (re-port 1e7f10da) NEVER executed the
+encoder on the side stream — the re-port dropped the ~22-line execution block that the
+original 0fbb3732 had (worker.py:2368 fetches side_stream, then falls through to the
+default-stream else at :2390-2395; fetched var never used). The measured effects
+(s2t B32 49->26 collapse, s2t B1 79ms) came from the micro_scheduler PREEMPTION alone
+(encoder walks jump the queue) — stream overlap itself was never measured on godv9.
+Clean batch-gated reimpl on eiv2: MSTAR_ENC_OVERLAP=<N> (commit 8c518dce, +204 LOC,
+in-flight<=N gate, TP==1 + Thinker-local guard, blanket default-stream join, flag-off
+byte-identical). A/B in flight: s2t B1/B2 target, B32 guard, greedy-B1 parity pair.

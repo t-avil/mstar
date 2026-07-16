@@ -1,0 +1,17 @@
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'interleaved', 'mrope_section'}
+
+--- Benchmark Results (wall time: 22.86s) ---
+Closed-Loop Benchmark Results (96 requests, max_concurrency=32)
+──────────────────────────────────────────────────
+Request type breakdown: image_to_text=96
+Requests : 96/96 succeeded
+TTFT (text)  : mean=5.004s  p50=4.799s  p95=6.825s  p99=6.891s
+E2E          : mean=7.010s  p50=6.781s  p95=11.348s  p99=11.396s
+ITL  (text)  : mean=0.011s  p50=0.000s  p95=0.011s  p99=0.014s
+Text tokens: 16995 total (177.0 avg/req)
+Output bytes (text): 73948 total (16995 chunks)
+Throughput: 4.20 req/s (successful only)
+Throughput: 743.40 text tok/s
+Total wall time: 22.86s
+
+Saved 96 outputs to /m-coriander/coriander/tim/rm_out/s2tab_off/i2t_B32/
