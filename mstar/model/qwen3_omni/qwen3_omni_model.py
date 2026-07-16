@@ -56,8 +56,10 @@ from mstar.utils.sampling import SamplingConfig
 logger = logging.getLogger(__name__)
 
 # Performance defaults (ON), validated vs HF to cos>=0.9999. Opt out for the
-# HF-identical baseline: MSTAR_GPU_MEL=0 / MSTAR_GPU_IMAGE_PREPROCESS=0 /
-# MSTAR_VLLM_PROMPT_LAYOUT=0 / MSTAR_QWEN3_NATIVE_{AUDIO,VISION}_ENCODER=0.
+# HF-identical baseline: MSTAR_GPU_MEL=0 / MSTAR_VLLM_PROMPT_LAYOUT=0 /
+# MSTAR_QWEN3_NATIVE_{AUDIO,VISION}_ENCODER=0. GPU image preprocessing is
+# always-on: its HF-CPU fallback was removed in the eiv2 cleanup, and
+# MSTAR_GPU_IMAGE_PREPROCESS=0 now hard-errors at model init.
 # (MSTAR_VLLM_AUDIO_SENTINELS, MSTAR_BATCH_VISION_PREFILL stay opt-in.)
 # GPU log-mel: mel spectrograms on GPU instead of HF's CPU WhisperFeatureExtractor.
 _GPU_MEL = os.environ.get("MSTAR_GPU_MEL", "1") in ("1", "true", "True")
@@ -347,6 +349,9 @@ class Qwen3OmniModel(Model):
     ):
         self.cache_dir = cache_dir
         self.model_path_hf = model_path_hf
+        # Fail at boot (not per request) if the removed HF-CPU image
+        # preprocessing fallback is requested via env.
+        _check_gpu_image_preprocess_not_disabled()
 
         self.CONVERTER = [
             WeightConverter(
@@ -1374,9 +1379,8 @@ class Qwen3OmniModel(Model):
         raw_video_inputs = tensors.get("video_inputs", [])
 
         # Images are preprocessed on-device by _gpu_image_preprocess (no
-        # CPU/numpy round-trip through the HF image processor). Hard-error if
-        # someone asks for the removed HF-CPU fallback.
-        _check_gpu_image_preprocess_not_disabled()
+        # CPU/numpy round-trip through the HF image processor); the removed
+        # HF-CPU fallback is guarded at __init__ (fail-at-boot, not per request).
 
         # GPU log-mel is opt-in (MSTAR_GPU_MEL=1) and only when CUDA is present in
         # this worker; otherwise the raw audio is converted to numpy for the HF

@@ -186,7 +186,8 @@ def fused_experts_fp8(
     compute_type = tl.bfloat16 if hidden_states.dtype == torch.bfloat16 else tl.float16
 
     # In-graph tile sweep on H200 (real Qwen3-Omni weights): BLOCK_M=16 beats
-    # 32 at decode M (158us vs 165us @ M=32); keep 32 for prefill-sized M.
+    # 32 at decode M (158us vs 165us @ M=32); prefill-sized M uses the larger
+    # BLOCK_M=64 tile below (1.63x over the old BLOCK_M=32 prefill config).
     if num_tokens <= E:
         config = {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 128,
                   "GROUP_SIZE_M": 1, "num_warps": 4, "num_stages": 3}
