@@ -274,6 +274,12 @@ class BatchedCacheManager:
             all_page_indices = []
             kv_last_page_lens = []
             kv_cache_locations_list = []
+            # True per-request kv length (committed + new tokens). Forwarded to
+            # the plan-free xqa wrapper so the in-graph multistep decode uses the
+            # REAL length even when ``_reserve_multistep_pages`` has grown
+            # ``page_indices`` by K (the reserved pages would otherwise inflate
+            # the page-count-derived seq_lens). Byte-identical for single-step.
+            real_seq_lens_list = []
 
             for i, rid in enumerate(self.request_ids):
                 state = self._get_state(rid, effective_label)
@@ -287,6 +293,7 @@ class BatchedCacheManager:
                 qo_indptr_list.append(qo_indptr_list[-1] + sl)
                 all_page_indices.extend(state.page_indices)
                 kv_indptr_list.append(kv_indptr_list[-1] + len(state.page_indices))
+                real_seq_lens_list.append(total_len)
 
                 last_page_len = total_len % page_size or page_size
                 kv_last_page_lens.append(last_page_len)
@@ -403,6 +410,7 @@ class BatchedCacheManager:
                     paged_kv_last_page_len=paged_kv_last_page_len,
                     kv_cache_locations=kv_cache_locations,
                     dtype=dtype,
+                    real_seq_lens=real_seq_lens_list,
                 )
             else:
                 wrapper.plan(

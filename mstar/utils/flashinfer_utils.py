@@ -685,12 +685,17 @@ class FlashInferDecodeWrapper:
         paged_kv_last_page_len: torch.Tensor,
         kv_cache_locations: torch.Tensor | None = None,
         dtype: torch.dtype = torch.bfloat16,
+        real_seq_lens: torch.Tensor | list[int] | None = None,
     ):
         """Plan decode attention and compute KV write locations.
 
         For decode, each request appends exactly 1 token. The write
         location is the last page at position = last_page_len (before
         the append; after append it becomes last_page_len).
+
+        ``real_seq_lens`` is forwarded to the plan-free xqa wrapper for the
+        in-graph multistep decode path (see ``FlashInferXqaDecodeWrapper.plan``);
+        it is ``None`` (and ignored) for single-step.
 
         Inputs may be on CPU; see prefill wrapper's plan docstring.
         """
@@ -773,6 +778,7 @@ class FlashInferDecodeWrapper:
                 paged_kv_last_page_len=paged_kv_last_page_len,
                 kv_cache_locations=kv_cache_locations,
                 dtype=dtype,
+                real_seq_lens=real_seq_lens,
             )
 
     @torch.compiler.disable
@@ -930,16 +936,29 @@ class FlashInferXqaDecodeWrapper:
         paged_kv_last_page_len: torch.Tensor,
         kv_cache_locations: torch.Tensor | None = None,
         dtype: torch.dtype = torch.bfloat16,
+        real_seq_lens: torch.Tensor | list[int] | None = None,
     ):
         """Build the dense page table + device ``seq_lens`` (no host sync, no
         FlashInfer ``.plan()``). Mirrors ``FlashInferDecodeWrapper.plan`` args so
         it is a drop-in.
+
+        ``real_seq_lens`` (in-graph multistep only): the TRUE per-request kv
+        length (``committed + new_tokens``). The multistep path reserves K extra
+        KV pages up front (``_reserve_multistep_pages``) so the in-graph
+        write-location roll always lands in a physical page; but those reserved
+        pages inflate ``build_dense_block_tables``' page-count-derived
+        ``seq_lens`` by a full page whenever the K-step window crosses a page
+        boundary. When the caller supplies the true length we use it verbatim so
+        step-0 attention reads exactly ``committed+1`` tokens while the (wider)
+        block table still carries the reserved columns the roll needs. For
+        single-step this is ``None`` and the derived value is used unchanged
+        (byte-identical).
         """
         n_req = paged_kv_indptr.shape[0] - 1
         self.dtype = dtype
         self._n_req = n_req
 
-        block_tables, seq_lens, max_seq_len = build_dense_block_tables(
+        block_tables, derived_seq_lens, max_seq_len = build_dense_block_tables(
             paged_kv_indptr,
             paged_kv_indices,
             paged_kv_last_page_len,
@@ -948,6 +967,15 @@ class FlashInferXqaDecodeWrapper:
             max_pages_per_seq=self.max_pages_per_seq,
         )
         self._max_seq_len = max_seq_len
+
+        # Decouple the REAL kv length from the (possibly K-page-inflated) block
+        # table page count. See ``real_seq_lens`` in the docstring.
+        if real_seq_lens is not None:
+            seq_lens = torch.as_tensor(
+                real_seq_lens, dtype=torch.uint32, device=self.device
+            )
+        else:
+            seq_lens = derived_seq_lens
 
         if self.use_cuda_graph:
             self._seq_lens_buf[:n_req].copy_(seq_lens)
@@ -962,8 +990,21 @@ class FlashInferXqaDecodeWrapper:
             self._seq_lens = seq_lens
             self._block_tables = block_tables
 
-        # KV write locations (identical math to the plan-based wrapper).
-        if kv_cache_locations is not None:
+        # KV write location for THIS step's token (absolute index ``seq_len-1``).
+        if self.multistep_k >= 2:
+            # Seed the write-location from the SAME page-roll math the in-graph
+            # advance uses (multistep_write_locations reads position seq_len-1 out
+            # of the dense block table). This is REQUIRED once K pages are
+            # reserved: the plan-based ``kv_cache_locations`` seed points at
+            # ``page_indices[-1]`` (the LAST reserved page), which is the wrong
+            # page for step 0 after a page-boundary crossing. Deriving it from the
+            # real ``seq_lens`` + the dense table keeps step 0 exactly consistent
+            # with ``advance_step_ingraph`` and correct under the reserve.
+            # Byte-identical to the seed for single-step (no reserved pages).
+            locations = multistep_write_locations(
+                self._seq_lens, self._block_tables, self.page_size
+            )
+        elif kv_cache_locations is not None:
             locations = kv_cache_locations.to(self.device, non_blocking=True)
         else:
             indptr = paged_kv_indptr.to(self.device, non_blocking=True)

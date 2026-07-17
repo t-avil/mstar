@@ -1077,6 +1077,19 @@ class CudaGraphRunner:
         config = graph_data.config
         if not graph_data.slots:
             return False
+        # In-graph multistep (MSTAR_XQA_MULTISTEP>=2) is INCOMPATIBLE with
+        # pre-planning. Pre-plan runs plan_attention on the plan_executor thread
+        # BEFORE the GPU thread's ``_reserve_multistep_pages`` grows each seq by
+        # K pages, then stamps ``_pre_planned_labels`` so the in-preprocess
+        # plan_attention takes the fast path and NEVER rebuilds the device block
+        # table. The K reserved pages then never reach ``_block_tables_buf``, so
+        # ``advance_step_ingraph``'s write-location roll gathers a stale/zero
+        # column the moment the K-step window crosses a page boundary — the
+        # generated tokens' KV lands on the wrong physical page and later
+        # attention regenerates the opening. Plan inline (post-reserve) instead;
+        # multistep already amortizes the host cost over K tokens.
+        if graph_data.multistep_k >= 2:
+            return False
         if slot is None:
             slot = 0
         slot %= len(graph_data.slots)
@@ -1439,6 +1452,10 @@ class CudaGraphRunner:
                 launch_started_event.set()
             if exec_timings is not None:
                 exec_timings.fwd_start = time.perf_counter()
+            if graph_data.multistep_k >= 2:
+                self._ms_debug_dump_seed(
+                    static_cm, config_labels, graph_data.multistep_k,
+                )
             graph.replay()
             if self.enable_nvtx:
                 range_pop(synchronize=False)
@@ -1494,6 +1511,9 @@ class CudaGraphRunner:
                     request_ids=request_ids,
                     static_output=static_output,
                     k_steps=graph_data.multistep_k,
+                )
+                self._ms_debug_dump_tokens(
+                    static_output, request_ids, graph_data.multistep_k,
                 )
             else:
                 outputs = self._sample_and_remap(
@@ -1835,6 +1855,77 @@ class CudaGraphRunner:
                         self.alloc_manager.flush_to_store(rid, label)
         if self.enable_nvtx:
             range_pop(synchronize=False)
+
+    def _ms_debug_dump_seed(
+        self, static_cm, config_labels: list[str], k_steps: int,
+    ) -> None:
+        """MSTAR_XQA_MS_DEBUG: dump the SEEDED per-step decode state (request 0)
+        BEFORE a multistep replay, so the K-step in-graph write-location roll can
+        be verified against the reserved pages. Only the first
+        ``MSTAR_XQA_MS_DEBUG`` replays are dumped (host syncs; debug only).
+
+        For a CORRECT run the K expected write pages must all be VALID (non-zero,
+        picked from the dense block table) and the offsets must roll 0..p-1 across
+        a page boundary. The pre-plan/reserve bug shows up as the crossing step's
+        page reading 0 / a stale id (block-table column never populated).
+        """
+        budget = int(os.environ.get("MSTAR_XQA_MS_DEBUG", "0") or "0")
+        if budget <= 0:
+            return
+        seen = getattr(self, "_ms_debug_seen", 0)
+        if seen >= budget:
+            return
+        try:
+            label = "main" if "main" in config_labels else config_labels[0]
+            ps = static_cm._plan_states.get(label)
+            xqa = getattr(getattr(ps, "wrapper", None), "_xqa", None)
+            if xqa is None:
+                return
+            p = xqa.page_size
+            sl0 = int(xqa._seq_lens[0].item())          # committed + 1 for req 0
+            committed = sl0 - 1
+            loc0 = xqa.kv_cache_locations[0].tolist()    # [page, offset] step 0
+            bt0 = xqa._block_tables[0].tolist()
+            per_step = []
+            for j in range(k_steps):
+                last = committed + j                     # abs index written step j
+                col = last // p
+                page = bt0[col] if col < len(bt0) else None
+                per_step.append({"step": j, "abs_idx": last, "col": col,
+                                 "page": page, "off": last - col * p})
+            logger.warning(
+                "[XQA_MS_DEBUG seed #%d] label=%s K=%d page_size=%d committed=%d "
+                "seeded_seq_len0=%d step0_loc(page,off)=%s expected_roll=%s",
+                seen, label, k_steps, p, committed, sl0, loc0, per_step,
+            )
+            self._ms_debug_seen = seen + 1
+        except Exception as exc:  # never let debug crash a run
+            logger.warning("[XQA_MS_DEBUG seed] dump failed: %r", exc)
+
+    def _ms_debug_dump_tokens(
+        self, static_output: dict, request_ids: list[str], k_steps: int,
+    ) -> None:
+        """MSTAR_XQA_MS_DEBUG: dump the K in-graph tokens (request 0) AFTER a
+        multistep replay. Paired with the seed dump so a divergent replay's tokens
+        can be lined up with the write-location roll that produced them."""
+        budget = int(os.environ.get("MSTAR_XQA_MS_DEBUG", "0") or "0")
+        if budget <= 0:
+            return
+        seen = getattr(self, "_ms_debug_tok_seen", 0)
+        if seen >= budget:
+            return
+        try:
+            bt = static_output.get("__batched_tokens__")
+            if bt is None:
+                return
+            toks = bt[0, :k_steps].tolist()
+            logger.warning(
+                "[XQA_MS_DEBUG toks #%d] rid0=%s in_graph_tokens=%s",
+                seen, request_ids[0] if request_ids else "?", toks,
+            )
+            self._ms_debug_tok_seen = seen + 1
+        except Exception as exc:
+            logger.warning("[XQA_MS_DEBUG toks] dump failed: %r", exc)
 
     def _reserve_multistep_pages(
         self, rids: list[str], config_labels: list[str], k_steps: int,
