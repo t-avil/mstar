@@ -43,6 +43,33 @@ class SchedulingType(Enum):
     ROUND_ROBIN = "round_robin"
 
 
+# Stage-B mixed decode + bounded-prefill (MSTAR_MIXED_PREFILL). The walk that
+# carries the running decodes, and the prefill walks whose ONE head-of-queue
+# request may be co-admitted as a bounded chunk to unfreeze those decodes.
+_MIXED_DECODE_WALK = "thinker_decode"
+_MIXED_PREFILL_WALKS = ("prefill_text", "prefill_vision", "prefill_audio")
+
+
+def find_mixed_coadmit(
+    entries: list[ReadyNodeEntry],
+    decode_walk: str = _MIXED_DECODE_WALK,
+    prefill_walks: tuple[str, ...] = _MIXED_PREFILL_WALKS,
+) -> ReadyNodeEntry | None:
+    """Pick the ONE pending prefill request to co-admit with a decode batch.
+
+    Pure over the same-node ready ``entries`` the scheduler already collected
+    (decode and the prefill walks share the Thinker node, so both appear here).
+    Returns the first ready entry whose ``graph_walk`` is a prefill walk, or
+    ``None`` if there is no pending prefill to fold in. Head-of-queue order is
+    the collection order (scan order over worker-graph queues), matching the
+    "fold the head-of-queue image-prefill" intent. Never mutates ``entries``.
+    """
+    for e in entries:
+        if e.graph_walk in prefill_walks:
+            return e
+    return None
+
+
 class MicroScheduler:
     """
     Simple MVP scheduler: scans all worker graph queues for ready nodes,
@@ -272,6 +299,21 @@ class MicroScheduler:
         entries = [e for e in node_name_to_requests[best_node_name] \
                    if e.graph_walk == graph_walk]
 
+        # --- Stage-B mixed decode + bounded-prefill DETECTION (seam §1) ---
+        # When the flag is on and we picked a DECODE batch, look for ONE pending
+        # prefill request in the SAME node's ready set (decode + prefill walks
+        # share the Thinker node). If present, a mixed step COULD co-admit a
+        # bounded chunk of it to unfreeze the decodes. Today this only LOGS the
+        # descriptor (gated by MSTAR_MIXED_DEBUG) so ONE boot confirms mixed
+        # batches would form + where the chunk lands; it does NOT yet alter the
+        # returned batch (the engine packing + (bs,N) capture that actually
+        # executes the mixed step is the remaining, GPU-iterated seam). The
+        # detection itself is wrapped so it can never perturb scheduling.
+        self._maybe_log_mixed_coadmit(
+            worker_graphs_manager, best_node_name, graph_walk,
+            node_name_to_requests[best_node_name], len(entries),
+        )
+
         # Limit batch size if requested (e.g., for CUDA graph compatibility)
         if max_batch_size is not None and len(entries) > max_batch_size:
             entries = entries[:max_batch_size]
@@ -305,6 +347,71 @@ class MicroScheduler:
             node_objects=node_objects,
             request_to_worker_graph=request_to_worker_graph,
         )
+
+    def _maybe_log_mixed_coadmit(
+        self,
+        worker_graphs_manager: WorkerGraphsManager,
+        node_name: str,
+        graph_walk: str,
+        node_entries: list[ReadyNodeEntry],
+        decode_bs: int,
+    ) -> None:
+        """Observability-only detection of a mixed co-admission opportunity.
+
+        Fires only when MSTAR_MIXED_PREFILL + MSTAR_MIXED_DEBUG are on, the
+        selected batch is a decode batch, and a pending prefill request exists
+        in the same node's ready set. Reads the prefill request's committed kv
+        length / MRoPE start / first page best-effort from its SequenceInfo and
+        logs the bounded chunk N. Wrapped so it can NEVER raise into scheduling.
+        """
+        try:
+            from mstar.utils.flashinfer_utils import (
+                mixed_debug_enabled,
+                mixed_prefill_enabled,
+                mixed_budget_tokens,
+                mixed_step_debug_log,
+            )
+            if not (mixed_prefill_enabled() and mixed_debug_enabled()):
+                return
+            if graph_walk != _MIXED_DECODE_WALK or decode_bs == 0:
+                return
+            cand = find_mixed_coadmit(node_entries)
+            if cand is None:
+                return
+            budget = mixed_budget_tokens()
+            committed_len = mrope_start = first_page = None
+            unprocessed = None
+            try:
+                partition = worker_graphs_manager.get_partition_for_node(node_name)
+                seq_info = worker_graphs_manager.get_seq_info(
+                    cand.request_id, partition
+                )
+                # PerLabelSeqInfo.info: {(kv_str, rank): {label: SequenceInfo}}.
+                for per_rank in seq_info.info.values():
+                    si = per_rank.get("main") or next(iter(per_rank.values()), None)
+                    if si is None:
+                        continue
+                    committed_len = getattr(si, "seq_len", None)
+                    mrope_start = getattr(si, "pos_id", None)
+                    pages = getattr(si, "page_indices", None)
+                    first_page = pages[0] if pages else None
+                    break
+            except Exception:
+                pass
+            n_chunk = budget if unprocessed is None else min(budget, unprocessed)
+            mixed_step_debug_log(
+                stage="schedule",
+                decode_bs=decode_bs,
+                chunk_n=n_chunk,
+                prefill_rid=cand.request_id,
+                committed_len=committed_len,
+                first_page=first_page,
+                mrope_start=mrope_start,
+                extra=f"pf_walk={cand.graph_walk}",
+            )
+        except Exception:
+            # Detection must never perturb the scheduler.
+            pass
 
     def has_ready_excluding(
         self,
