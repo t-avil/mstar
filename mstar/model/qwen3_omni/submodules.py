@@ -784,7 +784,7 @@ class ThinkerSubmodule(ARNodeSubmodule):
             # advance.
             cache_manager.set_custom_pos_advance(mrope_pos_advance, label="main")
 
-        return {
+        out = {
             "input_embeds": input_embeds,
             "cos_3d": cos_3d,
             "sin_3d": sin_3d,
@@ -796,6 +796,19 @@ class ThinkerSubmodule(ARNodeSubmodule):
             },
             **extra_inputs
         }
+        # In-graph multistep decode needs the 3D MRoPE positions as a live
+        # (slot-private) static buffer so the captured K-step body can advance
+        # them and recompute cos/sin per iteration. Emit it ONLY for decode with
+        # the flag on, so the single-step / flag-off path stays byte-identical
+        # (no extra static input buffer, unchanged forward signature).
+        from mstar.utils.flashinfer_utils import xqa_multistep_k
+        if graph_walk == "thinker_decode" and xqa_multistep_k() >= 2:
+            # Emit BATCH-LEADING (bs, 3) so the CUDA-graph runner's static-buffer
+            # interning + replay copy (which slice/size on the leading dim ==
+            # batch) work unchanged; the K-step body transposes back to the
+            # (3, bs) layout compute_3d_cos_sin wants.
+            out["position_ids_3d"] = position_ids_3d.transpose(0, 1).contiguous()
+        return out
 
     # ---- forward ----
 
@@ -1214,6 +1227,28 @@ class ThinkerSubmodule(ARNodeSubmodule):
 
         cos_sin_3d = (cos_3d, sin_3d) if cos_3d is not None else None
         cache_manager = engine_inputs.cache_manager
+
+        # In-graph K-step decode (MSTAR_XQA_MULTISTEP): the runner injects the
+        # step count + the plan-free xqa wrapper into the captured kwargs. When
+        # present (only ever at CAPTURE time, and only for thinker_decode), run
+        # the K-iteration body so ONE graph replay produces K tokens. Absent =>
+        # byte-identical single-step behavior below. Branch BEFORE the shared
+        # forward so we do not double-run the i==0 pass / double-write its KV.
+        multistep_k = kwargs.get("_multistep_k")
+        if multistep_k and graph_walk == "thinker_decode":
+            return self.forward_batched_multistep(
+                graph_walk=graph_walk,
+                engine_inputs=engine_inputs,
+                input_embeds=input_embeds,
+                cos_3d=cos_3d,
+                sin_3d=sin_3d,
+                position_ids_3d=kwargs["position_ids_3d"],
+                mrope_section=mrope_section,
+                masks_for_talker=masks_for_talker,
+                k_steps=int(multistep_k),
+                xqa_wrapper=kwargs["_xqa_wrapper"],
+            )
+
         hidden, layer_0_embed, layer_n_hidden = self.model(
             input_embeds=input_embeds,
             cache_handle=cache_manager,
@@ -1277,6 +1312,103 @@ class ThinkerSubmodule(ARNodeSubmodule):
         # graph runner can sample directly without concatenating per-rid slices.
         outputs["__batched_logits__"] = logits
         return outputs
+
+    def forward_batched_multistep(
+        self,
+        graph_walk: str,
+        engine_inputs: ModelInputsFromEngine,
+        input_embeds: torch.Tensor,
+        cos_3d: torch.Tensor,
+        sin_3d: torch.Tensor,
+        position_ids_3d: torch.Tensor,
+        mrope_section: list[int] | None = None,
+        masks_for_talker: dict[str, torch.Tensor] | None = None,
+        *,
+        k_steps: int,
+        xqa_wrapper,
+    ) -> dict[str, torch.Tensor]:
+        """In-graph K-step decode body (``MSTAR_XQA_MULTISTEP``); decode only.
+
+        Captures ``k_steps`` decode iterations in ONE CUDA graph so a single
+        replay emits K tokens (1 host round-trip per K tokens instead of per
+        token). Every per-step host operation is pulled INSIDE the captured
+        region as pure device tensor ops:
+
+          (a) full Thinker forward over the CURRENT device ``seq_lens`` (each
+              layer's ``run_attention`` first writes the current token's K,V at
+              the xqa wrapper's rolling ``kv_cache_locations``);
+          (b) LM head -> in-graph greedy token (first-index argmax, matching the
+              fused greedy kernel's ``tl.argmax``); recorded into the wrapper's
+              ``_tokens_out_buf`` column for one post-replay [bs,K] host copy;
+          (c) feed the sampled token as the next step's ``input_embeds`` (in
+              place, into the SLOT-PRIVATE static buffer);
+          (d) advance the MRoPE position by 1 for all three components (decode
+              is text, so temporal==height==width advance identically, exactly
+              as ``_preprocess_decode`` builds ``[[p],[p],[p]] -> p+1``) and
+              recompute cos/sin in place;
+          (e) advance the decode device state one token via
+              ``xqa_wrapper.advance_step_ingraph`` (``seq_lens += 1`` and roll
+              the KV write-location to the next PRE-RESERVED page column).
+
+        The loop-carried tensors (``input_embeds``, ``cos_3d``, ``sin_3d``,
+        ``position_ids_3d``) MUST be the slot-private static buffers (the eiv2
+        non-deterministic-greedy fix): the runner interns them per (config, key,
+        slot_idx) so slot 0 and slot 1 never alias a loop-carried carry buffer.
+
+        Returns ``__batched_tokens__`` [bs, k_steps] (the in-graph tokens; the
+        runner EOS-trims them on the host before emit) and ``__batched_logits__``
+        (the LAST step's [bs, V] logits, kept so the existing sample path can
+        still produce a token during bring-up / for the mixed-sampling fallback).
+        """
+        assert graph_walk == "thinker_decode", (
+            "forward_batched_multistep supports thinker_decode only"
+        )
+        from mstar.utils.flashinfer_utils import ingraph_greedy_token
+
+        cache_manager = engine_inputs.cache_manager
+        bs = input_embeds.shape[0]
+        inv_freq = self._get_inv_freq(input_embeds.device)
+        section = mrope_section or self.MROPE_SECTION
+        logits = None
+
+        for i in range(k_steps):
+            # (a) full forward over current seq_lens; per-layer KV write happens
+            #     inside run_attention at the xqa rolling write-location.
+            hidden, _layer0, _layern = self.model(
+                input_embeds=input_embeds,
+                cache_handle=cache_manager,
+                cos_sin_3d=(cos_3d, sin_3d),
+                mrope_section=mrope_section,
+                mrope_pos_advance=None,
+                deepstack_visual_embeds=None,
+            )
+            # (b) logits -> in-graph greedy token -> record for one host copy.
+            logits = self.model.lm_head(hidden)                 # (bs, vocab)
+            y = ingraph_greedy_token(logits)                    # (bs,) int64
+            xqa_wrapper.record_token_ingraph(i, y)
+
+            if i + 1 < k_steps:
+                # (c) feed token as next input embedding (in place).
+                input_embeds.copy_(self.model.model.embed_tokens(y))
+                # (d) advance MRoPE one text position; recompute cos/sin in place.
+                #     position_ids_3d is BATCH-LEADING (bs, 3); advance in place,
+                #     transpose to (3, bs) for compute_3d_cos_sin.
+                position_ids_3d += 1
+                new_cos, new_sin = compute_3d_cos_sin(
+                    position_ids_3d.transpose(0, 1), inv_freq,
+                    mrope_section=section,
+                    target_dtype=input_embeds.dtype,
+                )
+                cos_3d.copy_(new_cos)
+                sin_3d.copy_(new_sin)
+                # (e) advance decode device state one token (seq_lens += 1;
+                #     roll KV write-location to the next pre-reserved column).
+                xqa_wrapper.advance_step_ingraph()
+
+        return {
+            "__batched_tokens__": xqa_wrapper._tokens_out_buf[:bs, :k_steps],
+            "__batched_logits__": logits,
+        }
 
     def unpack_packed_outputs(
         self,

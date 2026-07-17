@@ -93,6 +93,13 @@ class CudaGraphData:
     # which slot a given iter targets.
     next_slot: int = 0
     applied_penalty_in_graph: bool = False
+    # In-graph K-step decode (MSTAR_XQA_MULTISTEP). 0/1 => single-step (the
+    # normal path). K>=2 => each replay ran K decode steps in-graph, so the
+    # replay path must: pre-reserve K KV pages/seq before replay, advance host
+    # seq_len by K after replay, and consume the [bs,K] __batched_tokens__
+    # sentinel (raw tokens; the submodule check_stop EOS-trims them) instead of
+    # sampling __batched_logits__ once.
+    multistep_k: int = 0
 
 
 @dataclass(frozen=True)
@@ -381,8 +388,20 @@ class CudaGraphRunner:
 
     def _intern_static_buffer(
         self, config_idx: int, key: str, value: torch.Tensor,
+        slot_idx: int | None = None,
     ) -> torch.Tensor:
         """Return a leading-dim slice view into the shared buffer for (config_idx, key).
+
+        ``slot_idx`` (in-graph multistep only): when provided, the buffer is
+        keyed per (config_idx, key, slot_idx) so it is SLOT-PRIVATE instead of
+        shared across NUM_SLOTS. This is the eiv2 non-deterministic-greedy fix —
+        the K-step decode body advances loop-carried buffers (input_embeds /
+        cos_3d / sin_3d / position_ids_3d) IN PLACE inside the captured graph,
+        so slot 0 and slot 1 must never alias them (a speculative pre-plan of
+        the other slot would otherwise advance a shared carry buffer a
+        timing-dependent number of times -> divergent MRoPE). ``slot_idx=None``
+        keeps the original shared behavior, so the single-step / flag-off path
+        is byte-identical.
 
         Allocates the shared buffer at ``value``'s shape on first encounter
         — relies on ``warmup_and_capture``'s largest-first iteration
@@ -398,7 +417,7 @@ class CudaGraphRunner:
         mismatch is a design-level surprise (a tensor whose shape depends on
         bs in a non-leading way), so we hard-fail with a precise message.
         """
-        buf_key = (config_idx, key)
+        buf_key = (config_idx, key) if slot_idx is None else (config_idx, key, slot_idx)
         shared = self.shared_static_buffers.get(buf_key)
         if shared is None:
             shared = torch.empty(value.shape, dtype=value.dtype, device=value.device)
@@ -494,7 +513,8 @@ class CudaGraphRunner:
         config: CudaGraphConfig,
         bs: int,
         slots: list[CudaGraphSlot],
-        applied_penalty_in_graph: bool=False
+        applied_penalty_in_graph: bool=False,
+        multistep_k: int = 0,
     ) -> None:
         """Register a populated CudaGraphData under all replay graph walks.
 
@@ -519,7 +539,8 @@ class CudaGraphRunner:
                 bs=bs,
                 slots=slots,
                 next_slot=0,
-                applied_penalty_in_graph=applied_penalty_in_graph
+                applied_penalty_in_graph=applied_penalty_in_graph,
+                multistep_k=multistep_k,
             )
 
     def _capture_slots(
@@ -528,6 +549,7 @@ class CudaGraphRunner:
         config: CudaGraphConfig,
         submodule: ARNodeSubmodule,
         prepare_slot: Callable[[int], _SlotCaptureSpec],
+        multistep_k: int = 0,
     ) -> None:
         """Drive the per-slot warmup + capture loop for one (config, bs) bucket.
 
@@ -602,7 +624,8 @@ class CudaGraphRunner:
 
             self._register_graph_data(
                 key=key, config=config, bs=key.bs, slots=captured_slots,
-                applied_penalty_in_graph=applied_penalty_in_graph
+                applied_penalty_in_graph=applied_penalty_in_graph,
+                multistep_k=multistep_k,
             )
         finally:
             for rids in dummy_rids_to_free:
@@ -701,6 +724,18 @@ class CudaGraphRunner:
             return
         config_idx = self.capture_configs.index(config)
 
+        # In-graph K-step decode (MSTAR_XQA_MULTISTEP): only for a decode config
+        # whose submodule implements the K-step body AND when the plan-free xqa
+        # kernel is active (device seq_lens, capturable advance). K in {0,1} or a
+        # submodule without the hook => single-step (byte-identical below).
+        from mstar.utils.flashinfer_utils import xqa_multistep_k
+        multistep_k = xqa_multistep_k()
+        multistep = (
+            multistep_k >= 2
+            and config.capture_graph_walk == "thinker_decode"
+            and hasattr(submodule, "forward_batched_multistep")
+        )
+
         def prepare_slot(slot_idx: int) -> _SlotCaptureSpec:
             dummy_rids = self._make_dummy_rids(config, bs, slot_idx)
             dummy_inputs = [template.clone() for _ in dummy_rids]
@@ -714,23 +749,51 @@ class CudaGraphRunner:
                 dummy_rids=dummy_rids, plan_states=plan_states, config=config,
             )
 
+            # Reach the plan-free xqa wrapper (owns the capturable seq_lens /
+            # kv-write-location advance + the [bs,K] token-out buffer). Prefer
+            # the "main" cache label the decode forward's run_attention uses.
+            xqa_wrapper = None
+            if multistep:
+                ps_label = "main" if "main" in plan_states else next(iter(plan_states))
+                base_wrapper = plan_states[ps_label].wrapper
+                xqa_wrapper = getattr(base_wrapper, "_xqa", None)
+                assert xqa_wrapper is not None, (
+                    "MSTAR_XQA_MULTISTEP>=2 requires MSTAR_XQA_DECODE=1 "
+                    "(plan-free xqa wrapper); got a plan-based decode wrapper."
+                )
+                xqa_wrapper.enable_multistep(multistep_k)
+
             # Preprocess (plans attention+rope outside graph) and intern
-            # the resulting tensors into the shared static-buffer pool so
-            # both slots' captures read from the same GPU addresses.
+            # the resulting tensors into the static-buffer pool. For multistep
+            # the loop-carried buffers must be SLOT-PRIVATE (see
+            # _intern_static_buffer): pass slot_idx so each slot advances its
+            # own carry buffers. Single-step keeps the shared pool.
             preprocessed = submodule.preprocess(
                 graph_walk=config.capture_graph_walk,
                 engine_inputs=engine_inputs,
                 inputs=dummy_inputs,
             )
+            intern_slot = slot_idx if multistep else None
             for k in list(preprocessed.keys()):
                 v = preprocessed[k]
                 if isinstance(v, torch.Tensor):
-                    preprocessed[k] = self._intern_static_buffer(config_idx, k, v)
+                    preprocessed[k] = self._intern_static_buffer(
+                        config_idx, k, v, slot_idx=intern_slot,
+                    )
 
             static_input_keys = [
                 k for k, v in preprocessed.items()
                 if isinstance(v, torch.Tensor)
             ]
+
+            # Inject the multistep control kwargs AFTER interning + key
+            # collection (non-tensors: not interned, not treated as static
+            # inputs). forward_batched dispatches to forward_batched_multistep
+            # when it sees these; they matter only at capture time (replay uses
+            # the captured graph, never re-calls forward_batched).
+            if multistep:
+                preprocessed["_multistep_k"] = multistep_k
+                preprocessed["_xqa_wrapper"] = xqa_wrapper
 
             def re_prepare() -> None:
                 submodule.preprocess(
@@ -756,6 +819,7 @@ class CudaGraphRunner:
 
         self._capture_slots(
             key=key, config=config, submodule=submodule, prepare_slot=prepare_slot,
+            multistep_k=(multistep_k if multistep else 0),
         )
 
     def can_run(
@@ -1276,6 +1340,21 @@ class CudaGraphRunner:
             if self.enable_nvtx:
                 range_pop(synchronize=False)
 
+            # --- In-graph multistep pre-reserve (MSTAR_XQA_MULTISTEP >= 2) ---
+            # The captured K-step body writes K tokens' K,V and advances
+            # seq_lens in-graph, so the paged allocator MUST already hold valid
+            # physical pages for every column those K writes can touch BEFORE
+            # replay — no host allocation happens inside the graph. Pre-grow each
+            # REAL request's KV to seq_len + K (plan_attention's own +1 alloc
+            # below is then a no-op, and build_dense_block_tables picks up the
+            # reserved pages so multistep_write_locations rolls into valid pages).
+            # Padding slots keep their tiny dummy seq_len (< page_size), so their
+            # in-graph writes never roll past page 0 and need no reserve.
+            if graph_data.multistep_k >= 2:
+                self._reserve_multistep_pages(
+                    dummy_rids[:real_bs], config_labels, graph_data.multistep_k,
+                )
+
             # --- Step 2: Pad inputs to padded_bs and re-plan via preprocess ---
             if self.enable_nvtx:
                 range_push("cg.preprocess_replan", synchronize=False)
@@ -1380,9 +1459,16 @@ class CudaGraphRunner:
                 range_push("gpu_thread.postprocess", synchronize=False)
             if self.enable_nvtx:
                 range_push("cg.advance_seq_lens", synchronize=False)
+            # Multistep: the graph advanced the DEVICE seq_lens by K (and wrote K
+            # tokens' K,V), so the host state must advance by K to stay in sync —
+            # call the per-token advance K times. Requests that hit EOS mid-K are
+            # over-advanced, which is harmless because the submodule check_stop
+            # trims + finishes them (the extra state is discarded with the req).
+            advance_times = graph_data.multistep_k if graph_data.multistep_k >= 2 else 1
             for label in config_labels:
                 static_cm.set_active_label(label)
-                static_cm.advance_seq_lens()
+                for _ in range(advance_times):
+                    static_cm.advance_seq_lens()
             if self.enable_nvtx:
                 range_pop(synchronize=False)
 
@@ -1399,15 +1485,26 @@ class CudaGraphRunner:
             # --- Step 6: Sample logits and remap dummy → real outputs ---
             if self.enable_nvtx:
                 range_push("cg.sample_and_remap", synchronize=False)
-            outputs = self._sample_and_remap(
-                request_ids=request_ids,
-                dummy_rids=dummy_rids,
-                static_output=static_output,
-                per_request_info=per_request_info,
-                slot_data=slot_data,
-                submodule=submodule,
-                inputs=inputs,
-            )
+            if graph_data.multistep_k >= 2:
+                # Multistep: the K tokens were sampled IN-GRAPH (in-graph greedy)
+                # and collected into the __batched_tokens__ [padded_bs, K]
+                # sentinel. Consume them directly (one host copy) — do NOT
+                # re-sample __batched_logits__.
+                outputs = self._remap_multistep_tokens(
+                    request_ids=request_ids,
+                    static_output=static_output,
+                    k_steps=graph_data.multistep_k,
+                )
+            else:
+                outputs = self._sample_and_remap(
+                    request_ids=request_ids,
+                    dummy_rids=dummy_rids,
+                    static_output=static_output,
+                    per_request_info=per_request_info,
+                    slot_data=slot_data,
+                    submodule=submodule,
+                    inputs=inputs,
+                )
             if self.enable_nvtx:
                 range_pop(synchronize=False)
 
@@ -1738,6 +1835,74 @@ class CudaGraphRunner:
                         self.alloc_manager.flush_to_store(rid, label)
         if self.enable_nvtx:
             range_pop(synchronize=False)
+
+    def _reserve_multistep_pages(
+        self, rids: list[str], config_labels: list[str], k_steps: int,
+    ) -> None:
+        """Pre-grow each request's paged KV by ``k_steps`` tokens before an
+        in-graph multistep replay (MSTAR_XQA_MULTISTEP).
+
+        The captured K-step body writes K tokens' K,V and rolls the write column
+        in-graph from the device ``seq_lens`` only — it CANNOT allocate a page.
+        So every page those K writes can touch must already be physical before
+        replay. ``alloc_manager.alloc(seq_len=cur+K)`` reserves them; the
+        subsequent ``plan_attention`` (+1) alloc is then a no-op and
+        ``build_dense_block_tables`` picks up the reserved pages so
+        ``multistep_write_locations`` rolls into valid pages instead of the
+        zero-padded (page-0-aliasing) columns.
+
+        ``rids`` are the (real-state-aliased) dummy rids for the real requests
+        only; padding slots keep their tiny dummy seq_len (< page_size) so their
+        in-graph writes never leave page 0.
+        """
+        for rid in rids:
+            for label in config_labels:
+                state = self.alloc_manager.get_state(rid, label)
+                self.alloc_manager.alloc(
+                    rid, label=label, seq_len=state.seq_len + k_steps,
+                )
+
+    def _remap_multistep_tokens(
+        self, request_ids: list[str], static_output: dict, k_steps: int,
+    ) -> dict:
+        """Consume the in-graph-sampled ``__batched_tokens__`` [padded_bs, K]
+        sentinel into per-rid outputs (one host copy, no re-sampling).
+
+        Emits, per request:
+          - ``new_tokens``: list of the K in-order token views [1] — the RAW
+            over-generated tokens. The submodule's ``check_stop`` is responsible
+            for EOS-trimming these before emit (it owns the stop-token set), the
+            same host-side "over-generate K, trim before emit" contract the
+            single-step path expresses one-token-at-a-time. This decides the stop
+            on the SAME round-trip (no async_sched deferral).
+          - ``new_token``: the LAST token view [1], so the existing next-step
+            feeding path (which embeds ``new_token``) continues from token K-1
+            for requests that did not stop. Stopped requests are finished by
+            check_stop and never feed their (discarded) post-EOS tail.
+
+        NOTE (integration seam, §6.5): the scheduler / submodule.check_stop must
+        be taught to consume ``new_tokens`` (K per step) rather than a single
+        ``new_token``. Until then the state stays consistent (host + device both
+        advanced by K) but only every K-th token reaches the client — a visible
+        under-count, NOT silent KV corruption.
+        """
+        batched_tokens = static_output.get("__batched_tokens__")
+        assert batched_tokens is not None, (
+            "multistep replay expected a __batched_tokens__ sentinel from "
+            "forward_batched_multistep; got None (capture wiring mismatch)."
+        )
+        real_bs = len(request_ids)
+        # One [real_bs, K] host copy. int64 token ids.
+        toks = batched_tokens[:real_bs, :k_steps].clone()
+        outputs: dict = {}
+        for i, rid in enumerate(request_ids):
+            row = toks[i]                       # [K]
+            token_views = [row[j : j + 1] for j in range(k_steps)]
+            outputs[rid] = {
+                "new_tokens": token_views,
+                "new_token": [token_views[-1]],
+            }
+        return outputs
 
     def _sample_and_remap(
         self,

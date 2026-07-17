@@ -23,6 +23,11 @@ from mstar.utils.flashinfer_utils import (  # noqa: E402
     trim_after_eos,
     xqa_multistep_k,
 )
+from mstar.model.qwen3_omni.components.rope import (  # noqa: E402
+    compute_3d_cos_sin,
+    compute_rope_freqs,
+    get_rope_index_text,
+)
 
 PAGE = 128
 FAILS = 0
@@ -143,6 +148,57 @@ def test_trim():
     check("multi eos-id set", out4[0] == [5, 8], str(out4[0]))
 
 
+def test_mrope_ingraph_advance():
+    """§6.3 (highest parity risk): the in-graph MRoPE advance must be
+    byte-identical to what preprocess would build at the advanced position.
+
+    forward_batched_multistep advances decode positions with ``pos += 1`` (all
+    three components, since a decode token is text: temporal==height==width) and
+    recomputes cos/sin via the SAME ``compute_3d_cos_sin``. This must equal the
+    single-step path, which rebuilds ``get_rope_index_text(1, start_pos+i)`` from
+    scratch each step. Validate K steps for a batch of requests at different
+    start positions.
+    """
+    print("MRoPE in-graph advance == single-step recompute (§6.3)")
+    HEAD_DIM = 128
+    SECTION = [24, 20, 20]
+    inv_freq = compute_rope_freqs(HEAD_DIM, rope_theta=1_000_000.0)
+    starts = [0.0, 5.0, 4096.0]  # different per-request decode positions
+    K = 4
+
+    # In-graph carry: build the step-0 3D positions the way _preprocess_decode
+    # does ([[p],[p],[p]] per request, concatenated on dim=1 -> (3, bs)), then
+    # advance in place by +1 each step.
+    pos_carry = torch.cat(
+        [get_rope_index_text(1, p) for p in starts], dim=1
+    )  # (3, bs)
+    ok_cos = ok_sin = True
+    for step in range(K):
+        cos_g, sin_g = compute_3d_cos_sin(
+            pos_carry, inv_freq, mrope_section=SECTION, target_dtype=torch.bfloat16,
+        )
+        # Reference: rebuild fresh at start+step for each request.
+        pos_ref = torch.cat(
+            [get_rope_index_text(1, p + step) for p in starts], dim=1
+        )
+        cos_r, sin_r = compute_3d_cos_sin(
+            pos_ref, inv_freq, mrope_section=SECTION, target_dtype=torch.bfloat16,
+        )
+        if not torch.equal(cos_g, cos_r):
+            ok_cos = False
+        if not torch.equal(sin_g, sin_r):
+            ok_sin = False
+        pos_carry = pos_carry + 1  # in-graph advance_step MRoPE update
+    check("cos byte-identical across K in-graph advances", ok_cos)
+    check("sin byte-identical across K in-graph advances", ok_sin)
+    # Sanity: advancing the carry by 1 equals rebuilding at +1 (the whole basis).
+    p0 = torch.cat([get_rope_index_text(1, p) for p in starts], dim=1)
+    check(
+        "pos += 1 == get_rope_index_text(start+1)",
+        torch.equal(p0 + 1, torch.cat([get_rope_index_text(1, p + 1) for p in starts], dim=1)),
+    )
+
+
 def main():
     print("=== XQA multistep CPU/meta checks (no GPU) ===")
     test_flag()
@@ -150,6 +206,7 @@ def main():
     test_pages_needed()
     test_greedy()
     test_trim()
+    test_mrope_ingraph_advance()
     print()
     if FAILS:
         print(f"RESULT: {FAILS} CHECK(S) FAILED")

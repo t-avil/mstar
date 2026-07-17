@@ -764,6 +764,17 @@ class FlashInferDecodeWrapper:
             k: [n_req, num_kv_heads, head_dim]
             v: [n_req, num_kv_heads, head_dim]
         """
+        # When the plan-free xqa path is active, route the KV write through the
+        # xqa wrapper's OWN kv_cache_locations. This is byte-identical for
+        # single-step (plan() sets both wrappers' locations from the same
+        # ``locations`` tensor, so they are equal), but it is REQUIRED for
+        # in-graph multistep: ``advance_step_ingraph`` advances only the xqa
+        # wrapper's seq_lens + kv_cache_locations between the K captured
+        # forwards, so the per-step KV write must read the xqa locations to land
+        # at the correct (rolling) page/offset instead of a frozen step-0 slot.
+        if self._xqa is not None:
+            self._xqa.set_kv_cache(kv_cache_layer, k, v)
+            return
         n = self._n_req
         pages = self.kv_cache_locations[:n, 0]
         positions = self.kv_cache_locations[:n, 1]
