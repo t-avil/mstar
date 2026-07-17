@@ -76,3 +76,49 @@ cleanly (it is plan-free/no host sync by design, but unverified in-graph here);
 captured region; (d) `_ms_len` / `_seq_lens_buf` / `kv_cache_locations` are
 re-seeded by `plan()` before every captured batch (the graph re-runs the same
 in-place `+= 1`).
+
+## §6.5 Emit / stop seam — consume all K tokens per replay (2026-07-17)
+
+The capture emits K tokens per replay but the emit path consumed only one, so
+the client saw every K-th token (decimated / garbled text). The seam wires the
+existing (already list-aware) transport to carry all K, in order, with
+single-step-identical stop handling.
+
+**Data flow (unchanged plumbing, now fed K tokens).**
+`_remap_multistep_tokens` returns per rid `new_tokens` = the K in-order token
+views and `new_token` = the last (feed anchor). The Thinker decode node has two
+text edges: `new_token` -> `EMIT_TO_CLIENT` (api server iterates
+`graph_edge.tensor_info` in order -> one detokenized chunk per token; worker
+`_send_outputs` extends `num_output_tokens` by the tensor count) and
+`text_inputs` -> next Thinker step. Both are already list-aware, so emitting K
+is a matter of populating the `new_token` edge with the K token list while
+feeding only the last to `text_inputs`. Ordering is preserved end to end: the K
+views are built in generation order, ride one `result_tensors` message, and the
+api server appends chunks in arrival order (no loop-index re-sort).
+
+**Stage 1 — coherence (this commit).** `ThinkerSubmodule.postprocess` (runs on
+the GPU thread — pure list reshaping, no host sync): when `new_tokens` is
+present, set `new_token = list(new_tokens)` (all K -> client) and
+`text_inputs = <last>` (feed). Single step (no `new_tokens`) is byte-identical.
+Validated by an `--ignore-eos --output-len N` run: mid-K EOS is not yet trimmed,
+so this isolates "is the K-token generation coherent" from "is stop handling
+correct". The conductor's token-accurate `num_output_tokens >= max_output_tokens`
+governs fixed length (overshoot <= K-1 per replay); the client's `output-len`
+truncation makes the visible length exact.
+
+**Stage 2 — stop handling (next commit).** Adds `multistep_keep_count`
+(flashinfer_utils), `ThinkerSubmodule.check_stop` scanning all K tokens for EOS,
+`ThinkerSubmodule.trim_multistep_emit` (first-EOS-inclusive keep count, computed
+from the host copy the worker already made for check_stop — no extra sync), and
+`kv_cache_engine.trim_multistep_for_batch` invoked by the worker right after
+`check_stop_for_batch`, trimming the routed `new_token` list before store/route
+so post-EOS tokens are never stored, emitted, or counted. Same round-trip, no
+async deferral. Single step (`len(new_token) <= 1`) and submodules without the
+hook are untouched.
+
+**Speech gate.** `forward_batched_multistep` returns only `__batched_tokens__` /
+`__batched_logits__` — it drops `thinker_states`/`thinker_mask`, which the Talker
+needs. So multistep is text-out only; audio-output requests must stay
+single-step. This is enforced by topology/config (only text-out serving sets
+`MSTAR_XQA_MULTISTEP`), matching the eiv2 topology-per-modality rule. The emit
+seam does not re-introduce speech data — it only reshapes the text token edges.

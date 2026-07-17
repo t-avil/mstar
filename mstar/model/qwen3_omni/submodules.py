@@ -1501,8 +1501,28 @@ class ThinkerSubmodule(ARNodeSubmodule):
                 outputs["thinker_mask"] = [multimodal_mask[inclusion_mask]]
 
         if "new_token" not in outputs:
+            outputs.pop("new_tokens", None)
             return
-        outputs["text_inputs"] = outputs["new_token"]
+
+        # In-graph K-step decode (MSTAR_XQA_MULTISTEP >= 2). The runner's
+        # _remap_multistep_tokens emits, per request:
+        #   new_tokens : the K in-order token views for this replay
+        #   new_token  : the LAST of those K (the next-step feed anchor)
+        # The "new_token" edge is EMIT_TO_CLIENT (modality text); the
+        # "text_inputs" edge feeds the next decode step. In single step these
+        # share one tensor, but a K-step replay must diverge: emit ALL K tokens
+        # (in order) to the client, feed only the LAST back into the Thinker.
+        # This runs on the GPU thread, so it stays pure list reshaping — no
+        # .item()/.cpu() host sync. (Stage 1: emit every K; validated with
+        # --ignore-eos so no mid-K EOS. EOS-trim of the emit is added in
+        # Stage 2 on the worker's slow-postprocess path.)
+        # Absent new_tokens (single step, flag off) => byte-identical to before.
+        multistep_tokens = outputs.pop("new_tokens", None)
+        if multistep_tokens is not None:
+            outputs["text_inputs"] = outputs["new_token"]     # [last] -> next step
+            outputs["new_token"] = list(multistep_tokens)     # [K] in order -> client
+        else:
+            outputs["text_inputs"] = outputs["new_token"]
 
     def check_stop(
         self, request_id: str,
