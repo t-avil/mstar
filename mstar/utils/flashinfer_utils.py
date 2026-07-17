@@ -90,6 +90,189 @@ def build_dense_block_tables(
     return block_tables, seq_lens.to(torch.uint32), max_pages_per_seq * page_size
 
 
+# ---------------------------------------------------------------------------
+# In-graph multistep decode (MSTAR_XQA_MULTISTEP) — Stage A helpers.
+#
+# These are the pure, CPU/meta-testable primitives that make a K-step decode
+# capturable in ONE CUDA graph on top of the plan-free xqa decode path:
+#   - xqa_multistep_k():        flag reader (K; 0/1 => off).
+#   - multistep_write_locations(): derive the KV write slot for the current
+#     token PURELY from the device seq_lens buffer (page-roll math). No host
+#     indices, so it is valid inside a capture region.
+#   - multistep_pages_needed():  how many dense block_table columns must hold
+#     pre-allocated pages so K steps never allocate inside the graph.
+#   - ingraph_greedy_token():    argmax matching the host greedy tie-break.
+#   - trim_after_eos():          host-side stop handling (over-generate K, trim
+#     everything after the first EOS before emit).
+# See campaign_i2t/XQA_MULTISTEP_DESIGN.md for the full capture body.
+# ---------------------------------------------------------------------------
+
+
+def xqa_multistep_k() -> int:
+    """Number of decode steps to fuse into one CUDA graph (``MSTAR_XQA_MULTISTEP``).
+
+    Returns 0 when the feature is off (env unset, ``0``, ``1``, or unparseable) —
+    0 and 1 both mean "single step per graph", i.e. the existing behavior, so the
+    flag-OFF path stays byte-identical. Any ``K >= 2`` requests a K-step in-graph
+    decode. Only meaningful when ``MSTAR_XQA_DECODE=1`` (needs the plan-free,
+    device-``seq_lens`` xqa kernel); with the plan-based wrapper the per-step host
+    replan cannot be captured, so multistep silently stays off.
+    """
+    if not xqa_decode_enabled():
+        return 0
+    try:
+        k = int(os.environ.get("MSTAR_XQA_MULTISTEP", "0"))
+    except (ValueError, TypeError):
+        return 0
+    return k if k >= 2 else 0
+
+
+def multistep_write_locations(
+    seq_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+    page_size: int,
+) -> torch.Tensor:
+    """KV write location for the token being processed at the CURRENT ``seq_lens``.
+
+    ``seq_lens[r]`` is the kv length of request ``r`` **including** the token
+    whose K,V is written this step (same convention as ``build_dense_block_tables``
+    and the single-step wrapper, whose ``set_kv_cache`` writes at
+    ``pos = last_page_len - 1``). The token's absolute index is therefore
+    ``seq_lens - 1``; its page column is ``(seq_lens-1) // page_size`` and its
+    in-page offset is ``(seq_lens-1) % page_size``. The physical page id is
+    gathered from the pre-allocated dense ``block_tables``.
+
+    Everything is a gather / integer div-mod on device tensors — no ``.item()``,
+    no host indices — so this runs INSIDE the capture region. Advancing
+    ``seq_lens += 1`` between steps rolls ``col`` to the next (pre-reserved)
+    block-table column automatically when a page boundary is crossed.
+
+    Args:
+        seq_lens:     [bs] int/uint kv lengths (device or CPU for tests).
+        block_tables: [bs, W] int32 dense page ids, left-packed, zero-padded.
+        page_size:    tokens per KV page.
+    Returns:
+        locations: [bs, 2] int64 — column 0 = physical page id, column 1 =
+        in-page offset. Same shape/semantics as the wrapper's
+        ``kv_cache_locations``.
+    """
+    L = seq_lens.to(torch.int64)
+    last = L - 1
+    col = torch.div(last, page_size, rounding_mode="floor")        # [bs]
+    off = last - col * page_size                                    # [bs]
+    bs = block_tables.shape[0]
+    rows = torch.arange(bs, device=block_tables.device)
+    page = block_tables[rows, col].to(torch.int64)                 # gather
+    return torch.stack([page, off], dim=1)
+
+
+def multistep_pages_needed(
+    seq_lens_before: torch.Tensor,
+    k_steps: int,
+    page_size: int,
+) -> int:
+    """Dense block-table columns that must hold valid pre-allocated pages to run
+    ``k_steps`` in-graph decode steps starting from ``seq_lens_before``.
+
+    Over the K steps the running length used at step ``i`` (0-based) is
+    ``L0 + i`` and the token written that step has index ``L0 + i - 1``, so the
+    widest page column touched (read for attention AND written) is
+    ``(max(L0) + k_steps - 2) // page_size``. The block table (and the host
+    paged allocator) must reserve **that many + 1** columns/pages up front, so no
+    page allocation happens inside the graph.
+
+    Returns the required column COUNT (== required pages per sequence, worst
+    case). Callers size ``max_pages_per_seq`` (block-table width) to be ``>=``
+    this and tell the paged allocator to pre-grow each sequence to
+    ``max(L0) + k_steps - 1`` tokens before capture/replay.
+    """
+    L0 = int(seq_lens_before.max().item()) if seq_lens_before.numel() else 0
+    max_idx = L0 + k_steps - 2           # last token index written across K steps
+    if max_idx < 0:
+        return 1
+    return max_idx // page_size + 1
+
+
+def ingraph_greedy_token(logits: torch.Tensor) -> torch.Tensor:
+    """In-graph greedy token = ``argmax`` over the vocab dim.
+
+    ``torch.argmax(dim=-1)`` returns the FIRST maximal index (lowest token id on
+    ties), which matches the fused greedy kernel used by the single-step path
+    (``fused_temperature_softmax(..., include_greedy=True)`` emits a one-hot at
+    ``tl.argmax``, also first-index). Kept as a named helper so the multistep
+    capture body and any parity test reference the exact same reduction.
+
+    NOTE (parity): to be *byte-identical* to a mixed greedy/sampled batch the
+    capture body should reuse M*'s ``Sampler``/``fused_temperature_softmax`` path
+    directly (it already runs in-graph for the penalty case). This helper is the
+    pure-greedy equivalent for the all-greedy benchmark config and for CPU tests;
+    the CUDA tie-break of ``torch.argmax`` must be confirmed first-index on the
+    live box (it is first-index on CPU).
+
+    Args:
+        logits: [bs, vocab] (any float dtype).
+    Returns:
+        tokens: [bs] int64.
+    """
+    return logits.argmax(dim=-1).to(torch.int64)
+
+
+def trim_after_eos(
+    tokens: torch.Tensor,
+    eos_token_ids,
+    already_finished=None,
+    include_eos: bool = True,
+) -> list[list[int]]:
+    """Host-side stop handling for over-generated multistep output.
+
+    The graph cannot early-stop, so it always emits ``K`` tokens per request.
+    After the single ``[bs, K]`` host copy, drop everything a request produced
+    AFTER its first stop token. This is done on the host BEFORE emit (never emit
+    post-EOS), which avoids the ``async_sched`` trap of deferring the stop
+    DECISION to a later step.
+
+    Args:
+        tokens:        [bs, K] the K in-order tokens sampled for each request.
+        eos_token_ids: int or iterable of stop token ids.
+        already_finished: optional [bs] bool — requests that hit EOS in a prior
+                          batch emit nothing this batch.
+        include_eos:    keep the EOS token itself (True) or drop it (False).
+                        Single-step check_stop emits the stop token then stops,
+                        so the default is True; confirm against M*'s check_stop.
+    Returns:
+        per-request list of emitted token ids (variable length <= K).
+    """
+    if isinstance(eos_token_ids, int):
+        eos_set = {eos_token_ids}
+    else:
+        eos_set = set(int(x) for x in eos_token_ids)
+
+    rows = tokens.tolist()
+    bs = len(rows)
+    fin = [False] * bs
+    if already_finished is not None:
+        fin = [bool(x) for x in (
+            already_finished.tolist()
+            if torch.is_tensor(already_finished) else already_finished
+        )]
+
+    out: list[list[int]] = []
+    for r in range(bs):
+        if fin[r]:
+            out.append([])
+            continue
+        kept: list[int] = []
+        for tok in rows[r]:
+            tok = int(tok)
+            if tok in eos_set:
+                if include_eos:
+                    kept.append(tok)
+                break
+            kept.append(tok)
+        out.append(kept)
+    return out
+
+
 @torch.compiler.disable
 def run_rms_norm(
     input: torch.Tensor,
@@ -638,6 +821,12 @@ class FlashInferXqaDecodeWrapper:
         self.max_pages_per_seq = max_pages_per_seq
         self.dtype = None
         self.sm_scale = 1.0 / (head_dim ** 0.5)
+        # In-graph multistep (MSTAR_XQA_MULTISTEP). K>=2 => the capture body runs
+        # K decode iterations, advancing seq_lens + kv write-locations in-graph
+        # between them. K in {0,1} => single-step (unchanged). Buffers allocated
+        # lazily in plan()/enable_multistep() only when K>=2 and cuda-graph mode.
+        self.multistep_k = xqa_multistep_k()
+        self._tokens_out_buf: torch.Tensor | None = None
 
         # xqa views the workspace as uint8; first 8MB is the semaphore region and
         # MUST be zero on first use. Own a dedicated zeroed buffer (128MB) so we
@@ -758,3 +947,47 @@ class FlashInferXqaDecodeWrapper:
         positions = self.kv_cache_locations[:n, 1]
         kv_cache_layer[pages, 0, positions] = k[:n].to(self.dtype)
         kv_cache_layer[pages, 1, positions] = v[:n].to(self.dtype)
+
+    # ---- In-graph multistep primitives (capturable; used only when K>=2) ----
+
+    def advance_step_ingraph(self) -> None:
+        """Advance decode state by ONE token, entirely with device tensor ops
+        (capturable — no ``.item()``, no host indices, no reallocation).
+
+        Called between the K captured forward passes. After the step-``i``
+        forward has consumed the current ``seq_lens`` (attention) and written the
+        current token's K,V at ``kv_cache_locations``, this:
+          1. ``seq_lens += 1`` — so step ``i+1``'s attention sees the new length;
+          2. recomputes ``kv_cache_locations`` from the advanced ``seq_lens`` via
+             :func:`multistep_write_locations`, rolling to the next PRE-ALLOCATED
+             block-table column when a page boundary is crossed.
+
+        Preconditions (enforced by the host at plan/reserve time, NOT here):
+          - ``block_tables`` already holds valid pages for every column the K
+            steps will touch (see :func:`multistep_pages_needed`);
+          - ``_max_seq_len`` covers ``max(seq_lens) + K``.
+        """
+        assert self.use_cuda_graph, "multistep advance requires cuda-graph buffers"
+        n = self._n_req
+        # In-place add on the persistent device buffer (same address at replay).
+        self._seq_lens_buf[:n] += 1
+        locs = multistep_write_locations(
+            self._seq_lens_buf[:n], self._block_tables_buf[:n], self.page_size
+        )
+        self.kv_cache_locations[:n].copy_(locs)
+
+    def enable_multistep(self, k_steps: int) -> None:
+        """Allocate the ``[bs, K]`` static output-token buffer used to collect the
+        K in-graph-sampled tokens for one batched host copy after replay."""
+        assert self.use_cuda_graph and self.batch_size is not None
+        self.multistep_k = k_steps
+        self._tokens_out_buf = torch.zeros(
+            self.batch_size, k_steps, dtype=torch.int64, device=self.device
+        )
+
+    def record_token_ingraph(self, step: int, token_ids: torch.Tensor) -> None:
+        """Write step-``i`` sampled tokens into column ``i`` of the static output
+        buffer (capturable copy). Read back with ONE host copy after replay."""
+        assert self._tokens_out_buf is not None, "call enable_multistep() first"
+        n = self._n_req
+        self._tokens_out_buf[:n, step].copy_(token_ids[:n].to(torch.int64))
