@@ -92,3 +92,85 @@ decode). LOSES TTFT every batch (single-GPU audio prefill serialization, same st
 class as i2t B32). s2t is latency-PRIMARY (TTFT+ITL) -> SPLIT: ITL win, TTFT deficit = s2t
 NOT cleanly won on primary. TTFT lever (MSTAR_ENCODER_ASYNC) helps TTFT but regresses s2t
 throughput (documented tradeoff) -> s2t TTFT is the focused open problem. Chart: s2t_FINAL_pd_vs_vllm.png.
+
+### ★★ ENC-ASYNC (MSTAR_ENCODER_ASYNC=1) — i2t-ONLY win (completes i2t sweep), DESTROYS s2t
+Boot: PD + preproc + MSTAR_ENCODER_ASYNC=1 (port 8347).
+i2t B32 (3 reps): tok/s +11.3/+10.2/+15.4% (unchanged vs no-encasync +11%); TTFT p50 216/161/168
+  -> median 168ms < vLLM 179 < no-encasync 204. => enc-async turns i2t B32 TTFT tie->WIN.
+i2t B16: tok/s +35.7% (no regression). => enc-async is a clean i2t upgrade (B32 TTFT tie->win).
+s2t B8: req/s +45.6%->+22.9%, tok/s +27->+7.7%, TTFT 172->235 (WORSE), ITL 7.5->8.2.
+s2t B32: req/s +40%->+3.6%, tok/s +22%->-9.3%, TTFT 499->540, ITL 6.6->15.6 (COLLAPSE).
+=> enc-async REGRESSES s2t badly (confirms prior note). MODALITY-GATED: use enc-async for i2t,
+   NOT for s2t. (PD is already text-out-only per-modality; topology/flags per modality.)
+VERDICT: BEST i2t = PD + preproc + ENC_ASYNC (wins EVERY metric EVERY batch incl B32 TTFT 168).
+         BEST s2t = PD + preproc (NO enc-async).
+
+### CORRECTION — enc-async NOT adopted (fuller data)
+First 3 B32 reps gave TTFT median 168 (<179) but the clean 3-rep SWEEP gives B32 TTFT median
+**200ms** (high variance 161-216) — enc-async does NOT reliably push i2t B32 TTFT below vLLM
+179; tok/s only marginal (+11->+13%). Determinism held (i2t B1 16/16). And it DESTROYS s2t.
+=> enc-async REJECTED (marginal for i2t, harmful for s2t). BEST i2t stays PD + preproc.
+i2t B32 TTFT (~200 median) is a genuine ~tie neither PD nor enc-async decisively flips =
+structural single-GPU-prefill limit (vLLM uses 2-GPU TP prefill; M* TP regresses host-bound decode).
+
+### E1 eiv2 build (moonshot/decode-composed) BASELINE (flags OFF) — REGRESSES vs wt-boot-cache
+i2t B32 (3 reps): tok/s -33.7/-35.3/-37.0% (ITL 15-17ms) vs wt-boot-cache PD +11% (ITL 11.9). BAD.
+s2t B8: tok/s -1.6% ITL 12.4 (vs +27%/7.5). s2t B32: tok/s -0.1% ITL 18.3 (vs +22%/6.6). BAD.
+=> eiv2 decode-composed branch with flags OFF falls to a slower decode path (ITL ~2x worse).
+   The branch refactored decode expecting its flags ON. NEXT: E3+E4 composed decode flags ON
+   (FULLSTEP_DECODE + DECODE_SYNCFREE) — must recover >=25% ITL to beat wt-boot-cache. Parity-gate.
+
+### ★ E3+E4 eiv2 COMPOSED DECODE (FULLSTEP_DECODE=1 + DECODE_SYNCFREE=1) — DEAD (parity-fail + collapse)
+PARITY FAIL: i2t B1 determinism 2/16 match run-to-run (NON-deterministic greedy!). Plus perf
+COLLAPSE: i2t B32 tok/s -90%, ITL 153ms (10x slow); cells timed out. Output slightly degraded.
+=> composed in-graph/syncfree decode is BROKEN (non-deterministic + 10x slow). DEAD.
+COMBINED with E1 (eiv2 baseline regresses tok/s -35%/ITL 2x): ENTIRE eiv2/moonshot-decode branch
+direction is EXHAUSTED/dead. wt-boot-cache + PD + preproc = confirmed champion.
+Note: fused-KV (E2) moot — eiv2-only + eiv2 baseline already -35%, can't beat champion.
+=> Config/flag space EXHAUSTED. Remaining open gaps (i2t B32 TTFT tie, s2t TTFT) are STRUCTURAL
+   (need mixed prefill+decode co-admission = code). Pivot to CODE: N1 dual-stream + s2t instrumentation.
+
+### s2t TTFT localization (code agent) — audio encoder ALREADY BATCHED (no cheap fix)
+Native audio encoder varlen-packs all ready requests into ONE forward (submodules.py:243-267,
+can_batch:275-282); scheduler groups all (micro_scheduler.py:1172). NOT bs=1. => "batch audio
+encoder" = NO-OP (refutes hypothesis). B32 s2t 499ms = compute-bound (block-diagonal attn scales
+~linear w/ batch) + batched Thinker prefill_audio. Same structural class as i2t B32 prefill.
+=> No cheap flag/code fix for s2t TTFT. Real levers: (a) encoder-side kernel work / async overlap
+(ENC_ASYNC regresses s2t throughput - rejected), (b) mixed prefill+decode co-admission (large
+rewrite). Instrumentation patch (MSTAR_S2T_PHASE_TIMING, parity-safe default-off) available to
+split AuT-encode vs Thinker-prefill vs KV-handoff if we want the exact breakdown.
+CONCLUSION: both open gaps (i2t B32 TTFT tie, s2t TTFT) = structural compute-bound single-GPU
+prefill; only real fix = co-admission substrate (vLLM-style unified token budget) = multi-day rewrite.
+
+### ★★★ CO-ADMISSION IS ALREADY BUILT — MSTAR_MIXED_SPLIT_ATTN (champion branch, UNBENCHMARKED)
+Scoping agent GO/NO-GO: the record-around-attention substrate for mixed prefill+decode is COMMITTED
+on wt-boot-cache/infra/boot-cache (commits e6c41479 + fixes): captures thinker_mixed as ONE fixed-shape
+FLASH_INFER_PACKED graph (decode_rows+prefill_bucket), splits attention into 2 sub-wrappers planned
+OUTSIDE the graph (cuda_graph_runner.py:354,1402,1798). NO run_mixed stub anymore. Default OFF
+(qwen3_omni_model.py:299). Enable: MSTAR_MIXED_BATCH=1 MSTAR_MIXED_SPLIT_ATTN=1 MSTAR_MIXED_CHUNK_SIZES=256,512.
+MY CHAMPION BOOTS HAD SPLIT_ATTN OFF -> co-admission never active in any measurement so far!
+Prior mixed failures: MIXED_WALK=fundamental(no captured shape, fixed by split-attn); mixed-CG=BUG(dict
+not NodeOutput, superseded); W5-P2=NEUTRAL at B32 (B32 is CPU-serialization-bound not mixed-eager-bound).
+=> Expected payoff LOW (B32 CPU-floor) but it's THE real co-admission lever + targets s2t TTFT too +
+   it's a FLAG A/B (hours not days). PARITY IS THE RISK (mixed fp8/split-KV -> greedy nondeterminism;
+   killed eiv2 E3/E4). TEST: parity-gate (determinism 16/16 + coherence) FIRST, then i2t B32 + s2t TTFT
+   paired >=3 reps vs split-attn-off. NEXT EXPERIMENT.
+
+### ★★★ E-SPLIT MSTAR_MIXED_SPLIT_ATTN (co-admission) — TESTED, NEUTRAL(i2t)/HARMFUL(s2t)/parity-risk. NOT adopted.
+i2t B32 (3 reps): tok/s +7.3/+13.5/+11.0% (median +11%), TTFT p50 198-255 (median 214), ITL 10.8-12.2.
+ = SAME as champion (split-attn off): NEUTRAL, no TTFT gain. Confirms B32 is CPU-floor-bound not mixed-eager-bound.
+s2t B32: tok/s -38.4%, ITL 45ms, TTFT 426 = REGRESSED badly (mixed step hurts s2t decode). s2t B8 ~ok.
+Parity: i2t B32 determinism 3/32 run-to-run (batch-composition fp8/split-KV nondeterminism); coherent/correct.
+VERDICT: co-admission (the last real structural lever, already built) does NOT close i2t B32 TTFT or s2t
+TTFT. Scoping prediction confirmed: single-GPU-prefill + 26ms CPU-serialization floor is the wall; TP
+regresses (SHM no NVLink); postprocess-exile/syncfree = eiv2 branch = BROKEN (parity-fail+collapse).
+=> ALL TRACTABLE LEVERS EXHAUSTED. Champion (wt-boot-cache+PD+preproc, split-attn OFF) is the ceiling.
+   Remaining gaps (i2t B32 TTFT ~tie, s2t TTFT) require an ATTENDED decode-CPU-floor rewrite (high risk,
+   prior attempts broke parity). ESCALATE. Shift to rigor: bulletproof the delivered wins.
+
+### RIGOR (2026-07-17) — bulletproofed medians
+i2t B32 with 9 reps: tok/s +12.6%, TTFT p50 181ms (≈vLLM 179, now a clean tie/marginal win),
+ ITL 11.8, req/s +35.3%. => i2t is a decisive win on EVERY metric every batch.
+s2t n=256 x3 (wave-robust): req/s +21..92%, tok/s +2..68%, ITL 5-8.5 vs vLLM 5-29 (huge win),
+ TTFT 78-505 vs 66-217 (loses all — structural). Confirms s2t throughput+ITL win, TTFT deficit.
+Charts: i2t_FINAL_pd_vs_vllm.png, s2t_FINAL_n256_pd_vs_vllm.png.
