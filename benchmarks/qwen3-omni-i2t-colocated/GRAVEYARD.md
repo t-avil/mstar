@@ -286,3 +286,62 @@ for a -7% SINGLE cell (i2t B32; ITL tied; M* already WINS B1/8/16 like-for-like)
 RECOMMENDATION -> STRONGLY (A): bank the honest like-for-like i2t win (B1-16), document B32 as structural
 decode-floor limit (irreducible per-step D->H; closing needs a full MRV2 rewrite that FlashInfer 0.6.13 makes
 even harder). R3 grind for -7% = poor risk/reward + spec's "don't spin on ambitious ideas unattended".
+
+### ★★★★ R3 THEORIST (Opus) VERDICT: in-graph multistep INFEASIBLE on FlashInfer 0.6.13 (code-traced)
+Champion single-step decode does NOT grow length in-graph — it RE-PLANS on host every step: wrapper.plan()
+does indptr/last_page_len .to("cpu") (flashinfer_utils.py:177-183) to compute split-KV tile schedule, frozen
+into workspace; graph.replay() reads fixed buffers. seq_lens_buffer=False => NO in-graph substrate to
+re-derive KV schedule as length grows; page rollover (indptr/indices) unrepresentable in-graph.
+Option A (persistent wrapper + in-graph last_page_len++): stale tile schedule -> NOT bit-identical (garbage on
+split-KV/rollover). Option B (N chained pre-planned subgraphs): each length needs host plan() at replay = the
+round-trip being removed. => ATTENTION is the sole blocker; all else (in-graph argmax, DIRECT_FEED, pos_3d,
+per-slot buffers, trim-stop) is capturable. Closing B32 needs FlashInfer bump (in-graph seq_len) OR hand-written
+paged-decode kernel = RE-PLATFORMING not a patch. Files: flashinfer_utils.py:163-204,369-448; cuda_graph_runner
+.py:340-412,673-676,1730-1752. RECOMMEND: bank honest win; do NOT spend GPU-days. Awaiting critic cross-check.
+
+### ★★★★ R3 CRITIC (Opus) — INDEPENDENTLY CONFIRMS NO-GO (architecturally closed)
+Plan/alloc is 100% host-side Python: plan_attention (cache_manager.py:307-352) walks request_ids in Python,
+alloc() does PAGE ROLLOVER in Python (:318), builds int32 tensors on CPU (:349-352); FlashInferDecodeWrapper.plan
+calls attn_wrapper.plan every step (flashinfer_utils.py:186) w/ indptr/last_page_len .to("cpu") (:178-180) +
+total_tokens=int(lens.sum().item()) HARD sync (:215). use_cuda_graph only reuses buffer ADDRESSES at replay, does
+NOT make plan capturable. Chained-subgraph fallback fails identically (page index only from host alloc()/plan()).
+=> "architecturally closed by FlashInfer 0.6.13 + Python paged allocator; floor is plan+alloc not forward." NO-GO.
+Cheapest disproof (if needed): offline page-rollover KV test (no boot). Parity ladder (L1-L7) documented.
+CONSENSUS: 2 independent Opus agents (theorist + critic) code-trace the SAME infeasibility. B32 -7% requires a
+FlashInfer bump (in-graph seq_len) or hand-written paged-decode kernel = RE-PLATFORM, not a patch. RECOMMEND: bank.
+
+### ★★★★ R3 IMPLEMENTER (Opus) — 3rd independent confirmation; Slice-0 patch avoids the wall
+Delivered MSTAR_MULTISTEP_INGRAPH Slice-0 patch that validates ONLY the safe pieces (in-graph greedy argmax +
+per-slot-private carry via _intern_static_buffer slot_idx key, cuda_graph_runner.py:456/475/2244) — and
+EXPLICITLY does NOT attempt in-graph attention length-growth ("the real R3 blocker... FlashInfer 0.6.13 no
+seq_lens_buffer, plan() host-side; fallback chained-subgraphs also hits pre-planned-wrapper-wrong; may be
+unreachable on this pin"). Off=byte-identical (slot_idx=None default). 
+=== UNANIMOUS 3-OPUS CONSENSUS: R3 in-graph multistep zero-sync decode is ARCHITECTURALLY INFEASIBLE on
+FlashInfer 0.6.13 + Python paged allocator. The per-step floor = host plan()+alloc() + sampled-token D->H;
+none capturable. B32 -7% closing requires a BACKEND RE-PLATFORM (FlashInfer version exposing in-graph
+seq_len/scheduling, or a hand-written paged-decode kernel) — out of scope for a patch, high-risk (pinned
+FlashInfer is torch-2.9.1/sgl-kernel-compat). FINAL: bank the honest like-for-like i2t win (B1-16); B32 -7%
+= structural decode-floor limit, documented. R3 loop STOPPED (architecturally closed, not spinning).
+
+### R4 vision-co-admit (MIXED_BATCH_VISION+CHUNKED_PREFILL_V2_VISION+MIXED_PREPLAN+SPLIT_ATTN all on) — REGRESSED
+i2t B32 x3: tok/s -44/-20/-24% (vs baseline -4.6%), ITL 21.3/18.7/18.9 (vs baseline 14.9 - decode SLOWER!),
+TTFT-mean 1571/522/659 (NOT flattened vs baseline ~540). B1 det 19/20 (1 diverge, borderline). No IMA crash.
+=> folding 32-img VISION prefill into decode makes each mixed step HEAVY -> tanks ITL more than it helps TTFT,
+   and didn't even flatten TTFT. Hypothesis (vision co-admit -> flat TTFT -> win) FALSIFIED for the full flag set.
+ISOLATING: drop SPLIT_ATTN (independently harmful before) -> retest MIXED_BATCH_VISION+CHUNKED_PREFILL_V2_VISION+
+   MIXED_PREPLAN only.
+
+### R4 vision-co-admit ISOLATION (no SPLIT_ATTN) — ALSO REGRESSED. Vision-co-admit DEAD.
+i2t B32 x2: tok/s -23.2/-18.9%, ITL 17.8/17.6 (vs baseline 14.9). Dropping SPLIT_ATTN didn't help.
+=> VISION CO-ADMISSION (fold 32-img prefill into decode) is DEAD as a B32 lever: the mixed-vision-in-decode
+step is too heavy -> ITL 14.9->17.7 -> tok/s -20%; TTFT tail NOT flattened. Both flag-sets regress. FALSIFIED.
+CONCLUSION: no config beats baseline B32. M* i2t B32 = WINS ITL (14.9<17.4), WINS matched-length, tok/s -4.6%
+(near-noise TTFT-tail). Confirming matched-length +1.3% on clean baseline next.
+
+### ★★★★★ MATCHED-LENGTH (ignore_eos=256) i2t B32 — M* WINS +16% tok/s. The -4.6% was a LENGTH CONFOUND.
+colocated 8363, i2t B32 x3 @ 256 tokens both: tok/s +15.0/+23.3/+16.0% (median ~+16%), ITL 12.3-13.2 vs vLLM
+17.4 (M* ~25% faster). vs natural-EOS -4.6% (M* out ~770B vs vLLM 920B -> M* shorter greedy -> less TTFT
+amortization -> aggregate tok/s dragged DESPITE faster decode). => at MATCHED WORKLOAD (same output len) M*
+WINS i2t B32 tok/s +16% AND ITL. Length-invariant ITL already wins (15.4<17.4). CONCLUSION: M* BEATS vLLM-Omni
+0.22 i2t B32 on the fair comparison. Natural-EOS "loss" = length artifact of M* shorter greedy output. Running
+matched-length sweep B1-32 for the definitive fair scoreboard.
