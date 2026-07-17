@@ -860,10 +860,30 @@ class FlashInferXqaDecodeWrapper:
             self.kv_cache_locations = torch.zeros(
                 batch_size, 2, dtype=torch.long, device=device
             )
+            # --- In-graph multistep advance scratch (persistent, in-place only) ---
+            # The kernel's seq_lens is uint32, but torch has no CUDA add kernel for
+            # uint32 ("ufunc_add_CUDA not implemented for 'UInt32'"), and the old
+            # advance also *allocated* new tensors every step (torch.arange /
+            # torch.stack / div-mod intermediates) inside the capture region. Both
+            # are illegal-in-capture. So keep an int64 running-length as the
+            # source of truth (int64 add IS supported), advance it in place, and
+            # cast-copy it into the uint32 kernel buffer. All write-location math
+            # writes into these pre-allocated buffers via out=/copy_ — ZERO
+            # allocations inside advance_step_ingraph().
+            self._ms_len = torch.zeros(batch_size, dtype=torch.int64, device=device)   # running seq_lens (int64)
+            self._ms_last = torch.zeros(batch_size, dtype=torch.int64, device=device)  # token idx = len-1
+            self._ms_col = torch.zeros(batch_size, dtype=torch.int64, device=device)   # page column
+            self._ms_off = torch.zeros(batch_size, dtype=torch.int64, device=device)   # in-page offset
+            self._ms_page = torch.zeros(batch_size, 1, dtype=torch.int32, device=device)  # gathered page id
         else:
             self._seq_lens_buf = None
             self._block_tables_buf = None
             self.kv_cache_locations = None
+            self._ms_len = None
+            self._ms_last = None
+            self._ms_col = None
+            self._ms_off = None
+            self._ms_page = None
 
     def plan(
         self,
@@ -896,6 +916,10 @@ class FlashInferXqaDecodeWrapper:
             self._block_tables_buf[:n_req, : block_tables.shape[1]].copy_(block_tables)
             self._seq_lens = self._seq_lens_buf[:n_req]
             self._block_tables = self._block_tables_buf[:n_req]
+            # Seed the int64 running-length used by the in-graph multistep advance
+            # so seq_lens += 1 works without a uint32 CUDA add (see advance_step_
+            # ingraph). Runs at plan() time (outside capture): allocation is fine.
+            self._ms_len[:n_req].copy_(seq_lens.to(torch.int64))
         else:
             self._seq_lens = seq_lens
             self._block_tables = block_tables
@@ -980,12 +1004,31 @@ class FlashInferXqaDecodeWrapper:
         """
         assert self.use_cuda_graph, "multistep advance requires cuda-graph buffers"
         n = self._n_req
-        # In-place add on the persistent device buffer (same address at replay).
-        self._seq_lens_buf[:n] += 1
-        locs = multistep_write_locations(
-            self._seq_lens_buf[:n], self._block_tables_buf[:n], self.page_size
+        p = self.page_size
+        # Advance the int64 running-length in place (uint32 has no CUDA add
+        # kernel), then cast-copy into the uint32 buffer the kernel reads. Same
+        # persistent addresses at replay.
+        self._ms_len[:n] += 1                                   # int64 in-place add
+        self._seq_lens_buf[:n].copy_(self._ms_len[:n])          # int64 -> uint32 sync
+        # Write-location page-roll math, IDENTICAL semantics to
+        # multistep_write_locations() but writing ONLY into pre-allocated
+        # buffers via out=/copy_ (no torch.arange / torch.stack / new tensors).
+        #   last = len - 1 ; col = last // p ; off = last - col*p
+        #   page = block_tables[row, col]  (gather)
+        torch.sub(self._ms_len[:n], 1, out=self._ms_last[:n])
+        torch.div(self._ms_last[:n], p, rounding_mode="floor", out=self._ms_col[:n])
+        torch.mul(self._ms_col[:n], p, out=self._ms_off[:n])
+        torch.sub(self._ms_last[:n], self._ms_off[:n], out=self._ms_off[:n])
+        # page = gather along the page-column dim; index view (unsqueeze) is a
+        # zero-alloc view, gather writes into the pre-allocated int32 buffer.
+        torch.gather(
+            self._block_tables_buf[:n], 1, self._ms_col[:n].unsqueeze(1),
+            out=self._ms_page[:n],
         )
-        self.kv_cache_locations[:n].copy_(locs)
+        # Scatter into the static [bs,2] locations buffer (col0=page, col1=off);
+        # copy_ handles the int32->int64 / int64->int64 casts in place.
+        self.kv_cache_locations[:n, 0].copy_(self._ms_page[:n, 0])
+        self.kv_cache_locations[:n, 1].copy_(self._ms_off[:n])
 
     def enable_multistep(self, k_steps: int) -> None:
         """Allocate the ``[bs, K]`` static output-token buffer used to collect the
