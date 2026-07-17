@@ -16,10 +16,78 @@ Adapted from VoxServe's flashinfer_utils.py for our KV cache layout:
 """
 
 import logging
+import os
 
 import torch
 
 logger = logging.getLogger(__name__)
+
+
+def xqa_decode_enabled() -> bool:
+    """Feature flag for the plan-free xqa/trtllm decode path.
+
+    Default OFF. When set (``MSTAR_XQA_DECODE=1``) the batched decode wrapper
+    routes its ``run()`` through ``flashinfer.decode.trtllm_batch_decode_with_kv_cache``
+    (which dispatches to the xqa kernel on SM90) instead of the plan-based
+    ``BatchDecodeWithPagedKVCacheWrapper``. Plan-based remains the default and
+    the fallback. This is the foundation for in-graph multistep decode and
+    mixed decode + bounded-prefill capture (device-resident ``seq_lens``, no
+    host replan).
+    """
+    return os.environ.get("MSTAR_XQA_DECODE", "0") not in ("0", "", "false", "False")
+
+
+def build_dense_block_tables(
+    paged_kv_indptr: torch.Tensor,
+    paged_kv_indices: torch.Tensor,
+    paged_kv_last_page_len: torch.Tensor,
+    page_size: int,
+    device: torch.device,
+    max_pages_per_seq: int | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, int]:
+    """Convert FlashInfer ragged paged-KV metadata into the dense page table +
+    device ``seq_lens`` that the plan-free xqa/trtllm decode kernel expects.
+
+    Ragged (plan-based) inputs, per request ``i`` with pages
+    ``[indptr[i], indptr[i+1])`` in ``paged_kv_indices``:
+      - ``num_pages_i  = indptr[i+1] - indptr[i]``
+      - ``seq_len_i    = (num_pages_i - 1) * page_size + last_page_len_i``
+
+    Dense outputs:
+      - ``block_tables`` : int32 ``[bs, max_pages_per_seq]``, row ``i`` holds the
+        physical page ids for request ``i`` left-packed, remainder zero-padded.
+      - ``seq_lens``     : uint32 ``[bs]`` (device), kv length per request.
+      - ``max_seq_len``  : python int = ``max_pages_per_seq * page_size``.
+
+    All work is device-side gather/scatter (capturable). Inputs may be CPU;
+    they are moved to ``device`` first.
+    """
+    indptr = paged_kv_indptr.to(device, non_blocking=True).to(torch.int64)
+    indices = paged_kv_indices.to(device, non_blocking=True).to(torch.int64)
+    last_page_len = paged_kv_last_page_len.to(device, non_blocking=True).to(torch.int64)
+
+    bs = indptr.shape[0] - 1
+    num_pages = indptr[1:] - indptr[:-1]                       # [bs]
+    seq_lens = (num_pages - 1) * page_size + last_page_len     # [bs]
+
+    if max_pages_per_seq is None:
+        # eager path: size to the widest request this call
+        max_pages_per_seq = int(num_pages.max().item()) if bs > 0 else 1
+        max_pages_per_seq = max(max_pages_per_seq, 1)
+
+    block_tables = torch.zeros(bs, max_pages_per_seq, dtype=torch.int32, device=device)
+    # Scatter ragged indices into the dense rectangle: for global page slot g in
+    # [indptr[i], indptr[i+1]) the (row, col) is (i, g - indptr[i]).
+    total_pages = int(indptr[-1].item()) if bs > 0 else 0
+    if total_pages > 0:
+        arange = torch.arange(total_pages, device=device)
+        seg = torch.repeat_interleave(
+            torch.arange(bs, device=device), num_pages
+        )                                                       # request id per page slot
+        col = arange - indptr[:-1][seg]                         # column within row
+        block_tables[seg, col] = indices[:total_pages].to(torch.int32)
+
+    return block_tables, seq_lens.to(torch.uint32), max_pages_per_seq * page_size
 
 
 @torch.compiler.disable
@@ -366,6 +434,29 @@ class FlashInferDecodeWrapper:
             )
             self.kv_cache_locations = None
 
+        # Flag-gated plan-free xqa decode path (default OFF). When enabled, the
+        # plan-based wrapper above is still constructed (fallback / KV bookkeeping)
+        # but run() is routed through the xqa kernel. See xqa_decode_enabled().
+        self._xqa = None
+        if xqa_decode_enabled():
+            self._xqa = FlashInferXqaDecodeWrapper(
+                workspace_buffer,
+                num_qo_heads,
+                num_kv_heads,
+                head_dim,
+                page_size,
+                batch_size=batch_size,
+                max_num_pages=max_num_pages,
+                max_pages_per_seq=max_num_pages if self.use_cuda_graph else None,
+                device=device,
+                use_cuda_graph=self.use_cuda_graph,
+                enable_nvtx=enable_nvtx,
+            )
+            logger.info(
+                "MSTAR_XQA_DECODE=1: batched decode run() routed through plan-free "
+                "xqa/trtllm kernel (plan-based wrapper kept as fallback)."
+            )
+
     def plan(
         self,
         paged_kv_indptr: torch.Tensor,
@@ -452,6 +543,17 @@ class FlashInferDecodeWrapper:
         self._n_req = n_req
         self.dtype = dtype
 
+        # Mirror the plan into the xqa wrapper (builds dense block_tables +
+        # device seq_lens; no host sync).
+        if self._xqa is not None:
+            self._xqa.plan(
+                paged_kv_indptr=paged_kv_indptr,
+                paged_kv_indices=paged_kv_indices,
+                paged_kv_last_page_len=paged_kv_last_page_len,
+                kv_cache_locations=kv_cache_locations,
+                dtype=dtype,
+            )
+
     @torch.compiler.disable
     def run(self, q: torch.Tensor, kv_cache_layer: torch.Tensor) -> torch.Tensor:
         """Run planned batched decode attention.
@@ -462,6 +564,8 @@ class FlashInferDecodeWrapper:
         Returns:
             output: [n_req, num_qo_heads, head_dim]
         """
+        if self._xqa is not None:
+            return self._xqa.run(q, kv_cache_layer)
         return self.attn_wrapper.run(q.to(self.dtype), kv_cache_layer)
 
     def set_kv_cache(
@@ -477,6 +581,178 @@ class FlashInferDecodeWrapper:
             k: [n_req, num_kv_heads, head_dim]
             v: [n_req, num_kv_heads, head_dim]
         """
+        n = self._n_req
+        pages = self.kv_cache_locations[:n, 0]
+        positions = self.kv_cache_locations[:n, 1]
+        kv_cache_layer[pages, 0, positions] = k[:n].to(self.dtype)
+        kv_cache_layer[pages, 1, positions] = v[:n].to(self.dtype)
+
+
+class FlashInferXqaDecodeWrapper:
+    """Plan-free batched decode attention with paged KV cache (xqa / trtllm-gen).
+
+    Drop-in replacement for :class:`FlashInferDecodeWrapper`'s ``plan``/``run``/
+    ``set_kv_cache`` interface, backed by
+    ``flashinfer.decode.trtllm_batch_decode_with_kv_cache`` (``backend="auto"``
+    dispatches to the **xqa** kernel on SM90 / H200).
+
+    Why: the plan-based ``BatchDecodeWithPagedKVCacheWrapper.plan`` host-syncs
+    (``indptr.to("cpu")`` + ``int(max(kv_lens).item())`` at ``decode.py:1102``),
+    which cannot appear inside a CUDA graph capture region, so N decode steps
+    cannot be captured in one graph. The xqa entry point is plan-free: it takes a
+    **device-resident** ``seq_lens`` (uint32) and a **dense** ``block_tables``
+    (int32 ``[bs, max_pages_per_seq]``) directly, does no host sync, and is a
+    registered custom op with a fake/meta impl — so it traces + captures cleanly,
+    and ``seq_lens`` can be advanced in-graph between steps with no host replan.
+
+    KV layout is M*'s native single-tensor NHD
+    ``[num_pages, 2, page_size, num_kv_heads, head_dim]`` — no reshape needed.
+
+    ``set_kv_cache`` and the write-location bookkeeping are copied verbatim from
+    the plan-based wrapper so KV writes are byte-identical across the two paths;
+    only the attention read kernel differs.
+    """
+
+    def __init__(
+        self,
+        workspace_buffer: torch.Tensor,
+        num_qo_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+        page_size: int,
+        batch_size: int | None = None,
+        max_num_pages: int | None = None,
+        max_pages_per_seq: int | None = None,
+        device: torch.device = torch.device("cuda"),
+        use_cuda_graph: bool = False,
+        enable_nvtx: bool = False,
+    ):
+        self.device = device
+        self.use_cuda_graph = use_cuda_graph
+        self.enable_nvtx = enable_nvtx
+        self.batch_size = batch_size
+        self.num_qo_heads = num_qo_heads
+        self.num_kv_heads = num_kv_heads
+        self.head_dim = head_dim
+        self.page_size = page_size
+        self.max_pages_per_seq = max_pages_per_seq
+        self.dtype = None
+        self.sm_scale = 1.0 / (head_dim ** 0.5)
+
+        # xqa views the workspace as uint8; first 8MB is the semaphore region and
+        # MUST be zero on first use. Own a dedicated zeroed buffer (128MB) so we
+        # never collide with the plan-based wrapper's workspace.
+        self.workspace_buffer = torch.zeros(
+            128 * 1024 * 1024, dtype=torch.uint8, device=device
+        )
+
+        if self.use_cuda_graph:
+            assert batch_size is not None, "batch_size required for CUDA graph mode"
+            assert max_num_pages is not None, "max_num_pages required for CUDA graph mode"
+            assert max_pages_per_seq is not None, (
+                "max_pages_per_seq required for CUDA graph mode (dense page table width)"
+            )
+            # Static device buffers advanced in-place across plan() / in-graph steps.
+            self._seq_lens_buf = torch.zeros(batch_size, dtype=torch.uint32, device=device)
+            self._block_tables_buf = torch.zeros(
+                batch_size, max_pages_per_seq, dtype=torch.int32, device=device
+            )
+            self.kv_cache_locations = torch.zeros(
+                batch_size, 2, dtype=torch.long, device=device
+            )
+        else:
+            self._seq_lens_buf = None
+            self._block_tables_buf = None
+            self.kv_cache_locations = None
+
+    def plan(
+        self,
+        paged_kv_indptr: torch.Tensor,
+        paged_kv_indices: torch.Tensor,
+        paged_kv_last_page_len: torch.Tensor,
+        kv_cache_locations: torch.Tensor | None = None,
+        dtype: torch.dtype = torch.bfloat16,
+    ):
+        """Build the dense page table + device ``seq_lens`` (no host sync, no
+        FlashInfer ``.plan()``). Mirrors ``FlashInferDecodeWrapper.plan`` args so
+        it is a drop-in.
+        """
+        n_req = paged_kv_indptr.shape[0] - 1
+        self.dtype = dtype
+        self._n_req = n_req
+
+        block_tables, seq_lens, max_seq_len = build_dense_block_tables(
+            paged_kv_indptr,
+            paged_kv_indices,
+            paged_kv_last_page_len,
+            self.page_size,
+            self.device,
+            max_pages_per_seq=self.max_pages_per_seq,
+        )
+        self._max_seq_len = max_seq_len
+
+        if self.use_cuda_graph:
+            self._seq_lens_buf[:n_req].copy_(seq_lens)
+            self._block_tables_buf[:n_req, : block_tables.shape[1]].copy_(block_tables)
+            self._seq_lens = self._seq_lens_buf[:n_req]
+            self._block_tables = self._block_tables_buf[:n_req]
+        else:
+            self._seq_lens = seq_lens
+            self._block_tables = block_tables
+
+        # KV write locations (identical math to the plan-based wrapper).
+        if kv_cache_locations is not None:
+            locations = kv_cache_locations.to(self.device, non_blocking=True)
+        else:
+            indptr = paged_kv_indptr.to(self.device, non_blocking=True)
+            indices = paged_kv_indices.to(self.device, non_blocking=True)
+            last_page_len = paged_kv_last_page_len.to(self.device, non_blocking=True)
+            page_idx = indices[indptr[1:] - 1]
+            pos_idx = last_page_len - 1
+            locations = torch.stack(
+                [page_idx.to(torch.long), pos_idx.to(torch.long)], dim=1
+            )
+        if self.use_cuda_graph:
+            self.kv_cache_locations[:n_req].copy_(locations)
+        else:
+            self.kv_cache_locations = locations
+
+    @torch.compiler.disable
+    def run(self, q: torch.Tensor, kv_cache_layer: torch.Tensor) -> torch.Tensor:
+        """Run plan-free xqa/trtllm decode.
+
+        Args:
+            q: [n_req, num_qo_heads, head_dim]  (q_len_per_req == 1)
+            kv_cache_layer: [max_pages, 2, page_size, num_kv_heads, head_dim] (NHD)
+        Returns:
+            output: [n_req, num_qo_heads, head_dim]
+        """
+        from flashinfer.decode import trtllm_batch_decode_with_kv_cache
+
+        q = q.to(self.dtype)
+        out = trtllm_batch_decode_with_kv_cache(
+            query=q,
+            kv_cache=kv_cache_layer,               # NHD [pages, 2, page, kv_heads, hd]
+            workspace_buffer=self.workspace_buffer,
+            block_tables=self._block_tables,
+            seq_lens=self._seq_lens,
+            max_seq_len=self._max_seq_len,
+            bmm1_scale=self.sm_scale,              # == plan-based default sm_scale
+            bmm2_scale=1.0,
+            kv_layout="NHD",
+            backend="auto",                        # SM90 -> xqa
+            q_len_per_req=1,
+        )
+        return out
+
+    def set_kv_cache(
+        self,
+        kv_cache_layer: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+    ):
+        """Write K, V for decode (1 token per request). Identical to the
+        plan-based wrapper so KV state is bit-identical across paths."""
         n = self._n_req
         pages = self.kv_cache_locations[:n, 0]
         positions = self.kv_cache_locations[:n, 1]
