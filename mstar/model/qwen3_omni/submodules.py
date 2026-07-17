@@ -1513,9 +1513,9 @@ class ThinkerSubmodule(ARNodeSubmodule):
         # share one tensor, but a K-step replay must diverge: emit ALL K tokens
         # (in order) to the client, feed only the LAST back into the Thinker.
         # This runs on the GPU thread, so it stays pure list reshaping — no
-        # .item()/.cpu() host sync. (Stage 1: emit every K; validated with
-        # --ignore-eos so no mid-K EOS. EOS-trim of the emit is added in
-        # Stage 2 on the worker's slow-postprocess path.)
+        # .item()/.cpu() host sync. Emitting every K here is safe: post-EOS
+        # tokens are dropped later on the worker's slow-postprocess path by
+        # trim_multistep_emit (host copy already made for check_stop).
         # Absent new_tokens (single step, flag off) => byte-identical to before.
         multistep_tokens = outputs.pop("new_tokens", None)
         if multistep_tokens is not None:
@@ -1531,13 +1531,54 @@ class ThinkerSubmodule(ARNodeSubmodule):
     ) -> set[str]:
         if "new_token" not in outputs:
             return set()
-        token = outputs["new_token"][0].item()
+        # Single step: new_token is [t]. In-graph multistep (MSTAR_XQA_MULTISTEP):
+        # new_token is the per-replay emit list [t0 .. t_{<=K-1}], already
+        # EOS-trimmed inclusive by trim_multistep_emit before this runs. Scanning
+        # every emitted token is byte-identical to the old [0]-only read when
+        # len == 1, and catches an EOS anywhere inside a K-step replay.
+        tokens = outputs["new_token"]
         ignore_eos = request_info.sampling_config["Thinker"].ignore_eos
         eos_token_id = self.config.im_end_token_id
-        if (not ignore_eos and eos_token_id == token) or \
-                (request_info.dynamic_loop_iter_counts.get("thinker_decode_loop", 0) + 1 >= request_info.max_tokens):
+        if not ignore_eos:
+            for t in tokens:
+                if eos_token_id == t.item():
+                    return {"thinker_decode_loop"}
+        # Max output length. Single step advances the loop counter by 1 per
+        # emitted token; a K-step replay emits len(tokens) tokens per iteration,
+        # so this loop-count bound is coarse under multistep — the conductor's
+        # token-accurate num_output_tokens >= max_output_tokens is the
+        # authoritative length stop (conductor._process_done_forward). This stays
+        # a per-replay safety net and is byte-identical for single step.
+        if request_info.dynamic_loop_iter_counts.get("thinker_decode_loop", 0) + 1 >= request_info.max_tokens:
             return {"thinker_decode_loop"}
         return set()
+
+    def trim_multistep_emit(
+        self, request_id: str,
+        request_info: CurrentForwardPassInfo,
+        outputs: dict[str, list[torch.Tensor]],
+    ) -> int | None:
+        """How many of the K over-generated multistep tokens to EMIT for this
+        request: first-EOS-inclusive, or ``None`` (keep all K) when ignore_eos
+        or no EOS was produced this replay.
+
+        The worker calls this (via ``engine.trim_multistep_for_batch``) right
+        after ``check_stop_for_batch`` and BEFORE routing, so trimming the
+        ``new_token`` list drops post-EOS tokens before they are stored,
+        emitted, or counted — never emit past EOS, decided on the same
+        round-trip. ``outputs`` is the host-side prematerialized copy the worker
+        already made for check_stop, so no extra D->H sync is incurred. Returns
+        ``None`` for single step (len <= 1), leaving that path untouched.
+        """
+        toks = outputs.get("new_token")
+        if not toks or len(toks) <= 1:
+            return None
+        from mstar.utils.flashinfer_utils import multistep_keep_count
+        return multistep_keep_count(
+            [t.item() for t in toks],
+            self.config.im_end_token_id,
+            ignore_eos=request_info.sampling_config["Thinker"].ignore_eos,
+        )
 
     def filter_batched_output(
         self,

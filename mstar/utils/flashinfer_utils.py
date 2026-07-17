@@ -273,6 +273,44 @@ def trim_after_eos(
     return out
 
 
+def multistep_keep_count(
+    token_ids,
+    eos_token_ids,
+    ignore_eos: bool = False,
+) -> int | None:
+    """How many of the K over-generated multistep tokens to EMIT for one request.
+
+    The K-step graph cannot early-stop, so it always samples K tokens. On the
+    host, emit up to and including the FIRST stop token and drop the rest — the
+    single-step "emit the stop token, then stop" contract expressed once per K.
+
+    Args:
+        token_ids:     the K in-order token ids for one request (list/iterable
+                       of ints — the caller has already done the D->H copy that
+                       check_stop makes, so this is pure host int logic).
+        eos_token_ids: int or iterable of stop token ids.
+        ignore_eos:    when True, never trim (keep all K).
+    Returns:
+        ``j + 1`` where ``j`` is the first stop-token index (keep [0..j]
+        inclusive), or ``None`` to keep all K (no stop token this replay, or
+        ``ignore_eos``). ``None`` (not ``K``) so callers can cheaply skip the
+        slice in the common no-stop case.
+
+    Kept as a pure named helper so the submodule trim hook and the CPU checks
+    exercise the exact same first-EOS-inclusive logic as ``trim_after_eos``.
+    """
+    if ignore_eos:
+        return None
+    if isinstance(eos_token_ids, int):
+        eos_set = {eos_token_ids}
+    else:
+        eos_set = {int(x) for x in eos_token_ids}
+    for j, tok in enumerate(token_ids):
+        if int(tok) in eos_set:
+            return j + 1
+    return None
+
+
 @torch.compiler.disable
 def run_rms_norm(
     input: torch.Tensor,

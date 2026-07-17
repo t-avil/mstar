@@ -950,6 +950,42 @@ class KVCacheEngine(BaseEngine):
                 result[rid] = stops
         return result
 
+    def trim_multistep_for_batch(
+        self, batch: NodeBatch, output: NodeOutput, cpu_output: NodeOutput,
+    ) -> None:
+        """EOS-trim over-generated in-graph multistep tokens (MSTAR_XQA_MULTISTEP)
+        BEFORE routing. Worker calls this on the slow-postprocess path right
+        after ``check_stop_for_batch``.
+
+        For each rid whose routed ``new_token`` carries >1 token (a K-step
+        replay), ask the submodule how many of the K to keep (first EOS
+        inclusive; all K if none / ignore_eos) using the host-side
+        ``cpu_output`` copy that was already materialized for check_stop (no
+        extra D->H sync). Truncate the routed ``new_token`` list on the ORIGINAL
+        device ``output`` in place, so post-EOS tokens are never stored,
+        emitted, or counted. Single step (len <= 1) and submodules without the
+        ``trim_multistep_emit`` hook are untouched (byte-identical)."""
+        if batch.node_name not in self.submodule_management:
+            return
+        submodule = self.submodule_management[batch.node_name].submodule
+        trim = getattr(submodule, "trim_multistep_emit", None)
+        if trim is None:
+            return
+        for rid in batch.request_ids:
+            routed = output.per_request_output_tensors.get(rid)
+            if not routed:
+                continue
+            emit = routed.get("new_token")
+            if not emit or len(emit) <= 1:
+                continue  # single step / already a single token
+            req_info = batch.per_request_info.get(rid)
+            if req_info is None:
+                continue
+            cpu_outputs = cpu_output.per_request_output_tensors.get(rid, {})
+            keep = trim(rid, req_info, cpu_outputs)
+            if keep is not None and 0 <= keep < len(emit):
+                routed["new_token"] = emit[:keep]
+
     def reserve_replay_slot(self, batch: NodeBatch) -> int | None:
         """Allocate the next double-buffer slot for this batch and stash it
         on ``batch.metadata['cuda_graph_slot']``.

@@ -106,7 +106,7 @@ correct". The conductor's token-accurate `num_output_tokens >= max_output_tokens
 governs fixed length (overshoot <= K-1 per replay); the client's `output-len`
 truncation makes the visible length exact.
 
-**Stage 2 — stop handling (next commit).** Adds `multistep_keep_count`
+**Stage 2 — stop handling (this commit).** Adds `multistep_keep_count`
 (flashinfer_utils), `ThinkerSubmodule.check_stop` scanning all K tokens for EOS,
 `ThinkerSubmodule.trim_multistep_emit` (first-EOS-inclusive keep count, computed
 from the host copy the worker already made for check_stop — no extra sync), and

@@ -18,6 +18,7 @@ import torch  # noqa: E402
 
 from mstar.utils.flashinfer_utils import (  # noqa: E402
     ingraph_greedy_token,
+    multistep_keep_count,
     multistep_pages_needed,
     multistep_write_locations,
     trim_after_eos,
@@ -148,6 +149,47 @@ def test_trim():
     check("multi eos-id set", out4[0] == [5, 8], str(out4[0]))
 
 
+def test_multistep_keep_count():
+    """§6.5 emit/stop seam: how many of K over-generated tokens to emit.
+
+    multistep_keep_count is the pure host logic that
+    ThinkerSubmodule.trim_multistep_emit calls, and it must agree with the
+    first-EOS-inclusive contract that trim_after_eos already encodes (single
+    step emits the stop token, then stops)."""
+    print("multistep_keep_count() first-EOS-inclusive keep count")
+    EOS = 2
+    # No EOS anywhere -> keep all K (None so the caller can skip the slice).
+    check("no eos -> None (keep all K)", multistep_keep_count([5, 6, 7, 8], EOS) is None)
+    # EOS mid-K -> keep [0..j] inclusive.
+    check("eos at j=2 -> keep 3", multistep_keep_count([5, 6, 2, 7], EOS) == 3)
+    # EOS first token -> keep 1 (emit only the stop token).
+    check("eos at j=0 -> keep 1", multistep_keep_count([2, 9, 9, 9], EOS) == 1)
+    # EOS last token -> keep all K (no post-EOS to drop).
+    check("eos at j=K-1 -> keep K", multistep_keep_count([5, 6, 7, 2], EOS) == 4)
+    # ignore_eos -> never trim, even with an EOS present.
+    check("ignore_eos -> None", multistep_keep_count([5, 2, 7, 8], EOS, ignore_eos=True) is None)
+    # Multiple stop ids: first hit of the set wins.
+    check("multi eos-id set", multistep_keep_count([5, 8, 6, 2], [2, 8]) == 2)
+
+    # Cross-check against trim_after_eos: keep_count must equal the trimmed
+    # length for every row (both inclusive), and the emitted prefix must be the
+    # original tokens in order (never reordered, never post-EOS).
+    rows = [
+        [5, 6, 2, 7],   # eos at 2
+        [1, 1, 1, 1],   # none
+        [2, 9, 9, 9],   # eos at 0
+        [5, 6, 7, 2],   # eos at 3
+    ]
+    trimmed = trim_after_eos(torch.tensor(rows), EOS)  # first-EOS-inclusive
+    ok = True
+    for r, row in enumerate(rows):
+        kc = multistep_keep_count(row, EOS)
+        keep = kc if kc is not None else len(row)
+        if row[:keep] != trimmed[r]:
+            ok = False
+    check("keep_count prefix == trim_after_eos, in order", ok)
+
+
 def test_mrope_ingraph_advance():
     """§6.3 (highest parity risk): the in-graph MRoPE advance must be
     byte-identical to what preprocess would build at the advanced position.
@@ -206,6 +248,7 @@ def main():
     test_pages_needed()
     test_greedy()
     test_trim()
+    test_multistep_keep_count()
     test_mrope_ingraph_advance()
     print()
     if FAILS:

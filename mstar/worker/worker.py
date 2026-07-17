@@ -1680,6 +1680,11 @@ class Worker:
         engine = self.engine_manager.get_engine(batch_N.node_name)
         cpu_output = self._prematerialize_for_check_stop(output)
         new_stops = engine.check_stop_for_batch(batch_N.node_batch, cpu_output)
+        # In-graph K-step decode (MSTAR_XQA_MULTISTEP): drop tokens generated
+        # AFTER a mid-K stop token from the routed emit BEFORE store/route, using
+        # the host copy just made for check_stop (no extra sync). No-op for
+        # single step and for engines/submodules without the multistep hook.
+        engine.trim_multistep_for_batch(batch_N.node_batch, output, cpu_output)
 
         if self.enable_nvtx:
             range_pop(synchronize=False)

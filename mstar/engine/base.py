@@ -414,6 +414,18 @@ class BaseEngine(ABC):
         """
         return {}
 
+    def trim_multistep_for_batch(
+        self, batch: NodeBatch, output: NodeOutput, cpu_output: NodeOutput,
+    ) -> None:
+        """EOS-trim over-generated in-graph multistep tokens before routing.
+
+        Called by the worker on its slow-postprocess path right after
+        ``check_stop_for_batch``. Default: no-op (engines that never run the
+        MSTAR_XQA_MULTISTEP path have nothing to trim). The kv-cache engine
+        overrides this to delegate to the submodule's ``trim_multistep_emit``.
+        """
+        return
+
     def warmup(self) -> None:
         """Optional CUDA graph capture. Override in subclasses."""
         return
