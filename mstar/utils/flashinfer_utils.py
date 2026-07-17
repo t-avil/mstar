@@ -174,6 +174,65 @@ def mixed_budget_tokens(default: int = 512) -> int:
     return default
 
 
+def mixed_debug_enabled() -> bool:
+    """Gate for the Stage-B mixed-step observability log (``MSTAR_MIXED_DEBUG``).
+
+    Default OFF. When set (independent of the perf flags, but only meaningful
+    with ``MSTAR_MIXED_PREFILL=1``) the scheduler/engine emit a one-line record
+    every time a mixed decode+bounded-prefill step is *formed*: the decode batch
+    size ``bs``, the bounded chunk size ``N``, and the co-admitted prefill
+    request's id / committed kv length / first reserved page / MRoPE start
+    position. One boot with this on is enough to confirm that mixed batches are
+    actually forming and that the chunk is placed where the primitive expects.
+    Pure observability — never changes control flow.
+    """
+    return os.environ.get("MSTAR_MIXED_DEBUG", "0") not in ("0", "", "false", "False")
+
+
+def mixed_step_debug_log(
+    *,
+    stage: str,
+    decode_bs: int,
+    chunk_n: int,
+    prefill_rid=None,
+    committed_len=None,
+    first_page=None,
+    mrope_start=None,
+    extra: str = "",
+) -> None:
+    """Emit ONE mixed-step formation record (only when ``MSTAR_MIXED_DEBUG``).
+
+    ``stage`` distinguishes WHERE the record was produced:
+      - ``"schedule"``  — the MicroScheduler detected a co-admission opportunity
+        (a running decode set AND a head-of-queue pending prefill) and computed
+        the bounded chunk descriptor. Proves the opportunity exists + the
+        admission logic fires at this batch size.
+      - ``"attn"``      — the attention layer actually planned + ran a mixed
+        step (``committed_len``/``first_page`` are the reserved KV placement).
+
+    Wrapped so it can NEVER raise into the hot path (all fields optional; any
+    formatting error is swallowed). No-op unless the flag is set, so flag-off is
+    byte-identical.
+    """
+    if not mixed_debug_enabled():
+        return
+    try:
+        parts = [f"MIXED[{stage}] bs={decode_bs} N={chunk_n}"]
+        if prefill_rid is not None:
+            parts.append(f"rid={prefill_rid}")
+        if committed_len is not None:
+            parts.append(f"committed={committed_len}")
+        if first_page is not None:
+            parts.append(f"page0={first_page}")
+        if mrope_start is not None:
+            parts.append(f"mrope_start={mrope_start}")
+        if extra:
+            parts.append(extra)
+        logger.info(" ".join(str(p) for p in parts))
+    except Exception:  # observability must never crash the worker
+        pass
+
+
 def build_chunk_causal_mask(
     batch_size: int, q_seq_len: int, device: torch.device
 ) -> torch.Tensor:
