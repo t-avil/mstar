@@ -127,6 +127,83 @@ def xqa_multistep_k() -> int:
     return k if k >= 2 else 0
 
 
+def mixed_prefill_enabled() -> bool:
+    """Feature flag for the Stage-B mixed decode + bounded-prefill step
+    (``MSTAR_MIXED_PREFILL``). Default OFF.
+
+    When set (and ``MSTAR_XQA_DECODE=1``), a decode step that has a pending
+    image-prefill request to co-admit runs a MIXED attention step: the ``bs``
+    running decodes (q_len=1, xqa) plus a BOUNDED chunk of ONE pending prefill
+    request (q_len=N, xqa) are attended in ONE captured graph (the two-call "(T)"
+    strategy proven in ``test/xqa/mixed_prefill_poc.py``). The win is TTFT: the
+    prefill no longer runs as a separate walk that FREEZES all decodes.
+
+    IMPORTANT (Stage-A lesson): the mixed step is gated ON *only when there is a
+    bounded prefill chunk to co-admit*. Pure-decode steps (nothing pending to
+    prefill) MUST stay on the fast decode path — xqa at q_len=1 is ~50% slower
+    than FlashInfer BatchDecode, so routing pure decode through xqa loses. The
+    scheduler decides per step (see ``mixed_budget_tokens``); this flag only
+    enables the capability.
+    """
+    if not xqa_decode_enabled():
+        return False
+    return os.environ.get("MSTAR_MIXED_PREFILL", "0") not in ("0", "", "false", "False")
+
+
+def mixed_budget_tokens(default: int = 512) -> int:
+    """Bounded prefill-chunk size N admitted per mixed step (``MSTAR_MIXED_BUDGET_TOKENS``).
+
+    At most ``N`` unprocessed tokens of ONE pending prefill request are folded
+    into a decode step so decodes are never starved (the existing all-in-one
+    co-admission regressed -20..-44% precisely because it had NO bound). Falls
+    back to ``MSTAR_PREFILL_CHUNK_TOKENS`` then ``default`` (512, the PREFILL
+    bucket regime). Returns 0 when mixed prefill is off. N is a CUDA-graph key
+    (one captured graph per ``(bs, N)``), so keep the set of N values small.
+    """
+    if not mixed_prefill_enabled():
+        return 0
+    for var in ("MSTAR_MIXED_BUDGET_TOKENS", "MSTAR_PREFILL_CHUNK_TOKENS"):
+        v = os.environ.get(var)
+        if v:
+            try:
+                n = int(v)
+                if n >= 1:
+                    return n
+            except (ValueError, TypeError):
+                pass
+    return default
+
+
+def build_chunk_causal_mask(
+    batch_size: int, q_seq_len: int, device: torch.device
+) -> torch.Tensor:
+    """Bit-packed uint16 causal mask for the xqa q_len=N prefill-chunk leg.
+
+    Verbatim semantics of FlashInfer 0.6.13
+    ``tests/attention/test_xqa_batch_decode.py::generate_causal_mask`` (the exact
+    layout the kernel decodes): bit ``i`` of row ``j`` set => query row ``j``
+    attends local KV column ``i``; causal = ``kv_idx <= q_idx``. Shape
+    ``[batch, q_seq_len, ((q_seq_len+31)//32)*2]`` uint16, shared across the
+    batch. Depends ONLY on ``q_seq_len`` so it is built ONCE (static buffer) per
+    N and read read-only inside the capture region.
+    """
+    num_packed = (q_seq_len + 31) // 32
+    q_idx = torch.arange(q_seq_len, device=device, dtype=torch.int32).unsqueeze(1)
+    kv_idx = torch.arange(q_seq_len, device=device, dtype=torch.int32).unsqueeze(0)
+    causal = kv_idx <= q_idx
+    padded = num_packed * 32
+    if padded > q_seq_len:
+        pad = torch.zeros(
+            q_seq_len, padded - q_seq_len, device=device, dtype=torch.bool
+        )
+        causal = torch.cat([causal, pad], dim=1)
+    causal = causal.view(q_seq_len, num_packed, 32)
+    bits = torch.tensor([1 << i for i in range(32)], device=device, dtype=torch.int64)
+    m32 = (causal.to(torch.int64) * bits).sum(dim=-1).to(torch.uint32)
+    m32 = m32.unsqueeze(0).expand(batch_size, q_seq_len, num_packed).contiguous()
+    return m32.view(torch.uint16)
+
+
 def multistep_write_locations(
     seq_lens: torch.Tensor,
     block_tables: torch.Tensor,
@@ -929,6 +1006,20 @@ class FlashInferXqaDecodeWrapper:
             self._ms_off = None
             self._ms_page = None
 
+        # --- Stage-B mixed decode + bounded-prefill (MSTAR_MIXED_PREFILL) ---
+        # Static buffers for the co-admitted prefill-chunk LEG (the "(T)" two-call
+        # strategy: this wrapper's existing q_len=1 decode call for the bs decodes
+        # + this q_len=N call for ONE bounded prefill chunk, captured back-to-back
+        # in one graph). Allocated lazily in ``enable_mixed_prefill`` (only when
+        # the flag is on) so the flag-OFF wrapper is byte-identical.
+        self.mixed_n = 0                       # current chunk size N (graph key); 0 => no mixed leg
+        self._pf_seq_lens = None               # [1] uint32  committed+N
+        self._pf_block_tables = None           # [1, W_pf] int32 dense pages
+        self._pf_locations = None              # [N_max, 2] long  KV write (page, offset) per chunk row
+        self._pf_mask = None                   # [1, N_max, mask_row] uint16 causal mask
+        self._pf_max_seq_len = 0
+        self._pf_max_pages = 0
+
     def plan(
         self,
         paged_kv_indptr: torch.Tensor,
@@ -1124,3 +1215,153 @@ class FlashInferXqaDecodeWrapper:
         assert self._tokens_out_buf is not None, "call enable_multistep() first"
         n = self._n_req
         self._tokens_out_buf[:n, step].copy_(token_ids[:n].to(torch.int64))
+
+    # ----------------------------------------------------------------------
+    # Stage-B: mixed decode + bounded-prefill in one captured step (the (T)
+    # two-call strategy from test/xqa/mixed_prefill_poc.py, PART 2/3).
+    #
+    # Layout contract (packed): a mixed step's packed query/K/V is
+    #   rows [0        , bs      ) = the bs running DECODES (q_len=1 each)
+    #   rows [bs       , bs + N  ) = ONE pending prefill request's N-token CHUNK
+    # so decode rows keep the exact addresses/plan the pure-decode path uses and
+    # the prefill chunk is appended. run_mixed() attends both legs and returns the
+    # (bs+N) packed output in the SAME row order; set_kv_cache_mixed() writes both
+    # legs' K,V before the reads. All buffers are static (cuda-graph mode only).
+    # ----------------------------------------------------------------------
+
+    def enable_mixed_prefill(self, n_max: int, max_pages_pf: int) -> None:
+        """Allocate the prefill-leg static buffers for a mixed step (cuda-graph
+        mode). ``n_max`` = max bounded chunk size N (``MSTAR_MIXED_BUDGET_TOKENS``);
+        ``max_pages_pf`` = dense block-table width for the prefill request
+        (``ceil((max_committed + n_max)/page_size)``). Idempotent for a given
+        ``(n_max, max_pages_pf)``; the mask depends only on N so it is prebuilt.
+        """
+        assert self.use_cuda_graph, "mixed prefill requires cuda-graph static buffers"
+        mask_row = ((n_max + 31) // 32) * 2
+        self.mixed_n = n_max
+        self._pf_max_pages = max_pages_pf
+        self._pf_seq_lens = torch.zeros(1, dtype=torch.uint32, device=self.device)
+        self._pf_block_tables = torch.zeros(
+            1, max_pages_pf, dtype=torch.int32, device=self.device
+        )
+        self._pf_locations = torch.zeros(n_max, 2, dtype=torch.long, device=self.device)
+        # Causal mask depends ONLY on N -> build once, read-only in-capture.
+        self._pf_mask = build_chunk_causal_mask(1, n_max, self.device).contiguous()
+        # reshape helper buffer view retained; mask_row implied by shape
+        self._pf_mask = self._pf_mask.view(1, n_max, mask_row)
+
+    def plan_prefill_chunk(
+        self,
+        committed_len: int,
+        page_indices: list[int] | torch.Tensor,
+        n_chunk: int,
+    ) -> None:
+        """Plan the co-admitted prefill LEG (outside capture; copies into static
+        buffers). Mirrors the POC's PagedKV assembly for one request.
+
+        Args:
+            committed_len: KV tokens already written for this prefill request
+                (context BEFORE this chunk). The chunk occupies absolute
+                positions ``[committed_len, committed_len + n_chunk)``.
+            page_indices:  physical page ids covering at least
+                ``committed_len + n_chunk`` tokens (pre-reserved by the allocator;
+                no in-graph page alloc).
+            n_chunk:       N, the bounded chunk size (== ``self.mixed_n``).
+
+        Per xqa spec-dec semantics: ``seq_len = committed_len + n_chunk`` INCLUDES
+        the new query tokens, whose K,V must be written at those positions BEFORE
+        run_mixed() (done by set_kv_cache_mixed()).
+        """
+        assert self._pf_seq_lens is not None, "call enable_mixed_prefill() first"
+        assert n_chunk == self.mixed_n, (
+            f"chunk size {n_chunk} != captured N {self.mixed_n} (N is a graph key)"
+        )
+        p = self.page_size
+        total = committed_len + n_chunk
+        pages = torch.as_tensor(page_indices, dtype=torch.int32, device=self.device)
+        npg = (total + p - 1) // p
+        assert npg <= self._pf_max_pages, (
+            f"prefill needs {npg} pages > reserved {self._pf_max_pages}"
+        )
+        # seq_len (device, uint32) INCLUDES the N new tokens.
+        self._pf_seq_lens.fill_(total)
+        # dense left-packed block table row.
+        self._pf_block_tables.zero_()
+        self._pf_block_tables[0, :npg].copy_(pages[:npg])
+        # KV write locations for the N chunk rows: abs pos committed..committed+N-1.
+        abs_pos = torch.arange(
+            committed_len, committed_len + n_chunk, device=self.device
+        )
+        col = torch.div(abs_pos, p, rounding_mode="floor")
+        off = abs_pos - col * p
+        page_ids = pages[col.to(torch.long)].to(torch.long)
+        self._pf_locations[:n_chunk, 0].copy_(page_ids)
+        self._pf_locations[:n_chunk, 1].copy_(off.to(torch.long))
+        self._pf_max_seq_len = self._pf_max_pages * p
+
+    def set_kv_cache_mixed(
+        self, kv_cache_layer: torch.Tensor, k: torch.Tensor, v: torch.Tensor
+    ) -> None:
+        """Write K,V for a mixed packed batch: rows [0,bs)=decodes (existing decode
+        locations), rows [bs,bs+N)=prefill chunk (``_pf_locations``). Capturable
+        (static-index scatter, no allocation)."""
+        n = self._n_req
+        N = self.mixed_n
+        # decode leg (identical to set_kv_cache).
+        dpages = self.kv_cache_locations[:n, 0]
+        dpos = self.kv_cache_locations[:n, 1]
+        kv_cache_layer[dpages, 0, dpos] = k[:n].to(self.dtype)
+        kv_cache_layer[dpages, 1, dpos] = v[:n].to(self.dtype)
+        # prefill leg.
+        ppages = self._pf_locations[:N, 0]
+        ppos = self._pf_locations[:N, 1]
+        kv_cache_layer[ppages, 0, ppos] = k[n : n + N].to(self.dtype)
+        kv_cache_layer[ppages, 1, ppos] = v[n : n + N].to(self.dtype)
+
+    @torch.compiler.disable
+    def run_mixed(
+        self, q: torch.Tensor, kv_cache_layer: torch.Tensor
+    ) -> torch.Tensor:
+        """Two-call (T) mixed attention: q_len=1 decode leg (rows [0,bs)) + q_len=N
+        prefill leg (rows [bs,bs+N)), captured back-to-back. Returns the (bs+N)
+        packed output in the same row order.
+
+        Args:
+            q: [bs + N, num_qo_heads, head_dim]  (decodes then prefill chunk)
+            kv_cache_layer: [max_pages, 2, page_size, num_kv_heads, head_dim] NHD
+        """
+        from flashinfer.decode import trtllm_batch_decode_with_kv_cache
+
+        n = self._n_req
+        N = self.mixed_n
+        q = q.to(self.dtype)
+        # decode leg — q_len=1, same args as run().
+        out_dec = trtllm_batch_decode_with_kv_cache(
+            query=q[:n],
+            kv_cache=kv_cache_layer,
+            workspace_buffer=self.workspace_buffer,
+            block_tables=self._block_tables,
+            seq_lens=self._seq_lens,
+            max_seq_len=self._max_seq_len,
+            bmm1_scale=self.sm_scale,
+            bmm2_scale=1.0,
+            kv_layout="NHD",
+            backend="auto",
+            q_len_per_req=1,
+        )
+        # prefill leg — q_len=N, shared causal mask.
+        out_pf = trtllm_batch_decode_with_kv_cache(
+            query=q[n : n + N],
+            kv_cache=kv_cache_layer,
+            workspace_buffer=self.workspace_buffer,
+            block_tables=self._pf_block_tables,
+            seq_lens=self._pf_seq_lens,
+            max_seq_len=self._pf_max_seq_len,
+            bmm1_scale=self.sm_scale,
+            bmm2_scale=1.0,
+            kv_layout="NHD",
+            backend="auto",
+            q_len_per_req=N,
+            mask=self._pf_mask,
+        )
+        return torch.cat([out_dec, out_pf], dim=0)
