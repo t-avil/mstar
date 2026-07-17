@@ -538,6 +538,24 @@ class ThinkerSubmodule(ARNodeSubmodule):
                 device=device,
             )  # (3, 1)
 
+            # MSTAR_XQA_MS_DEBUG: per-replay decode feed. Confirms (a) the token
+            # fed to step 0 of each replay is the PREVIOUS replay's LAST token
+            # (not new_token[0]) and (b) start_pos jumps by K between replays
+            # (host advance_seq_lens x K). Host sync (.item()); debug-only,
+            # budgeted to the first N calls.
+            _ms_dbg = int(os.environ.get("MSTAR_XQA_MS_DEBUG", "0") or "0")
+            if _ms_dbg > 0:
+                _seen = getattr(self, "_ms_debug_feed_seen", 0)
+                if _seen < _ms_dbg:
+                    try:
+                        logger.warning(
+                            "[XQA_MS_DEBUG feed #%d] fed_token=%d start_pos=%s",
+                            _seen, int(token_id.flatten()[0].item()), start_pos,
+                        )
+                    except Exception:
+                        pass
+                    self._ms_debug_feed_seen = _seen + 1
+
             return ARNodeInputs(
                 input_seq_len=1,
                 input_embeds=embeds,

@@ -1112,10 +1112,22 @@ class Qwen3OmniModel(Model):
             is_last_prefill = (step == len(schedule) - 1)
             inputs = self._get_thinker_prefill_inputs(metadata, persist_signals)
         else:
-            # Decode: previous token feeds back as text_inputs
+            # Decode: previous token feeds back as text_inputs.
+            #
+            # In-graph K-step decode (MSTAR_XQA_MULTISTEP): ``new_token`` holds
+            # ALL K tokens generated this replay (the client-emit list built by
+            # ThinkerSubmodule.filter_batched_output). The NEXT decode step must
+            # be fed only the NEWEST token — the LAST of the K — since decode's
+            # prepare_inputs consumes ``text_inputs[0]`` as the single fed token.
+            # Feeding ``new_token`` verbatim would hand step 0 the replay's FIRST
+            # token (new_token[0]), re-processing an already-consumed token and
+            # stalling into repeats ("2168 2168 ...", early <|im_end|>). Taking
+            # the last element is byte-identical for single-step decode (the list
+            # is length 1, so ``[-1:] == [:]``).
             is_last_prefill = False
             edge = GraphEdge(next_node="Thinker", name="text_inputs")
-            edge.tensor_info = persist_signals.get("new_token", [])
+            new_token = persist_signals.get("new_token", [])
+            edge.tensor_info = new_token[-1:] if new_token else []
             inputs = [edge]
 
         unpersist_tensors = sum(
