@@ -131,6 +131,17 @@ class BatchedCacheManager:
         # pre-plan was applied.
         self._plan_done_event: "torch.cuda.Event | None" = None
 
+        # --- Stage-B mixed decode + bounded-prefill (MSTAR_MIXED_PREFILL) ---
+        # When an engine step co-admits ONE bounded prefill chunk with the
+        # running decodes, it calls ``plan_mixed_chunk`` (below) to plan the
+        # prefill LEG on the active label's xqa wrapper and set this descriptor.
+        # ``run_attention`` then dispatches that layer's read/write through the
+        # wrapper's ``set_kv_cache_mixed`` / ``run_mixed`` (the (T) two-call
+        # primitive) instead of the pure-decode ``set_kv_cache`` / ``run``.
+        # None => no mixed chunk active this step => byte-identical decode path.
+        # (Dormant until the scheduler/engine packing seam calls plan_mixed_chunk.)
+        self._mixed_active: dict | None = None
+
     @torch.compiler.disable
     def _get_state(self, request_id: str, label: str | None = None) -> KVRequestState:
         label = label or self.active_labels.get(request_id, "main")
@@ -658,6 +669,71 @@ class BatchedCacheManager:
         self._plan_states[combined_label].pos_ids = combined_pos_ids
 
     @torch.compiler.disable
+    def plan_mixed_chunk(
+        self,
+        committed_len: int,
+        page_indices,
+        n_chunk: int,
+        prefill_rid=None,
+        mrope_start=None,
+    ) -> None:
+        """Arm a mixed decode+bounded-prefill step (Stage B, MSTAR_MIXED_PREFILL).
+
+        Plans the co-admitted prefill LEG on the ACTIVE label's decode wrapper's
+        xqa sub-wrapper (``enable_mixed_prefill`` once + ``plan_prefill_chunk``
+        per step) and records ``_mixed_active`` so ``run_attention`` routes this
+        step through ``set_kv_cache_mixed`` / ``run_mixed``. The packed layout is
+        ``rows[0,bs)=decodes ; rows[bs,bs+N)=this chunk`` — the caller MUST pack
+        q/k/v that way. Call ``clear_mixed`` after the step.
+
+        Args mirror ``FlashInferXqaDecodeWrapper.plan_prefill_chunk``:
+          committed_len: kv tokens already written for the prefill request.
+          page_indices:  physical pages covering ``committed_len + n_chunk``
+                         (pre-reserved by the allocator; no in-graph alloc).
+          n_chunk:       bounded chunk size N (== the wrapper's captured N).
+        """
+        from mstar.utils.flashinfer_utils import mixed_step_debug_log
+
+        label = next(iter(self.active_labels.values()))
+        ps = self._plan_states[label]
+        wrapper = ps.wrapper
+        xqa = getattr(wrapper, "_xqa", None)
+        assert xqa is not None, (
+            "plan_mixed_chunk requires MSTAR_XQA_DECODE=1 (xqa sub-wrapper)"
+        )
+        if getattr(xqa, "mixed_n", 0) != n_chunk:
+            # Lazily size the prefill-leg static buffers to (N, reserved pages).
+            page_size = self.kv_cache_config.page_size
+            max_pages_pf = (committed_len + n_chunk + page_size - 1) // page_size
+            xqa.enable_mixed_prefill(n_chunk, max_pages_pf)
+        xqa.plan_prefill_chunk(committed_len, page_indices, n_chunk)
+        self._mixed_active = {
+            "label": label,
+            "n_chunk": n_chunk,
+            "committed_len": committed_len,
+            "rid": prefill_rid,
+        }
+        first_page = None
+        try:
+            first_page = int(page_indices[0]) if len(page_indices) else None
+        except (TypeError, IndexError):
+            pass
+        mixed_step_debug_log(
+            stage="attn",
+            decode_bs=int(getattr(xqa, "_n_req", 0)),
+            chunk_n=n_chunk,
+            prefill_rid=prefill_rid,
+            committed_len=committed_len,
+            first_page=first_page,
+            mrope_start=mrope_start,
+        )
+
+    @torch.compiler.disable
+    def clear_mixed(self) -> None:
+        """Disarm the mixed step (back to byte-identical decode dispatch)."""
+        self._mixed_active = None
+
+    @torch.compiler.disable
     def run_attention(
         self,
         q: torch.Tensor,
@@ -697,6 +773,19 @@ class BatchedCacheManager:
 
         ps = self._plan_states[label]
         assert self.kv_cache is not None and ps.wrapper is not None
+
+        # Stage-B mixed step: when a bounded prefill chunk is co-admitted for
+        # THIS label, route the packed [decodes ; chunk] K/V write + attention
+        # read through the xqa (T) two-call primitive. Absent => byte-identical.
+        if self._mixed_active is not None and self._mixed_active["label"] == label:
+            xqa = ps.wrapper._xqa
+            xqa.set_kv_cache_mixed(self.kv_cache[layer_idx], k, v)
+            if self.auto_write_store and ps.write_store:
+                for req_id in self.request_ids:
+                    self.alloc_manager.flush_to_store(
+                        req_id, label=label, layers=layer_idx
+                    )
+            return xqa.run_mixed(q, self.kv_cache[layer_idx]).to(orig_dtype)
 
         ps.wrapper.set_kv_cache(self.kv_cache[layer_idx], k, v)
 
