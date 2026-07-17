@@ -443,6 +443,23 @@ class TensorCommunicationManager(ABC):
             tuple[str, str | None, str | None], _FastPopulatePlan
         ] = {}
 
+        # MSTAR_INT_UUID: the per-tensor storage handle was str(uuid4()) — ~10%
+        # of the decode-step self-time (uuid4 CSPRNG + hex format, per tensor
+        # per rid per step). It is a pure internal key (per_req_tensors[rid][uuid],
+        # uuid_to_shard_dim, uuid_to_edge_name) looked up only against its
+        # originating store, so a monotonic counter suffices. Namespaced by pid
+        # so keys stay unique per-worker AND per-boot (uuids ride SHM to peers).
+        # Default off returns str(uuid4()) = byte-identical wire semantics.
+        self._int_uuid = os.environ.get("MSTAR_INT_UUID", "0") == "1"
+        self._uuid_prefix = f"{os.getpid()}-"
+        self._uuid_ctr = 0
+
+    def _new_tensor_uuid(self) -> str:
+        if self._int_uuid:
+            self._uuid_ctr += 1
+            return self._uuid_prefix + str(self._uuid_ctr)
+        return str(uuid4())
+
     # ---- shared: store ----
     def _ensure_leading_shard_dim(self, shard_dim: int | None, tensor: torch.Tensor):
         """Move ``shard_dim`` to dim 0, preserving the relative order of the
@@ -499,7 +516,7 @@ class TensorCommunicationManager(ABC):
 
             shard_dim = cfg.shard_dim.get(name) if cfg is not None else None
             for tensor in tensor_list:
-                tensor_uuid = str(uuid4())
+                tensor_uuid = self._new_tensor_uuid()
                 # TODO: only rearrange when (1) the tensor will be sent and
                 # (2) it may be split along the shard dim in transport. Doing
                 # it here unconditionally so TensorPointerInfo dims/strides
@@ -731,7 +748,7 @@ class TensorCommunicationManager(ABC):
             infos: list[TensorPointerInfo] = []
             for tensor, tplan in zip(tensor_list, tplans):
                 canonical = self._ensure_leading_shard_dim(tplan.shard_dim, tensor)
-                tensor_uuid = str(uuid4())
+                tensor_uuid = self._new_tensor_uuid()
                 self.tensor_store.put_tensor(
                     request_id=request_id, uuid=tensor_uuid, tensor=canonical,
                 )
@@ -823,7 +840,7 @@ class TensorCommunicationManager(ABC):
             start = info.offset // bytes_per_row
             end = start + info.nbytes // bytes_per_row
             slice_view = canonical_tensor[start:end]
-            new_uuid = str(uuid4())
+            new_uuid = self._new_tensor_uuid()
             self.tensor_store.put_tensor(request_id, new_uuid, slice_view)
             self.uuid_to_shard_dim[new_uuid] = shard_dim
             # Release this edge's stake on the producer's UUID — the slice now
@@ -972,7 +989,7 @@ class TensorCommunicationManager(ABC):
                         consolidated = buf.consolidate()
                         new_infos: list[TensorPointerInfo] = []
                         for uuid_, tensor in (
-                            (str(uuid4()), t) for t in consolidated
+                            (self._new_tensor_uuid(), t) for t in consolidated
                         ):
                             self.tensor_store.put_tensor(req_id, uuid_, tensor)
                             # +1 for graph-node usage (released by the

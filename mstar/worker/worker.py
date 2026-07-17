@@ -520,6 +520,19 @@ class Worker:
         self._sidecar_checkstop = (
             os.environ.get("MSTAR_SIDECAR_CHECKSTOP", "0") == "1"
         )
+        # MSTAR_SKIP_REDUNDANT_SYNC: the blanket completion_event.synchronize()
+        # in postprocess (before check_stop) is redundant when SIDECAR_CHECKSTOP
+        # is on — the deferred check_stop copy self-gates on completion_event via
+        # its own side stream, _await_checkstop polls that copy before the stop
+        # decision, and client emit reuses the same gated copy. Worse, the blanket
+        # sync BLOCKS the main thread before the per-rid dynamic-loop-iter Python
+        # can overlap the D→H copy, defeating the sidecar overlap. Skipping it
+        # (only when sidecar_checkstop is on, so a gate exists) lets that overlap
+        # happen. Default off = the blanket sync stays (byte-identical).
+        self._skip_redundant_sync = (
+            self._sidecar_checkstop
+            and os.environ.get("MSTAR_SKIP_REDUNDANT_SYNC", "0") == "1"
+        )
         # Shadow mode (design §8, mandatory before any perf cell): when on, the
         # legacy SYNCHRONOUS check_stop is recomputed alongside the deferred
         # path and the two stop sets are asserted equal, mismatches logged at
@@ -3530,7 +3543,15 @@ class Worker:
 
         # Wait for batch N's completion event before proceeding
         # TODO: may need to refine this based on how it affects performance?
-        if torch.cuda.is_available() and batch_N.batch.node_objects:
+        # MSTAR_SKIP_REDUNDANT_SYNC: skip this blanket sync — the deferred
+        # check_stop copy self-gates on completion_event and _await_checkstop
+        # polls it before the stop decision; emit reuses that gated copy. Only
+        # taken when SIDECAR_CHECKSTOP is on (so the gate exists).
+        if (
+            torch.cuda.is_available()
+            and batch_N.batch.node_objects
+            and not self._skip_redundant_sync
+        ):
             if output.completion_event is not None:
                 if self.enable_nvtx:
                     range_push("worker.postprocess.completion_event_sync", synchronize=False)
