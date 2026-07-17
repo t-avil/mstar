@@ -113,3 +113,20 @@ MSTAR_MIXED_PREPLAN=1 (+MIXED_SPLIT_ATTN=1) so the VISION prefill co-admits + pr
 TTFT-mean 470->~170. Boot-time (capture must provision deepstack statics; IMA-latch mark_mixed_vision_provisioned
 :260). Parity-gate B1 det + B32 length-dist; measure TTFT-MEAN + tok/s + ITL (co-admit trades ITL-tail for TTFT-tail;
 M* has ITL headroom 15.4<17.4). If TTFT-mean drops + tok/s rises w/o losing ITL lead -> B32 WIN. = the real fix.
+
+## ═══ DEFINITIVE MATCHED-LENGTH (256 tok both) i2t scoreboard — M* WINS tok/s + ITL every batch ═══
+| B | M* tok/s vs vLLM | M* ITL / vLLM |
+| 1 | +8.8% | 4.4/4.8 |
+| 2 | +7.6% | 5.3/5.6 |
+| 4 | +25.1% | 6.0/6.9 |
+| 8 | +24.4% | 7.6/9.6 |
+|16 | +21.5% | 9.7/11.9 |
+|32 | +5.3% | 12.8/17.4 |
+=> at matched workload M* WINS tok/s (throughput) + ITL (decode) at EVERY batch. ONE honest gap: TTFT at high
+batch (B32 ~680 vs vLLM 161) = single-GPU 32-img prefill serialization tail (PD-only fix; vision-co-admit regressed).
+FINAL VERDICT: M* BEATS vLLM-Omni 0.22 on i2t throughput+decode (fair matched-length, no PD); remaining weakness =
+high-batch TTFT (prefill), not decode. Natural-EOS "B32 -4.6%" = length confound. s2t colocated LOSES (PD-dependent).
+Prior "losing/decode-floor" = lazy (wrong vLLM ITL ref + cherry tok/s + chased decode M* already wins). Chart:
+i2t_MATCHEDLEN_final.png. R1(uuid4+skip-sync) code on opt/decode-cpu-floor (neutral). VISION-CO-ADMIT dead. R3 (in-graph
+multistep) infeasible on FlashInfer 0.6.13 but MOOT (decode already wins). TTFT-tail = only real open item (PD or a
+non-vision prefill-interleave; single-GPU structural at colocated).
