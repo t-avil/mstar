@@ -1,0 +1,24 @@
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'interleaved', 'mrope_section'}
+
+--- Benchmark Results (wall time: 28.05s) ---
+Closed-Loop Benchmark Results (32 requests, max_concurrency=8)
+──────────────────────────────────────────────────
+Request type breakdown: image_to_speech=32
+Requests : 32/32 succeeded
+TTFT (audio)  : mean=0.757s  p50=0.637s  p95=1.331s  p99=1.458s
+TTFT (text)   : mean=0.470s  p50=0.309s  p95=1.101s  p99=1.149s
+E2E           : mean=5.971s  p50=6.166s  p95=8.580s  p99=8.690s
+ITL  (audio)  : mean=0.229s  p50=0.227s  p95=0.334s  p99=0.437s
+ITL  (text)   : mean=0.008s  p50=0.007s  p95=0.010s  p99=0.026s
+Audio SV      : mean=1.000s  p50=1.000s  p05=1.000s  p10=1.000s  (higher is better)
+RTF           : mean=0.132  p50=0.131  p95=0.154  p99=0.159  (lower is better; <1.0 = real-time)
+Audio dur    : mean=46.172s
+Text tokens: 5743 total (179.5 avg/req)
+Output bytes (audio): 70920750 total (761 chunks)
+Output bytes (text): 25181 total (5743 chunks)
+Throughput: 1.14 req/s (successful only)
+Throughput: 204.73 text tok/s
+Throughput: 52.67 audio sec/s (synthesized audio per wall second)
+Total wall time: 28.05s
+
+Saved 64 outputs to /m-coriander/coriander/tim/exp_gate_out/i2s_natEOS/

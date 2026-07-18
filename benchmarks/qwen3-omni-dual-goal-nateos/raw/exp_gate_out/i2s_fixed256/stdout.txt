@@ -1,0 +1,24 @@
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'interleaved'}
+
+--- Benchmark Results (wall time: 32.04s) ---
+Closed-Loop Benchmark Results (32 requests, max_concurrency=8)
+──────────────────────────────────────────────────
+Request type breakdown: image_to_speech=32
+Requests : 32/32 succeeded
+TTFT (audio)  : mean=0.761s  p50=0.643s  p95=1.366s  p99=1.475s
+TTFT (text)   : mean=0.491s  p50=0.313s  p95=1.103s  p99=1.155s
+E2E           : mean=7.335s  p50=7.440s  p95=9.843s  p99=10.433s
+ITL  (audio)  : mean=0.229s  p50=0.223s  p95=0.344s  p99=0.437s
+ITL  (text)   : mean=0.008s  p50=0.008s  p95=0.011s  p99=0.025s
+Audio SV      : mean=1.000s  p50=1.000s  p05=1.000s  p10=1.000s  (higher is better)
+RTF           : mean=0.129  p50=0.127  p95=0.140  p99=0.194  (lower is better; <1.0 = real-time)
+Audio dur    : mean=57.815s
+Text tokens: 8224 total (257.0 avg/req)
+Output bytes (audio): 88803420 total (949 chunks)
+Output bytes (text): 40226 total (8224 chunks)
+Throughput: 1.00 req/s (successful only)
+Throughput: 256.71 text tok/s
+Throughput: 57.75 audio sec/s (synthesized audio per wall second)
+Total wall time: 32.04s
+
+Saved 64 outputs to /m-coriander/coriander/tim/exp_gate_out/i2s_fixed256/

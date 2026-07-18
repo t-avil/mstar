@@ -1,0 +1,7 @@
+          path   B encoff(med)  base(med) encoff/base    n
+ audio_to_text   8       419.1      318.2      1.317x    3
+ audio_to_text  16       577.2      404.3      1.428x    3
+ audio_to_text  32       848.9      587.2      1.446x    3
+ image_to_text   8       788.2      833.7      0.945x    3
+ image_to_text  16      1217.0     1145.9      1.062x    3
+ image_to_text  32      1273.1     1396.8      0.911x    3

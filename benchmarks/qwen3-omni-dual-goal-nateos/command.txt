@@ -1,0 +1,31 @@
+# Exact commands for the dual-goal (text tok/s parity + speech 2-3x) benchmark.
+# Build: mstar-godv9 (opt/prep-pos-batched-v9) + full host-floor/MoE flag stack.
+# GPUs: NUMA node 1. bench harness: /m-coriander/coriander/tim/bench-v2 (benchmark.runner)
+# vLLM values are COMMITTED references (0.22 natural-EOS) — never re-benchmarked (owner rule).
+
+## Launch — single-config (base topology, both goals vs older M*)
+bash /m-coriander/coriander/tim/launch_mstar_base_fullstack.sh 6,7 8322 6
+#   = lab_server.sh godv9 "<full flag stack>" configs/qwen3omni_2gpu.yaml 6,7 8322 6
+
+## Launch — topology-per-modality (max text)
+# text server (encoff): encoders off the Thinker GPU
+bash /m-coriander/coriander/tim/launch_mstar_best.sh 4,5 8323 6
+#   = lab_server.sh godv9 "<full flag stack>" configs/qwen3omni_2gpu_encoff.yaml 4,5 8323 6
+# speech server (base): encoders off the Talker/Code2Wav GPU
+bash /m-coriander/coriander/tim/launch_mstar_base_fullstack.sh 6,7 8322 6
+
+## Measure (natural-EOS, the regime older tok/s + the 2-3x were measured in)
+bash /m-coriander/coriander/tim/exp_full_nateos.sh 8322 base    # text i2t/s2t + speech i2s/s2s
+#   runner: --profiling-type closed_loop --max-concurrency B --num-requests N (no --ignore-eos)
+#   text N: 64/64/96/96/96/128 ; speech N: 12/20/24/40/64/96 ; datasets food101(image)/libri(audio)
+
+## Gate (methodology artifact): natural-EOS vs fixed-256 on same build
+bash /m-coriander/coriander/tim/exp_gate_artifact.sh 8321 8 32
+#   fixed-256 adds: --ignore-eos --output-len-min 256 --output-len-max 256
+
+## Paired same-load topology A/B (encoff vs base, load-robust ratio)
+bash /m-coriander/coriander/tim/exp_paired_text.sh 8323 8322 3
+
+## Verdict + charts
+python compare.py base ; python gen_text_nateos.py base ; python gen_speech_nateos.py base
+#   (python = /home/tim/mstar-encoders/.venv/bin/python ; charts use shared chartstyle.mplstyle)
