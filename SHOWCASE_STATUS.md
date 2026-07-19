@@ -58,3 +58,22 @@ PINNED_SAMPLE_PARAMS, ENC_OVERLAP, WALK_STATS counter.
 The COMPLETE winning feature set + how-to-enable is documented in FEATURES.txt on
 branch winning/dual-goal (the validated build these commits reconstruct). eiv2
 (`encoder-implemented-v2` @510beedd) is the style model + cherry-pick source.
+
+## BLOCKER (2026-07-19) — feature interdependency prevents clean 1-per-commit for the rest
+The remaining winning features are NOT independent. Confirmed: the emit-sidecar commit
+(9175055b) worker.py references _fast_checkstop (2), _sidecar_checkstop (7), _await_checkstop
+(4), _compute_new_stops (2) — helpers from adjacent features — AND enc_overlap (3), from the
+EXCLUDED ENC_OVERLAP feature. So sidecar/fast-checkstop/fast-route/fast-send/slim-emit2/
+codec-emit co-evolved and cross-reference; likewise the chunked-prefill/mixed-batch/mixed-spec
+cluster and merged-audio. They cannot be cleanly split into independent per-feature commits
+without (a) replaying godv9's full history incl. excluded/intermediate commits, or (b) expert
+manual rewriting (strip enc_overlap refs, untangle shared helpers) — error-prone, unvalidatable
+until a GPU rebench.
+
+8 clean separable-feature commits DONE (cleanup, fp8, ordered-emit, grids, host-floor,
+custom-ops, sampler). Escalated to user for the granularity decision:
+  A. Accept 8-commit clean showcase + complete winning/dual-goal (all features + FEATURES.txt).
+  B. Coarser feature-CLUSTER commits (~3-4 more: worker host-floor cluster / chunked+mixed
+     cluster / merged-audio+autogate) — honest grouping, bounded manual conflict resolution.
+  C. Replay godv9 history more fully — complete+correct but not "one feature per commit".
+Loop PAUSED pending user choice.
