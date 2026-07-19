@@ -37,3 +37,18 @@ YAML. Would ALSO need the cross-rank/side prefill provisioning bug fixed (the s2
 Per-modality wins STAND (the submission result). This is exploratory: the split config
 is committed for reproducibility; dynamic output-modality placement is the clear next
 experiment for a true one-deployment win.
+
+## Second candidate tested: TP-encoder (tensor-parallel encoders across both ranks)
+configs/qwen3omni_2gpu_tpenc.yaml — encoders ranks:[0,1] so each modality pays HALF the
+encoder contention. Boots (encoders ARE TP-shardable). B32: s2t=622.9 (0.94x vLLM024 =
+LOSES), s2s=21.2 sps (0.62x vLLM024 = collapses), i2t/i2s crashed. FAIL: TP comm overhead
++ half-contention on BOTH bottleneck GPUs makes everything worse, not a compromise.
+
+## FINAL: static single-config space exhausted — both candidates fail
+  encoff (both->rank0): wins text, loses speech.        base (both->rank1): wins speech, loses text.
+  split (audio->0,vision->1): wins s2t, regress i2t, CRASH s2s.   TP-enc: loses s2t + s2s.
+No static placement wins both. The conflict is fundamentally by OUTPUT modality (bottleneck
+= Thinker for text-out, Talker+Code2Wav for speech-out). ONLY dynamic per-request encoder
+placement by output modality can win both — a runtime routing change (M*'s flexible-placement
+thesis, per-request) + the cross-rank prefill provisioning fix. Per-modality topology stays
+the submission result; dynamic placement is the clearly-scoped next experiment.
