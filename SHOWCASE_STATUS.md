@@ -95,3 +95,24 @@ Clusters to build:
 COMPLETION GATE: build clusters (git, syntax-check) -> when GPUs 6,7 free, rebench the
 showcase w/ full winning flags -> MUST reproduce winning numbers -> only then DONE. If
 rebench diverges, debug (likely a mis-resolved worker.py hunk). Rebench is the correctness net.
+
+## CONCLUSIVE FINDING (2026-07-19) — worker-side features are NOT cleanly separable
+Proven: 46 godv9 commits touch mstar/worker/worker.py between baseline and winning.
+winning's worker.py is their cumulative interdependent product — the FIRST godv9 host-floor
+commit (4ce01253 FAST_POSTPROC) already conflicts against baseline worker.py because it
+assumes predecessor state. No subset of the worker-side feature commits cherry-picks cleanly;
+they also cross-reference each other's helpers + the excluded ENC_OVERLAP. So clean
+one-feature (or one-cluster) commits for the worker-side host-floor / mixed-prefill / merged-
+audio features are NOT reconstructible by cherry-pick without replaying godv9's full worker.py
+history (which carries experimental leftover) or rewriting the features from scratch
+(massive, unvalidatable-without-GPU, high-risk for an academic submission).
+
+CLEANLY-ACHIEVED = the 8 file-separable feature commits (cleanup, fp8, ordered-emit, grids,
+grid-fix, host-floor[eiv2], custom-ops, sampler). These are DONE + pushed.
+
+RECOMMENDATION: accept the 8-commit showcase (demonstrates the clean-history style) +
+branch winning/dual-goal (complete, validated, FEATURES.txt = authoritative). The worker-side
+optimizations are documented per-flag in FEATURES.txt. If a representation of the worker-side
+is required, the only honest option is a SINGLE "worker/prefill optimization stack" commit
+bringing worker.py+submodules.py to the shipped winning state — but that carries the winning
+build's flag-gated experimental code (not leftover-free). Escalated to user.
