@@ -1,0 +1,22 @@
+model: "qwen3_omni"
+max_seq_len: 32768
+# SPLIT-ENCODER single config (experiment): unlike encoff (both encoders on rank0)
+# and base (both on rank1), split the encoders by the modality conflict so ONE
+# config serves text and speech well:
+#   * vision_encoder -> rank 1 (Thinker GPU): off the Talker/Code2Wav GPU, so i2s
+#     keeps the base-topology speech win; i2t is topology-neutral so no text loss.
+#   * audio_encoder  -> rank 0 (Talker/Code2Wav GPU): off the Thinker GPU, so s2t
+#     keeps the encoff-topology text win. Trade: s2s pays a brief audio-encode
+#     contention on rank0 (one-time prefill) -> small, acceptable drop.
+# Text bottleneck = Thinker (rank1); speech bottleneck = Talker+Code2Wav (rank0).
+node_groups:
+  - node_names: [vision_encoder]
+    ranks: [1]
+  - node_names: [audio_encoder]
+    ranks: [0]
+  - node_names: [Thinker]
+    ranks: [1]
+  - node_names: [Talker]
+    ranks: [0]
+  - node_names: [Code2Wav]
+    ranks: [0]
