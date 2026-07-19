@@ -721,7 +721,13 @@ class Conductor:
                 input_modalities=body.initial_input_modalities,
                 output_modalities=body.initial_output_modalities,
                 input_signals=body.initial_signals,
-                model_kwargs=body.model_kwargs,
+                # _live_occupancy = live active-request count (incl. this request,
+                # added at self.requests[...] above) so the model's per-admission
+                # audio-merge gate can compare against MSTAR_MERGED_PREFILL_AUDIO_MAX_BS.
+                model_kwargs={
+                    **(body.model_kwargs or {}),
+                    "_live_occupancy": len(self.requests),
+                },
             )
             pstate = partition_states[p.name]
             # if a partition is not active at all in the request, register that here

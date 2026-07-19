@@ -576,6 +576,29 @@ def merged_prefill_audio_enabled() -> bool:
     return _envflag("MSTAR_MERGED_PREFILL_AUDIO")
 
 
+def merged_prefill_audio_max_bs() -> int:
+    """Live-occupancy ceiling for the audio merge (``MSTAR_MERGED_PREFILL_AUDIO_MAX_BS``,
+    default 24). ``MSTAR_MERGED_PREFILL_AUDIO`` registers the merged walk; this gate
+    decides PER ADMISSION whether to actually use it, based on the live active-request
+    count. Measured: the merge wins big at low concurrency (s2t B<=16 tok/s +19-28%)
+    because it collapses the two decode-blocking prefill steps into one, but at B32 the
+    heavier merged prefill stalls the dense decode wave and regresses ~26%. Merging only
+    when occupancy <= this ceiling keeps the low-batch win without the high-batch loss,
+    so one config wins at every batch. Set very high => always merge (old behavior);
+    very low => never merge. Both merged and unmerged walks are captured in the same
+    boot, so the per-admission choice never triggers recapture (parity-safe either way).
+    """
+    import os as _os
+    raw = _os.environ.get("MSTAR_MERGED_PREFILL_AUDIO_MAX_BS")
+    if raw is None:
+        return 24
+    try:
+        v = int(raw)
+    except ValueError:
+        return 24
+    return v
+
+
 def _tensor_dump_dir() -> str | None:
     """Directory for env-gated intermediate-tensor / token dumps, or None."""
     import os as _os
@@ -1481,7 +1504,9 @@ class Qwen3OmniModel(Model):
         # unchanged (merged_vision_first=None) when the merge does not apply, so
         # every non-eligible request keeps the byte-identical multi-walk path.
         schedule, merged_vision_first, merged_audio_order = (
-            self._maybe_merge_prefill_schedule(schedule, audio_output)
+            self._maybe_merge_prefill_schedule(
+                schedule, audio_output, model_kwargs.get("_live_occupancy")
+            )
         )
 
         first_walk = schedule[0][0] if schedule else "thinker_decode"
@@ -1559,6 +1584,7 @@ class Qwen3OmniModel(Model):
         self,
         schedule: list[tuple[str, dict[str, TensorPointerInfo]]],
         audio_output: bool,
+        live_occupancy: int | None = None,
     ) -> tuple[
         list[tuple[str, dict[str, TensorPointerInfo]]], bool | None, str | None
     ]:
@@ -1608,7 +1634,19 @@ class Qwen3OmniModel(Model):
                     merged_entry.update(tensor_dict)
                 return [("prefill_multimodal", merged_entry)], vision_first, None
 
-        if merged_prefill_audio_enabled() and not audio_output:
+        if (
+            merged_prefill_audio_enabled()
+            and not audio_output
+            and (
+                live_occupancy is None
+                or live_occupancy <= merged_prefill_audio_max_bs()
+            )
+        ):
+            # Occupancy gate: merge only at low concurrency (big s2t B<=16 win);
+            # above the ceiling the heavier merged prefill would stall the dense
+            # decode wave (B32 regression). live_occupancy is None => merge
+            # (preserves always-merge when occupancy isn't plumbed) — parity-safe:
+            # both merged and unmerged walks are captured, so either choice is exact.
             walks = [w for w, _ in schedule]
             if len(schedule) == 2 and sorted(walks) == [
                 "prefill_audio", "prefill_text"
