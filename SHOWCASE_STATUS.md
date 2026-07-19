@@ -77,3 +77,21 @@ custom-ops, sampler). Escalated to user for the granularity decision:
      cluster / merged-audio+autogate) — honest grouping, bounded manual conflict resolution.
   C. Replay godv9 history more fully — complete+correct but not "one feature per commit".
 Loop PAUSED pending user choice.
+
+## REFINED STRATEGY (2026-07-19, user chose Option B = feature-CLUSTER commits)
+Build interdependent clusters from the GODV9 line (winning's actual ancestry, NOT eiv2),
+in godv9 order. ASSESSED: godv9 host-floor cluster leaves ZERO enc_overlap refs after
+resolution (clean, unlike eiv2's sidecar) — godv9 is the correct source.
+Clusters to build:
+  CLUSTER-1 worker host-floor: a39cf7cf(FAST_CHECKSTOP) b59ba78e(EMIT_SIDECAR)
+    7ef5150b(SIDECAR_CHECKSTOP) 5c87cb8a(SLIM_EMIT2) 267e5cf0(FAST_ROUTE) fd8eae5f(FAST_ROUTE2)
+    333b7ddd(FAST_SEND) 01856e80(CODEC_CHUNK_EMIT) 55faf299(FAST_CHECKSTOP_TALKER)
+    + prep-device-pos 35a9358c/915ab8f3/620de912. ~6 worker.py conflicts = 3-way merges
+    (KEEP my custom-ops/sampler changes AND add the cluster's). One squashed commit.
+  CLUSTER-2 chunked+mixed prefill: 76f3afec 6e39106b 0cea3e8d + mixed-batch 1093527a b265cd1c
+    7c09d101 f45cbbdf a599bb63 864d4925 + mixed-spec e31f39ed. One squashed commit.
+  CLUSTER-3 merged-audio + auto-gate: 92b31307 07eba5bb 655f15ca. One squashed commit.
+  (preproc-pool 18330f4d+a6f55ba1 = separable, its own commit.)
+COMPLETION GATE: build clusters (git, syntax-check) -> when GPUs 6,7 free, rebench the
+showcase w/ full winning flags -> MUST reproduce winning numbers -> only then DONE. If
+rebench diverges, debug (likely a mis-resolved worker.py hunk). Rebench is the correctness net.
