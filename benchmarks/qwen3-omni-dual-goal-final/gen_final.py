@@ -18,7 +18,7 @@ E = "/m-coriander/coriander/tim/exp_nateos_out"
 SERIES = [
     ("winning",       BLUE,  "-",  "o", "M* winning (this work)"),
     ("encoders_impl", BLUE,  ":",  "D", "M* encoders-impl (baseline)"),
-    ("main",          GREY,  "-",  "^", "m-star main"),
+    ("upmain",        GREY,  "-",  "^", "m-star main (upstream 59fe435c)"),
     ("vllm024",       GREEN, "-",  "s", "vLLM-Omni 0.24"),
 ]
 
