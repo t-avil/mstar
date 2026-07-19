@@ -1,0 +1,148 @@
+================================================================================
+WINNING DUAL-GOAL CONFIGURATION — Qwen3-Omni serving (M*)
+branch: winning/dual-goal   base: decodefloor @deda3e0f (⊇ godv9)
+================================================================================
+
+GOAL: beat vLLM-Omni on TEXT generation (i2t, s2t) on tok/s + req/s at every
+batch, WITHOUT sacrificing the 2-3x SPEECH-generation lead (i2s, s2s). Achieved
+by (1) a per-modality topology and (2) a stack of default-off, parity-safe
+feature flags layered on the "encoders-implemented" baseline.
+
+BASELINE for comparison = branch `encoders-implemeneted` @4c33b33a (encoders
+work, but NONE of the flags below; every flag here is OFF in the baseline, so
+enabling it is the delta). All flags are default-OFF and byte-identical when off.
+
+--------------------------------------------------------------------------------
+0. DEPLOYMENT — topology per modality (the single most important choice)
+--------------------------------------------------------------------------------
+One code build; the SERVING CONFIG differs by output modality:
+  * TEXT out (i2t, s2t):  --config configs/qwen3omni_2gpu_encoff.yaml
+      encoders placed on the Talker/Code2Wav GPU (rank0), Thinker alone on rank1.
+      Removes audio/vision-encoder-vs-decode contention on the Thinker GPU.
+      Baseline: encoders share the Thinker GPU -> mid-batch decode stalls.
+  * SPEECH out (i2s, s2s): --config configs/qwen3omni_2gpu.yaml  ("base")
+      encoders on the Thinker GPU, Talker+Code2Wav alone -> protects the codec
+      pipeline that delivers the 2-3x audio lead. (encoff collapses i2s to ~1.27x.)
+  NO DP-disaggregation, NO PD topology. Continuous batching, closed loop.
+
+--------------------------------------------------------------------------------
+1. HOST-FLOOR DECODE STACK — cut the ~26ms Python/GIL per-step floor
+--------------------------------------------------------------------------------
+M* decode is host-bound (GIL), not GPU-bound; these shave the per-step CPU cost.
+  MSTAR_FAST_POSTPROC=1   streamlined per-step postprocess (drop redundant work)
+  MSTAR_BATCH_EMIT=1      batch token-emit across the step instead of per-token
+  MSTAR_SLIM_EMIT=1
+  MSTAR_SLIM_EMIT2=1      init-read/slim the emit path (fresh-boot read caches)
+  MSTAR_FAST_ROUTE=1
+  MSTAR_FAST_ROUTE2=1     faster control-plane routing of step outputs
+  MSTAR_FAST_SEND=1       lower-overhead result send
+  MSTAR_EMIT_SIDECAR=1    move emit onto a sidecar walk-gate (off Thinker step)
+  MSTAR_SIDECAR_CHECKSTOP=1  deferred-consume stop check on the sidecar
+  MSTAR_FAST_CHECKSTOP=1     integer-only stop compares (no D->H sync)
+  MSTAR_FAST_CHECKSTOP_TALKER=1  same for the Talker (speech paths)
+  MSTAR_CODEC_CHUNK_EMIT=1   chunked codec-token emit (Code2Wav, speech paths)
+Enable: set each =1. Baseline: all off (per-token emit, per-step host sync).
+
+--------------------------------------------------------------------------------
+2. CORRECT + ORDERED TOKEN EMISSION
+--------------------------------------------------------------------------------
+  MSTAR_ORDERED_EMIT=1   guarantee per-request first-token ordering (fixes an
+                         inline-vs-SHM emit race that dropped/reordered the FIRST
+                         token under concurrency). Ship-critical correctness.
+Baseline: unordered emit (rare first-token races at concurrency).
+
+--------------------------------------------------------------------------------
+3. SAMPLER + POSITION PREP (per-step CPU savings)
+--------------------------------------------------------------------------------
+  MSTAR_SAMPLER_CFG_CACHE=1
+  MSTAR_SAMPLER_CFG_CACHE_V2=1  cache/reuse per-request sampler config (skip
+                                rebuild each step)
+  MSTAR_PREP_DEVICE_POS=1
+  MSTAR_PREP_DEVICE_POS_BATCHED=1  build position ids on-device, batched (drop a
+                                   host->device round trip per step)
+
+--------------------------------------------------------------------------------
+4. MoE + KERNELS
+--------------------------------------------------------------------------------
+  MSTAR_MOE_FP8=1     fp8 (w8a8) Triton grouped-GEMM for the 128-expert MoE;
+                      ~1.13x e2e decode, BLOCK_M=16 wins at all decode M.
+  MSTAR_CUSTOM_OPS=1  torch.library custom ops (run_attention / fused_experts_fp8
+                      / apply_rope) so the compiled Thinker graph stays intact.
+                      Needs the TORCHINDUCTOR cache vars in section 8 for boot time.
+Baseline: bf16 MoE, no custom ops.
+
+--------------------------------------------------------------------------------
+5. MULTIPROCESS PREPROCESS POOL  (the i2t fix — mandatory for image paths)
+--------------------------------------------------------------------------------
+  MSTAR_GPU_IMAGE_PREPROCESS=1  image preprocess on GPU
+  MSTAR_PREPROC_PROC=1          off-process multimodal preprocess pool
+  MSTAR_PREPROC_PROCS=8         pool size
+  MSTAR_BURST_CAP=1
+  MSTAR_BURST_THREADS=8         coordinated per-process host-thread budget
+WHY: without the pool, a single-thread image preprocess serializes and blows up
+i2t B32 TTFT (176ms WITH the pool vs ~2800ms without). Baseline: inline single
+-thread preprocess. REQUIRED for i2t/i2s.
+
+--------------------------------------------------------------------------------
+6. CHUNKED PREFILL + CAPTURED MIXED BATCH (fold prefill into decode)
+--------------------------------------------------------------------------------
+  MSTAR_CHUNKED_PREFILL_V2=1     chunk long Thinker prefills into bounded pieces
+  MSTAR_MIXED_BATCH=1            captured thinker_mixed step: N decode rows + one
+                                 prefill chunk in ONE captured forward
+  MSTAR_MIXED_SPEC=1            fold the mixed step INTO the running decode spec
+                                 chain (not off-chain)
+  MSTAR_PREFILL_CHUNK_TOKENS=2048   chunk size cap C
+  MSTAR_MIXED_BUDGET_TOKENS=4096    vLLM-style every-step chunk admission budget
+WHY: removes decode/prefill-chunk alternation; raises the captured prefill bucket
+so vision prefills don't serialize decode. Baseline: standalone prefill steps
+that freeze decode.
+
+--------------------------------------------------------------------------------
+7. CAPTURE GRIDS (bucket coverage so more shapes hit a captured graph)
+--------------------------------------------------------------------------------
+  MSTAR_BATCH_VISION_PREFILL=1
+  MSTAR_VIS_BATCH_SIZES=1,2,4,8,16,32
+  MSTAR_PREFILL_BATCH_SIZES=1,2,4,8,16,32
+Baseline: narrower capture grid -> more eager (uncaptured, slow) prefills.
+
+--------------------------------------------------------------------------------
+8. s2t AUDIO-PREFILL MERGE + OCCUPANCY AUTO-GATE  (NEW in this branch)
+--------------------------------------------------------------------------------
+  MSTAR_MERGED_PREFILL_AUDIO=1        collapse an s2t request's two decode-blocking
+                                      Thinker prefill steps (prefill_text +
+                                      prefill_audio, 42.5ms/req) into ONE
+                                      prefill_multimodal_audio walk. Byte-identical
+                                      prefill; reuses the prefill_text CUDA-graph
+                                      capture (no recapture). s2t ONLY (text out).
+  MSTAR_MERGED_PREFILL_AUDIO_MAX_BS=24  auto-gate: merge ONLY when live active-request
+                                      occupancy <= this. Measured: merge wins
+                                      +19-28% at B<=16 but the heavier merged
+                                      prefill stalls the dense B32 decode wave
+                                      (-26%). Gating by occupancy keeps the
+                                      low-batch win with NO high-batch regression,
+                                      so one config wins at every batch.
+Enable for s2t: both =1 / =24. Do NOT set for i2t/i2s/s2s (audio-in text-out only).
+Baseline: two separate prefill steps per s2t request, each freezing decode.
+
+--------------------------------------------------------------------------------
+9. BUILD / CACHE INFRA (not perf features; boot speed only)
+--------------------------------------------------------------------------------
+  TORCHINDUCTOR_FX_GRAPH_CACHE=1
+  TORCHINDUCTOR_CACHE_DIR=/m-coriander/coriander/tim/inductor_cache_shared
+  TORCHDYNAMO_CACHE_SIZE_LIMIT=128
+  MSTAR_MEGA_CACHE=<prefix>          boot-time torch.compile mega-cache (fast reboot)
+  MSTAR_BOOT_PHASES=1                boot-phase timing logs
+
+--------------------------------------------------------------------------------
+HOW TO BOOT EACH PATH (GPUs <pair>, non-DP, closed-loop)
+--------------------------------------------------------------------------------
+COMMON + PREPROC + GRIDS + section-9 cache = the full flag string (see
+boot_pd_45.sh / boot_winning_s2t.sh in the repo root).
+  i2t / i2s images: COMMON + PREPROC + GRIDS,  config: (i2t) encoff / (i2s) base
+  s2t:             COMMON + PREPROC + GRIDS + MSTAR_MERGED_PREFILL_AUDIO=1
+                    MSTAR_MERGED_PREFILL_AUDIO_MAX_BS=24,  config: encoff
+  s2s:             COMMON + PREPROC + GRIDS,  config: base
+Benchmark (natural-EOS, closed loop): bench-v2 runner, --profiling-type
+closed_loop --max-concurrency B  (OMIT --ignore-eos/--output-len for natEOS).
+Per path: i2t=image_to_text/food101, s2t=audio_to_text/libri,
+          i2s=image_to_speech/food101, s2s=audio_to_speech/libri.
