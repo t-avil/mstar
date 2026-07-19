@@ -4,7 +4,22 @@ Fork point: `encoders-implemeneted` @4c33b33a (the baseline). Goal: one clean,
 gated, single-feature commit per winning feature, PD/DP NEVER present, no leftover
 experimental code — for academic presentation of the journey baseline -> winning.
 
-## DONE — 6 verified clean commits (pushed)
+## UPDATE 2026-07-19 (multi-day completion in progress)
+8 clean feature commits now done (added: custom-op route MSTAR_CUSTOM_OPS [4 primaries,
+side-prefill fix 586fcfa1 excluded as out-of-scope], sampler-config cache
+MSTAR_SAMPLER_CFG_CACHE [primary]). STRATEGY for the rest: apply remaining feature
+intro-commits in godv9 TOPOLOGICAL ORDER (distance from baseline) so shared-file changes
+(sampling.py, worker.py, submodules.py) stack correctly instead of colliding. Remaining
+order: 9175055b sidecar(15) -> 76f3afec/6e39106b chunked-prefill(18,20) -> mixed-batch
+cluster 1093527a..e31f39ed(22-32) -> route 267e5cf0/fd8eae5f/333b7ddd(58-68) ->
+55faf299 checkstop-talker(76) -> 01856e80 codec-emit(78) -> 0cea3e8d mixed-budget(81) ->
+35a9358c/915ab8f3 prep-device-pos(95-97) -> 92b31307/07eba5bb merged-audio(107-109) +
+655f15ca auto-gate -> 18330f4d/a6f55ba1 preproc-pool(115). Squash multi-commit features.
+Resolve conflicts referencing the winning-branch final code. Excluded fixes are noted per
+commit. FINAL: rebench the completed showcase (when GPUs free) to confirm it reproduces
+winning numbers; then push + note in benchmarks README.
+
+## DONE — 8 verified clean commits (pushed: 6 below + custom-ops + sampler)
 1. remove redundant HF-CPU image-preprocess fallback + dead guards  (cleanup-first)
 2. fp8 MoE grouped GEMM (MSTAR_MOE_FP8)
 3. ordered emit (MSTAR_ORDERED_EMIT)
