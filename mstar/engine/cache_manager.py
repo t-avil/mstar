@@ -2,6 +2,7 @@ from dataclasses import dataclass
 
 import torch
 
+from mstar.engine import compile_ops  # registers mstar::* custom ops on import
 from mstar.engine.kv_store import KVCacheConfig, KVRequestState, PagedAllocationManager
 from mstar.utils.flashinfer_utils import FlashInferDecodeWrapper, FlashInferPrefillWrapper
 
@@ -131,6 +132,12 @@ class BatchedCacheManager:
         # pre-plan was applied.
         self._plan_done_event: "torch.cuda.Event | None" = None
 
+        # Publish as the active manager for the custom-op forward-context.
+        # A weak default only: the just-in-time set in plan_attention and in
+        # CudaGraphRunner's capture loop is what guarantees the correct manager
+        # is active for each specific forward.
+        compile_ops.set_active_manager(self)
+
     @torch.compiler.disable
     def _get_state(self, request_id: str, label: str | None = None) -> KVRequestState:
         label = label or self.active_labels.get(request_id, "main")
@@ -190,6 +197,11 @@ class BatchedCacheManager:
             label: cache label to plan for. If None, uses the current active label.
         """
         from mstar.utils.profiler import range_pop, range_push
+
+        # plan_attention runs (outside the graph) before every forward that
+        # will read this manager, so it is the reliable per-forward hook to make
+        # this manager the one the custom ops resolve to.
+        compile_ops.set_active_manager(self)
 
         if self.enable_nvtx:
             range_push("cache.plan_attention", synchronize=False)

@@ -550,6 +550,14 @@ class CudaGraphRunner:
 
                 forward = submodule.forward_batched
                 if config.compile:
+                    # Custom-op fp8 path: quantize experts BEFORE compile so the
+                    # one-time mutating lazy-quant never runs in the traced
+                    # forward (the mstar::fused_experts_fp8 op then reads cached
+                    # fp8 weights with no graph break). Idempotent + gated.
+                    from mstar.engine.compile_ops import custom_ops_enabled
+                    if custom_ops_enabled():
+                        from mstar.model.components.moe import prequantize_fp8_experts
+                        prequantize_fp8_experts(submodule)
                     forward = torch.compile(
                         forward,
                         mode="max-autotune-no-cudagraphs",
@@ -571,6 +579,11 @@ class CudaGraphRunner:
 
                 torch.cuda.set_device(self.device)
                 torch.cuda.synchronize()
+                # Publish this slot's manager for the custom-op forward-context
+                # so any mstar::* op traced into the compiled forward resolves
+                # to the manager whose graph is being warmed / captured here.
+                from mstar.engine.compile_ops import set_active_manager
+                set_active_manager(spec.cache_manager)
                 for _ in range(2):
                     with torch.amp.autocast("cuda", enabled=True, dtype=self.autocast_dtype):
                         run_forward()
