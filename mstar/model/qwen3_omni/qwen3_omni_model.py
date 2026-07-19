@@ -362,6 +362,62 @@ def mixed_budget_tokens() -> int:
     return v if v > 0 else 0
 
 
+def ngram_spec_enabled() -> bool:
+    """#17 LOSSLESS n-gram (prompt-lookup) speculative decoding.
+
+    When ON, a decode step may draft up to ``ngram_spec_k()`` next tokens for a
+    request from its OWN token history (most-recent recurrence of the current
+    suffix n-gram — see ``mstar/spec/ngram_drafter.py``) and verify them in ONE
+    multi-query forward. Accepted drafts + the guaranteed bonus token are emitted
+    in a single step, so the wall-clock cost of a decode step yields >1 token when
+    the model's output is self-repetitive (common in structured / list / code
+    output). Token-exact against the non-spec greedy path => LOSSLESS: flag-off,
+    or a fully-rejected draft, is byte-identical output.
+
+    Default OFF -> byte-identical: the drafter is never consulted, the verify
+    forward degenerates to q_len==1, and the emit path appends exactly one token.
+    Independent of the mixed-batch machinery (does NOT need MSTAR_MIXED_BATCH):
+    verify reuses the multi-query prefill wrapper against paged KV, not the
+    captured decode graph.
+    """
+    return _envflag("MSTAR_NGRAM_SPEC")
+
+
+def ngram_spec_k() -> int:
+    """Max draft length K per request per step (``MSTAR_NGRAM_SPEC_K``, default 4).
+
+    Each spec step reserves K+1 KV slots (K drafts + the always-real bonus token —
+    see ``mstar/spec/kv_rollback.py``) and runs a (1+K)-query verify forward.
+    Larger K raises the ceiling (more tokens per step on a hot repeat) but also the
+    per-step verify cost when drafts miss; 4 matches vLLM's ngram default.
+    """
+    import os as _os
+    raw = _os.environ.get("MSTAR_NGRAM_SPEC_K")
+    if raw is None:
+        return 4
+    try:
+        v = int(raw.strip())
+    except ValueError:
+        return 4
+    return v if v > 0 else 4
+
+
+def ngram_spec_min_n() -> int:
+    """Shortest suffix n-gram the drafter will match on (``MSTAR_NGRAM_SPEC_MIN_N``,
+    default 2). Below this, a match is too generic to be a useful predictor and
+    just wastes verify slots on likely-rejected drafts.
+    """
+    import os as _os
+    raw = _os.environ.get("MSTAR_NGRAM_SPEC_MIN_N")
+    if raw is None:
+        return 2
+    try:
+        v = int(raw.strip())
+    except ValueError:
+        return 2
+    return v if v >= 1 else 2
+
+
 def eager_fold_enabled() -> bool:
     """EAGER FOLD FALLBACK (idea o1): co-admit a brand-new request's FIRST
     prefill chunk into the running decode step even when the chunk is LARGER than
