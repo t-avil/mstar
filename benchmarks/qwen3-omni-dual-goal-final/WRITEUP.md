@@ -88,6 +88,48 @@ features (fp8 MoE, custom ops) change output only by bounded rounding. Evidence:
    build's differences from references sit within this natural cross-version band, and
    its byte-identical + rounding-bounded features keep output faithful.
 
+## Limitations & honest caveats (read before citing a number)
+1. **One codebase, TWO deployment configs — not one config that wins everywhere.**
+   Text wins on `encoff`, speech wins on `base`; a single served config cannot be
+   optimal for both simultaneously. The system-level claim is "one codebase +
+   modality-routed topology," and a production deployment would route by output
+   modality (or accept a compromise config).
+2. **Speech "2–3×" is REQUEST throughput, not audio-seconds/s.** On audio-sps the
+   ratio vs vLLM-0.24 is only ~1.5× (i2s/s2s) because vLLM-0.24 emits LONGER audio per
+   request — a length confound, identical in kind to text tok/s. req/s is the honest
+   serving-throughput metric; lead with it and state the confound.
+3. **t2s is the weakest speech path: ~1.6× audio-sps / ~1.7–2.0× req/s vs vLLM-0.24**
+   — at the low edge of 2–3×, not inside it. i2s (2.19–2.52×) and s2s (2.65–3.50×) are
+   solidly 2–3×; t2s is not. (vLLM-0.24 improved its own audio 35–55% over 0.22; vs 0.22
+   t2s would likely be fuller 2–3×, but no committed 0.22 t2s exists to confirm.)
+4. **vLLM numbers were measured here (the owner's no-vLLM rule was lifted for this
+   task only).** For the submission, re-run vLLM-0.24 through the owner's own pipeline
+   to confirm — those are the numbers to defend.
+5. **`m-star main @9ee13699` is a weak baseline** (winning is 3–8× over it — a large
+   gap worth sanity-checking that it's genuinely the current main). `encoders-impl` and
+   `main` were booted AS-IS with minimal flags (a deliberate, disclosed baseline choice).
+6. **n-cadence & variance.** Committed sweeps use n=64–128 (validation used n=256).
+   Single mid-batch cells were fluke-prone (host load, cold boot); a couple of text
+   cells (i2t B32, s2t B2) sit at ~1.0× (fluke-level ties, disclosed not rounded up).
+   The node was fully occupied by other users' jobs for ~2 h mid-campaign.
+7. **Parity is design-level + unit-tested, not a fresh cross-build runtime token-diff.**
+   Byte-identical claims are for default-off features + the auto-gate (unit-tested);
+   fp8/custom-ops numerical faithfulness rests on committed certs. A runtime output-
+   parity run (winning flags on vs off, greedy token agreement vs the GPU-greedy
+   non-determinism floor) is the evidence a rigorous reviewer would want. [see PARITY_RUNTIME]
+8. **Showcase branch is 8 of ~17 features.** The worker-side features are NOT cleanly
+   git-separable (46 interdependent worker.py commits sharing helpers); they are
+   documented per-flag in FEATURES.txt instead. See SHOWCASE_STATUS.md.
+
+## Negative results (worth including for credibility)
+- **n-gram speculative decoding** measured 1.04 tok/step on real i2t / 1.00 on s2t →
+  NO-GO (output is novel prose, not self-repetitive/prompt-echoing). Killed no-boot.
+- **Co-admission (fold prefill into decode)** cannot fold vision (needs captured
+  deepstack) or audio → doesn't help i2t/s2t; it's the *merge* (2 prefill steps → 1),
+  not co-admission, that wins.
+- **The merge regresses −26% at B32** (heavier merged prefill stalls dense decode) —
+  the failure that motivated the occupancy auto-gate.
+
 ## Artifacts
 - Branch `winning/dual-goal` (fork) — the validated build + `FEATURES.txt` (per-flag
   what/how-to-enable vs baseline) + the auto-gate parity test.
