@@ -71,7 +71,8 @@ for tag, rt, title in (("i2t","image_to_text","I2T (image → text)"),
 
 # ---------- SPEECH (i2s, s2s) ----------
 for tag, rt, title in (("i2s","image_to_speech","I2S (image → speech)"),
-                       ("s2s","audio_to_speech","S2S (speech → speech)")):
+                       ("s2s","audio_to_speech","S2S (speech → speech)"),
+                       ("t2s","text_to_speech","T2S (text → speech)")):
     fig, axes = plt.subplots(2, 2, figsize=(11.5, 8.4))
     a1, a2, a3, a4 = axes.flat
     for lab, c, ls, mk, name in SERIES:
