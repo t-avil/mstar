@@ -469,7 +469,9 @@ class Conductor:
             p.join(timeout=5)
         self._worker_processes.clear()
 
-    def _assign_worker_graphs_to_workers(self) -> dict[str, list[str]]:
+    def _assign_worker_graphs_to_workers(
+        self, output_modalities: list[str] | None = None,
+    ) -> dict[str, list[str]]:
         """
         For a request, assign worker graphs to workers. DP picks are
         coordinated by ``_group_id`` so all wgs derived from the same
@@ -477,10 +479,23 @@ class Conductor:
         two wgs sharing a TP group could end up on different DP replicas
         and break model topology.
 
-        TODO: smarter assignment that minimizes cross-graph-walk tensor
-        transfer (e.g., bias toward keeping prefill→decode handoff local
-        for the same request).
+        ENCODER OUTPUT-MODALITY ROUTING (single-config win, MSTAR):
+        a multi-rank DP-replica node_group (the encoders, the only group
+        declared as full replicas on both ranks in the dpenc config) is
+        routed to the IDLE rank by OUTPUT modality instead of at random:
+          * speech output (``audio`` in output_modalities) -> rank 1, the
+            Thinker's rank (idle-for-speech; the bottleneck is Talker/
+            Code2Wav on rank 0). Co-located with the Thinker so the prefill
+            embedding handoff is LOCAL -> reproduces the base topology AND
+            avoids the cross-rank prefill provisioning gap.
+          * text output -> rank 0, the Talker/Code2Wav rank (idle-for-text;
+            the bottleneck is the Thinker on rank 1) -> reproduces encoff.
+        Byte-identical (same weights, same input compute the same encode);
+        this is a pure scheduling decision. Falls back to the previous
+        random DP pick when output_modalities is None or the target rank is
+        not in the group's ranks (backward-compatible).
         """
+        _speech_out = bool(output_modalities) and "audio" in output_modalities
         # _group_id -> chosen DP-replica index within that group's ranks
         group_id_to_replica_idx: dict[int, int] = {}
         result = {}
@@ -492,8 +507,17 @@ class Conductor:
                 ranks = wg._tp_ranks[replica_idx]
                 result[wg_id] = [f"worker_{r}" for r in ranks]
             else:
+                if len(wg.ranks) > 1:
+                    # DP-replica encoder group: deterministic output-modality route.
+                    target = 1 if _speech_out else 0
+                    default_idx = (
+                        wg.ranks.index(target) if target in wg.ranks
+                        else np.random.randint(len(wg.ranks))
+                    )
+                else:
+                    default_idx = np.random.randint(len(wg.ranks))
                 replica_idx = group_id_to_replica_idx.setdefault(
-                    wg._group_id, np.random.randint(len(wg.ranks)),
+                    wg._group_id, default_idx,
                 )
                 result[wg_id] = [f"worker_{wg.ranks[replica_idx]}"]
         return result
@@ -651,7 +675,9 @@ class Conductor:
         """Actually dispatch a request to workers (no admission check)."""
         logger.debug("Conductor ingesting request %s", body.request_id)
         ingest_time = time.perf_counter()
-        worker_graph_to_workers = self._assign_worker_graphs_to_workers()
+        worker_graph_to_workers = self._assign_worker_graphs_to_workers(
+            body.initial_output_modalities,
+        )
 
         model_kwargs = body.model_kwargs or {}
         max_output_tokens = self.model.get_max_output_tokens(**model_kwargs)
