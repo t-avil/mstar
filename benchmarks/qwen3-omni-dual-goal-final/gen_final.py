@@ -11,14 +11,14 @@ import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 HERE = os.path.dirname(os.path.abspath(__file__)); os.chdir(HERE)
 plt.style.use("chartstyle.mplstyle")
-BLUE, GREEN, GREY = "#1f77b4", "#2ca02c", "#7f7f7f"
+BLUE, GREEN, GREY, ORANGE = "#1f77b4", "#2ca02c", "#7f7f7f", "#ff7f0e"
 BATCHES = [1, 2, 4, 8, 16, 32]; xs = list(range(len(BATCHES)))
 E = "/m-coriander/coriander/tim/exp_nateos_out"
 # (dir, color, linestyle, marker, label)
 SERIES = [
-    ("winning",       BLUE,  "-",  "o", "M* winning (this work)"),
-    ("encoders_impl", BLUE,  ":",  "D", "M* encoders-impl (baseline)"),
-    ("upmain",        GREY,  "-",  "^", "m-star main (upstream 59fe435c)"),
+    ("dpenc",         ORANGE, "-", "*", "M* SINGLE config (this work)"),
+    ("winning",       BLUE,  "--", "o", "M* per-modality (winning)"),
+    ("upmain",        GREY,  "-",  "^", "m-star main (upstream)"),
     ("vllm024",       GREEN, "-",  "s", "vLLM-Omni 0.24"),
 ]
 
@@ -64,7 +64,7 @@ for tag, rt, title in (("i2t","image_to_text","I2T (image → text)"),
     finish(a2, "Request throughput (req/s) — higher better", "requests / s")
     finish(a3, "TTFT p50 (ms) — lower better", "ms")
     finish(a4, "ITL mean (ms) — lower better", "ms")
-    fig.suptitle(f"Qwen3-Omni  {title}  — natural-EOS: M* winning (blue) vs baseline (dotted) "
+    fig.suptitle(f"Qwen3-Omni  {title}  — natural-EOS: M* SINGLE config (orange, this work) vs per-modality winning (blue) "
                  f"vs m-star main (grey) vs vLLM-Omni 0.24 (green)", fontsize=11.5, y=0.995)
     fig.tight_layout(rect=[0, 0.02, 1, 0.95])
     out = f"charts/final_{tag}.png"; fig.savefig(out, dpi=140); print("wrote", out)
@@ -95,7 +95,7 @@ for tag, rt, title in (("i2s","image_to_speech","I2S (image → speech)"),
     finish(a3, "RTF p50 — lower better", "RTF")
     a4.set_title("Speech goal: winning req/s / vLLM-0.24"); a4.set_ylabel("x faster")
     a4.set_xticks(xs); a4.set_xticklabels([str(b) for b in BATCHES]); a4.set_xlabel("batch size"); a4.legend(fontsize=7.5)
-    fig.suptitle(f"Qwen3-Omni  {title}  — natural-EOS: M* winning (blue) vs baseline (dotted) "
+    fig.suptitle(f"Qwen3-Omni  {title}  — natural-EOS: M* SINGLE config (orange, this work) vs per-modality winning (blue) "
                  f"vs m-star main (grey) vs vLLM-Omni 0.24 (green)", fontsize=11.5, y=0.995)
     fig.tight_layout(rect=[0, 0.02, 1, 0.95])
     out = f"charts/final_{tag}.png"; fig.savefig(out, dpi=140); print("wrote", out)
