@@ -1,0 +1,299 @@
+{
+  "system": "ours",
+  "inference_system": "ours",
+  "model": "Qwen3Omni",
+  "request_type": "audio_to_speech",
+  "profiling_type": "closed_loop",
+  "num_requests": 24,
+  "num_warmup": 5,
+  "completed": 24,
+  "failed": 0,
+  "wall_time_s": 4.256161000987049,
+  "jct_mean_ms": 671.1184753342726,
+  "jct_median_ms": 674.2199559812434,
+  "jct_p90_ms": 898.4878193819895,
+  "jct_p95_ms": 915.9634110401385,
+  "jct_p99_ms": 1066.9256122008665,
+  "request_throughput": 5.638884429990816,
+  "text_token_throughput": 109.48833934898835,
+  "audio_seconds_throughput": 25.776309912749426,
+  "audio_duration_mean_s": 4.571171875,
+  "batch_size": 1,
+  "max_concurrency": 4,
+  "ttft": {
+    "text": {
+      "mean": 0.12440249879243008,
+      "p50": 0.12216373602859676,
+      "higher_is_better": false,
+      "p95": 0.21110569574811952,
+      "p99": 0.21865076429210603,
+      "p05": null,
+      "p10": null
+    },
+    "audio": {
+      "mean": 0.3944212167916703,
+      "p50": 0.39288261550245807,
+      "higher_is_better": false,
+      "p95": 0.46630778592661953,
+      "p99": 0.47042998841323425,
+      "p05": null,
+      "p10": null
+    }
+  },
+  "itl": {
+    "text": {
+      "mean": 0.008942103811842073,
+      "p50": 0.007113631523679942,
+      "higher_is_better": false,
+      "p95": 0.024509479530388487,
+      "p99": 0.047287695265840736,
+      "p05": null,
+      "p10": null
+    },
+    "audio": {
+      "mean": 0.14936249059180476,
+      "p50": 0.19023565246607177,
+      "higher_is_better": false,
+      "p95": 0.21517239318054635,
+      "p99": 0.22748631763097366,
+      "p05": null,
+      "p10": null
+    }
+  },
+  "e2e_latency": {
+    "mean": 0.6711184753342726,
+    "p50": 0.6706830394978169,
+    "higher_is_better": false,
+    "p95": 0.9159634110401385,
+    "p99": 1.0669256122008663,
+    "p05": null,
+    "p10": null
+  },
+  "rtf": {
+    "mean": 0.15261274621007406,
+    "p50": 0.1503881119754431,
+    "higher_is_better": false,
+    "p95": 0.18720863021537132,
+    "p99": 0.1964825351922841,
+    "p05": null,
+    "p10": null
+  },
+  "per_request": [
+    {
+      "request_id": 0,
+      "jct_ms": 1111.195384990424,
+      "type": "audio_to_speech",
+      "output_bytes": {
+        "text": 125,
+        "audio": 380670
+      }
+    },
+    {
+      "request_id": 1,
+      "jct_ms": 894.1347069921903,
+      "type": "audio_to_speech",
+      "output_bytes": {
+        "text": 140,
+        "audio": 301140
+      }
+    },
+    {
+      "request_id": 2,
+      "jct_ms": 674.2199559812434,
+      "type": "audio_to_speech",
+      "output_bytes": {
+        "text": 91,
+        "audio": 190890
+      }
+    },
+    {
+      "request_id": 3,
+      "jct_ms": 445.98931598011404,
+      "type": "audio_to_speech",
+      "output_bytes": {
+        "text": 53,
+        "audio": 107520
+      }
+    },
+    {
+      "request_id": 4,
+      "jct_ms": 324.469176994171,
+      "type": "audio_to_speech",
+      "output_bytes": {
+        "text": 45,
+        "audio": 84480
+      }
+    },
+    {
+      "request_id": 5,
+      "jct_ms": 764.2148640006781,
+      "type": "audio_to_speech",
+      "output_bytes": {
+        "text": 105,
+        "audio": 263850
+      }
+    },
+    {
+      "request_id": 6,
+      "jct_ms": 644.4566129939631,
+      "type": "audio_to_speech",
+      "output_bytes": {
+        "text": 94,
+        "audio": 198570
+      }
+    },
+    {
+      "request_id": 7,
+      "jct_ms": 848.7513700383715,
+      "type": "audio_to_speech",
+      "output_bytes": {
+        "text": 120,
+        "audio": 308820
+      }
+    },
+    {
+      "request_id": 8,
+      "jct_ms": 900.3534389776178,
+      "type": "audio_to_speech",
+      "output_bytes": {
+        "text": 160,
+        "audio": 339540
+      }
+    },
+    {
+      "request_id": 9,
+      "jct_ms": 918.718111992348,
+      "type": "audio_to_speech",
+      "output_bytes": {
+        "text": 113,
+        "audio": 328020
+      }
+    },
+    {
+      "request_id": 10,
+      "jct_ms": 684.5943340449594,
+      "type": "audio_to_speech",
+      "output_bytes": {
+        "text": 107,
+        "audio": 221610
+      }
+    },
+    {
+      "request_id": 11,
+      "jct_ms": 682.7461870270781,
+      "type": "audio_to_speech",
+      "output_bytes": {
+        "text": 88,
+        "audio": 248490
+      }
+    },
+    {
+      "request_id": 12,
+      "jct_ms": 356.4851770061068,
+      "type": "audio_to_speech",
+      "output_bytes": {
+        "text": 57,
+        "audio": 103680
+      }
+    },
+    {
+      "request_id": 13,
+      "jct_ms": 736.9748110068031,
+      "type": "audio_to_speech",
+      "output_bytes": {
+        "text": 114,
+        "audio": 279210
+      }
+    },
+    {
+      "request_id": 14,
+      "jct_ms": 650.2626110450365,
+      "type": "audio_to_speech",
+      "output_bytes": {
+        "text": 83,
+        "audio": 202410
+      }
+    },
+    {
+      "request_id": 15,
+      "jct_ms": 655.2533880458213,
+      "type": "audio_to_speech",
+      "output_bytes": {
+        "text": 81,
+        "audio": 206250
+      }
+    },
+    {
+      "request_id": 16,
+      "jct_ms": 470.3070569667034,
+      "type": "audio_to_speech",
+      "output_bytes": {
+        "text": 62,
+        "audio": 134400
+      }
+    },
+    {
+      "request_id": 17,
+      "jct_ms": 801.3466980191879,
+      "type": "audio_to_speech",
+      "output_bytes": {
+        "text": 110,
+        "audio": 260010
+      }
+    },
+    {
+      "request_id": 18,
+      "jct_ms": 679.950101999566,
+      "type": "audio_to_speech",
+      "output_bytes": {
+        "text": 85,
+        "audio": 202410
+      }
+    },
+    {
+      "request_id": 19,
+      "jct_ms": 564.9119149893522,
+      "type": "audio_to_speech",
+      "output_bytes": {
+        "text": 77,
+        "audio": 176640
+      }
+    },
+    {
+      "request_id": 20,
+      "jct_ms": 667.1461230143905,
+      "type": "audio_to_speech",
+      "output_bytes": {
+        "text": 103,
+        "audio": 225450
+      }
+    },
+    {
+      "request_id": 21,
+      "jct_ms": 510.57602296350524,
+      "type": "audio_to_speech",
+      "output_bytes": {
+        "text": 62,
+        "audio": 130560
+      }
+    },
+    {
+      "request_id": 22,
+      "jct_ms": 527.4543169653043,
+      "type": "audio_to_speech",
+      "output_bytes": {
+        "text": 61,
+        "audio": 145920
+      }
+    },
+    {
+      "request_id": 23,
+      "jct_ms": 592.3317259876058,
+      "type": "audio_to_speech",
+      "output_bytes": {
+        "text": 82,
+        "audio": 225450
+      }
+    }
+  ]
+}
