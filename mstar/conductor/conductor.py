@@ -461,7 +461,9 @@ class Conductor:
         ENCODER OUTPUT-MODALITY ROUTING (single-config win, MSTAR):
         a multi-rank DP-replica node_group (the encoders, the only group
         declared as full replicas on both ranks in the dpenc config) is
-        routed to the IDLE rank by OUTPUT modality instead of at random:
+        routed by OUTPUT modality — a static modality->rank map that
+        reproduces each modality's proven encoder placement — instead of at
+        random:
           * speech output (``audio`` in output_modalities) -> rank 1, the
             Thinker's rank (idle-for-speech; the bottleneck is Talker/
             Code2Wav on rank 0). Co-located with the Thinker so the prefill
@@ -470,9 +472,16 @@ class Conductor:
           * text output -> rank 0, the Talker/Code2Wav rank (idle-for-text;
             the bottleneck is the Thinker on rank 1) -> reproduces encoff.
         Byte-identical (same weights, same input compute the same encode);
-        this is a pure scheduling decision. Falls back to the previous
-        random DP pick when output_modalities is None or the target rank is
-        not in the group's ranks (backward-compatible).
+        this is a pure scheduling decision, and a STATIC modality->rank map,
+        not live-occupancy detection. Text output — including when
+        ``output_modalities`` is None — routes deterministically to rank 0;
+        speech output to rank 1. The random pick applies only to a TP/SP
+        instance group (the ``_instance_ranks`` branch below) or as a guard
+        if the mapped target rank is absent from the group's ranks. The
+        DP-replica encoder group has tp_size=sp_size=1, so ``_instance_ranks``
+        is empty (see WorkerGraph.__post_init__) and it takes the modality
+        route here; single-rank groups keep the plain random/backward-compat
+        path unchanged.
         """
         _speech_out = bool(output_modalities) and "audio" in output_modalities
         # _group_id -> chosen DP-replica index within that group's ranks
