@@ -89,11 +89,18 @@ features (fp8 MoE, custom ops) change output only by bounded rounding. Evidence:
    its byte-identical + rounding-bounded features keep output faithful.
 
 ## Limitations & honest caveats (read before citing a number)
-1. **One codebase, TWO deployment configs — not one config that wins everywhere.**
-   Text wins on `encoff`, speech wins on `base`; a single served config cannot be
-   optimal for both simultaneously. The system-level claim is "one codebase +
-   modality-routed topology," and a production deployment would route by output
-   modality (or accept a compromise config).
+1. **One served config wins all five paths — at a small cost vs the per-modality
+   optimum.** The `dpenc` config places the encoders as BF16 DP-replicas on BOTH
+   ranks and routes each request's encode to the modality-appropriate rank at
+   runtime (text-out → rank 0 = the `encoff` placement; speech-out → rank 1 = the
+   `base` placement, local to the Thinker), so a SINGLE served config recovers both
+   per-modality optima with no topology swap. The residual cost is small and
+   disclosed: single-config i2t B32 is ~1.04× vs the pure `encoff` build's ~1.07×,
+   because text-out pays one cross-rank encoder→Thinker embedding handoff that a
+   dedicated `encoff` deployment avoids. Production can ship the one `dpenc` config
+   and route internally, or still pin a per-modality topology to reclaim that last
+   ~3% on a single dominant path. (Earlier drafts of this submission used two
+   deployment configs; the replicated-encoder routing supersedes that.)
 2. **Speech "2–3×" is REQUEST throughput, not audio-seconds/s.** On audio-sps the
    ratio vs vLLM-0.24 is only ~1.5× (i2s/s2s) because vLLM-0.24 emits LONGER audio per
    request — a length confound, identical in kind to text tok/s. req/s is the honest

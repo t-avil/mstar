@@ -49,9 +49,14 @@ submission/scripts/run_sweep.sh 8296
 # 3) regenerate charts
 python submission/scripts/gen_charts.py
 ```
-Notes: s2t B32 is wave-lottery sensitive — validate at n≥256 (the committed i2t/s2t
-B32 cells use the n=256 read). The competitor (`vllm024`) and `upmain` series were
-measured separately and are committed here as reference; per the owner rule, re-run
+Notes on sample counts (corrected): the committed B32 cells are **n=128** for every
+series and path, EXCEPT `dpenc` i2t B32 which is **n=256**. So the tightest headline
+(i2t 1.04×) compares dpenc@n=256 vs vLLM@n=128 — a rate (throughput) metric, so not
+invalid, but not equal-n either. This branch adds a **fresh equal-n=128 rebench** of
+`dpenc` (see `submission/raw/dpenc/` regenerated here) so i2t/s2t B32 compare at
+matched n. s2t B32 is wave-lottery sensitive — validate at n≥256 before defending a
+tight s2t cell. The competitor (`vllm024`) and `upmain` series are committed here as
+reference (byte-identical to the `benchmarks` branch); per the owner rule, re-run
 vLLM-0.24 through your own pipeline before defending those numbers.
 
 ## Everything-in-one-config, in one sentence (vs origin/main `9ee13699`)
