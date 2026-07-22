@@ -1,0 +1,11 @@
+Based on the visual evidence in the photo, the cuisine and dish can be identified as follows:
+
+*   **Cuisine**: Japanese
+
+*   **Dish**: This is a type of **uramaki** (inside-out roll) sushi. The key features that lead to this identification are:
+    *   **Uramaki Style**: The rice is on the outside of the roll, and the nori (seaweed) is on the inside, wrapping the filling.
+    *   **Topping**: The roll is topped with a generous amount of a pinkish-orange, flaky ingredient, which is characteristic of **crab stick** (also known as surimi or imitation crab).
+    *   **Sauce**: A dark, glossy sauce, likely a **teriyaki** or **eel sauce (unagi sauce)**, has been drizzled over the top.
+    *   **Garnish**: A small amount of green wasabi paste is visible in the background.
+
+This dish is commonly known as a **Crab Stick Roll** or **Crab Stick Uramaki**.<|im_end|>

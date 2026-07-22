@@ -1,0 +1,14 @@
+Based on the visual evidence in the photo, the cuisine is **Chinese**, and the dishes are **Roast Duck** and **Steamed Duck**.
+
+Here is a breakdown of the identification:
+
+*   **Roast Duck (Foreground):** The dish in the foreground is clearly roast duck. This is identifiable by its signature features:
+    *   **Crispy Skin:** The skin is a deep, glossy mahogany color, indicating it has been roasted to achieve a crispy texture.
+    *   **Sliced Presentation:** The duck has been cooked whole and then sliced for serving.
+    *   **Accompaniments:** It is served with fresh cilantro and what appear to be thin, crisp pancakes or rice paper, which are traditional accompaniments for wrapping the duck.
+
+*   **Steamed Duck (Background):** The dish on the plate in the background is a different preparation of duck.
+    *   **Cooking Method:** The meat is pale and appears very tender, which is characteristic of steaming or poaching.
+    *   **Presentation:** It is served with a garnish of green onions, a common practice for this style of dish.
+
+*   **Cuisine:** The combination of these two duck preparations, along with the blue-and-white porcelain

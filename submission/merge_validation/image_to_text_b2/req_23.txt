@@ -1,0 +1,9 @@
+Based on the visual characteristics of the food in the image, this dish is **Xiaolongbao** (also known as **soup dumplings**).
+
+Here are the key features that identify it:
+
+*   **Pleated, Dome-Shaped Wrapper:** The dumplings have a distinctive pleated top, which is pinched to seal the filling inside. This is a hallmark of Xiaolongbao.
+*   **Steamed Preparation:** They are served in a bamboo steamer basket, which is the traditional and most common method for cooking them.
+*   **Delicate Dough:** The wrapper appears thin and translucent, which is necessary to hold the hot soup filling without breaking during steaming.
+
+Xiaolongbao are a famous type of **Shanghai cuisine**. The name "Xiaolongbao" literally translates to "small dragon bun," and they are renowned for their savory meat filling (usually pork) and a rich, flavorful soup that is released when the dumpling is bitten into.<|im_end|>

@@ -1,0 +1,3 @@
+Of course. Based on the image you provided, here is a caption for the food:
+
+**Crispy, saucy wings served with a side of golden fries.**<|im_end|>

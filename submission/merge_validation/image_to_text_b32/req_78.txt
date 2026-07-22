@@ -1,0 +1,9 @@
+Based on the visual information, this food is a **lobster roll**.
+
+Here are the key details that lead to this identification:
+
+*   **Main Ingredient:** The sandwich is filled with large, bright red chunks of meat, which are characteristic of cooked lobster tail meat.
+*   **Bread:** It is served in a split-top, toasted roll, often referred to as a "hot dog bun" or "split-top roll." This type of roll is the traditional vessel for a lobster roll.
+*   **Preparation Style:** The lobster meat appears to be tossed in a light dressing, likely a mayonnaise-based sauce, which is a common preparation for a "cold" lobster roll. The presence of what looks like black pepper on the meat is also typical for this dish.
+
+In summary, the combination of lobster meat served in a split-top roll is the defining feature of a lobster roll.<|im_end|>

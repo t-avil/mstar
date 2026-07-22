@@ -1,0 +1,13 @@
+Based on the visual elements in the image, the dish shown is **Thai Fried Rice**, also commonly known as **Khao Pad**.
+
+Here are the key characteristics that lead to this identification:
+
+*   **Mounded Shape:** The rice is cooked and then molded into a dome shape, which is a very common presentation for this dish.
+*   **Color:** The rice has a distinct yellowish hue, which is characteristic of being cooked with turmeric and/or egg.
+*   **Garnishes:** The dish is served with classic accompaniments for Thai fried rice:
+    *   **Lime Wedge:** A wedge of lime is placed on the plate, intended to be squeezed over the rice to add a fresh, acidic flavor.
+    *   **Cucumber Slices:** Sliced cucumbers are served on the side, providing a cool and crunchy contrast.
+    *   **Tomato Wedge:** A slice of tomato adds a touch of sweetness and color.
+    *   **Green Onions:** A few stalks of green onions are used as a garnish.
+
+This combination of a turmeric-colored rice dome served with lime, cucumber, and tomato is a classic presentation of Thai Fried Rice.<|im_end|>

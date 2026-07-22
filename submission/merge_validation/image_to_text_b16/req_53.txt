@@ -1,0 +1,3 @@
+Based on the visual information, this dish is a type of **pasta**.
+
+More specifically, the pasta shape is **penne**, which is a short, tube-shaped pasta with diagonally cut ends. The sauce appears to be a creamy, light-colored sauce, possibly a **carbonara** or a **creamy mushroom** sauce, as it is mixed with the penne and has a slightly oily sheen.<|im_end|>

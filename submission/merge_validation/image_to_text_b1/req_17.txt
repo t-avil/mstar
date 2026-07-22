@@ -1,0 +1,13 @@
+Based on the visual evidence in the image, the dish is **raw oysters on the half shell**.
+
+Here is a breakdown of the identification:
+
+*   **The Dish:** The main components are oysters served in their natural, cup-shaped shells. They are presented on a bed of crushed ice to keep them cold and fresh, which is the standard way to serve raw oysters. Each oyster is garnished with a wedge of lemon, which is typically squeezed over the oyster to add acidity and enhance its flavor.
+
+*   **The Cuisine:** This is a classic dish found in many coastal cuisines around the world, including:
+    *   **French cuisine:** Known as *huîtres*.
+    *   **American cuisine:** A staple on the East Coast and in seafood restaurants.
+    *   **Japanese cuisine:** Known as *kaki*.
+    *   **British cuisine:** A traditional dish, especially in coastal areas.
+
+The presentation is very typical of a seafood restaurant or a bar specializing in raw bar items.<|im_end|>

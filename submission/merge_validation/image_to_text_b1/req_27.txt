@@ -1,0 +1,5 @@
+Based on the visual evidence, the dish shown is **donuts**.
+
+This is a type of **sweet bread** or **pastry** that is popular worldwide, but the specific style of these donuts—golden-brown, ring-shaped, and coated in granulated sugar—suggests they are a classic **American-style donut**.
+
+The cuisine is **American**.<|im_end|>

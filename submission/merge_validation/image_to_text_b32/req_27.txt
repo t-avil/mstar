@@ -1,0 +1,3 @@
+Based on the visual evidence, the dish is **donuts**.
+
+The cuisine is **American**. Donuts are a quintessential American breakfast and snack food, although they have origins in Europe. The specific style shown here, with their golden-brown, fried appearance and sugar coating, is very typical of classic American donuts.<|im_end|>

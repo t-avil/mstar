@@ -1,0 +1,9 @@
+Based on the visual evidence in the photo, the cuisine is **Chinese**, and the dishes are **Roast Duck** and **Steamed Duck**.
+
+Here is a breakdown of the identification:
+
+*   **Roast Duck (Foreground):** The dish in the foreground features slices of duck with a very crispy, golden-brown, and lacquered skin. This is characteristic of Peking Duck or a similar Cantonese-style roast duck. It is served with fresh cilantro and what appears to be a thin, crispy pancake, which is a classic accompaniment for this dish.
+
+*   **Steamed Duck (Background):** The dish in the background consists of duck that has been cooked to be tender and moist, with a pale, off-white skin. This preparation is typical of steamed duck, a common dish in Cantonese cuisine. It is garnished with green onions.
+
+*   **Accompaniments:** The presence of small bowls with dipping sauces (one dark, one orange) and a bowl of shredded vegetables (likely for wrapping) further supports the identification of this as a Chinese meal, likely from a Cantonese restaurant.<|im_end|>

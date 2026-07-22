@@ -1,0 +1,3 @@
+Based on the visual information, this food item is a **donut**.
+
+More specifically, it appears to be a **glazed donut topped with a dollop of cream and sprinkled with poppy seeds**. The light brown glaze and the dark specks are characteristic of a poppy seed topping.<|im_end|>

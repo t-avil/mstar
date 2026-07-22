@@ -1,0 +1,9 @@
+Based on the visual characteristics of the food in the image, this dish is **Xiaolongbao** (also known as **Soup Dumplings**).
+
+Here are the key features that identify it:
+
+*   **Pleated, Dome-Shaped Wrapper:** The dumplings have a distinctive pleated top, which is pinched to seal in the filling. This is a hallmark of Xiaolongbao.
+*   **Steamed Preparation:** They are served in a bamboo steamer basket, which is the traditional and most common method for cooking them.
+*   **Filling:** While the filling is not visible, Xiaolongbao are famous for containing a hot, savory soup made from meat broth and gelatin, which melts into liquid when steamed. The dumplings are typically filled with minced pork, though other fillings like crab or shrimp are also popular.
+
+In summary, the combination of the pleated shape and the steaming method strongly indicates that these are Xiaolongbao, a famous type of soup dumpling from the Jiangnan region of China.<|im_end|>

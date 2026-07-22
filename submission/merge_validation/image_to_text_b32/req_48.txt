@@ -1,0 +1,13 @@
+Based on the visual information, this dish is a type of **taco**.
+
+Here are the specific details that lead to this identification:
+
+*   **Tortilla:** The food is served in a soft, round, and slightly charred tortilla, which is folded over the filling. This is characteristic of a taco.
+*   **Filling:** The main filling consists of grilled fish, likely a white fish such as tilapia or snapper, identifiable by the distinct grill marks on its surface.
+*   **Toppings:** The taco is garnished with fresh ingredients, including:
+    *   Arugula (rocket)
+    *   Thinly sliced red onions
+    *   A lemon wedge for squeezing
+    *   A small side of what appears to be a slaw made with red cabbage and onions.
+
+This specific combination of grilled fish, arugula, and red onion in a soft tortilla is a very popular style of taco, often referred to as a **Fish Taco**.<|im_end|>

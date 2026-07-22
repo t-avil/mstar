@@ -1,0 +1,9 @@
+Based on the visual evidence in the image, the dish shown is **fried calamari**.
+
+Here are the key details that lead to this conclusion:
+
+*   **Main Ingredient:** The primary component consists of small, ring-shaped pieces of seafood that have been battered and deep-fried. This shape and appearance are characteristic of calamari (squid).
+*   **Preparation Style:** The calamari is coated in a thick, golden-brown, and crispy batter, which is typical for a fried preparation.
+*   **Accompaniments:** The dish is served with a lemon wedge on the side, a classic pairing for fried seafood to add a bright, acidic flavor. There also appear to be some green herbs sprinkled on top, likely parsley or oregano, for added flavor and garnish.
+
+This dish is commonly served as an appetizer in Italian-American and Mediterranean restaurants.<|im_end|>
