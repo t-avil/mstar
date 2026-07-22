@@ -33,6 +33,7 @@ def _tpi(uuid: str, n: int = 4) -> TensorPointerInfo:
 
 TEXT = ("prefill_text", {"text_inputs": _tpi("txt")})
 AUDIO = ("prefill_audio", {"audio_features": _tpi("af"), "audio_seqlens": _tpi("asl")})
+VISION = ("prefill_vision", {"image_features": _tpi("vf"), "image_grid_thw": _tpi("igt")})
 
 
 @pytest.fixture(autouse=True)
@@ -117,3 +118,21 @@ def test_audio_output_never_merges_even_below_ceiling(monkeypatch):
     out, _, aorder = shim._maybe_merge_prefill_schedule(
         sched, audio_output=True, live_occupancy=1)
     assert out is sched and aorder is None
+
+
+# --- single-config safety: the audio flag is set GLOBALLY in the one dpenc boot,
+# so an i2t request (text+vision, no audio) MUST pass through byte-identical. The
+# audio branch needs a prefill_audio walk (absent) and the vision branch needs the
+# separate MSTAR_MERGED_PREFILL flag (NOT set in the single boot) -> no-op. This
+# pins that i2t correctness does not depend on the audio flag being unset. -------
+def test_audio_gate_declines_for_vision_text_i2t_schedule(monkeypatch):
+    monkeypatch.delenv("MSTAR_MERGED_PREFILL", raising=False)          # vision merge OFF
+    monkeypatch.delenv("MSTAR_CHUNKED_PREFILL_V2_VISION", raising=False)
+    monkeypatch.setenv("MSTAR_MERGED_PREFILL_AUDIO", "1")              # audio merge ON (as shipped)
+    shim = _CondShim()
+    for occ in (1, 8, 24, None):   # even below the audio ceiling, i2t is untouched
+        sched = [TEXT, VISION]
+        out, vorder, aorder = shim._maybe_merge_prefill_schedule(
+            sched, audio_output=False, live_occupancy=occ)
+        assert out is sched and vorder is None and aorder is None, \
+            f"i2t (text+vision) occ={occ} must be a byte-identical no-op"
