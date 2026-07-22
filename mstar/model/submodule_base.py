@@ -16,7 +16,8 @@ from mstar.engine.kv_store import PositionInfo
 from mstar.utils.sampling import BaseSampler, SeenTokenMask
 
 if TYPE_CHECKING:
-    from mstar.engine.cuda_graph_config import CudaGraphConfig
+    from mstar.engine.cuda_graph_config import CudaGraphConfig, PiecewiseCudaGraphConfig
+    from mstar.engine.cuda_graph_runner import PiecewiseCudaGraphRunner
 
 
 @dataclass
@@ -148,12 +149,74 @@ class ARNodeInputs(NodeInputs):
 
 
 @dataclass
+class PerRequestState:
+    """Engine-owned per-request state a submodule persists across forwards.
+
+    Submodules stash whatever a request's later steps need (schedulers,
+    conditioning latents, packing metadata) instead of keeping private
+    ``dict[request_id, ...]`` attributes. The engine owns the lifecycle: it
+    injects the batch's states via ``ModelInputsFromEngine.per_request_states``
+    and drops a request's state when the request is removed — no submodule
+    cleanup code required.
+
+    ``tensors`` vs ``kwargs`` split by value kind: device tensors go in
+    ``tensors``, everything else (numbers, dicts, scheduler objects) in
+    ``kwargs``. ``disag_shared_keys`` is reserved for PD disaggregation —
+    marked keys would travel with the request (tensors via the tensor
+    manager, kwargs with the forward-pass info); no engine implements the
+    transfer yet.
+    """
+
+    tensors: dict[str, torch.Tensor] = field(default_factory=dict)
+    kwargs: dict[str, Any] = field(default_factory=dict)
+    disag_shared_keys: set[str] = field(default_factory=set)
+
+    def add(self, key: str, value) -> None:
+        if isinstance(value, torch.Tensor):
+            self.kwargs.pop(key, None)
+            self.tensors[key] = value
+        else:
+            self.tensors.pop(key, None)
+            self.kwargs[key] = value
+
+    def add_all(self, **kwargs) -> None:
+        for key, value in kwargs.items():
+            self.add(key, value)
+
+    def remove(self, keys) -> None:
+        for key in ([keys] if isinstance(keys, str) else keys):
+            self.tensors.pop(key, None)
+            self.kwargs.pop(key, None)
+
+    def get(self, key: str, default=None):
+        if key in self.tensors:
+            return self.tensors[key]
+        return self.kwargs.get(key, default)
+
+    def __getitem__(self, key: str):
+        if key in self.tensors:
+            return self.tensors[key]
+        return self.kwargs[key]
+
+    def __contains__(self, key: str) -> bool:
+        return key in self.tensors or key in self.kwargs
+
+
+@dataclass
 class ModelInputsFromEngine:
     request_ids: list[str]
     per_request_info: dict[str, CurrentForwardPassInfo]
     cache_manager: BatchedCacheManager | None = None
     preallocated_buffers: dict[str, torch.Tensor] = field(default_factory=dict)
     sampler: BaseSampler | None = None
+    # label -> warmed-up PiecewiseCudaGraphRunner for inner-loop capture. Owned
+    # by the engine, spread in at execute time (like ``cache_manager`` /
+    # ``sampler``). Empty when the submodule opts into no piecewise graphs or
+    # capture failed. See ``NodeSubmodule.get_piecewise_cuda_graph_configs``.
+    piecewise_runners: dict[str, "PiecewiseCudaGraphRunner"] = field(default_factory=dict)
+    # The batch's per-request states, injected by the engine (None on paths
+    # that don't carry them, e.g. CUDA-graph capture with synthetic requests).
+    per_request_states: dict[str, PerRequestState] | None = None
 
     @property
     @torch.compiler.disable
@@ -176,6 +239,28 @@ class ModelInputsFromEngine:
 class NodeSubmodule(torch.nn.Module):
     """Base class for a model's compute units: defines the prepare_inputs →
     preprocess → forward(_batched) contract the engines drive."""
+
+    # Set True on a submodule whose forward does not benefit from (or is broken
+    # by) torch.compile — e.g. a data-dependent denoise loop, or a one-shot
+    # forward where the trace cost dwarfs the win. The KV-cache / stateless
+    # engines skip compiling such submodules (CUDA-graph capture is unaffected).
+    disable_torch_compile: bool = False
+
+    def __init__(self):
+        super().__init__()
+        # Per-request state store. prepare_inputs-time code (no engine inputs
+        # in scope) reaches it via ``request_state``; preprocess/forward read
+        # the engine-injected ``ModelInputsFromEngine.per_request_states`` view
+        # of the same objects. The engine removes a request's entry via
+        # ``cleanup_request`` when the request is removed.
+        self.request_states: dict[str, PerRequestState] = {}
+
+    def request_state(self, request_id: str) -> PerRequestState:
+        """The request's state, created on first access."""
+        state = self.request_states.get(request_id)
+        if state is None:
+            state = self.request_states[request_id] = PerRequestState()
+        return state
 
     def get_device(self):
         return next(self.parameters()).device
@@ -270,6 +355,32 @@ class NodeSubmodule(torch.nn.Module):
     def get_cuda_graph_configs(self, device: torch.device, tp_world_size: int = 1) -> list[CudaGraphConfig]:
         return []
 
+    def get_piecewise_cuda_graph_configs(
+        self, device: torch.device, autocast_dtype: torch.dtype, tp_world_size: int = 1
+    ) -> dict[str, PiecewiseCudaGraphConfig]:
+        """Return the piecewise CUDA graph configs this submodule opts into.
+
+        ``autocast_dtype`` is the engine's autocast dtype — passed so a config's
+        ``make_static_inputs`` can allocate the hidden-state buffer in the dtype
+        the captured region runs under (avoids a copy-time upcast at replay).
+
+        A piecewise CUDA graph captures ONE inner callable of this submodule's
+        forward (e.g. a transformer block loop) as a CUDA graph while the
+        surrounding compute stays eager. The engine builds one
+        ``PiecewiseCudaGraphRunner`` per returned label and threads the runners
+        into ``ModelInputsFromEngine.piecewise_runners`` so the submodule's
+        forward can look them up by label:
+
+            runner = engine_inputs.piecewise_runners.get("block_loop")
+            if runner is not None and runner.can_run(bs):
+                out = runner.run(static_inputs={...}, request_ids=..., seq_lens=...)
+
+        Default: no piecewise graphs. Override to return
+        ``{label: PiecewiseCudaGraphConfig}``; multiple labels capture multiple
+        independent graphs (i.e., one per outer function to be graphed).
+        """
+        return {}
+
     def can_use_cuda_graphs(
         self, batch: NodeBatch,
         model_inputs: list[NodeInputs]
@@ -305,23 +416,32 @@ class NodeSubmodule(torch.nn.Module):
         self, request_id: str,
         request_info: CurrentForwardPassInfo,
         outputs: dict[str, list[torch.Tensor]],
+        inputs: NodeInputs | None = None,
         **kwargs
     ):
         """
-        Metadata-only postprocessing on the submodule outputs.
+        Per-request postprocessing on the submodule outputs.
 
-        Runs on the GPU thread inside ``execute_batch``. **Must not read tensor
-        values** — no ``.item()`` / ``.cpu()`` / ``.tolist()`` etc. — because
-        any sync here blocks the GPU thread and forfeits the worker's async-
-        scheduling overlap. Stop-condition decisions that need token values
-        (e.g. EOS) belong in ``check_stop``.
+        Runs on the GPU thread inside ``execute_batch``, after the forward
+        (eager, batched, or CUDA-graph replay). ``inputs`` is the request's
+        ``prepare_inputs`` result for this step, so a submodule can finish a
+        step the captured graph could not hold (e.g. combine guidance branches
+        and run a Python multistep scheduler against the step's input latents).
+
+        Keep it metadata-only where possible. **Avoid reading tensor values**
+        — ``.item()`` / ``.cpu()`` sync here block the GPU thread and forfeit
+        the worker's async-scheduling overlap; stop-condition decisions that
+        need token values (e.g. EOS) belong in ``check_stop``. A captured-path
+        tail that must read scheduler state is the sanctioned exception — it
+        costs the same sync wherever it runs.
 
         Typical uses:
           - rebind output names for graph routing (``outputs["text_inputs"] =
             outputs["new_token"]``);
           - drop keys on a per-request basis for static-capture submodules
             (e.g. Qwen3-Omni Thinker dropping ``thinker_states`` for requests
-            that don't need audio).
+            that don't need audio);
+          - finish a captured step from ``inputs`` (Cosmos3 denoise tail).
 
         Modifies ``outputs`` in-place; returns nothing.
         """
@@ -351,8 +471,10 @@ class NodeSubmodule(torch.nn.Module):
         return set()
 
     def cleanup_request(self, request_id: str):
-        """Remove per-request state when a request completes."""
-        return
+        """Remove per-request state when a request completes. The engines call
+        this on request removal; overrides with extra internal state should
+        call super()."""
+        self.request_states.pop(request_id, None)
 
 
 class ARNodeSubmodule(NodeSubmodule):

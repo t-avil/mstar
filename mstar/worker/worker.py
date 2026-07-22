@@ -18,12 +18,12 @@ from mstar.api_server.request_types import (
     ResultTensorsBatch,
     SlimResultTokens,
 )
-from mstar.communication.communicator import CommProtocol, ZMQCommunicator
+from mstar.communication.communicator import CommProtocol, make_communicator
 from mstar.communication.event import EventWakeup
 from mstar.communication.tensors import NameToTensorList, create_tensor_communication_manager
 from mstar.conductor.request_info import CurrentForwardPassInfo
 from mstar.distributed.base import ShardingConfig
-from mstar.distributed.communication import WorkerTPGroups
+from mstar.distributed.communication import WorkerParallelGroups
 from mstar.engine.base import EngineType, NodeBatch, NodeOutput
 from mstar.engine.kv_store import KVCacheConfig, StoreWritePolicy, TransferEngineInfo
 from mstar.graph.base import GraphEdge, GraphNode
@@ -156,7 +156,7 @@ class Worker:
         all_worker_graph_ids_to_nodes: dict[str, set[str]],
         all_worker_graph_ids_to_dyn_loops: dict[str, set[str]],
         sharding_config: ShardingConfig,
-        tp_groups: WorkerTPGroups,
+        parallel_groups: WorkerParallelGroups,
         hostname: str = "localhost",
         socket_path_prefix: str = "/tmp/mstar",
         tensor_comm_protocol: CommProtocol = CommProtocol.RDMA,
@@ -559,8 +559,8 @@ class Worker:
         if dist_init_method is None:
             dist_init_method = f"tcp://{hostname}:29500"
 
-        self.tp_groups = tp_groups
-        self.tp_groups.init_dist(init_method=dist_init_method)
+        self.parallel_groups = parallel_groups
+        self.parallel_groups.init_dist(init_method=dist_init_method)
 
         # Build node_to_partition mapping from model's partitions and graph walks
         node_to_partition: dict[str, str] = {}
@@ -574,7 +574,7 @@ class Worker:
                         for node_name in section.get_nodes():
                             node_to_partition[node_name] = pdef.name
 
-        self.communicator = ZMQCommunicator(
+        self.communicator = make_communicator(
             my_id=worker_id,
             push_ids=worker_ids + ["conductor", "api_server", "api_server_preprocess_worker"],
             ipc_socket_path_prefix=socket_path_prefix,
@@ -601,7 +601,7 @@ class Worker:
             device=device,
             kv_config=kv_config,
             model_config=model_config,
-            tp_groups=self.tp_groups,
+            parallel_groups=self.parallel_groups,
             transfer_engine_info=TransferEngineInfo(
                 my_entity_id=worker_id,
                 my_session_id=self.tensor_manager.my_session_id,
@@ -636,26 +636,49 @@ class Worker:
             worker_id=self.worker_id
         )
 
-        self.tp_rank_zero_nodes = set([
-            node for node in node_names if self.tp_groups.get_tp_config_for_node(node).rank == 0
+        # The lockstep unit for a node is its whole instance: the tensor-parallel
+        # row composed with the sequence-parallel column. Exactly one rank per
+        # instance — instance rank 0, i.e. rank 0 in BOTH its TP and SP comm
+        # groups — leads scheduling and broadcasts ScheduleTPNode to the rest;
+        # every other instance rank follows. Keying the leader off the TP rank
+        # alone would elect one leader per TP row (e.g. ranks 0 and 2 of a
+        # tp2*sp2 instance), racing the followers and desyncing the per-step
+        # graph walk.
+        self.parallel_leader_nodes = set([
+            node for node in node_names
+            if self.parallel_groups.get_instance_rank_for_node(node) == 0
         ])
 
-        # v1: disallow multiple TP nodes in the same worker
-        self.tp_nodes = set([
-            node for node in node_names if self.tp_groups.get_tp_config_for_node(node).world_size > 1
+        # v1: disallow multiple lockstep-scheduled nodes in the same worker.
+        # A node is lockstep-scheduled when its instance spans more than one rank,
+        # i.e. tp_size * sp_size > 1. Pure sequence-parallel nodes (tp_size 1,
+        # sp_size > 1) need this too: their attention all-to-all requires the
+        # whole instance to step together. Without SP this is just tp_size > 1.
+        self.parallel_nodes = set([
+            node for node in node_names
+            if self.parallel_groups.get_instance_world_size_for_node(node) > 1
         ])
-        if len(self.tp_nodes) > 1:
+        if len(self.parallel_nodes) > 1:
             raise NotImplementedError(
-                f"Multiple TP nodes {self.tp_nodes} found in worker {worker_id}; "
-                "current implementation requires at most one TP node per worker."
+                f"Multiple parallel nodes {self.parallel_nodes} found in worker "
+                f"{worker_id}; current implementation requires at most one "
+                "lockstep-parallel node per worker."
             )
 
-        self.is_tp_follower = len(self.tp_nodes - self.tp_rank_zero_nodes) > 0
+        self.is_tp_follower = len(self.parallel_nodes - self.parallel_leader_nodes) > 0
+
+        # Aliases for our MSTAR_MIXED_BATCH / mixed-step scheduling code, which
+        # predates upstream's TP->parallel (#154/#176) rename. Same concept:
+        # tp_rank_zero_nodes == leader (instance rank 0) node set;
+        # tp_nodes == nodes whose parallel instance world_size > 1. In the
+        # non-TP/non-SP shipping config both are empty sets.
+        self.tp_rank_zero_nodes = self.parallel_leader_nodes
+        self.tp_nodes = self.parallel_nodes
 
         self.scheduler = MicroScheduler(
             self.engine_manager,
-            tp_rank_zero_nodes=self.tp_rank_zero_nodes,
             tp_nodes=self.tp_nodes,
+            parallel_leader_nodes=self.parallel_leader_nodes,
         )
 
         # Determine store write policy based on worker graph topology
@@ -1457,8 +1480,8 @@ class Worker:
     def maybe_send_zmq_to_tp_followers(
         self, node_batch: NodeBatch
     ):
-        if node_batch.node_name not in self.tp_nodes or \
-                node_batch.node_name not in self.tp_rank_zero_nodes:
+        if node_batch.node_name not in self.parallel_nodes or \
+                node_batch.node_name not in self.parallel_leader_nodes:
             return
         # this worker is only a part of one TP group for this node,
         # so, we can just look at the sharding_config for the first
@@ -1591,16 +1614,19 @@ class Worker:
             else:
                 tw_flat = sum(routing.to_workers.values(), start=[])
                 stw_flat = sum(routing.streaming_to_workers.values(), start=[])
-            uuids = set()
+            # upstream (#177) changed register_for_send to take tensor_infos
+            # (a list of TensorPointerInfo) instead of a set of uuids. Build
+            # the info-by-uuid dict; our inline-skip / fast-send opts below
+            # operate on it exactly as they did on the uuid set.
+            infos_by_uuid = {}
             for edge in (
                 routing.persist +
                 tw_flat +
                 routing.emit_to_client +
                 stw_flat
             ):
-                uuids.update([
-                    info.uuid for info in edge.tensor_info
-                ])
+                for info in edge.tensor_info:
+                    infos_by_uuid[info.uuid] = info
             # Inline-emit uuids skip SHM registration entirely: no file
             # write, no remote fetch, no ack. Their producer-side ref is
             # released locally in _send_outputs instead.
@@ -1610,17 +1636,20 @@ class Worker:
             # pure-inline subset skips.
             if self._inline_dual:
                 skip = routing.__dict__.get("pure_inline_uuids")
-                uuids -= skip if skip is not None else inline_uuids
+                skip = skip if skip is not None else inline_uuids
             else:
-                uuids -= inline_uuids
+                skip = inline_uuids
+            for _u in skip:
+                infos_by_uuid.pop(_u, None)
             # MSTAR_FAST_SEND: an empty registration is a no-op (the loop
             # body never runs), but the SHM implementation still enters its
             # CUDA side-stream context per call — and on the steady inline
             # decode path the set is empty for every rid, every step. Skip
             # the call outright.
-            if uuids or not self._fast_send:
+            if infos_by_uuid or not self._fast_send:
                 self.tensor_manager.register_for_send(
-                    request_id=request_id, uuids=uuids,
+                    request_id=request_id,
+                    tensor_infos=list(infos_by_uuid.values()),
                     skip_cuda_sync=True,
                 )
 
@@ -1658,8 +1687,8 @@ class Worker:
     ) -> None:
         """
         Send outputs to other workers and to the conductor.
-        Persist signals are buffered and sent together with the
-        WORKER_GRAPHS_DONE message to avoid race conditions.
+        Persist signals and new-token counts are buffered and sent together
+        with the WORKER_GRAPHS_DONE message to avoid race conditions.
 
         ``prematerialized_new_tokens`` (optional): `{signal_name: [int, ...]}`
         for this request, where the caller has already done the D→H copy
@@ -1716,46 +1745,29 @@ class Worker:
             )
 
         if outputs.new_token_outputs:
-            name_to_new_token: dict = {}
+            name_to_count: dict[str, int] = {}
             for signal in outputs.new_token_outputs:
-                if signal.name in name_to_new_token:
-                    continue # don't double-count new tokens
-                if (
-                    prematerialized_new_tokens is not None
-                    and signal.name in prematerialized_new_tokens
-                ):
-                    new_tokens = prematerialized_new_tokens[signal.name]
-                else:
-                    new_tokens = []  # list[int]
-                    for tensor_info in signal.tensor_info:
-                        tensor = self.tensor_manager.get_tensor(
-                            request_id=request_id,
-                            uuid=tensor_info.uuid
-                        )
-                        new_tokens.extend(tensor.cpu().numpy().tolist())
-                name_to_new_token[signal.name] = new_tokens
-
-                # Buffer ONLY this signal's tokens. Both the fast inline and
-                # buffer_new_tokens EXTEND pending state, and this block runs
-                # once per signal — re-passing the ACCUMULATED dict here
-                # re-extended every earlier name's tokens once per later
-                # signal (duplicated WGD tokens whenever a step carries >1
-                # distinct new-token signal name). Dormant while every
-                # production walk emitted exactly one name; the INLINE_DUAL
-                # prefill prem extension widens exposure, so fix both paths.
-                # Byte-identical for single-name steps.
-                if fast_info is not None:
-                    # Inline of worker_graphs_manager.buffer_new_tokens (the
-                    # flushed pending state is load-bearing: it rides the
-                    # WORKER_GRAPHS_DONE message).
-                    pending = fast_info.pending_new_tokens
-                    if signal.name not in pending:
-                        pending[signal.name] = []
-                    pending[signal.name].extend(new_tokens)
-                else:
-                    self.worker_graphs_manager.buffer_new_tokens(
-                        request_id, {signal.name: new_tokens}
+                # upstream (#149) removed the conductor_new_token path: the
+                # conductor now needs only per-signal token COUNTS (numel, no
+                # D->H sync), not the materialized values. This supersedes our
+                # prematerialized_new_tokens D->H-avoidance for THIS path (numel
+                # needs no copy at all). Actual token VALUES still reach the
+                # client via the emit_to_client / emit-sidecar path below. The
+                # prematerialized_new_tokens param is retained: _inline_emit_uuids
+                # still consumes it further down.
+                if signal.name in name_to_count:
+                    continue  # don't double-count new tokens
+                count = 0
+                for tensor_info in signal.tensor_info:
+                    tensor = self.tensor_manager.get_tensor(
+                        request_id=request_id,
+                        uuid=tensor_info.uuid,
                     )
+                    count += tensor.numel()
+                name_to_count[signal.name] = count
+            self.worker_graphs_manager.buffer_new_token_counts(
+                request_id, name_to_count
+            )
 
         if outputs.emit_to_client:
             if fast_info is not None:
@@ -1967,7 +1979,7 @@ class Worker:
                     worker_graph_ids=outputs.completed_worker_graph_ids,
                     is_first_tp_rank=outputs.is_first_tp_rank,
                     persist_signals=self.worker_graphs_manager.flush_persist_signals(request_id),
-                    new_tokens=self.worker_graphs_manager.flush_new_tokens(request_id),
+                    new_token_counts=self.worker_graphs_manager.flush_new_token_counts(request_id),
                     output_signal_names=self.worker_graphs_manager.flush_output_signals(request_id),
                     per_label_seq_info=self.worker_graphs_manager.get_seq_info(request_id, partition_name),
                     partition_name=partition_name,
@@ -2441,6 +2453,19 @@ class Worker:
                 self._encoder_async_stream = torch.cuda.Stream()
         return self._encoder_async_stream
 
+    def _init_cuda_executor_thread(self) -> None:
+        """Pin this executor thread to the worker's CUDA device.
+
+        The CUDA current device is per-thread and defaults to 0. PyTorch
+        ops carry per-tensor device guards, but raw Triton launches and
+        bare ``torch.cuda.current_stream()`` / ``synchronize()`` calls
+        resolve against the THREAD's device — on a worker whose model
+        lives on a non-zero device, work issued from an unpinned thread
+        lands on device 0's stream, unordered with the real compute.
+        """
+        if self.device.type == "cuda" and self.device.index is not None:
+            torch.cuda.set_device(self.device)
+
     def _execute_on_gpu_thread(
         self,
         batch: ScheduledBatch,
@@ -2691,8 +2716,8 @@ class Worker:
     def _can_speculate(self, batch: ScheduledBatch) -> bool:
         if any(
             not node.enable_async_scheduling for node in batch.node_objects.values()
-        ) or batch.node_name in self.tp_nodes:
-            # disable speculation for TP nodes for now
+        ) or batch.node_name in self.parallel_nodes:
+            # disable speculation for lockstep-parallel nodes for now
             return False
         # Mixed batch: whether the chain may CONTINUE from a thinker_mixed step.
         #
@@ -3020,8 +3045,9 @@ class Worker:
 
         # Filter out destinations that aren't speculation candidates.
         #
-        # * ``info.node_name in self.tp_nodes`` — TP nodes don't support
-        #   speculation in v1 (rank-0 schedules; followers can't initiate).
+        # * ``info.node_name in self.parallel_nodes`` — lockstep-parallel nodes
+        #   don't support speculation in v1 (the instance leader schedules;
+        #   followers can't initiate).
         # * ``not wgio.nodes[info.node_name].enable_async_scheduling`` — the
         #   destination node opts out of async scheduling. Mirrors the
         #   source-side check in ``_can_speculate``; without this, a
@@ -3030,7 +3056,7 @@ class Worker:
         #   then dropped per-rid further down.
         ready_for_spec = [
             info for info in ready_for_spec
-            if info.node_name not in self.tp_nodes
+            if info.node_name not in self.parallel_nodes
             and wgio.nodes[info.node_name].enable_async_scheduling
         ]
 
@@ -3504,13 +3530,11 @@ class Worker:
                         or pending_stop.rid not in batch_N.node_batch.request_ids:
                     continue
                 stopped_rid = pending_stop.rid
-                if stopped_rid not in batch_N.batch.node_objects:
-                    continue
                 output.per_request_output_tensors.pop(stopped_rid, None)
                 valid_rids.discard(stopped_rid)
-                batch_N.batch.node_objects.pop(stopped_rid)
-                batch_N.batch.request_to_worker_graph.pop(stopped_rid)
-                batch_N.node_batch.per_request_info.pop(stopped_rid)
+                batch_N.batch.node_objects.pop(stopped_rid, None)
+                batch_N.batch.request_to_worker_graph.pop(stopped_rid, None)
+                batch_N.node_batch.per_request_info.pop(stopped_rid, None)
                 # Structural change (rid dropped mid-step): drop any replay plan.
                 if self._fast_postproc:
                     self.tensor_manager.invalidate_populate_plan(stopped_rid)
@@ -3518,9 +3542,21 @@ class Worker:
                 # when the plan cache is empty / flag off).
                 self.worker_graphs_manager.invalidate_route_plan(stopped_rid)
         batch_N.node_batch.request_ids = list(valid_rids)
+        if not valid_rids:
+            range_pop(synchronize=False)
+            return
 
         # pending stops are only needed for one iteration, so can be cleared now
         self._pending_loop_stops.clear()
+
+        # An engine can drop rids that were skipped during execution (a
+        # submodule's prepare_inputs returned None) from node_batch.request_ids,
+        # but it cannot reach the worker-side ScheduledBatch. Reconcile it here so
+        # the routing/output loops below only touch rids that produced outputs.
+        for rid in list(batch_N.batch.request_to_worker_graph):
+            if rid not in valid_rids:
+                batch_N.batch.request_to_worker_graph.pop(rid, None)
+                batch_N.batch.node_objects.pop(rid, None)
 
         per_req_nested_idxs = {
             rid: self.worker_graphs_manager.get_nested_loop_idxs_for_node(
@@ -3917,46 +3953,6 @@ class Worker:
 
         return routing_per_request
 
-    def _d2h_new_tokens(
-        self,
-        tensors: list[torch.Tensor],
-        completion_event: "torch.cuda.Event | None",
-    ) -> list[int]:
-        """Batched D→H copy of new-token tensors, gated on GPU(N)'s
-        completion event so it does not block on GPU(N+1) (which is queued
-        on default stream behind GPU(N)).
-
-        Falls back to the simple ``torch.cat([...]).cpu()`` when CUDA is
-        unavailable, the tensors are already on CPU, or no completion event
-        was recorded (non-CUDA execution).
-
-        Safety: assumes ``tensors`` are fresh allocations (not views into
-        CUDA-graph static buffers that GPU(N+1) will overwrite). Sampler
-        outputs from FlashInfer's ``top_p_sampling_from_probs`` qualify;
-        if a future change makes the new-token tensor a static-buffer
-        view, this needs an extra clone-on-default-stream-before-event-
-        record step on the GPU thread.
-        """
-        if not tensors:
-            return []
-        first = tensors[0]
-        on_cuda = first.is_cuda and torch.cuda.is_available()
-        if not on_cuda or completion_event is None:
-            return torch.cat([t.flatten() for t in tensors]).cpu().tolist()
-
-        if self._d2h_stream is None:
-            self._d2h_stream = torch.cuda.Stream(device=self.device)
-        side = self._d2h_stream
-        side.wait_event(completion_event)
-        with torch.cuda.stream(side):
-            flat_gpu = torch.cat([t.flatten() for t in tensors])
-            flat_cpu = self._get_pinned_d2h_buffer(
-                "new_tokens", flat_gpu.shape, flat_gpu.dtype,
-            )
-            flat_cpu.copy_(flat_gpu, non_blocking=True)
-        side.synchronize()
-        return flat_cpu.tolist()
-
     def _get_pinned_d2h_buffer(
         self,
         purpose: str,
@@ -4320,7 +4316,7 @@ class Worker:
         # large multi-tower models. Syncing here means every worker
         # reaches warmup at the same wall-clock instant, so subgroup
         # bootstrap completes within the retry budget.
-        self.tp_groups.barrier_all()
+        self.parallel_groups.barrier_all()
 
         # Hot-load persisted compile artifacts (inductor/dynamo/autotune) before
         # the first torch.compile inside warmup_all(). Default off; a missing or
@@ -4342,7 +4338,7 @@ class Worker:
         # ``ScheduleTPNode`` to a follower that's still inside another
         # engine's ``warmup``. The follower can't service the message
         # yet, but the leader will sit on the first NCCL collective.
-        self.tp_groups.barrier_all()
+        self.parallel_groups.barrier_all()
 
         # Setup (weight load + warmup + CUDA-graph capture) is complete. Tell
         # the conductor this worker is ready. The conductor blocks its main
@@ -4368,7 +4364,8 @@ class Worker:
         # with GPU execution. Run the engine unconditionally on a dedicated
         # 1-worker GPU thread.
         gpu_executor = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix=f"mstar-gpu-{self.worker_id}"
+            max_workers=1, thread_name_prefix=f"mstar-gpu-{self.worker_id}",
+            initializer=self._init_cuda_executor_thread,
         )
         logger.info(
             "Worker %s: engine runs on dedicated GPU thread",
@@ -4391,7 +4388,8 @@ class Worker:
         plan_executor = None
         if pre_plan_spec:
             plan_executor = ThreadPoolExecutor(
-                max_workers=1, thread_name_prefix=f"mstar-plan-{self.worker_id}"
+                max_workers=1, thread_name_prefix=f"mstar-plan-{self.worker_id}",
+                initializer=self._init_cuda_executor_thread,
             )
             logger.info(
                 "Worker %s: plan_executor enabled — speculative plan() "

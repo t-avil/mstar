@@ -17,7 +17,7 @@ from dataclasses import dataclass
 
 import torch
 
-from mstar.distributed.communication import WorkerTPGroups
+from mstar.distributed.communication import WorkerParallelGroups
 from mstar.engine.base import (
     BaseEngine,
     EngineType,
@@ -26,7 +26,7 @@ from mstar.engine.base import (
     PlannedBatch,
     PreparedBatch,
 )
-from mstar.engine.cuda_graph_runner import StatelessCudaGraphRunner
+from mstar.engine.cuda_graph_runner import PiecewiseCudaGraphRunner, StatelessCudaGraphRunner
 from mstar.model.submodule_base import (
     ARNodeInputs,
     ModelInputsFromEngine,
@@ -57,8 +57,7 @@ class StatelessEngineConfig:
       during warmup. Audio codec disables this because the one-shot compile
       cost is too high for short forwards.
     - ``enable_piecewise_runner`` enables ``PiecewiseCudaGraphRunner`` for
-      submodules that return a config from ``get_piecewise_runner_config()``.
-      Used by VJepa2's masked predictor.
+      submodules that return configs from ``get_piecewise_cuda_graph_configs()``.
     - ``name`` is the NVTX range prefix.
     """
 
@@ -132,6 +131,9 @@ class StatelessEngine(BaseEngine):
         self.submodules: dict[str, NodeSubmodule] = {}
         self.device: torch.device | None = None
         self.cuda_graph_runners: dict[str, StatelessCudaGraphRunner] = {}
+        # node_name -> {label -> PiecewiseCudaGraphRunner}; spread into
+        # ModelInputsFromEngine at execute time.
+        self._piecewise_runners: dict[str, dict[str, "PiecewiseCudaGraphRunner"]] = {}
 
         # Dedup set for "captured graphs exist but don't match this shape"
         # warnings — each unique miss is logged at most once.
@@ -166,7 +168,7 @@ class StatelessEngine(BaseEngine):
     def load_model(
         self,
         submodules: dict[str, torch.nn.Module],
-        tp_groups: WorkerTPGroups,
+        parallel_groups: WorkerParallelGroups,
         device: torch.device,
         **kwargs,
     ) -> None:
@@ -176,7 +178,11 @@ class StatelessEngine(BaseEngine):
         else:
             self.submodules = dict(submodules)
         self.device = device
-        self.tp_groups = tp_groups
+        self.parallel_groups = parallel_groups
+        # Default every node to an empty runner map so execute paths can index
+        # ``self._piecewise_runners[node_name]`` directly; warmup overwrites
+        # entries for nodes that capture piecewise graphs.
+        self._piecewise_runners = {name: {} for name in self.submodules}
 
     def add_request(self, request_id: str, **kwargs) -> None:
         pass  # stateless
@@ -220,7 +226,7 @@ class StatelessEngine(BaseEngine):
                 f"engine.{self.config.name}.{batch.node_name}."
                 f"{batch.graph_walk}.bs{len(batch.request_ids)}"
             )
-        self.tp_groups.get_tp_config_for_node(batch.node_name).barrier()
+        self.parallel_groups.get_tp_config_for_node(batch.node_name).barrier()
         submodule = self.submodules.get(batch.node_name)
         per_submodule_dtype = submodule.get_autocast_dtype() if submodule is not None else None
         try:
@@ -272,7 +278,9 @@ class StatelessEngine(BaseEngine):
         submodule = planned.submodule
         if submodule is None:
             return
-        for rid in planned.batch.request_ids:
+        for rid, node_inputs in zip(
+            planned.batch.request_ids, planned.node_inputs, strict=True
+        ):
             info = planned.batch.per_request_info.get(rid)
             if info is None:
                 continue
@@ -280,6 +288,7 @@ class StatelessEngine(BaseEngine):
                 request_id=rid,
                 request_info=info,
                 outputs=output.per_request_output_tensors.get(rid, {}),
+                inputs=node_inputs,
             )
 
     # ─── Internals ─────────────────────────────────────────────────────
@@ -429,6 +438,10 @@ class StatelessEngine(BaseEngine):
         engine_inputs = ModelInputsFromEngine(
             request_ids=batch.request_ids,
             per_request_info=batch.per_request_info,
+            piecewise_runners=self._piecewise_runners[batch.node_name],
+            per_request_states={
+                rid: submodule.request_state(rid) for rid in batch.request_ids
+            },
         )
 
         if self.enable_nvtx:
@@ -473,6 +486,7 @@ class StatelessEngine(BaseEngine):
             engine_inputs = ModelInputsFromEngine(
                 request_ids=[rid],
                 per_request_info={rid: fwd_info},
+                piecewise_runners=self._piecewise_runners[batch.node_name],
             )
 
             if self.enable_nvtx:
@@ -508,8 +522,8 @@ class StatelessEngine(BaseEngine):
         """Apply ``torch.compile`` and capture optional CUDA graphs.
 
         Each step is opt-in by the submodule (via ``get_cuda_graph_configs``
-        and ``get_piecewise_runner_config``) so submodules that don't support
-        a feature are skipped without error.
+        and ``get_piecewise_cuda_graph_configs``) so submodules that don't
+        support a feature are skipped without error.
         """
         if not torch.cuda.is_available() or self.device is None:
             return
@@ -523,6 +537,12 @@ class StatelessEngine(BaseEngine):
                 self._install_piecewise_runner(node_name, submodule)
 
     def _apply_torch_compile(self, node_name: str, submodule: NodeSubmodule) -> None:
+        if getattr(submodule, "disable_torch_compile", False):
+            logger.info(
+                "StatelessEngine[%s]: torch.compile disabled for %s (submodule opt-out)",
+                self.config.name, node_name,
+            )
+            return
         try:
             if hasattr(submodule, "forward"):
                 submodule.forward = torch.compile(
@@ -557,7 +577,7 @@ class StatelessEngine(BaseEngine):
                 submodule_name=node_name,
                 submodule=submodule,
                 device=self.device,
-                tp_group=self.tp_groups.get_tp_config_for_node(node_name)
+                tp_group=self.parallel_groups.get_tp_config_for_node(node_name)
             )
             runner.enable_nvtx = self.enable_nvtx
             runner.warmup_and_capture()
@@ -578,49 +598,19 @@ class StatelessEngine(BaseEngine):
             )
 
     def _install_piecewise_runner(self, node_name: str, submodule: NodeSubmodule) -> None:
-        getter = getattr(submodule, "get_piecewise_runner_config", None)
-        if getter is None:
-            return
-        pcgr_config = getter()
-        if pcgr_config is None:
-            return
-        try:
-            from mstar.engine.cuda_graph_runner import (
-                DEFAULT_AR_CAPTURE_BATCH_SIZES,
-                PiecewiseCudaGraphRunner,
-            )
+        # Stateless submodules have no KV cache, so the KV managers are all
+        # None; a piecewise config with uses_kv_cache=True on a stateless node
+        # would fail its own assert and be skipped (eager path) by the builder.
+        from mstar.engine.cuda_graph_runner import build_piecewise_runners
 
-            pcgr = PiecewiseCudaGraphRunner(
-                fn_factory=pcgr_config["fn_factory"],
-                embed_dim=pcgr_config["embed_dim"],
-                capture_batch_sizes=pcgr_config.get(
-                    "capture_batch_sizes", DEFAULT_AR_CAPTURE_BATCH_SIZES
-                ),
-                capture_seq_len=pcgr_config["capture_seq_len"],
-                device=self.device,
-                autocast_dtype=self.config.autocast_dtype,
-                pos_buf_shapes=pcgr_config.get("pos_buf_shapes"),
-                kv_cache_config=None,
-                alloc_manager=None,
-                buffer_manager=None,
-                tp_group=self.tp_groups.get_tp_config_for_node(node_name),
-            )
-            pcgr.warmup_and_capture()
-            if pcgr.graphs:
-                submodule.set_piecewise_runner(pcgr)
-                logger.info(
-                    "StatelessEngine[%s]: PiecewiseCudaGraphRunner installed for %s (%d bs buckets)",
-                    self.config.name,
-                    node_name,
-                    len(pcgr.graphs),
-                )
-        except Exception:
-            logger.warning(
-                "StatelessEngine[%s]: PiecewiseCudaGraphRunner capture failed for %s, using eager mode",
-                self.config.name,
-                node_name,
-                exc_info=True,
-            )
+        tp_config = self.parallel_groups.get_tp_config_for_node(node_name)
+        self._piecewise_runners[node_name] = build_piecewise_runners(
+            submodule=submodule,
+            device=self.device,
+            autocast_dtype=self.config.autocast_dtype,
+            tp_world_size=getattr(tp_config, "world_size", 1),
+            tp_group=tp_config,
+        )
 
 
 class _ComposedContext:

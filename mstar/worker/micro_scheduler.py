@@ -130,7 +130,7 @@ class MicroScheduler:
     def __init__(
         self, engine_manager: EngineManager,
         sched_type=SchedulingType.ROUND_ROBIN,
-        tp_rank_zero_nodes: set[str] | None = None,
+        parallel_leader_nodes: set[str] | None = None,
         max_consec_tp_follower_batches: int = 1,
         tp_nodes: set[str] | None = None,
     ):
@@ -138,14 +138,18 @@ class MicroScheduler:
         self.batch_number = 0
         self.sched_type = sched_type
 
-        # tensor parallel
-        self.tp_rank_zero_nodes = tp_rank_zero_nodes
-        # Nodes with TP world_size > 1 (distinct from tp_rank_zero_nodes, which
-        # also includes every non-TP node since those are rank 0). Used to keep
-        # W5-P2 mixed-batch assembly off TP nodes: a mixed batch's per-request
-        # walks are heterogeneous and TP fan-out (ScheduleTPNode / sharding
-        # group lookup) is keyed by a single batch walk, so a "thinker_mixed"
-        # TP batch has no sharding group. TP mixed is P3.
+        # lockstep-parallel (TP / SP instance) scheduling. Upstream (#154/#176)
+        # renamed tp_rank_zero_nodes -> parallel_leader_nodes; our W5-P2
+        # mixed-batch code still references self.tp_rank_zero_nodes, so alias
+        # both names to the same set (identical concept: the rank-0 / leader
+        # node of each lockstep-parallel instance).
+        self.parallel_leader_nodes = parallel_leader_nodes
+        self.tp_rank_zero_nodes = parallel_leader_nodes
+        # Nodes with TP world_size > 1. Used to keep W5-P2 mixed-batch assembly
+        # off TP nodes: a mixed batch's per-request walks are heterogeneous and
+        # TP fan-out (ScheduleTPNode / sharding group lookup) is keyed by a
+        # single batch walk, so a "thinker_mixed" TP batch has no sharding
+        # group. TP mixed is P3.
         self.tp_nodes = tp_nodes or set()
         self.tp_batches_pending_schedule = deque()
         self.num_consec_tp_follower_batches = 0
@@ -1123,7 +1127,7 @@ class MicroScheduler:
                 if request_id in self.held_until:
                     continue
                 for sname in node_names:
-                    if sname not in self.tp_rank_zero_nodes:
+                    if sname not in self.parallel_leader_nodes:
                         continue # only rank 0 can initiate scheduling!
                     if target_node_name is not None and sname != target_node_name:
                         continue

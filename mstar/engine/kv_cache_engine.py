@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass, field
 import torch
 
 from mstar.conductor.request_info import CurrentForwardPassInfo
-from mstar.distributed.communication import TPCommGroup, WorkerTPGroups
+from mstar.distributed.communication import CommGroup, WorkerParallelGroups
 from mstar.engine.base import (
     BaseEngine,
     EngineCapabilities,
@@ -16,11 +16,21 @@ from mstar.engine.base import (
     PlannedBatch,
     PreparedBatch,
 )
-from mstar.engine.cache_manager import BatchedCacheManager, WorkspaceBufferManager
+from mstar.engine.cache_manager import (
+    BatchedCacheManager,
+    WorkspaceBufferManager,
+    create_cache_manager,
+)
 from mstar.engine.cpu_page_pool import CPUPagePool
-from mstar.engine.cuda_graph_runner import _DIRECT_FEED_KEY, CudaGraphRunner
+from mstar.engine.cuda_graph_runner import (
+    _DIRECT_FEED_KEY,
+    build_piecewise_runners,
+    CudaGraphRunner,
+    PiecewiseCudaGraphRunner,
+)
 from mstar.engine.kv_store import (
     AllocationFailedError,
+    CrossAttnPool,
     KVCacheConfig,
     PagedAllocationManager,
     StoreWritePolicy,
@@ -41,16 +51,86 @@ class KVManagement:
     alloc_manager: PagedAllocationManager
     cpu_page_pool: CPUPagePool | None
     buffer_manager: WorkspaceBufferManager
+    # source name -> cross-attention context pool (see KVCacheConfig.cross_attn)
+    cross_pools: dict[str, CrossAttnPool] = field(default_factory=dict)
+    # Distinct cross-attention alloc managers (pools may be shared between
+    # sources); precomputed at build time since it can't change after
+    # startup, so per-request add/remove doesn't re-walk cross_pools.
+    cross_alloc_managers: list[PagedAllocationManager] = field(default_factory=list)
+
+
+def _build_cross_pools(
+    cfg: KVCacheConfig,
+    base_num_layers: int,
+    device,
+    kv_cache_type,
+    transfer_engine_info,
+) -> dict[str, CrossAttnPool]:
+    """Allocate the cross-attention context pools declared by ``cfg.cross_attn``.
+
+    Sources whose ``CrossAttnKVConfig.pool_key()`` match share one physical
+    pool whose page budget is the **sum** of their ``max_num_pages`` (so a
+    model author who gives two same-geometry sources 256 pages each gets a
+    512-page shared pool). Inherits ``page_size`` / ``num_layers`` /
+    ``num_qo_heads`` from the (already TP-sharded) base ``cfg``.
+    """
+    if not cfg.cross_attn:
+        return {}
+
+    # First pass: accumulate the page budget per shared pool key.
+    pages_by_key: dict[tuple, int] = {}
+    for cross_cfg in cfg.cross_attn.values():
+        key = cross_cfg.pool_key()
+        pages_by_key[key] = pages_by_key.get(key, 0) + cross_cfg.max_num_pages
+
+    # Second pass: build one pool per key, then map every source to it.
+    pool_by_key: dict[tuple, CrossAttnPool] = {}
+    cross_pools: dict[str, CrossAttnPool] = {}
+    for source, cross_cfg in cfg.cross_attn.items():
+        key = cross_cfg.pool_key()
+        pool = pool_by_key.get(key)
+        if pool is None:
+            alloc_config = KVCacheConfig(
+                num_layers=base_num_layers,
+                num_kv_heads=cross_cfg.num_kv_heads,
+                head_dim=cross_cfg.head_dim,
+                max_seq_len=cross_cfg.max_context_len,
+                max_num_pages=pages_by_key[key],
+                page_size=cfg.page_size,
+                num_qo_heads=cfg.num_qo_heads,
+            )
+            cross_kv = torch.zeros(
+                alloc_config.num_layers, alloc_config.max_num_pages, 2,
+                alloc_config.page_size, alloc_config.num_kv_heads,
+                alloc_config.head_dim,
+                dtype=kv_cache_type, device=device,
+            ).contiguous()
+            pool = CrossAttnPool(
+                config=cross_cfg,
+                alloc_config=alloc_config,
+                kv_cache=cross_kv,
+                alloc_manager=PagedAllocationManager(
+                    config=alloc_config,
+                    kv_cache=cross_kv,
+                    transfer_engine_info=transfer_engine_info,
+                ),
+            )
+            pool_by_key[key] = pool
+        cross_pools[source] = pool
+    return cross_pools
 
 
 @dataclass
 class SubmoduleManagement:
     submodule: ARNodeSubmodule
     kv_management: KVManagement
-    tp_group: TPCommGroup
+    tp_group: CommGroup
     default_sampling_config: SamplingConfig
     sampler: Sampler = field(default_factory=Sampler)
     cuda_graph_runner: CudaGraphRunner | None = None
+    # label -> PiecewiseCudaGraphRunner for inner-loop capture; spread into
+    # ModelInputsFromEngine so the submodule's forward can look them up.
+    piecewise_runners: dict[str, "PiecewiseCudaGraphRunner"] = field(default_factory=dict)
 
 
 class KVCacheEngine(BaseEngine):
@@ -93,7 +173,7 @@ class KVCacheEngine(BaseEngine):
     def load_model(
         self,
         submodules: dict[str, torch.nn.Module],
-        tp_groups: WorkerTPGroups,
+        parallel_groups: WorkerParallelGroups,
         kv_cache_config: list[KVCacheConfig],
         device: torch.device,
         transfer_engine_info: TransferEngineInfo,
@@ -115,18 +195,33 @@ class KVCacheEngine(BaseEngine):
             if not nodes:
                 continue  # skip KV cache configs that don't apply to any loaded submodule
             world_sizes = set([
-                tp_groups.get_tp_config_for_node(node).world_size for node in nodes
+                parallel_groups.get_tp_config_for_node(node).world_size for node in nodes
             ])
             tp_ranks = set([
-                tp_groups.get_tp_config_for_node(node).rank for node in nodes
+                parallel_groups.get_tp_config_for_node(node).rank for node in nodes
             ])
-            if len(world_sizes) > 1 or len(tp_ranks) > 1:
+            sp_sizes = set([
+                parallel_groups.get_sp_config_for_node(node).world_size for node in nodes
+            ])
+            sp_ranks = set([
+                parallel_groups.get_sp_config_for_node(node).rank for node in nodes
+            ])
+            if (
+                len(world_sizes) > 1 or len(tp_ranks) > 1
+                or len(sp_sizes) > 1 or len(sp_ranks) > 1
+            ):
                 raise RuntimeError(
                     "It is disallowed to share a KV cache among colocated nodes "
-                    f"from different TP groups: {nodes}."
+                    f"from different TP/SP groups: {nodes}."
                 )
-            tp_size = world_sizes.pop()
-            cfg.shard(tp_size)
+            # Ulysses sequence parallelism makes attention run at effective
+            # head-degree tp*sp (the all-to-all redistributes heads across the
+            # SP group), so each rank's cache holds num_kv_heads / (tp*sp) —
+            # the instance world size (all nodes share one instance, validated
+            # above).
+            cfg.shard(
+                parallel_groups.get_instance_world_size_for_node(next(iter(nodes)))
+            )
             num_kv_heads = cfg.num_kv_heads
 
             kv_cache = torch.zeros(
@@ -147,6 +242,16 @@ class KVCacheEngine(BaseEngine):
                     cfg.cpu_offload_pages,
                 )
 
+            cross_pools = _build_cross_pools(
+                cfg, num_layers, device, kv_cache_type, transfer_engine_info,
+            )
+            # Distinct alloc managers, deduped by identity (shared pools),
+            # computed once here rather than per request.
+            cross_alloc_managers: list[PagedAllocationManager] = []
+            for pool in cross_pools.values():
+                if all(pool.alloc_manager is not m for m in cross_alloc_managers):
+                    cross_alloc_managers.append(pool.alloc_manager)
+
             kv_mgmt = KVManagement(
                 kv_cache_config=cfg,
                 kv_cache=kv_cache,
@@ -160,6 +265,8 @@ class KVCacheEngine(BaseEngine):
                     int(os.environ.get("MSTAR_WORKSPACE_BUFFER_MB", "512")) * 1024 * 1024,
                     device=device,
                 ),
+                cross_pools=cross_pools,
+                cross_alloc_managers=cross_alloc_managers,
             )
             self.kv_management[cfg.get_node_str()] = kv_mgmt
 
@@ -167,7 +274,7 @@ class KVCacheEngine(BaseEngine):
                 node_to_kv_mgmt[node_name] = kv_mgmt
 
         for node_name, submodule in submodules.items():
-            tp_group = tp_groups.get_tp_config_for_node(node_name)
+            tp_group = parallel_groups.get_tp_config_for_node(node_name)
             self.submodule_management[node_name] = SubmoduleManagement(
                 submodule=submodule,
                 kv_management=node_to_kv_mgmt[node_name],
@@ -192,7 +299,7 @@ class KVCacheEngine(BaseEngine):
         from mstar.engine.kv_store import StoreWritePolicy
         autowrite = (cache_mgmt.alloc_manager.write_policy == StoreWritePolicy.ALWAYS)
 
-        return BatchedCacheManager(
+        return create_cache_manager(
             request_ids=request_ids,
             active_labels_per_request={rid: "main" for rid in request_ids},
             kv_cache=cache_mgmt.kv_cache,
@@ -202,20 +309,28 @@ class KVCacheEngine(BaseEngine):
             device=self.device,
             auto_write_store=autowrite,
             enable_nvtx=self.enable_nvtx,
+            cross_pools=cache_mgmt.cross_pools,
         )
 
     def _compile_submodules(self) -> None:
         """Apply torch.compile to submodule forward paths.
 
-        Uses mode="max-autotune-no-cudagraphs" (SGLang's approach) so compiled
-        code gets baked into CUDA graphs when captured. Must be called BEFORE
-        CUDA graph capture.
+        Compiles each submodule's ``forward`` and ``forward_batched`` with the
+        default mode (fullgraph=False, dynamic=None). Called from ``warmup``
+        after CUDA graph capture. ``max-autotune-no-cudagraphs`` is intentionally
+        not used here: on variable-shape inputs it triggers frequent slow
+        recompiles, so that mode is applied on the CUDA-graph path instead
+        (see ``cuda_graph_runner``).
         """
         if not torch.cuda.is_available():
             return
 
         for node_name, submodule_mgmt in self.submodule_management.items():
             submodule = submodule_mgmt.submodule
+
+            if getattr(submodule, "disable_torch_compile", False):
+                logger.info("KVCacheEngine: torch.compile disabled for %s (submodule opt-out)", node_name)
+                continue
 
             try:
                 submodule.forward = torch.compile(
@@ -235,11 +350,7 @@ class KVCacheEngine(BaseEngine):
 
     def warmup(self) -> None:
         """Compile submodules and capture CUDA graphs."""
-        from mstar.engine.cuda_graph_runner import (
-            DEFAULT_AR_CAPTURE_BATCH_SIZES,
-            CudaGraphRunner,
-            PiecewiseCudaGraphRunner,
-        )
+        from mstar.engine.cuda_graph_runner import CudaGraphRunner
 
         for node_name, submodule_mgmt in self.submodule_management.items():
             kv_mgmt = submodule_mgmt.kv_management
@@ -265,31 +376,20 @@ class KVCacheEngine(BaseEngine):
                 logger.info("KVCacheEngine: CUDA graphs captured for %s (%d configs)",
                             node_name, len(runner.graphs))
 
-            # Piecewise CUDA graph for transformer block loops (e.g. VJepa2 AC rollout).
-            # Submodules opt in by implementing get_piecewise_runner_config().
-            pcgr_config = getattr(submodule, "get_piecewise_runner_config", lambda: None)()
-            if pcgr_config is not None:
-                pcgr = PiecewiseCudaGraphRunner(
-                    fn_factory=pcgr_config["fn_factory"],
-                    embed_dim=pcgr_config["embed_dim"],
-                    capture_batch_sizes=pcgr_config.get("capture_batch_sizes", DEFAULT_AR_CAPTURE_BATCH_SIZES),
-                    capture_seq_len=pcgr_config["capture_seq_len"],
-                    device=self.device,
-                    autocast_dtype=self.autocast_dtype,
-                    pos_buf_shapes=pcgr_config.get("pos_buf_shapes"),
-                    kv_cache_config=kv_mgmt.kv_cache_config,
-                    alloc_manager=kv_mgmt.alloc_manager,
-                    buffer_manager=kv_mgmt.buffer_manager,
-                    cache_labels=pcgr_config.get("cache_labels", ["main"]),
-                    tp_group=submodule_mgmt.tp_group,
-                )
-                pcgr.warmup_and_capture()
-                if pcgr.graphs:
-                    submodule.set_piecewise_runner(pcgr)
-                    logger.info(
-                        "KVCacheEngine: PiecewiseCudaGraphRunner installed for %s (%d bs buckets)",
-                        node_name, len(pcgr.graphs),
-                    )
+            # Piecewise CUDA graphs for inner-loop capture (e.g. VJepa2 AC
+            # rollout block loop). Submodules opt in via
+            # get_piecewise_cuda_graph_configs; runners are spread into
+            # ModelInputsFromEngine at execute time.
+            submodule_mgmt.piecewise_runners = build_piecewise_runners(
+                submodule=submodule,
+                device=self.device,
+                autocast_dtype=self.autocast_dtype,
+                tp_world_size=submodule_mgmt.tp_group.world_size,
+                tp_group=submodule_mgmt.tp_group,
+                kv_cache_config=kv_mgmt.kv_cache_config,
+                alloc_manager=kv_mgmt.alloc_manager,
+                buffer_manager=kv_mgmt.buffer_manager,
+            )
 
         # torch.compile applied after CUDA graph capture so compiled kernels
         # are baked into the graphs.
@@ -402,7 +502,13 @@ class KVCacheEngine(BaseEngine):
         configs = [
             cfg for cfg in runner.capture_configs \
                 if graph_walk in cfg.replay_graph_walks
+                and getattr(cfg, "caps_eager_batch_size", True)
         ]
+        # Configs that opt out of capping (caps_eager_batch_size=False) capture a
+        # graph only for an acceleration subset of batch sizes; the eager batched
+        # path handles larger batches and the runner gates graph replay by exact
+        # batch size. With no capping config left for this walk, honor the
+        # submodule's max_batch_size instead of the captured-size ceiling.
         if not configs:
             return submod_max_bs
         max_cuda_graph_bs = max([
@@ -456,7 +562,11 @@ class KVCacheEngine(BaseEngine):
             request_ids=batch.request_ids,
             per_request_info=batch.per_request_info,
             cache_manager=cache_manager,
-            sampler=sampler
+            sampler=sampler,
+            piecewise_runners=self.submodule_management[batch.node_name].piecewise_runners,
+            per_request_states={
+                rid: submodule.request_state(rid) for rid in batch.request_ids
+            },
         )
         if self.enable_nvtx:
             range_push("ar.batched.preprocess", synchronize=False)
@@ -578,6 +688,8 @@ class KVCacheEngine(BaseEngine):
                 },
                 cache_manager=cache_manager,
                 sampler=sampler,
+                piecewise_runners=self.submodule_management[batch.node_name].piecewise_runners,
+                per_request_states={rid: submodule.request_state(rid)},
             )
 
             if self.enable_nvtx:
@@ -910,6 +1022,7 @@ class KVCacheEngine(BaseEngine):
             range_pop(synchronize=False)
 
         node_inputs: list[ARNodeInputs] = []
+        skipped_rids: set[str] = set()
         if self.enable_nvtx:
             range_push("kv_cache.prepare_inputs")
         pos_infos = []
@@ -932,18 +1045,34 @@ class KVCacheEngine(BaseEngine):
                 pos_infos=pos_infos,
             )
         if batched_inputs is not None:
+            # MSTAR batched-prepare fast path: returns a full input list (no
+            # per-rid skips). upstream's skip-None handling (below) applies to
+            # the per-rid sequential fallback only.
             node_inputs = batched_inputs
         else:
             for rid, pos_info in zip(batch.request_ids, pos_infos):
-                node_inputs.append(
-                    submodule.prepare_inputs(
-                        graph_walk=batch.graph_walk,
-                        fwd_info=batch.per_request_info[rid],
-                        inputs=batch.per_request_input_tensors[rid],
-                        pos_info=pos_info,
-                        seen_token_mask=submod_mgmt.sampler.get_token_mask(rid)
-                    )
+                # upstream (#176): prepare_inputs may return None when a
+                # submodule elects to skip a rid this step; collect and prune.
+                req_inputs = submodule.prepare_inputs(
+                    graph_walk=batch.graph_walk,
+                    fwd_info=batch.per_request_info[rid],
+                    inputs=batch.per_request_input_tensors[rid],
+                    pos_info=pos_info,
+                    seen_token_mask=submod_mgmt.sampler.get_token_mask(rid)
                 )
+                if req_inputs is None:
+                    skipped_rids.add(rid)
+                else:
+                    node_inputs.append(req_inputs)
+
+        if skipped_rids:
+            batch.request_ids = [rid for rid in batch.request_ids if rid not in skipped_rids]
+            batch.per_request_info = {
+                rid: info
+                for rid, info in batch.per_request_info.items()
+                if rid not in skipped_rids
+            }
+
         if self.enable_nvtx:
             range_pop(synchronize=False)
 
@@ -965,6 +1094,10 @@ class KVCacheEngine(BaseEngine):
         node_inputs = planned.node_inputs
         submod_mgmt = planned.prepared.metadata["submod_mgmt"]
         sampler = submod_mgmt.sampler
+
+        if not batch.request_ids:
+            return NodeOutput(per_request_output_tensors={})
+
         submod_mgmt.tp_group.barrier()
 
         if self._can_use_cuda_graph(batch, node_inputs):
@@ -1000,11 +1133,12 @@ class KVCacheEngine(BaseEngine):
     def postprocess_batch(self, planned: PlannedBatch, output: NodeOutput) -> None:
         batch = planned.batch
         submodule = planned.submodule
-        for rid, info in batch.per_request_info.items():
+        for rid, node_inputs in zip(batch.request_ids, planned.node_inputs, strict=True):
             submodule.postprocess(
                 request_id=rid,
-                request_info=info,
+                request_info=batch.per_request_info[rid],
                 outputs=output.per_request_output_tensors.get(rid, {}),
+                inputs=node_inputs,
             )
 
     def _get_needed_labels(
@@ -1243,6 +1377,8 @@ class KVCacheEngine(BaseEngine):
     ) -> None:
         for submodule_mgmt in self.submodule_management.values():
             submodule_mgmt.kv_management.alloc_manager.add_request(request_id, cache_labels or ["main"])
+            for cross_mgr in submodule_mgmt.kv_management.cross_alloc_managers:
+                cross_mgr.add_request(request_id)
             submodule_mgmt.sampler.add_request(request_id)
             # Mirror into the cuda-graph runner's master sampler buffers so
             # the per-step path can index_select instead of rebuilding from
@@ -1256,20 +1392,12 @@ class KVCacheEngine(BaseEngine):
             if cache_mgmt.cpu_page_pool is not None:
                 cache_mgmt.cpu_page_pool.remove_request(request_id)
             cache_mgmt.alloc_manager.remove_request(request_id)
+            for cross_mgr in cache_mgmt.cross_alloc_managers:
+                cross_mgr.remove_request(request_id)
             submodule_mgmt.sampler.remove_request(request_id)
+            submodule_mgmt.submodule.cleanup_request(request_id)
             if submodule_mgmt.cuda_graph_runner is not None:
                 submodule_mgmt.cuda_graph_runner.unregister_request(request_id)
-            # Release the submodule's OWN per-request state. StatelessEngine.
-            # remove_request already invokes this hook; KVCacheEngine omitted it,
-            # so any KV_CACHE submodule that tracks per-request state in
-            # cleanup_request leaked it: per-request bookkeeping sets/dicts grew
-            # without bound, and a submodule managing a bounded resource pool
-            # (a fixed set of decode slots) drained the pool and then silently
-            # reused one slot across concurrent requests -> per-request state
-            # bleed. cleanup_request is a no-op for submodules that don't track
-            # the request, so calling it on every submodule (like
-            # sampler.remove_request above) is safe.
-            submodule_mgmt.submodule.cleanup_request(request_id)
 
     def pause_request(
         self, request_id: str, cache_label: str = "main",
