@@ -482,7 +482,9 @@ class Conductor:
         ENCODER OUTPUT-MODALITY ROUTING (single-config win, MSTAR):
         a multi-rank DP-replica node_group (the encoders, the only group
         declared as full replicas on both ranks in the dpenc config) is
-        routed to the IDLE rank by OUTPUT modality instead of at random:
+        routed by OUTPUT modality — a STATIC modality->rank map that
+        reproduces each modality's proven encoder placement, NOT live
+        occupancy detection — instead of at random:
           * speech output (``audio`` in output_modalities) -> rank 1, the
             Thinker's rank (idle-for-speech; the bottleneck is Talker/
             Code2Wav on rank 0). Co-located with the Thinker so the prefill
@@ -491,9 +493,13 @@ class Conductor:
           * text output -> rank 0, the Talker/Code2Wav rank (idle-for-text;
             the bottleneck is the Thinker on rank 1) -> reproduces encoff.
         Byte-identical (same weights, same input compute the same encode);
-        this is a pure scheduling decision. Falls back to the previous
-        random DP pick when output_modalities is None or the target rank is
-        not in the group's ranks (backward-compatible).
+        this is a pure scheduling decision. Text output — including when
+        ``output_modalities`` is None — routes deterministically to rank 0;
+        speech output to rank 1. The random DP pick applies only to the
+        TP-replica path above, or as a guard if the mapped target rank is
+        genuinely absent from the group's ranks. Single-rank node_groups
+        keep the plain random/backward-compatible path unchanged (the new
+        block is entered only for multi-rank replica groups).
         """
         _speech_out = bool(output_modalities) and "audio" in output_modalities
         # _group_id -> chosen DP-replica index within that group's ranks
