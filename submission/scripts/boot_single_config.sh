@@ -34,7 +34,8 @@ for g in "${GL[@]}"; do m=$(nvidia-smi --query-gpu=memory.used --format=csv,nohe
 
 echo "Booting SINGLE config on GPUs $GPUS port $PORT  (config: qwen3omni_2gpu_dpenc.yaml)"
 cd "$REPO" && CUDA_VISIBLE_DEVICES=$GPUS PATH="$SVENV/bin:/usr/local/cuda/bin:$PATH" \
-  CUDA_HOME=/usr/local/cuda PYTHONPATH="$REPO" HF_HOME="$HF_HOME" $FLAGS \
+  CUDA_HOME=/usr/local/cuda PYTHONPATH="$REPO" HF_HOME="$HF_HOME" \
+  env $FLAGS \
   timeout 14400 "$SVENV/bin/python" -m mstar.cli.main serve qwen3_omni \
     --config configs/qwen3omni_2gpu_dpenc.yaml --host 0.0.0.0 --port "$PORT" \
     --tensor-comm-protocol SHM --socket-path-prefix "$SOCK" --log-level WARNING
