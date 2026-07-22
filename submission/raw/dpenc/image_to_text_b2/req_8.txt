@@ -1,0 +1,12 @@
+Based on the visual characteristics of the dish, this food is most likely **spring rolls**.
+
+Here are the key details that lead to this identification:
+
+*   **Wrapping:** The rolls are encased in a thin, translucent wrapper that becomes soft and slightly sticky when fresh. This is characteristic of rice paper, which is used to make fresh spring rolls (also known as summer rolls).
+*   **Filling:** The filling is clearly visible and consists of fresh, uncooked ingredients. You can see:
+    *   Green leafy vegetables (like lettuce or herbs)
+    *   Shredded vegetables (such as carrots and possibly cucumber)
+    *   A pinkish ingredient that is likely cooked shrimp or possibly a type of ham or pork.
+*   **Preparation:** The rolls are served cold and fresh, not fried. This distinguishes them from "egg rolls" or "pot stickers," which are typically deep-fried and have a thicker, crispier wrapper.
+
+This dish is a popular appetizer in many Asian cuisines, particularly Vietnamese (where they are called *gỏi cuốn*), Thai, and Chinese.<|im_end|>

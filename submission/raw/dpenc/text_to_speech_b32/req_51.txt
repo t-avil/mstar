@@ -1,0 +1,11 @@
+The Moon affects ocean tides primarily through its gravitational pull on Earth. Here's how it works:
+
+1. **Gravitational Pull**: The Moon exerts a gravitational force on Earth, which is strongest on the side of Earth facing the Moon. This force pulls the ocean water toward the Moon, creating a bulge in the ocean on that side—this is the **high tide**.
+
+2. **Centrifugal Force**: On the opposite side of Earth, the Moon's gravity is weaker, and the Earth-Moon system rotates around a common center of mass (the barycenter). This rotation creates a **centrifugal force** that pushes water outward, forming a second bulge—another **high tide** on the far side of Earth.
+
+3. **Low Tides**: The areas between the two bulges experience lower water levels, resulting in **low tides**.
+
+4. **Earth's Rotation**: As Earth rotates on its axis once every 24 hours, different parts of the planet pass through these bulges and troughs, causing most coastal areas to experience **two high tides and two low tides** each day—this is known as a **semidiurnal tidal pattern**.
+
+5. **Sun's Influence**: The Sun also

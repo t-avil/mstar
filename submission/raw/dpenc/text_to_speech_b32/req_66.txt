@@ -1,0 +1,13 @@
+Renewable and nonrenewable energy are two broad categories of energy sources, distinguished primarily by their availability and sustainability over time.
+
+**Renewable Energy:**
+- **Definition:** Energy derived from natural sources that are replenished at a rate equal to or faster than their consumption.
+- **Examples:** Solar energy (from the sun), wind energy (from wind turbines), hydroelectric power (from flowing water), geothermal energy (from heat within the Earth), and biomass (from organic materials like plants and waste).
+- **Sustainability:** These sources are considered sustainable because they are naturally replenished and virtually inexhaustible on a human timescale.
+- **Environmental Impact:** Generally have lower environmental impacts, especially in terms of greenhouse gas emissions and pollution, compared to nonrenewable sources.
+- **Availability:** Often depend on geographic location and weather conditions (e.g., solar energy is more abundant in sunny regions).
+
+**Nonrenewable Energy:**
+- **Definition:** Energy derived from finite resources that take millions of years to form and cannot be replenished within a human lifetime.
+- **Examples:** Fossil fuels such as coal, oil, and natural gas, as well as nuclear energy (from uranium).
+- **Sustainability:** These sources are limited and will

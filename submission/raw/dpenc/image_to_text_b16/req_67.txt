@@ -1,0 +1,9 @@
+Based on the visual evidence in the photo, the cuisine is **Chinese**, and the dishes are two classic preparations of **roast duck**.
+
+Here is a breakdown of the dishes:
+
+1.  **Foreground Dish (Roast Duck):** This is a whole roast duck that has been cooked to achieve a very crispy, golden-brown skin. The skin is glistening, which is characteristic of Peking duck. It is served with fresh cilantro and what appear to be thin, crispy pancakes or rice paper, which are traditionally used to wrap the duck slices.
+
+2.  **Background Dish (Steamed Duck):** This dish features a different preparation. The duck meat is cut into pieces and appears to be steamed or poached, resulting in tender, moist meat. It is garnished with green onions and served on a separate plate.
+
+The combination of these two dishes, along with the accompaniments like the dipping sauces (one dark, one orange) and the blue-and-white porcelain plates, is typical of a Chinese restaurant offering a variety of duck dishes.<|im_end|>

@@ -1,0 +1,11 @@
+Quantum entanglement is a phenomenon in quantum physics where two or more particles become linked in such a way that the state of one particle is directly related to the state of the other(s), no matter how far apart they are. This connection persists even when the particles are separated by vast distances—sometimes across the universe.
+
+Here are some key points about quantum entanglement:
+
+1. **Linked States**: When particles are entangled, measuring the state of one (such as its spin, polarization, or position) instantly determines the state of the other(s), even if they are light-years apart. This happens faster than the speed of light, which initially led Einstein to call it "spooky action at a distance."
+
+2. **Superposition**: Entangled particles exist in a combined quantum state that is a superposition of multiple possibilities until measured. For example, two entangled electrons might be in a state where one is spin-up and the other is spin-down—but until measured, both possibilities coexist.
+
+3. **Non-locality**: Entanglement demonstrates that quantum mechanics is non-local, meaning that physical effects can be correlated across space without any direct interaction. This challenges classical intuitions about how information and influence travel.
+
+4. **No Faster-Than-Light

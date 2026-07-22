@@ -1,0 +1,9 @@
+Based on the visual information, this dish is **escargot**.
+
+Here are the key details that lead to this identification:
+
+*   **Snail Shells:** The most prominent feature is the presence of cooked snails still inside their distinctive spiral shells.
+*   **Preparation Style:** The snails are served in a dish with a sauce, which is a classic preparation for escargot. The dark, glossy substance visible in the shells is likely a garlic butter sauce, often called *aioli* or *beurre persillé*.
+*   **Garnish:** The dish is garnished with a sprig of fresh parsley and a slice of lemon, which are common accompaniments for escargot, used to add freshness and a citrusy note to cut through the richness of the butter sauce.
+
+Escargot is a traditional French dish, and the preparation shown is a very common way it is served in restaurants.<|im_end|>

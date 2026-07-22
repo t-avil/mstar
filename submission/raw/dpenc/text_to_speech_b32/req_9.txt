@@ -1,0 +1,13 @@
+Viruses and bacteria are both microscopic organisms, but they differ significantly in structure, function, and how they cause disease. Here are the key differences:
+
+1. **Cellular Structure**:
+   - **Bacteria**: Are single-celled, prokaryotic organisms, meaning they lack a nucleus and membrane-bound organelles. They have a cell wall (usually made of peptidoglycan) and can reproduce independently.
+   - **Viruses**: Are not cells and are not considered living organisms. They lack cellular structures like a nucleus, cytoplasm, or organelles. They consist of genetic material (DNA or RNA) enclosed in a protein coat called a capsid.
+
+2. **Reproduction**:
+   - **Bacteria**: Reproduce independently through binary fission, a form of asexual reproduction.
+   - **Viruses**: Cannot reproduce on their own. They must infect a host cell (bacterial, animal, or plant) and hijack the host’s cellular machinery to replicate.
+
+3. **Size**:
+   - **Bacteria**: Typically larger than viruses. Most are about 0.2–2.0 micrometers in size.
+   - **Viruses**: Much smaller, usually 20–30

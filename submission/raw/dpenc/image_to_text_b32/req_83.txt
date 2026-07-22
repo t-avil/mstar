@@ -1,0 +1,9 @@
+Based on the visual information, this food is **edamame**.
+
+Here are the details that lead to this identification:
+
+*   **Appearance:** The dish consists of bright green, oval-shaped pods. These are the characteristic appearance of immature soybeans.
+*   **Preparation:** The pods are cooked and served in a bowl, which is a very common way to serve edamame as a snack or appetizer.
+*   **Garnish:** The dish is garnished with coarse salt and lemon wedges. This is a classic presentation for edamame, where the salt enhances the flavor of the beans inside, and the lemon adds a fresh, acidic note.
+
+Therefore, the food shown is a bowl of salted edamame with lemon.<|im_end|>

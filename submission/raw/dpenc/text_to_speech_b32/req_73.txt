@@ -1,0 +1,11 @@
+Dark matter is a form of matter that does not emit, absorb, or reflect light, making it invisible to current electromagnetic observation methods. It was first proposed to explain discrepancies between the observed gravitational effects in galaxies and galaxy clusters and the amount of visible matter present.
+
+Key points about dark matter:
+
+1. **Gravitational Evidence**: Observations of galaxy rotation curves show that stars at the edges of galaxies rotate much faster than expected based on visible matter alone. This suggests the presence of additional, unseen mass—dark matter—providing extra gravity.
+
+2. **Cosmic Structure Formation**: Dark matter plays a crucial role in the formation of large-scale structures in the universe, such as galaxies and galaxy clusters. Its gravitational pull helps pull ordinary matter together to form stars and galaxies.
+
+3. **Cosmic Microwave Background (CMB)**: Measurements from satellites like the Planck mission show that dark matter makes up about 27% of the total mass-energy content of the universe, compared to about 5% for ordinary (baryonic) matter.
+
+4. **Nature Unknown**: Despite strong indirect evidence, dark matter has not been directly detected. It is not composed of any known particles in the Standard Model of particle physics. Leading candidates include Weakly Interacting Massive Particles

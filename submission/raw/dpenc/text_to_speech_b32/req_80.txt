@@ -1,0 +1,16 @@
+The main difference between **saturated** and **unsaturated fats** lies in their **chemical structure**, specifically the presence or absence of **double bonds** in their fatty acid chains.
+
+### 1. **Saturated Fats**
+- **Structure**: No double bonds between carbon atoms in the fatty acid chain. All carbon atoms are bonded to the maximum number of hydrogen atoms ("saturated" with hydrogen).
+- **Shape**: Straight chains that pack tightly together.
+- **State at Room Temperature**: Usually **solid** (e.g., butter, lard, animal fats).
+- **Examples**: Animal fats (lard, tallow), coconut oil, palm oil.
+- **Health Impact**: Excessive intake is linked to increased levels of LDL ("bad") cholesterol and a higher risk of heart disease.
+
+### 2. **Unsaturated Fats**
+- **Structure**: Contain **one or more double bonds** in the fatty acid chain.
+- **Shape**: Kinks or bends at the double bonds prevent tight packing.
+- **State at Room Temperature**: Usually **liquid** (e.g., oils).
+- **Types**:
+  - **Monounsaturated fats**: One double bond (e.g., olive oil, canola oil, avocados).
+  -

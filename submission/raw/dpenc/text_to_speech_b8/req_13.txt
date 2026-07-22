@@ -1,0 +1,9 @@
+Quantum entanglement is a phenomenon in quantum physics where two or more particles become linked in such a way that the state of one particle is directly related to the state of the other(s), no matter how far apart they are. This connection persists even if the particles are separated by vast distances—sometimes across galaxies.
+
+Here are some key points about quantum entanglement:
+
+1. **Linked States**: When particles are entangled, measuring the state of one (such as its spin, polarization, or momentum) instantly determines the state of the other, even if they are light-years apart. This correlation happens faster than the speed of light, which initially raised concerns about violating Einstein's theory of relativity.
+
+2. **Einstein's "Spooky Action at a Distance"**: Albert Einstein famously referred to entanglement as "spooky action at a distance" because it seemed to contradict classical intuitions about locality and causality. However, experiments have confirmed that entanglement is real and does not allow for faster-than-light communication.
+
+3. **No Hidden Variables**: The 1964 Bell's Theorem and subsequent experiments (like those by Alain Aspect) showed that the correlations observed in entangled particles cannot be explained by any local hidden variable theory.

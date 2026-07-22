@@ -1,0 +1,10 @@
+Based on the ingredients and presentation, this dish is a **Caprese salad**.
+
+It is a classic Italian salad, typically made with fresh ingredients like:
+
+*   **Tomatoes:** Usually ripe, red tomatoes, often sliced.
+*   **Mozzarella cheese:** Fresh mozzarella, often in the form of small balls or "bocconcini," is used instead of the more common shredded variety.
+*   **Basil:** Fresh basil leaves are scattered on top.
+*   **Seasoning:** It is commonly dressed with olive oil and seasoned with salt and pepper.
+
+The dish is often served as an appetizer or a light main course.<|im_end|>

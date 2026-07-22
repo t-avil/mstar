@@ -1,0 +1,11 @@
+Based on the visual evidence in the photo, the cuisine and dish can be identified as follows:
+
+*   **Cuisine**: Japanese
+
+*   **Dish**: This is a type of **uramaki** (inside-out roll) sushi. The key features that lead to this identification are:
+    *   **Inside-Out Roll**: The rice is on the outside of the roll, and the nori (seaweed) is on the inside, wrapping the filling.
+    *   **Topping**: The roll is topped with a layer of what appears to be **crab stick (kanikama)**, which has been lightly fried or broiled to give it a golden, slightly crispy texture.
+    *   **Sauce**: A dark, glossy sauce, likely a sweet soy-based sauce such as **unagi sauce (tare)** or a spicy mayo, has been drizzled over the top.
+    *   **Garnish**: A small amount of **wasabi** is visible in the background, a common accompaniment for sushi.
+
+This specific dish is commonly known as a **Crab Tempura Roll** or a **Spicy Crab Roll**.<|im_end|>

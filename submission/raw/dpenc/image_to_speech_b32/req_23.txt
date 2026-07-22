@@ -1,0 +1,9 @@
+Based on the visual characteristics of the food in the image, this dish is **Xiaolongbao** (also known as **soup dumplings**).
+
+Here are the key features that lead to this identification:
+
+*   **Steamed Dumplings:** They are small, round dumplings that have been cooked by steaming, as indicated by the condensation on the paper liner and the bamboo steamer basket they are served in.
+*   **Pleated Top:** The most distinctive feature is the pleated top, which is pinched together to form a small, elegant "bun" shape. This is a classic characteristic of Xiaolongbao.
+*   **Filling:** While the filling is not visible, Xiaolongbao are famous for containing a hot, savory soup and minced meat (typically pork) inside the delicate, thin wrapper.
+
+In summary, the combination of being small, steamed dumplings with a pleated top strongly suggests they are Xiaolongbao.<|im_end|>

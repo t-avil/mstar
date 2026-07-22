@@ -1,0 +1,13 @@
+Based on the visual information, this dish is a type of **taco**.
+
+Here are the specific details that lead to this conclusion:
+
+*   **Tortilla:** The base is a soft, round tortilla that has been grilled or pan-seared, evident from the distinct char marks.
+*   **Filling:** The tortilla is filled with grilled fish, which appears to be a white fish like tilapia or cod, identifiable by its flaky texture and grill marks.
+*   **Toppings:** The fish is topped with fresh ingredients, including:
+    *   Arugula (rocket)
+    *   Thinly sliced red onions
+    *   A garnish of fresh cilantro
+    *   A lemon wedge on the side for squeezing over the dish.
+
+This combination of grilled fish, fresh vegetables, and a grilled tortilla is a very common preparation for a fish taco.<|im_end|>

@@ -1,0 +1,3 @@
+Based on the visual evidence, the dish is **donuts**.
+
+This is a classic baked good that is popular worldwide, but it has a particularly strong association with **American cuisine**. The donuts in the image appear to be a type of **yeast-raised cake donut**, characterized by their soft, fluffy texture and golden-brown color. They are coated in granulated sugar, which is a very common preparation for this style of donut.<|im_end|>

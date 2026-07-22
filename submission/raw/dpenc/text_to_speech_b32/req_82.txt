@@ -1,0 +1,17 @@
+Monetary policy and fiscal policy are two primary tools used by governments and central banks to influence a country's economy. While both aim to achieve macroeconomic goals such as stable prices, full employment, and sustainable economic growth, they operate through different mechanisms and are managed by different institutions.
+
+Here’s a breakdown of the key differences:
+
+1. **Who Implements It?**
+   - **Monetary Policy**: Conducted by the **central bank** (e.g., the U.S. Federal Reserve, the European Central Bank). It involves managing the money supply and interest rates.
+   - **Fiscal Policy**: Managed by the **government** (executive and legislative branches), including the Treasury and Congress or Parliament. It involves decisions on government spending and taxation.
+
+2. **Tools Used:**
+   - **Monetary Policy**:
+     - Adjusting **interest rates** (e.g., lowering rates to stimulate borrowing and spending).
+     - Conducting **open market operations** (buying or selling government securities).
+     - Changing **reserve requirements** for banks.
+     - Using **quantitative easing** (large-scale asset purchases) during crises.
+   - **Fiscal Policy**:
+     - Changing **government spending** (e.g., infrastructure projects, social programs).
+     -

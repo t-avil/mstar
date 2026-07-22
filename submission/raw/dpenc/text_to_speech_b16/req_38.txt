@@ -1,0 +1,14 @@
+The stock market is a complex system where shares of publicly traded companies are issued, bought, and sold. Here's a simplified explanation of how it works:
+
+### 1. **What is a Stock?**
+A stock represents ownership in a company. When you buy a share of stock, you own a small piece of that company. The more shares you own, the larger your ownership stake.
+
+### 2. **Primary vs. Secondary Markets**
+- **Primary Market**: This is where companies issue new shares to raise capital. The most common way is through an **Initial Public Offering (IPO)**, where a private company sells its shares to the public for the first time.
+- **Secondary Market**: After the IPO, shares are traded among investors. This is where most stock trading happens. Examples include the **New York Stock Exchange (NYSE)** and **Nasdaq**.
+
+### 3. **How Trading Works**
+- **Buyers and Sellers**: Investors buy and sell stocks through brokers (individuals or firms that execute trades on their behalf).
+- **Stock Exchanges**: These are platforms where buyers and sellers meet. Prices are determined by supply and demand.
+- **Market Orders vs. Limit Orders**:
+  - **Market Order**: Buy or sell immediately at

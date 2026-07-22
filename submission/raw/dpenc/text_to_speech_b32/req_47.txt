@@ -1,0 +1,17 @@
+A combustion engine, also known as an internal combustion engine (ICE), is a machine that converts the chemical energy stored in fuel into mechanical energy through the process of combustion. Here's a step-by-step explanation of how it works:
+
+### 1. **Fuel and Air Intake**
+- The engine draws in a mixture of air and fuel (typically gasoline or diesel) into the combustion chamber.
+- In gasoline engines, this mixture is created in the intake manifold or directly in the cylinder.
+- In diesel engines, only air is drawn in during the intake stroke, and fuel is injected later.
+
+### 2. **Compression**
+- The piston moves upward in the cylinder, compressing the air-fuel mixture (in gasoline engines) or just air (in diesel engines).
+- This compression increases the temperature and pressure of the mixture, making it more reactive.
+
+### 3. **Ignition**
+- **Gasoline Engines**: A spark plug ignites the compressed air-fuel mixture, causing a controlled explosion.
+- **Diesel Engines**: The high temperature from compression ignites the fuel when it is injected into the cylinder (no spark plug needed).
+
+### 4. **Power Stroke (Combustion)**
+- The explosion forces the piston downward, turning the crankshaft.

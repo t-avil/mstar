@@ -1,0 +1,18 @@
+Noise-canceling headphones work by using a technology called **active noise cancellation (ANC)** to reduce unwanted ambient sounds. Here's how it works:
+
+1. **Microphones**: The headphones have built-in microphones that pick up external sounds, such as airplane engines, traffic, or office chatter.
+
+2. **Sound Analysis**: The headphones analyze the incoming sound waves in real time, identifying their frequency and amplitude.
+
+3. **Inverse Sound Waves**: The headphones generate a new sound wave that is the **exact opposite (or inverse)** of the detected noise. This is based on the principle of **destructive interference** in physics.
+
+4. **Cancellation**: When the original noise and the inverse sound wave meet, they cancel each other out, reducing the overall noise level reaching your ears.
+
+5. **Passive Noise Isolation**: In addition to ANC, most noise-canceling headphones also use **passive noise isolation**—a physical barrier created by the earcup design and ear cushions that block out some external sound.
+
+**Types of Noise Cancellation**:
+- **Active Noise Cancellation (ANC)**: Uses electronics and microphones to cancel noise.
+- **Passive Noise Isolation**: Relies on physical design to block sound.
+
+**Benefits**:
+- Improved focus and concentration

@@ -1,0 +1,18 @@
+Inflation refers to the general increase in prices of goods and services over time, leading to a decrease in the purchasing power of money. In other words, as inflation rises, each unit of currency buys fewer goods and services.
+
+### Causes of Inflation:
+
+1. **Demand-Pull Inflation**:
+   - Occurs when the demand for goods and services exceeds their supply in an economy.
+   - This can happen due to factors like increased consumer spending, higher government expenditure, or expansionary monetary policy (e.g., lower interest rates).
+   - When consumers want more than what is available, businesses raise prices to balance supply and demand.
+
+2. **Cost-Push Inflation**:
+   - Happens when the costs of production (e.g., wages, raw materials, energy) increase.
+   - Businesses pass these higher costs onto consumers in the form of higher prices.
+   - Examples include rising oil prices, supply chain disruptions, or wage increases that outpace productivity.
+
+3. **Built-In Inflation (Wage-Price Spiral)**:
+   - A situation where workers demand higher wages to keep up with rising living costs.
+   - Businesses respond by raising prices to cover higher labor costs, which in turn leads to further wage demands.
+   - This creates a self

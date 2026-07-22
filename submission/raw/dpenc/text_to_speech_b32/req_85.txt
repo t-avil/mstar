@@ -1,0 +1,14 @@
+Carbon dating, also known as radiocarbon dating, is a method used to determine the age of organic materials by measuring the decay of the radioactive isotope carbon-14 (¹��C). Here's how it works:
+
+1. **Formation of Carbon-14**: 
+   - Carbon-14 is formed in the upper atmosphere when cosmic rays interact with nitrogen-14 (¹��N) atoms, converting them into carbon-14.
+   - This ¹��C combines with oxygen to form carbon dioxide (CO₂), which is then absorbed by plants during photosynthesis.
+   - Animals and humans consume carbon-14 by eating plants or other animals.
+
+2. **Equilibrium in Living Organisms**:
+   - While an organism is alive, it continuously exchanges carbon with its environment, maintaining a relatively constant ratio of carbon-14 to stable carbon-12 (¹²C).
+   - This ratio is similar to that in the atmosphere.
+
+3. **Death and Cessation of Carbon Exchange**:
+   - When an organism dies, it stops absorbing carbon from the environment.
+   - The carbon-14 in its tissues begins to decay back into nitrogen-14 through beta decay, with a half-life of

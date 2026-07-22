@@ -1,0 +1,21 @@
+The **Heisenberg Uncertainty Principle** is one of the foundational concepts in quantum mechanics, formulated by German physicist **Werner Heisenberg** in 1927. It fundamentally changed our understanding of the physical world by showing that there are inherent limits to how precisely certain pairs of physical properties of a particle can be known simultaneously.
+
+### Core Idea:
+The principle states that **it is impossible to simultaneously know both the exact position and the exact momentum (mass × velocity) of a particle**. The more precisely one property is measured, the less precisely the other can be known.
+
+Mathematically, this is expressed as:
+
+\[
+\Delta x \cdot \Delta p \geq \frac{\hbar}{2}
+\]
+
+Where:
+- \(\Delta x\) is the uncertainty in position,
+- \(\Delta p\) is the uncertainty in momentum,
+- \(\hbar\) is the reduced Planck's constant (\(\hbar = h / 2\pi\)).
+
+### Significance:
+
+1. **Limits of Measurement**:
+   - The uncertainty principle is not due to limitations in measurement tools or techniques. It is a **fundamental property of nature**.
+   - It reflects the wave-particle duality of quantum objects:

@@ -1,0 +1,6 @@
+Based on the visual characteristics of the dessert in the image, the dish is **Tiramisu**.
+
+Here is a breakdown of the identification:
+
+*   **Cuisine:** Italian. Tiramisu is a classic Italian dessert.
+*   **Dish:** Tiramisu. This is identifiable by its distinct layers, which appear to be soaked ladyfinger biscuits (savoiardi) and a creamy filling, all dusted generously with cocoa powder on top. The decorative chocolate patterns on the side are also a common presentation style for this dish.<|im_end|>

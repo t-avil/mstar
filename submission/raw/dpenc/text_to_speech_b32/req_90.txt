@@ -1,0 +1,24 @@
+Great question! While the terms **mutation** and **genetic disorder** are related, they refer to different things:
+
+### �� Mutation:
+A **mutation** is a change in the DNA sequence of an organism. This can happen in a single nucleotide (point mutation), a larger segment of DNA, or even involve entire chromosomes. Mutations can occur naturally during DNA replication or be caused by environmental factors like radiation or chemicals.
+
+- **Types of mutations**:
+  - **Point mutations**: Change in one base pair (e.g., sickle cell anemia).
+  - **Insertions/Deletions**: Adding or removing bases.
+  - **Chromosomal mutations**: Large-scale changes like duplications, inversions, or translocations.
+
+Mutations can be:
+- **Harmful** (cause disease)
+- **Beneficial** (provide evolutionary advantage)
+- **Neutral** (no effect on function)
+
+👉 **Important**: Not all mutations cause disease. Many are harmless or have no noticeable effect.
+
+---
+
+### �� Genetic Disorder:
+A **genetic disorder** is a disease or condition caused by abnormalities in an individual’s DNA. These abnormalities may include:
+- Mutations in specific genes
+- Chromosomal abnormalities (e.g., Down syndrome)
+-

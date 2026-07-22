@@ -1,0 +1,11 @@
+Based on the visual evidence in the photo, the cuisine is **Chinese**, and the dishes are two classic preparations of **roast duck**.
+
+Here is a breakdown of the dishes:
+
+1.  **Foreground Dish:** This is **Peking Duck** (Beijing Roast Duck). You can identify it by its signature features:
+    *   **Crispy Skin:** The duck has a very thin, golden-brown, and crispy skin, which is a hallmark of this dish.
+    *   **Serving Style:** It is served with thin pancakes (the pale, round items), which are used to wrap the duck slices along with condiments like the sweet bean sauce (the dark sauce in the small bowl) and scallions.
+
+2.  **Background Dish:** This is **Roast Duck** (often called Cantonese-style or "Siu Yuk" in Hong Kong). This style is characterized by:
+    *   **Thicker Skin:** The skin is thicker and has a deep, reddish-brown color, indicating it was likely basted with a sweet sauce during roasting.
+    *   **Serving Style:** It is typically served with a dipping sauce, which appears to be a sweet and sour sauce in the small bowl next to it

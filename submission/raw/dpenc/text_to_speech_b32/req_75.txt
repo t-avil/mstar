@@ -1,0 +1,13 @@
+TCP (Transmission Control Protocol) and UDP (User Datagram Protocol) are both transport layer protocols used for sending data over the internet, but they differ significantly in how they handle data transmission. Here are the key differences:
+
+1. **Connection-Oriented vs Connectionless**:
+   - **TCP**: Connection-oriented. Before data transmission, a connection is established between the sender and receiver using a three-way handshake (SYN, SYN-ACK, ACK). This ensures both parties are ready to communicate.
+   - **UDP**: Connectionless. No handshake is required. Data is sent immediately without establishing a connection.
+
+2. **Reliability**:
+   - **TCP**: Reliable. It ensures data is delivered correctly and in order. If packets are lost or corrupted, TCP retransmits them.
+   - **UDP**: Unreliable. It does not guarantee delivery, order, or error checking. Packets may be lost, duplicated, or arrive out of order.
+
+3. **Error Checking and Correction**:
+   - **TCP**: Includes error checking and correction. It uses acknowledgments (ACKs) and retransmission mechanisms to ensure data integrity.
+   - **UDP**: Provides basic error detection (via checksums) but does not correct errors or retransmit lost packets

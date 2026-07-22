@@ -1,0 +1,14 @@
+Bread rises during baking primarily due to the action of **yeast** and the **heat** applied during the process. Here's a step-by-step explanation of how this happens:
+
+1. **Yeast Fermentation (Before Baking):**  
+   When you mix yeast with flour, water, and sugar, the yeast becomes active. It consumes the sugars in the dough and converts them into **carbon dioxide (CO₂)** and **alcohol** through a process called **fermentation**. The CO₂ gas gets trapped in the gluten network of the dough, causing it to expand and rise. This is known as **proofing**.
+
+2. **Heat During Baking:**  
+   When the dough is placed in a hot oven, the heat causes several things to happen:
+   - The yeast becomes very active initially, producing more CO₂.
+   - The alcohol produced during fermentation evaporates.
+   - The trapped CO₂ expands further due to the heat, making the bread rise even more.
+   - The gluten in the dough sets (coagulates), and the starches gelatinize, giving the bread its structure.
+
+3. **Final Rise (Oven Spring):**  
+   The initial burst of rising in the oven is called **oven spring**

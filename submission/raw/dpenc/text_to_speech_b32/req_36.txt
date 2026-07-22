@@ -1,0 +1,36 @@
+Sure! Let's break down **recursion** in a simple and beginner-friendly way.
+
+### What is Recursion?
+
+**Recursion** is a programming technique where a function calls itself to solve a problem. It's like a loop, but instead of repeating steps using `for` or `while`, the function repeats by calling itself.
+
+Think of it like this:
+
+> "To solve a big problem, break it into smaller versions of the same problem until it becomes simple enough to solve directly."
+
+---
+
+### The Two Key Parts of Recursion
+
+Every recursive function has two main parts:
+
+1. **Base Case**  
+   This is the condition that stops the recursion. Without it, the function would keep calling itself forever (like an infinite loop), which would crash your program.
+
+2. **Recursive Case**  
+   This is where the function calls itself with a smaller or simpler version of the problem.
+
+---
+
+### Simple Example: Counting Down
+
+Let’s say you want to count down from 5 to 1.
+
+```python
+def countdown(n):
+    # Base case: stop when n is 0
+    if n == 0:
+        print("Done!")
+        return
+    # Recursive case: print n and call countdown with n-1
+    print

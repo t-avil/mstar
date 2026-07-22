@@ -1,0 +1,12 @@
+A **hash function** is a mathematical function that takes an input (or "message") of any size and produces a fixed-size string of characters, known as a **hash value** or **digest**. This output is typically a sequence of numbers and letters, and it appears random, even if the input changes only slightly.
+
+### Key Characteristics of Hash Functions:
+1. **Deterministic**: The same input will always produce the same hash value.
+2. **Fixed Output Size**: Regardless of the input size, the output is always the same length (e.g., SHA-256 always produces a 256-bit hash).
+3. **Fast Computation**: It should be quick to compute the hash value for any given input.
+4. **Pre-image Resistance**: Given a hash value, it should be computationally infeasible to reverse-engineer the original input.
+5. **Small Changes Produce Big Differences**: A tiny change in the input (like changing one character) results in a completely different hash value (known as the **avalanche effect**).
+6. **Collision Resistance**: It should be extremely difficult to find two different inputs that produce the same hash value.
+
+### Common Uses of Hash Functions:
+- **Data Integrity**: Verify that data hasn't been

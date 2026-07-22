@@ -1,0 +1,14 @@
+CRISPR (Clustered Regularly Interspaced Short Palindromic Repeats) is a revolutionary gene-editing technology that allows scientists to precisely modify DNA within living organisms. It is derived from a natural defense mechanism found in bacteria, which they use to protect themselves against viruses.
+
+### How CRISPR Works:
+
+1. **Natural Origin in Bacteria**:
+   - Bacteria use CRISPR sequences as part of an adaptive immune system.
+   - When a virus infects a bacterium, the bacterium captures a small piece of the viral DNA and inserts it into its own genome as a "spacer" within the CRISPR array.
+   - If the same virus attacks again, the bacterium transcribes the CRISPR array into RNA, which guides a protein called Cas9 to recognize and cut the matching viral DNA, disabling the virus.
+
+2. **Adaptation for Gene Editing**:
+   - Scientists have repurposed this system to edit genes in any organism, including humans.
+   - The key components are:
+     - **Guide RNA (gRNA)**: A synthetic RNA molecule designed to match the DNA sequence of the target gene.
+     - **Cas9 Protein**: An enzyme that cuts DNA at the location specified by the gRNA

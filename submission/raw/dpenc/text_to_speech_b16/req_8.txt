@@ -1,0 +1,18 @@
+Photosynthesis is the process by which green plants, algae, and some bacteria convert light energy into chemical energy stored in glucose (a type of sugar). This process primarily occurs in the chloroplasts of plant cells, which contain a green pigment called **chlorophyll** that captures light energy.
+
+Here’s a step-by-step explanation of how photosynthesis works:
+
+### 1. **Light Absorption**
+- Chlorophyll in the chloroplasts absorbs light energy, mainly from the blue and red parts of the light spectrum.
+- This energy is used to power the chemical reactions of photosynthesis.
+
+### 2. **Water Splitting (Photolysis)**
+- Water molecules (H₂O) from the roots are transported to the leaves.
+- In the **thylakoid membranes** of the chloroplasts, light energy splits water into oxygen (O₂), protons (H⁺), and electrons (e⁻).
+- The oxygen is released as a byproduct into the atmosphere.
+
+### 3. **Electron Transport Chain**
+- The excited electrons from chlorophyll move through a series of proteins called the **electron transport chain**.
+- This movement helps pump protons into the thylakoid space, creating a concentration gradient.
+
+### 4

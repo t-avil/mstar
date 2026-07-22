@@ -1,0 +1,13 @@
+Certainly! Machine learning (ML) and deep learning (DL) are both subfields of artificial intelligence (AI), but they differ in their approaches, architectures, and applications. Here's a breakdown of the key differences:
+
+### 1. **Definition**
+- **Machine Learning**: A broad field of AI where systems learn patterns from data and make decisions or predictions without being explicitly programmed. It uses algorithms that improve automatically through experience.
+- **Deep Learning**: A subset of machine learning that uses artificial neural networks with multiple layers (deep architectures) to model complex patterns in data.
+
+### 2. **Architecture**
+- **Machine Learning**: Uses simpler models such as linear regression, decision trees, support vector machines (SVM), random forests, and k-nearest neighbors (KNN).
+- **Deep Learning**: Uses deep neural networks (DNNs), including convolutional neural networks (CNNs), recurrent neural networks (RNNs), and transformers, with many layers (often 10+).
+
+### 3. **Feature Engineering**
+- **Machine Learning**: Requires significant manual feature engineering. Experts must identify and extract relevant features from raw data.
+- **Deep Learning**: Automatically learns features from raw data (e.g., pixels in images or raw text). This is known as

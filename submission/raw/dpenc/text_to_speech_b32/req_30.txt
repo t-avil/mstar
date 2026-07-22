@@ -1,0 +1,13 @@
+Sure! RAM stands for **Random Access Memory**. It is a type of computer memory that allows data to be read or written in almost the same amount of time regardless of the physical location of data inside the memory. RAM is **volatile**, meaning it loses its data when the computer is turned off.
+
+Here’s what RAM does in a computer:
+
+1. **Temporary Storage for Active Programs**: RAM stores data and instructions that are currently being used by the CPU (Central Processing Unit). When you open a program or file, it gets loaded into RAM so the CPU can access it quickly.
+
+2. **Speeds Up Processing**: RAM is much faster than storage devices like hard drives or SSDs. By keeping frequently used data in RAM, the computer can run programs and access files much more quickly.
+
+3. **Supports Multitasking**: When you run multiple programs at once, each one needs space in RAM. The more RAM your computer has, the more programs it can run simultaneously without slowing down.
+
+4. **Acts as a Workspace**: Think of RAM as a computer’s "desk" where it keeps the files and tools it’s currently working with. The CPU can quickly grab what it needs from this workspace.
+
+In summary, RAM is essential for smooth and fast computer performance

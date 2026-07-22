@@ -1,0 +1,11 @@
+Black holes form primarily through the gravitational collapse of massive stars. Here's a step-by-step explanation of how this process typically occurs:
+
+1. **Massive Star Lifecycle**: Black holes usually begin as stars with at least 20–25 times the mass of our Sun. These stars burn through their nuclear fuel (hydrogen and helium) much faster than smaller stars.
+
+2. **End of Nuclear Fusion**: When the star exhausts its nuclear fuel, it can no longer produce the outward pressure needed to counteract the inward pull of gravity.
+
+3. **Core Collapse**: Without outward pressure, the core of the star collapses under its own gravity. This collapse happens extremely rapidly—within seconds.
+
+4. **Supernova Explosion**: The outer layers of the star are blown away in a massive explosion called a supernova. This explosion can outshine entire galaxies for a short time.
+
+5. **Formation of a Black Hole**: If the remaining core after the supernova is more than about 2–3 times the mass of the Sun (the Tolman–Oppenheimer–Volkoff limit), no known force can stop the collapse. The core continues to collapse into a singularity—a point of infinite density—surrounded by an event horizon, forming a black hole

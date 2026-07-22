@@ -1,0 +1,9 @@
+Based on the visual evidence in the photo, the cuisine is **Chinese**, and the dishes are two classic preparations of roasted duck.
+
+Here is a breakdown of the dishes:
+
+1.  **Roasted Duck (likely Peking Duck):** The dish in the foreground features slices of duck with a very crispy, golden-brown, and lacquered skin. This is characteristic of Peking Duck, a famous dish from northern China. It is typically served with thin pancakes, scallions, and a sweet bean sauce for wrapping.
+
+2.  **Steamed Duck (likely Cantonese-style):** The dish in the background consists of duck that has been cooked until tender, resulting in pale, moist meat. This preparation is common in Cantonese cuisine, where duck is often steamed or braised to preserve its delicate flavor and tenderness. It is frequently served with a dipping sauce, such as the dark soy sauce visible in the small bowl.
+
+In summary, the photo displays two different ways to prepare duck, a staple of Chinese cuisine.<|im_end|>

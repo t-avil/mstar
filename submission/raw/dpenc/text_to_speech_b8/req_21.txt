@@ -1,0 +1,5 @@
+Occam's Razor is a problem-solving principle that suggests that among competing hypotheses, the one with the fewest assumptions should be selected. In other words, when multiple explanations are possible for a phenomenon, the simplest one—requiring the fewest assumptions—is usually the best choice.
+
+The principle is named after William of Ockham, a 14th-century English Franciscan friar and philosopher. The original Latin phrase is "entia non sunt multiplicanda sine necessitate," which translates to "entities should not be multiplied without necessity."
+
+Occam's Razor is not a strict rule but rather a guiding heuristic used in science, philosophy, and everyday reasoning. It helps avoid unnecessary complexity and encourages parsimony in explanations. However, it's important to note that simplicity does not guarantee truth—sometimes the correct explanation is more complex. Occam's Razor simply suggests that, all else being equal, simpler explanations are preferable until evidence points otherwise.<|im_end|>

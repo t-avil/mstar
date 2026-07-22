@@ -1,0 +1,29 @@
+Certainly! **Compound interest** is a financial concept where interest is calculated not only on the initial principal amount but also on the accumulated interest from previous periods. This means that your money grows at an increasing rate over time because you earn interest on both the original amount and the interest that has already been added.
+
+### Key Idea:
+With compound interest, your investment or debt grows exponentially rather than linearly.
+
+---
+
+### Formula for Compound Interest:
+The formula to calculate the future value of an investment with compound interest is:
+
+\[
+A = P \left(1 + \frac{r}{n}\right)^{nt}
+\]
+
+Where:
+- \( A \) = Final amount (principal + interest)
+- \( P \) = Principal (initial amount)
+- \( r \) = Annual interest rate (as a decimal)
+- \( n \) = Number of times interest is compounded per year
+- \( t \) = Number of years
+
+---
+
+### Example:
+Suppose you invest $1,000 at an annual interest rate of 5%, compounded annually for 3 years.
+
+Using the formula:
+\[
+A = 1000 \left(1 + \frac{0.05}{1}\right)^{1 \times 3

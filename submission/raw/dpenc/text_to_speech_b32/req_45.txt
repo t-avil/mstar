@@ -1,0 +1,13 @@
+Natural selection is a fundamental mechanism of evolution, first articulated by Charles Darwin and Alfred Russel Wallace in the 19th century. It explains how species change over time and adapt to their environments through the differential survival and reproduction of individuals with advantageous traits.
+
+Here’s a breakdown of the key components of natural selection:
+
+1. **Variation**: Within any population, individuals exhibit variation in traits—such as size, color, speed, or resistance to disease. This variation arises from genetic differences due to mutations, gene recombination during sexual reproduction, and other sources.
+
+2. **Inheritance**: Many of these traits are heritable, meaning they can be passed from parents to offspring through genes.
+
+3. **Overproduction and Struggle for Existence**: Most species produce more offspring than the environment can support. This leads to competition for limited resources such as food, mates, and shelter.
+
+4. **Differential Survival and Reproduction**: Individuals with traits that are better suited to their environment are more likely to survive and reproduce. These advantageous traits are said to be "adaptive."
+
+5. **Adaptation and Evolution**: Over generations, the frequency of beneficial traits increases in the population, while less favorable traits become less common. This gradual change in the genetic makeup of a population is

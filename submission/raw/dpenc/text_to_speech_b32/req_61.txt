@@ -1,0 +1,17 @@
+A neural network learns through a process called **training**, which involves adjusting its internal parameters (weights and biases) to minimize the difference between its predictions and the actual target values. This process is typically done using **supervised learning** and relies on **backpropagation** and **optimization algorithms**. Here's a step-by-step breakdown:
+
+1. **Forward Propagation**:
+   - Input data is passed through the network layer by layer.
+   - Each neuron applies a weighted sum of its inputs, adds a bias, and passes the result through an activation function (e.g., ReLU, sigmoid).
+   - The final output is compared to the true label using a **loss function** (e.g., mean squared error for regression, cross-entropy for classification).
+
+2. **Loss Calculation**:
+   - The loss function quantifies how wrong the network's prediction was.
+   - The goal of training is to minimize this loss.
+
+3. **Backpropagation**:
+   - The gradients of the loss with respect to each weight and bias are computed using the **chain rule** of calculus.
+   - This tells us how much each parameter contributed to the error.
+
+4. **Parameter Update**:
+   - An **optimization algorithm** (like Stochastic Gradient

@@ -1,0 +1,15 @@
+The key principles of object-oriented programming (OOP) are fundamental concepts that guide the design and implementation of software using objects. These principles promote code reusability, maintainability, and scalability. The four main principles are:
+
+1. **Encapsulation**  
+   - **Definition**: Bundling data (attributes) and methods (functions) that operate on the data into a single unit called a class.  
+   - **Purpose**: To hide internal implementation details and expose only necessary interfaces.  
+   - **Example**: A `BankAccount` class might have private variables like `balance` and public methods like `deposit()` and `withdraw()` to control access.
+
+2. **Abstraction**  
+   - **Definition**: Hiding complex implementation details and exposing only essential features.  
+   - **Purpose**: To reduce complexity and allow users to interact with objects without knowing how they work internally.  
+   - **Example**: A user interacts with a `Car` object using methods like `start()` and `stop()` without needing to understand the engine mechanics.
+
+3. **Inheritance**  
+   - **Definition**: A mechanism where a new class (subclass) inherits properties and behaviors from an existing class (superclass).  
+   - **Purpose**: To promote code reuse and establish

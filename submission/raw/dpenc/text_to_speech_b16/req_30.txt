@@ -1,0 +1,18 @@
+Sure! RAM stands for **Random Access Memory**. It is a type of computer memory that allows data to be read and written in almost the same amount of time regardless of the physical location of the data. RAM is **volatile**, meaning it loses its data when the computer is turned off.
+
+### Key Functions of RAM:
+
+1. **Temporary Storage for Active Programs and Data**:
+   - When you open a program (like a web browser or a word processor), the operating system loads it into RAM so that the CPU can access it quickly.
+   - RAM stores the data and instructions that the CPU needs right now to run programs efficiently.
+
+2. **Speed and Performance**:
+   - RAM is much faster than storage devices like hard drives or SSDs. This speed allows the computer to run programs smoothly and switch between tasks quickly.
+   - More RAM allows your computer to handle more programs and data at once without slowing down.
+
+3. **Working Memory**:
+   - Think of RAM as the computer’s "short-term memory." It holds information that is actively being used or processed.
+   - For example, when you're editing a document, the text and formatting instructions are stored in RAM until you save the file.
+
+4. **Supports Multitasking**:
+  

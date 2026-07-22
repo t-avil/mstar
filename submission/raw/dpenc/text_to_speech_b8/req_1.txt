@@ -1,0 +1,23 @@
+Certainly! Here's a clear explanation of the difference between **machine learning** and **deep learning**:
+
+### 1. **Definition**
+- **Machine Learning (ML):** A broad field of artificial intelligence where computers learn from data and improve their performance on a task over time without being explicitly programmed.
+- **Deep Learning (DL):** A subset of machine learning that uses **artificial neural networks** with multiple layers (hence "deep") to model complex patterns in data.
+
+---
+
+### 2. **How They Work**
+- **Machine Learning:**
+  - Uses algorithms like decision trees, support vector machines (SVM), random forests, or linear regression.
+  - Requires **feature engineering**: humans must manually select and extract relevant features from raw data.
+  - Works well with structured data (e.g., spreadsheets, databases).
+
+- **Deep Learning:**
+  - Uses **neural networks** with many layers (e.g., convolutional neural networks for images, recurrent neural networks for sequences).
+  - Automatically learns features from raw data — no need for manual feature extraction.
+  - Excels with unstructured data like images, audio, and text.
+
+---
+
+### 3. **Data Requirements**
+- **Machine Learning:** Can work well with smaller datasets

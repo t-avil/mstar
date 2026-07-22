@@ -1,0 +1,13 @@
+The human immune system is a complex network of cells, tissues, and organs that work together to defend the body against harmful pathogens such as bacteria, viruses, fungi, and parasites, as well as abnormal cells like cancer. It functions through two main branches: the **innate immune system** (rapid, non-specific response) and the **adaptive immune system** (slower, highly specific response).
+
+### 1. **Innate Immune System (First Line of Defense)**
+This is the body’s immediate, non-specific response to infection or injury. It includes:
+
+- **Physical Barriers**: Skin and mucous membranes (e.g., in the respiratory and digestive tracts) prevent pathogens from entering the body.
+- **Cellular Defenses**:
+  - **Phagocytes** (e.g., macrophages, neutrophils): Engulf and destroy pathogens.
+  - **Natural Killer (NK) Cells**: Target and destroy infected or cancerous cells.
+- **Chemical Defenses**:
+  - **Inflammatory Response**: Increases blood flow to infected areas, bringing immune cells and signaling molecules.
+  - **Fever**: Raises body temperature to inhibit pathogen growth.
+  - **Complement System**: A group of proteins that enhance immune responses

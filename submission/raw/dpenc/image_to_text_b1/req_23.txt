@@ -1,0 +1,9 @@
+Based on the visual characteristics of the food in the image, this dish is **Xiaolongbao** (also known as **soup dumplings**).
+
+Here are the key features that identify it:
+
+*   **Steamed Dumplings:** They are small, round dumplings with a thin, translucent wrapper, which is characteristic of dumplings steamed in a bamboo basket (a *zheng*).
+*   **Pleated Top:** The dumplings have a distinctive pleated top, which is pinched to seal in the filling.
+*   **Filling:** The wrapper appears slightly puffy and translucent, which indicates it contains a hot, savory broth that melts the fat in the wrapper during steaming. This is the defining feature of Xiaolongbao.
+
+Xiaolongbao is a famous type of soup dumpling originating from the Jiangnan region of China, particularly associated with the city of Wuxi.<|im_end|>

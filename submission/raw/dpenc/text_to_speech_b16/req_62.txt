@@ -1,0 +1,15 @@
+The **Turing Test** is a test of a machine's ability to exhibit intelligent behavior equivalent to, or indistinguishable from, that of a human. It was proposed by the British mathematician and computer scientist **Alan Turing** in his 1950 paper *"Computing Machinery and Intelligence."*
+
+### How the Turing Test Works:
+In the test, a human evaluator interacts with both a machine and a human through a text-only interface (like a chat). The evaluator does not know which is which. If the evaluator cannot reliably distinguish the machine from the human, the machine is said to have passed the test.
+
+### Key Points:
+- **Focus on behavior**: The test evaluates the machine's ability to mimic human responses, not its internal processes or consciousness.
+- **Text-based interaction**: The communication is typically via text to avoid biases related to voice, appearance, or physical movement.
+- **Goal**: To determine whether a machine can demonstrate human-like intelligence in conversation.
+
+### Significance:
+The Turing Test is a foundational concept in artificial intelligence (AI) and has inspired decades of research and debate about machine intelligence, consciousness, and the nature of human thought.
+
+### Criticisms:
+- Some argue that passing the test doesn't mean the machine truly understands or is conscious

@@ -1,0 +1,19 @@
+Great question! The terms *hypothesis* and *theory* are often used interchangeably in everyday language, but in science, they have distinct meanings:
+
+### Hypothesis:
+- A **testable and falsifiable** prediction or proposed explanation for a phenomenon.
+- It is an **initial idea** based on observations or prior knowledge.
+- It is usually **specific and narrow** in scope.
+- It must be **tested through experiments or observations**.
+- Example: "If plants are exposed to more sunlight, then they will grow faster."
+
+### Theory:
+- A **well-substantiated explanation** of some aspect of the natural world that is based on a body of evidence.
+- It has been **extensively tested and supported** by multiple lines of evidence.
+- It is **broad in scope** and can explain many related phenomena.
+- It is **not just a guess**—it is a framework that has withstood rigorous testing.
+- Example: The **Theory of Evolution** explains how species change over time through natural selection, supported by fossil records, genetics, and observations.
+
+### Key Difference:
+- A **hypothesis** is a starting point—a "what if?" question.
+- A **theory** is a well-established explanation that has survived

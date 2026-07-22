@@ -1,0 +1,14 @@
+A **REST API** (Representational State Transfer Application Programming Interface) is a set of rules and conventions for building and interacting with web services. It allows different software systems to communicate over HTTP (Hypertext Transfer Protocol) in a simple, scalable, and stateless way.
+
+### Key Principles of REST:
+1. **Stateless**: Each request from a client to a server must contain all the information needed to understand and process the request. The server does not store any session state between requests.
+
+2. **Client-Server Architecture**: The client (e.g., a web browser or mobile app) and the server are independent. This separation allows both to evolve independently.
+
+3. **Uniform Interface**: REST uses a consistent and standardized interface for communication. This includes:
+   - **Resource identification**: Resources (like users, products, or orders) are identified using URLs (Uniform Resource Locators).
+   - **Resource manipulation**: Clients can manipulate resources using standard HTTP methods (GET, POST, PUT, DELETE).
+   - **Self-descriptive messages**: Each message includes enough information to describe how to process it.
+   - **Hypermedia as the Engine of Application State (HATEOAS)**: Responses include links to related actions, enabling dynamic navigation.
+
+4. **Cacheable

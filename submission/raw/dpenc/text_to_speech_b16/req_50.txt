@@ -1,0 +1,16 @@
+In programming, **syntax** and **semantics** are two fundamental concepts that define how code is structured and what it means. Here's a breakdown of the difference:
+
+### 1. **Syntax**
+- **Definition**: Syntax refers to the **rules** that govern the structure of statements and expressions in a programming language.
+- **Focus**: It's about **correctness of form** — whether the code follows the language's grammar rules.
+- **Example**: In Python, `print("Hello")` is syntactically correct, but `print "Hello"` (without parentheses) is not, because it violates Python's syntax rules.
+- **Error Type**: If your code has a syntax error, the compiler or interpreter will **not** run it and will throw an error like `SyntaxError`.
+
+> �� **Syntax is like grammar in a language** — it tells you how to form valid sentences.
+
+---
+
+### 2. **Semantics**
+- **Definition**: Semantics refers to the **meaning** of the code — what the program actually does when executed.
+- **Focus**: It's about **correctness of behavior** — whether the code performs the intended logic.
+- **Example**: The code `x = 5 + "hello"` may be synt

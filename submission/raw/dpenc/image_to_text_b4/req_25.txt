@@ -1,0 +1,13 @@
+Based on the visual evidence in the image, the dish shown is **fish tacos**.
+
+Here are the key components that lead to this identification:
+
+*   **Tortillas:** The dish is served in soft, round tortillas, which are folded over the filling to form tacos.
+*   **Protein:** The main filling is a golden-brown, battered, and fried piece of fish, which is characteristic of fish tacos.
+*   **Toppings:** The tacos are generously topped with a variety of fresh ingredients, including:
+    *   **Shredded cabbage:** A light green, finely shredded vegetable, likely cabbage or a mix of cabbage and lettuce.
+    *   **Diced tomatoes:** Small, red cubes of tomato are visible.
+    *   **Sour cream:** A white, creamy sauce is drizzled over the top.
+    *   **Cilantro:** Small green specks, likely chopped cilantro, are mixed in.
+
+This combination of fried fish, soft tortillas, and fresh toppings like cabbage, tomato, and sour cream is the classic presentation of fish tacos.<|im_end|>

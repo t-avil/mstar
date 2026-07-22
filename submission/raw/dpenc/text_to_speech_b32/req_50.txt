@@ -1,0 +1,28 @@
+In programming, **syntax** and **semantics** are two fundamental concepts that define how code is structured and what it means.
+
+### 1. **Syntax**
+- **Definition**: Syntax refers to the **rules** that govern the **structure** of statements and expressions in a programming language.
+- It defines how code must be written to be valid.
+- If the syntax is incorrect, the program **won't compile or run** (it results in a **syntax error**).
+- Syntax is about **form** — the correct arrangement of symbols, keywords, punctuation, etc.
+
+**Example**:
+```python
+print("Hello, World!")
+```
+This is syntactically correct in Python.
+
+But this is not:
+```python
+print "Hello, World!"
+```
+In Python 3, this is a **syntax error** because parentheses are required.
+
+---
+
+### 2. **Semantics**
+- **Definition**: Semantics refers to the **meaning** of the code — what the program actually does when executed.
+- It deals with **logic**, **behavior**, and **intent** behind the code.
+- Even if the syntax is correct, the program may have **semantic errors** (also called **logical errors**), which cause incorrect behavior.
+
+**Example**

@@ -1,0 +1,16 @@
+The U.S. federal government is divided into three branches, as established by the U.S. Constitution. These branches are designed to provide a system of checks and balances to prevent any one branch from becoming too powerful. The three branches are:
+
+1. **Legislative Branch**:
+   - **Function**: Makes federal laws.
+   - **Composition**: Bicameral Congress, consisting of:
+     - **Senate**: 100 members (2 from each state), serving 6-year terms.
+     - **House of Representatives**: 435 members (based on state population), serving 2-year terms.
+   - **Key Powers**: Approving budgets, declaring war, regulating interstate and foreign commerce, and confirming presidential appointments.
+
+2. **Executive Branch**:
+   - **Function**: Enforces federal laws and manages the day-to-day operations of the government.
+   - **Composition**:
+     - **President**: Head of state and government, commander-in-chief of the armed forces, and leader of the executive branch.
+     - **Vice President**: Presides over the Senate and assumes the presidency if the president is unable to serve.
+     - **Cabinet**: Heads of federal executive departments (e.g., Department of State, Department of Defense).
+    

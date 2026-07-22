@@ -1,0 +1,20 @@
+Deductive and inductive reasoning are two fundamental approaches to logical thinking, differing primarily in the direction of their conclusions and the certainty of those conclusions.
+
+### Deductive Reasoning:
+- **Definition**: Deductive reasoning starts with general premises and moves toward a specific, logically certain conclusion.
+- **Structure**: If the premises are true and the logic is valid, the conclusion **must** be true.
+- **Example**:
+  - Premise 1: All humans are mortal.
+  - Premise 2: Socrates is a human.
+  - Conclusion: Therefore, Socrates is mortal.
+- **Key Features**:
+  - **Validity**: A deductive argument is valid if the conclusion logically follows from the premises.
+  - **Soundness**: A deductive argument is sound if it is valid and all premises are actually true.
+  - **Certainty**: If the premises are true, the conclusion is guaranteed to be true.
+
+### Inductive Reasoning:
+- **Definition**: Inductive reasoning starts with specific observations and moves toward a general conclusion.
+- **Structure**: The conclusion is **probable**, not certain, based on the evidence.
+- **Example**:
+  - Observation: Every swan I've seen is white.
+  - Conclusion: Therefore,

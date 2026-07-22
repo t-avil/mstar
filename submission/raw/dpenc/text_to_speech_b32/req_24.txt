@@ -1,0 +1,18 @@
+Certainly! **Compound interest** is a financial concept where interest is calculated not only on the initial principal amount but also on the accumulated interest from previous periods. This leads to exponential growth of your investment or debt over time, as opposed to simple interest, which is calculated only on the original principal.
+
+### How It Works:
+Let’s say you invest $1,000 at an annual interest rate of 5%, compounded annually.
+
+- **Year 1**:  
+  Interest = 5% of $1,000 = $50  
+  New balance = $1,000 + $50 = $1,050
+
+- **Year 2**:  
+  Interest = 5% of $1,050 = $52.50  
+  New balance = $1,050 + $52.50 = $1,102.50
+
+- **Year 3**:  
+  Interest = 5% of $1,102.50 = $55.13  
+  New balance = $1,102.50 + $55.13 = $1,157.63
+
+As you can see,

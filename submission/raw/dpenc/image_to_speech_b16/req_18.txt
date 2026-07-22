@@ -1,0 +1,12 @@
+Based on the visual evidence, this dish is a **Seafood Paella**.
+
+Here are the key indicators that lead to this conclusion:
+
+*   **The Pan:** The food is served in a wide, shallow, black pan with two handles. This is a traditional *paellera*, the specific pan used for cooking paella.
+*   **The Ingredients:** The dish is a rich mixture of various seafood, including:
+    *   **Mussels:** The dark, bivalve shells are clearly visible.
+    *   **Shrimp/Prawns:** The pink, cooked shrimp are a prominent feature.
+    *   **Saffron Rice:** The rice has a distinct golden-yellow color, which is characteristic of paella, typically achieved with saffron.
+*   **The Garnish:** The dish is garnished with lemon wedges, which are commonly served alongside paella to be squeezed over the top for added flavor.
+
+This combination of a saffron-infused rice base with a variety of seafood, served in a paella pan, is the classic definition of a seafood paella.<|im_end|>

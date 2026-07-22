@@ -1,0 +1,14 @@
+Climate change is primarily driven by human activities that increase the concentration of greenhouse gases (GHGs) in the Earth's atmosphere. The main causes include:
+
+1. **Burning of Fossil Fuels**: The combustion of coal, oil, and natural gas for energy and transportation releases large amounts of carbon dioxide (CO₂), the most significant long-term greenhouse gas. This is the largest contributor to climate change.
+
+2. **Deforestation and Land Use Changes**: Trees absorb CO₂ from the atmosphere. When forests are cleared for agriculture, logging, or urban development, not only is this carbon sink lost, but the stored carbon is often released back into the atmosphere through burning or decomposition.
+
+3. **Agriculture**: Agricultural practices contribute to climate change through:
+   - Methane (CH��) emissions from livestock digestion (enteric fermentation) and manure management.
+   - Nitrous oxide (N₂O) emissions from synthetic fertilizers and manure.
+   - Land-use changes associated with farming.
+
+4. **Industrial Processes**: Manufacturing, cement production, and chemical processing release CO₂ and other GHGs directly into the atmosphere.
+
+5. **Waste Management**: Landfills produce methane as organic waste decomposes anaerobically. Wastewater treatment also emits methane

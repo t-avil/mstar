@@ -1,0 +1,16 @@
+Latitude and longitude are two geographic coordinates used to specify any location on Earth's surface. Here's how they differ:
+
+1. **Definition**:
+   - **Latitude**: Measures how far north or south a point is from the equator. It is expressed in degrees (°), ranging from 0° at the equator to 90° at the poles (90° N at the North Pole and 90° S at the South Pole).
+   - **Longitude**: Measures how far east or west a point is from the Prime Meridian (which passes through Greenwich, England). It is also expressed in degrees, ranging from 0° to 180° east or west.
+
+2. **Reference Lines**:
+   - **Latitude** uses the **equator** as its reference line (0° latitude).
+   - **Longitude** uses the **Prime Meridian** (0° longitude) as its reference line.
+
+3. **Direction**:
+   - **Latitude** lines run **east-west** and are parallel to the equator.
+   - **Longitude** lines run **north-south** and converge at the poles.
+
+4. **Shape of Lines**:
+   - **Latitude lines** are circles parallel to the equator and are

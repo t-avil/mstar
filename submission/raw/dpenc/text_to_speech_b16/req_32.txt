@@ -1,0 +1,17 @@
+Black holes form primarily through the **gravitational collapse of massive stars** at the end of their life cycles. Here's a step-by-step explanation of how this happens:
+
+1. **Massive Star Lifecycle**:
+   - Stars much more massive than our Sun (typically more than about **8 times the mass of the Sun**) burn through their nuclear fuel (hydrogen and helium) over millions of years.
+   - As the star ages, it fuses heavier elements in its core, eventually forming an iron core.
+
+2. **Core Collapse**:
+   - Iron cannot undergo fusion to produce energy, so it no longer supports the star against gravity.
+   - Without outward pressure from fusion, the core collapses under its own gravity in a fraction of a second.
+
+3. **Supernova Explosion**:
+   - The outer layers of the star rebound off the collapsing core and explode outward in a **supernova**.
+   - This explosion can outshine entire galaxies for a short time.
+
+4. **Formation of a Black Hole**:
+   - If the remaining core is more than about **3 times the mass of the Sun**, no known force (neutron degeneracy pressure or any other) can stop the collapse.
+   - The core collapses into an infinitely dense

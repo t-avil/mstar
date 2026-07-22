@@ -1,0 +1,9 @@
+Based on the visual evidence in the photo, the cuisine is **Chinese**, and the dishes are two classic preparations of roasted duck.
+
+Here is a breakdown of the dishes:
+
+1.  **Roasted Duck (Sliced):** The dish in the foreground features slices of duck with a very crispy, golden-brown skin and tender meat. This is characteristic of **Peking Duck**. It is typically served with thin pancakes, scallions, and a sweet bean sauce for wrapping. The garnish of fresh cilantro is also common.
+
+2.  **Steamed Duck (Whole):** The dish in the background shows a whole duck that has been cooked and is being carved. This preparation is known as **Steamed Duck** or **Braised Duck**. The skin appears plump and moist rather than crispy, which is typical for this style of cooking. It is often served with a dipping sauce, such as the dark soy-based sauce visible in the small bowl.
+
+In summary, the photo displays two different ways to prepare duck in Chinese cuisine: the crispy, roasted style (Peking Duck) and the tender, moist, steamed style.<|im_end|>

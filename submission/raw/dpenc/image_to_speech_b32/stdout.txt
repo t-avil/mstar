@@ -1,0 +1,27 @@
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'interleaved', 'mrope_section'}
+
+--- Benchmark Results (wall time: 104.98s) ---
+Closed-Loop Benchmark Results (96 requests, max_concurrency=32)
+──────────────────────────────────────────────────
+Request type breakdown: image_to_speech=96
+Requests : 95/96 succeeded
+TTFT (audio)  : mean=22.442s  p50=0.796s  p95=66.829s  p99=66.831s
+TTFT (text)   : mean=0.415s  p50=0.153s  p95=1.137s  p99=1.138s
+E2E           : mean=33.783s  p50=14.313s  p95=84.433s  p99=85.975s
+ITL  (audio)  : mean=0.520s  p50=0.471s  p95=0.593s  p99=3.374s
+ITL  (text)   : mean=0.129s  p50=0.009s  p95=0.031s  p99=0.050s
+Audio SV      : mean=0.988s  p50=1.000s  p05=0.946s  p10=0.960s  (higher is better)
+RTF           : mean=0.854  p50=0.299  p95=2.506  p99=4.813  (lower is better; <1.0 = real-time)
+Audio dur    : mean=45.500s
+Text tokens: 17055 total (179.5 avg/req)
+Output bytes (audio): 207479640 total (2233 chunks)
+Output bytes (text): 73800 total (17055 chunks)
+Throughput: 0.90 req/s (successful only)
+Throughput: 162.46 text tok/s
+Throughput: 41.17 audio sec/s (synthesized audio per wall second)
+Total wall time: 104.98s
+
+--- Errors (1/96) ---
+  [0] [Errno None] Can not write request body for http://127.0.0.1:8296/generate
+
+Saved 190 outputs to /m-coriander/coriander/tim/wt-submission/submission/raw/dpenc/image_to_speech_b32/
