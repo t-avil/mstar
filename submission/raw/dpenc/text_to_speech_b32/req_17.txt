@@ -8,7 +8,7 @@ A **simile** and a **metaphor** are both figures of speech used to make comparis
 
 ### **Metaphor**:
 - A metaphor **directly states** that one thing **is** another, without using "like" or "as."
-- It creates a **stronger, more imaginative connection** between the two things.
+- It creates a **stronger, more imaginative** connection between the two things.
 - Example: *"Her smile is the sun."*  
   → This suggests her smile **is** the sun, not just similar to it.
 

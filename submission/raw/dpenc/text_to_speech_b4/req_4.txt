@@ -2,12 +2,12 @@ Climate change is primarily driven by human activities that increase the concent
 
 1. **Burning of Fossil Fuels**: The combustion of coal, oil, and natural gas for energy and transportation releases large amounts of carbon dioxide (CO₂), the most significant greenhouse gas contributing to global warming.
 
-2. **Deforestation and Land Use Changes**: Trees absorb CO₂ from the atmosphere. When forests are cleared for agriculture, logging, or urban development, this carbon sink is lost, and stored carbon is released back into the atmosphere.
+2. **Deforestation and Land Use Changes**: Trees absorb CO₂ from the atmosphere. When forests are cleared or burned, not only is this carbon-absorbing capacity lost, but stored carbon is also released back into the atmosphere.
 
-3. **Agriculture**: Livestock farming produces methane (CH��), a potent greenhouse gas, especially from enteric fermentation in ruminants like cows. Additionally, rice cultivation and synthetic fertilizers contribute to methane and nitrous oxide (N₂O) emissions.
+3. **Industrial Processes**: Manufacturing, cement production, and chemical processing emit GHGs such as CO₂, methane (CH��), and nitrous oxide (N₂O), which have high global warming potentials.
 
-4. **Industrial Processes**: Manufacturing activities, such as cement production, release CO₂ and other GHGs. Chemical processes in industries also emit potent gases like hydrofluorocarbons (HFCs).
+4. **Agriculture**: Livestock farming produces methane through enteric fermentation (digestion in animals like cows). Rice cultivation also releases methane, while synthetic fertilizers emit nitrous oxide.
 
-5. **Waste Management**: Landfills generate methane as organic waste decomposes anaerobically. Improper waste treatment contributes to GHG emissions.
+5. **Waste Management**: Landfills generate methane as organic waste decomposes anaerobically (without oxygen). Improper waste treatment contributes to GHG emissions.
 
-6. **Transportation
+6. **Transportation**: Cars, trucks, ships, planes, and trains rely

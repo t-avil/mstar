@@ -3,11 +3,11 @@ A **sonnet** is a type of poem that originated in Italy during the 13th century 
 There are three main types of sonnets:
 
 1. **Italian (or Petrarchan) Sonnet**:
-   - Divided into an **octave** (8 lines) and a **sestet** (6 lines).
+   - Originated in Italy, named after the poet Petrarch.
+   - Divided into two parts: an **octave** (8 lines) and a **sestet** (6 lines).
    - Rhyme scheme: typically **ABBAABBA CDECDE** or **ABBAABBA CDCDCD**.
-   - The octave presents a problem or theme, and the sestet offers a resolution or reflection.
+   - The octave presents a problem or theme, and the sestet offers a resolution or reflection (this shift is called the *volta*, or turn).
 
 2. **English (or Shakespearean) Sonnet**:
-   - Composed of **three quatrains** (4-line stanzas) and a final **couplet** (2 lines).
-   - Rhyme scheme: **ABABCDCDEFEFGG**.
-   - Often explores a theme in the qu
+   - Popularized by William Shakespeare.
+   - Composed of **three quatrains** (4-line stanzas

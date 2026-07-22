@@ -1,8 +1,3 @@
 Based on the visual information, this food item is a **donut**.
 
-More specifically, it appears to be a **poppy seed donut** with a **cream filling**. The key features that lead to this identification are:
-
-*   **Shape:** It has the classic ring shape of a donut.
-*   **Glaze:** The donut is covered in a smooth, light brownish-pink glaze.
-*   **Toppings:** The glaze is sprinkled with small, black specks, which are characteristic of poppy seeds.
-*   **Filling:** There is a dollop of white cream, likely vanilla or cream cheese frosting, on top, which is a common feature of filled donuts.<|im_end|>
+More specifically, it appears to be a **poppy seed donut** with a **cream filling**. The light brown, glossy glaze is sprinkled with small black specks, which are characteristic of poppy seeds. In the center, there is a dollop of white cream, likely a vanilla or cream cheese filling, which is common for this type of donut.<|im_end|>

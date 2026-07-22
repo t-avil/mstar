@@ -2,12 +2,11 @@ Rainbows are caused by the **refraction, reflection, and dispersion of light** i
 
 1. **Sunlight enters a raindrop**: When sunlight (which appears white but is actually made up of many colors) enters a raindrop, it slows down and bends. This bending is called **refraction**.
 
-2. **Dispersion of light**: As the light bends, it also separates into its component colors (red, orange, yellow, green, blue, indigo, violet). This is because different colors bend by different amounts—shorter wavelengths (like violet) bend more than longer ones (like red).
+2. **Dispersion of light**: As the light bends, it also separates into its component colors (red, orange, yellow, green, blue, indigo, violet). This happens because different colors bend by different amounts—shorter wavelengths (like violet) bend more than longer ones (like red).
 
 3. **Internal reflection**: The separated colors reflect off the inside surface of the raindrop.
 
-4. **Refraction again**: As the light exits the raindrop, it refracts once more, further spreading the colors.
+4. **Refraction again**: As the light exits the raindrop, it refracts again, further spreading the colors.
 
-5. **Formation of the rainbow**: Millions of raindrops refract and reflect sunlight in this way, and each drop sends back a specific color. When you look at the sky, you see the colors from different drops arranged in a circular arc. The most intense colors appear in a specific angle relative to the observer and the sun.
+5. **Formation of the rainbow**: Millions of raindrops refract and reflect sunlight in this way, and each drop sends back a specific color. When you look at the sky, you see the colors from different drops arranged in a circular arc. The most common rainbow is a **primary rainbow**, with red on the outer edge and violet on the inner edge.
 
-**Key points**:

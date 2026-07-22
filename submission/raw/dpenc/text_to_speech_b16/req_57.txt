@@ -1,21 +1,18 @@
-The **trolley problem** is a famous thought experiment in ethics and moral philosophy, first introduced by British philosopher Philippa Foot in 1967. It presents a hypothetical scenario designed to explore moral decision-making, particularly the differences between **utilitarianism** and **deontological ethics**.
+The **trolley problem** is a famous thought experiment in ethics and moral philosophy, first introduced by British philosopher Philippa Foot in 1967. It presents a hypothetical scenario designed to explore moral dilemmas, particularly the conflict between utilitarianism (maximizing overall well-being) and deontological ethics (adhering to moral rules or duties).
 
 ### The Scenario:
-
-Imagine you are standing next to a railway track. A runaway trolley (or train) is hurtling down the track toward five people who are tied up and unable to move. You are standing next to a lever that can divert the trolley onto a different track. However, there is one person tied up on that second track.
+Imagine you are standing next to a railway track. A runaway trolley is hurtling down the track toward five people who are tied up and unable to move. You are standing next to a lever that can divert the trolley onto a different track. However, there is one person tied up on that second track.
 
 You have two choices:
-
-1. **Do nothing**: The trolley continues on its current path, killing the five people.
+1. **Do nothing**: The trolley continues on its current path and kills the five people.
 2. **Pull the lever**: The trolley is diverted to the second track, killing the one person instead.
 
 ### The Moral Question:
-
 Which choice is morally right? Is it better to sacrifice one life to save five, or is it wrong to actively cause harm (pulling the lever) even if it results in fewer deaths?
 
 ---
 
-### Variations of the Trolley Problem:
+### Variations of the Problem:
+Philosophers have created several variations to explore different aspects of moral reasoning:
 
-1. **The Footbridge Variant (or "Fat Man" Variant)**:
-   - You are on a foot
+1

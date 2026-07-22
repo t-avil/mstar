@@ -1,16 +1,13 @@
-Viruses and bacteria are both microscopic organisms, but they differ significantly in structure, function, and how they affect living organisms. Here are the key differences:
+A virus and a bacterium are both microscopic organisms, but they differ significantly in structure, function, and how they affect living organisms. Here are the key differences:
 
 1. **Cellular Structure**:
-   - **Bacteria**: Are single-celled, prokaryotic organisms, meaning they lack a nucleus and membrane-bound organelles. Their DNA floats freely in the cytoplasm.
-   - **Viruses**: Are not cells and are not considered living organisms. They lack cellular structure and consist of genetic material (DNA or RNA) enclosed in a protein coat (capsid). Some viruses also have a lipid envelope.
+   - **Bacteria**: Are single-celled, prokaryotic organisms, meaning they lack a nucleus and membrane-bound organelles. They have a cell wall (usually made of peptidoglycan), cytoplasm, and genetic material (DNA) floating freely in the cytoplasm.
+   - **Viruses**: Are not cells and are not considered living organisms. They lack cellular structure and organelles. A virus consists of genetic material (DNA or RNA) enclosed in a protein coat called a capsid, and sometimes a lipid envelope.
 
 2. **Reproduction**:
    - **Bacteria**: Reproduce independently through binary fission, a form of asexual reproduction.
    - **Viruses**: Cannot reproduce on their own. They must infect a host cell and hijack its machinery to replicate.
 
 3. **Size**:
-   - **Bacteria**: Typically larger than viruses. Most are about 0.2–2.0 micrometers in size.
-   - **Viruses**: Much smaller, usually 20–300 nanometers in size.
-
-4. **Treatment**:
-   - **Bacteria**: Can often be treated with antibiotics, which target bacterial
+   - **Bacteria**: Typically 0.2–2.0 micrometers in size.
+   - **Viruses**: Much smaller, usually 20–300 nanometers.

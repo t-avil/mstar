@@ -9,8 +9,8 @@ Latitude and longitude are two geographic coordinates used to specify any locati
    - **Longitude** uses the **Prime Meridian** (0° longitude) as its reference line.
 
 3. **Direction**:
-   - **Latitude** lines run **east-west** and are parallel to the equator.
-   - **Longitude** lines run **north-south** and converge at the poles.
+   - **Latitude** is measured **north or south** of the equator.
+   - **Longitude** is measured **east or west** of the Prime Meridian.
 
 4. **Shape of Lines**:
-   - **Latitude lines** are circles parallel to the equator and are
+   - **Latitude lines** (parallels) run **parallel to the equator

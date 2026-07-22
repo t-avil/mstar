@@ -2,9 +2,7 @@ Based on the visual evidence in the image, the dish shown is **French Onion Soup
 
 Here are the key characteristics that lead to this identification:
 
-*   **Rich, Dark Broth:** The soup has a deep brown color, which is characteristic of a broth made by slowly caramelizing onions and simmering them with beef or vegetable stock.
-*   **Toasted Bread:** A slice of bread, likely a baguette, is placed on top of the soup. It appears to be toasted or grilled, forming a crust.
-*   **Melted Cheese:** The bread is covered with a layer of melted cheese, which has browned slightly from the heat. This is a classic feature of the dish.
-*   **Garnish:** The soup is garnished with finely chopped fresh herbs, most likely parsley, which adds a touch of color and freshness.
-
-This combination of a savory onion broth, a toasted cheese-topped crouton, and a fresh herb garnish is the signature presentation of French Onion Soup.<|im_end|>
+*   **Rich, Dark Broth:** The soup has a deep brown color, which is characteristic of a broth made by caramelizing a large amount of onions and simmering them with beef or chicken stock.
+*   **Toasted Bread and Melted Cheese:** A prominent feature is the slice of toasted bread, likely a baguette, placed on top of the soup. It is covered with a layer of melted cheese, which appears to be a white cheese like Gruyère or mozzarella.
+*   **Garnish:** The dish is garnished with finely chopped fresh herbs, most likely parsley, sprinkled over the melted cheese.
+*   **Serving Vessel:** The soup is served in a deep, round bowl, which is typical for this dish as it is often served "au gratin," with the cheese on top being browned, usually under a broiler.<|im_end|>

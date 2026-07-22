@@ -1,14 +1,11 @@
-Bread rises during baking primarily due to the action of **yeast** and the **heat** from the oven. Here's a step-by-step explanation of how this happens:
+Bread rises during baking primarily due to the action of **yeast** and the **heat** applied during the process. Here's a step-by-step explanation of how this happens:
 
 1. **Yeast Fermentation (Before Baking):**  
-   When you mix yeast with flour, water, and sugar, the yeast becomes active. It feeds on the sugars in the dough and converts them into **carbon dioxide (CO₂)** and **alcohol** through a process called fermentation. The CO₂ gas gets trapped in the gluten network of the dough, causing it to expand and rise. This is known as **proofing** or **rising**.
+   When you mix yeast with flour, water, and sugar, the yeast becomes active. It consumes the sugars in the dough and produces **carbon dioxide (CO₂)** and **alcohol** as byproducts. This process is called **fermentation**. The CO₂ gets trapped in the gluten network of the dough, causing it to expand and rise. This is known as **proofing** or **rising**.
 
-2. **Oven Spring (During Baking):**  
-   When the dough is placed in a hot oven, several things happen:
-   - The heat causes the **trapped CO₂ gas to expand**, making the bread rise even more.
-   - The **yeast becomes very active** at first, producing a final burst of CO₂ before dying off due to the high temperature.
-   - The **moisture in the dough turns to steam**, which also expands and contributes to the rise.
-   - This initial rapid expansion is called **oven spring**.
-
-3. **Setting the Structure:**  
-   As
+2. **Heat During Baking:**  
+   When the bread is placed in a hot oven, several things happen:
+   - The **yeast becomes very active** at first, producing more CO₂ until the heat kills it (usually around 130–140°F or 55–60°C).
+   - The **trapped CO₂ expands** due to the heat, causing the dough to rise further.
+   - The **water in the dough turns into steam**, which also expands and contributes to the rise.
+   - The **gluten structure sets** as the

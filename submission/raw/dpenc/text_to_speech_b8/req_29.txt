@@ -1,12 +1,19 @@
-The terms "democracy" and "republic" are often used interchangeably, but they have distinct meanings and can overlap in practice. Here's a breakdown of the key differences:
+The terms "democracy" and "republic" are often used interchangeably, but they refer to different aspects of government and can overlap in practice. Here's a breakdown of the key differences:
 
-### 1. **Definition**
-- **Democracy**: A system of government where the authority of the government is created and sustained by the people, typically through voting and participation. The term comes from the Greek *demos* (people) and *kratos* (rule).
-- **Republic**: A form of government where the country is considered a "public matter" (res publica), not the private concern or property of rulers. The head of state is usually an elected or appointed official, not a hereditary monarch.
+### 1. **Definition and Core Principles**
 
-### 2. **Focus**
-- **Democracy** emphasizes **popular sovereignty** and **majority rule**. It focuses on how decisions are made and who holds power.
-- **Republic** emphasizes the **structure of government** and the **absence of monarchy**. It focuses on the nature of the state and the role of the head of state.
+- **Democracy**:
+  - A system of government where the authority of the government is created and sustained by the people, typically through voting.
+  - The term comes from the Greek *dēmokratia*, meaning "rule by the people."
+  - In a democracy, the people have the power to make decisions, either directly (direct democracy) or through elected representatives (representative democracy).
 
-### 3. **Head of State**
-- In a **democracy**, the head of state may be a monarch (e.g., constitutional monarchy like the UK) or an elected official (e
+- **Republic**:
+  - A form of government where the country is considered a "public matter" (res publica in Latin), not the private concern or property of rulers.
+  - The head of state is not a monarch and is usually elected (e.g., a president), rather than inherited.
+  - Power is derived from the people, but the system may include checks and balances, separation of powers, and constitutional limits.
+
+### 2. **Key Differences**
+
+| Feature | Democracy | Republic |
+|--------|-----------|----------|
+| **Focus** | Power of the people | Form of government (

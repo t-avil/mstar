@@ -4,10 +4,9 @@ It is a platter featuring a variety of different cheeses, which is a common appe
 
 *   **Blue cheese:** The white cheese with blue-green veins on the left.
 *   **Brie or Camembert:** The soft, white-rinded cheese on the right.
-*   **Hard cheese:** The two slices of yellow cheese with a dark rind at the bottom.
+*   **Cheddar or similar hard cheese:** The two slices with a yellow interior and a dark rind at the bottom.
 
-The plate is accompanied by several classic cheese plate accompaniments, including:
+The plate is also accompanied by several classic accompaniments, including:
 
-*   A small salad with cherry tomatoes and mixed greens.
-*   Pickles.
-*   A dark, chunky chutney or jam.<|im_end|>
+*   **Salad:** A small side salad with mixed greens, sliced cherry tomatoes, and pickles.
+*   **Chutney or jam:** A small dollop of a dark, chunky preserve, likely a fruit chutney or fig jam, to complement the cheeses.<|im_end|>

@@ -1,12 +1,12 @@
-The human immune system is a complex network of cells, tissues, and organs that work together to defend the body against harmful pathogens such as bacteria, viruses, fungi, and parasites. It also helps eliminate abnormal cells, such as cancer cells, and removes dead or damaged cells. The immune system can be broadly divided into two main parts: the **innate immune system** and the **adaptive immune system**.
+The human immune system is a complex network of cells, tissues, and organs that work together to defend the body against harmful pathogens such as bacteria, viruses, fungi, and parasites, as well as abnormal cells like cancer. It can be broadly divided into two main parts: the **innate immune system** and the **adaptive immune system**.
 
-### 1. Innate Immune System (First Line of Defense)
-The innate immune system provides immediate, non-specific defense against pathogens. It acts within minutes to hours of infection and includes:
+### 1. **Innate Immune System (First Line of Defense)**
+This is the body’s immediate, non-specific response to pathogens. It acts within minutes to hours of infection and includes:
 
-- **Physical Barriers**: Skin and mucous membranes (in the respiratory, digestive, and urinary tracts) prevent pathogens from entering the body.
-- **Secretions**: Saliva, tears, and mucus contain enzymes like lysozyme that can destroy bacteria.
+- **Physical Barriers**: Skin and mucous membranes (e.g., in the respiratory and digestive tracts) prevent pathogens from entering the body.
+- **Secretions**: Saliva, tears, and mucus contain enzymes (like lysozyme) and antibodies that can destroy or trap microbes.
 - **Cellular Defenses**:
-  - **Phagocytes**: Cells like neutrophils and macrophages engulf and digest pathogens.
-  - **Natural Killer (NK) Cells**: Destroy virus-infected cells and tumor cells.
+  - **Phagocytes**: Cells like **neutrophils** and **macrophages** engulf and digest pathogens.
+  - **Natural Killer (NK) Cells**: Destroy infected or cancerous cells.
   - **Dendritic Cells**: Capture pathogens and present antigens to activate the adaptive immune system.
-- **Inflammatory Response**: When tissues are damaged or infected
+- **Inflammatory Response**: When tissues are damaged or infected,

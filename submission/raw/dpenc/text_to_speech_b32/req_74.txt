@@ -1,19 +1,19 @@
-A search engine indexes the web through a multi-step process involving crawling, parsing, storing, and ranking. Here's a simplified breakdown of how it works:
+A search engine indexes the web through a multi-step process that involves crawling, parsing, storing, and ranking web pages. Here's a breakdown of how it works:
 
 1. **Crawling**:
    - Search engines use automated programs called **crawlers** or **spiders** to discover web pages.
    - Crawlers start with a list of URLs (often from previous crawls or sitemaps) and follow links from one page to another.
-   - They continuously explore the web, visiting new pages and updating their list of known URLs.
+   - They continuously explore the web, visiting millions of pages daily.
+   - Crawlers respect the `robots.txt` file, which tells them which parts of a site they can or cannot access.
 
-2. **Fetching**:
-   - Once a crawler finds a URL, it retrieves the page's content (HTML, images, scripts, etc.) from the server.
-   - This is similar to how your browser loads a webpage.
+2. **Parsing and Rendering**:
+   - Once a page is crawled, the search engine parses its content.
+   - It extracts text, images, metadata (like titles and descriptions), and links.
+   - Modern crawlers also render JavaScript-heavy pages to understand content that loads dynamically.
 
-3. **Parsing**:
-   - The search engine analyzes the fetched content to understand what the page is about.
-   - It extracts text, identifies keywords, parses metadata (like titles and descriptions), and follows links to discover new pages.
-   - It also processes structured data (e.g., schema markup) and media files.
-
-4. **Indexing**:
-   - The parsed information is stored in a massive database called the **index**.
-   - The index is optimized for fast retrieval
+3. **Indexing**:
+   - The parsed content is stored in a massive database called the **index**.
+   - The index is optimized for fast retrieval and contains information about each page, such as:
+     - Keywords and phrases
+     - Page structure (headings, paragraphs, etc.)
+     - Links to

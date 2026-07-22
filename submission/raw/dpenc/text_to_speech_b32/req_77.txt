@@ -1,16 +1,16 @@
-The **Fermi Paradox** is the apparent contradiction between the high probability of the existence of extraterrestrial civilizations in the universe and the lack of evidence for, or contact with, such civilizations.
+The **Fermi Paradox** is the apparent contradiction between the high probability of extraterrestrial civilizations existing in the universe and the lack of evidence for, or contact with, such civilizations.
 
-It is named after the Italian-American physicist **Enrico Fermi**, who, during a lunchtime conversation in 1950, reportedly asked, *"Where is everybody?"* This question highlights the paradox: given the vast number of stars and planets in the universe, many of which are likely Earth-like and could support life, we should expect to see signs of intelligent life elsewhere — yet we haven't.
+It is named after the Italian-American physicist **Enrico Fermi**, who, during a casual lunchtime conversation in 1950, reportedly asked, *"Where is everybody?"* — highlighting the puzzling absence of observable signs of intelligent life beyond Earth.
 
 ### Key Points of the Paradox:
 
 1. **Vastness of the Universe**:
-   - There are billions of galaxies, each with billions of stars.
-   - Many of these stars have planets, including potentially habitable ones in the "Goldilocks zone" (where liquid water can exist).
+   - The observable universe contains hundreds of billions of galaxies, each with hundreds of billions of stars.
+   - Many of these stars have planets, and a significant fraction may lie in the "habitable zone" where conditions could support life.
 
 2. **High Probability of Life**:
-   - Life arose on Earth relatively quickly after conditions stabilized.
-   - If life is common, then intelligent, technological civilizations should have evolved elsewhere.
+   - Given the sheer number of stars and planets, even if the probability of life arising on any given planet is very low, the total number of life-bearing worlds could still be enormous.
+   - If life evolves into intelligent, technological civilizations, some should have developed far earlier than humans.
 
 3. **Technological Advancement**:
-   - Even if civilizations are rare, the universe is old (~13.8 billion years), so some should have
+   - A civilization that develops space travel could theoretically colonize the entire galaxy within a few million years — a

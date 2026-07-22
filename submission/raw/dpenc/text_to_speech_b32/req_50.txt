@@ -1,28 +1,12 @@
 In programming, **syntax** and **semantics** are two fundamental concepts that define how code is structured and what it means.
 
 ### 1. **Syntax**
-- **Definition**: Syntax refers to the **rules** that govern the **structure** of statements and expressions in a programming language.
-- It defines how code must be written to be valid.
-- If the syntax is incorrect, the program **won't compile or run** (it results in a **syntax error**).
-- Syntax is about **form** — the correct arrangement of symbols, keywords, punctuation, etc.
-
-**Example**:
-```python
-print("Hello, World!")
-```
-This is syntactically correct in Python.
-
-But this is not:
-```python
-print "Hello, World!"
-```
-In Python 3, this is a **syntax error** because parentheses are required.
-
----
+- **Definition**: Syntax refers to the **rules and structure** of the programming language. It defines how code must be written to be valid.
+- **Focus**: It's about the **form** of the code — the arrangement of symbols, keywords, punctuation, and structure.
+- **Example**: In Python, `print("Hello, World!")` is syntactically correct. But `print "Hello, World!"` (without parentheses) would be a **syntax error** in Python 3.
+- **Error Type**: If your code violates syntax rules, the compiler or interpreter will **not run** it and will throw a **syntax error**.
 
 ### 2. **Semantics**
-- **Definition**: Semantics refers to the **meaning** of the code — what the program actually does when executed.
-- It deals with **logic**, **behavior**, and **intent** behind the code.
-- Even if the syntax is correct, the program may have **semantic errors** (also called **logical errors**), which cause incorrect behavior.
-
-**Example**
+- **Definition**: Semantics refers to the **meaning** of the code. It defines what the code actually does when executed.
+- **Focus**: It's about the **behavior** and **logic** of the program.
+- **Example**: The code `x = 5 + 3` is syntactically correct, and semantically it means "assign the value 8 to the variable x." But

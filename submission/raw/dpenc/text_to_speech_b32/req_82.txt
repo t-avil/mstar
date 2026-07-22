@@ -4,7 +4,7 @@ Here’s a breakdown of the key differences:
 
 1. **Who Implements It?**
    - **Monetary Policy**: Conducted by the **central bank** (e.g., the U.S. Federal Reserve, the European Central Bank). It involves managing the money supply and interest rates.
-   - **Fiscal Policy**: Managed by the **government** (executive and legislative branches), including the Treasury and Congress or Parliament. It involves decisions on government spending and taxation.
+   - **Fiscal Policy**: Managed by the **government** (e.g., the President and Congress in the U.S., or the Ministry of Finance in other countries). It involves decisions on government spending and taxation.
 
 2. **Tools Used:**
    - **Monetary Policy**:
@@ -13,5 +13,4 @@ Here’s a breakdown of the key differences:
      - Changing **reserve requirements** for banks.
      - Using **quantitative easing** (large-scale asset purchases) during crises.
    - **Fiscal Policy**:
-     - Changing **government spending** (e.g., infrastructure projects, social programs).
-     -
+     - Changing **government spending** (e.g., increasing

@@ -3,8 +3,9 @@ Based on the ingredients and presentation, this dish is a **Caprese salad**.
 It is a classic Italian salad, typically made with fresh ingredients like:
 
 *   **Tomatoes:** Usually ripe, red tomatoes, often sliced.
-*   **Mozzarella cheese:** Fresh mozzarella, often in the form of small balls or "bocconcini," is used instead of the more common shredded variety.
-*   **Basil:** Fresh basil leaves are scattered on top.
-*   **Seasoning:** It is commonly dressed with olive oil and seasoned with salt and pepper.
+*   **Mozzarella cheese:** A fresh, white cheese, often in the form of mozzarella balls (bocconcini) or slices.
+*   **Basil:** Fresh green leaves, usually torn or chopped.
+*   **Olive oil and balsamic glaze:** Drizzled on top for flavor and shine.
+*   **Salt and pepper:** For seasoning.
 
-The dish is often served as an appetizer or a light main course.<|im_end|>
+The vibrant red, white, and green colors of the ingredients are said to resemble the colors of the Italian flag, which is why it's named after the island of Capri.<|im_end|>

@@ -2,14 +2,14 @@ Natural selection is a fundamental mechanism of evolution, first articulated by 
 
 Here’s a breakdown of the key components of natural selection:
 
-1. **Variation**: Within any population, individuals exhibit variation in traits—such as size, color, speed, or resistance to disease. This variation arises from genetic differences, often due to mutations or genetic recombination during reproduction.
+1. **Variation**: Within any population, individuals exhibit variation in traits—such as size, color, speed, or resistance to disease. This variation arises from genetic differences due to mutations, gene recombination during sexual reproduction, and other sources.
 
-2. **Inheritance**: Many of these traits are heritable, meaning they can be passed from parents to offspring through genes.
+2. **Overproduction and Struggle for Existence**: Most species produce more offspring than the environment can support. This leads to competition for limited resources like food, mates, and shelter. Not all offspring survive to reproduce.
 
-3. **Overproduction and Struggle for Existence**: Most species produce more offspring than the environment can support. This leads to competition for limited resources like food, mates, and shelter.
+3. **Differential Survival and Reproduction**: Individuals with traits that are better suited to their environment are more likely to survive and reproduce. These advantageous traits are called adaptations.
 
-4. **Differential Survival and Reproduction**: Individuals with traits that are better suited to their environment are more likely to survive and reproduce. These advantageous traits are said to be "selected for."
+4. **Inheritance**: Traits that improve survival and reproduction are passed on to the next generation through genes. Over time, these beneficial traits become more common in the population.
 
-5. **Adaptation**: Over generations, the frequency of beneficial traits increases in the population, leading to adaptation—improved fit between organisms and their environment.
+5. **Evolution**: As advantageous traits accumulate over generations, the population gradually changes—this is evolution by natural selection.
 
-**Example**: In a population of beetles, some
+**Example**: In

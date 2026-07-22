@@ -1,16 +1,13 @@
-The human immune system is a complex network of cells, tissues, and organs that work together to defend the body against harmful pathogens such as bacteria, viruses, fungi, and parasites, as well as abnormal cells like cancer. It functions through two main branches: the **innate immune system** (rapid, non-specific response) and the **adaptive immune system** (slower, highly specific response).
+The human immune system is a complex network of cells, tissues, and organs that work together to defend the body against harmful pathogens such as bacteria, viruses, fungi, and parasites, as well as abnormal cells like cancer. It can be broadly divided into two main parts: the **innate immune system** and the **adaptive immune system**.
 
 ### 1. **Innate Immune System (First Line of Defense)**
-This is the body’s immediate, non-specific defense mechanism that acts within minutes to hours of encountering a pathogen.
+This is the body’s immediate, non-specific response to pathogens. It acts within minutes to hours of infection and includes:
 
-- **Physical and Chemical Barriers:**
-  - Skin and mucous membranes block pathogens from entering the body.
-  - Secretions like mucus, tears, saliva, and stomach acid trap or destroy microbes.
-
-- **Cellular Defenses:**
-  - **Phagocytes** (e.g., macrophages, neutrophils) engulf and digest pathogens.
-  - **Natural Killer (NK) cells** detect and destroy infected or cancerous cells.
-  - **Dendritic cells** capture pathogens and present antigens to activate the adaptive immune system.
-
-- **Inflammatory Response:**
-  - When tissues are damaged or infected, the body releases chemicals that
+- **Physical Barriers**: Skin and mucous membranes (e.g., in the nose, mouth, and gut) prevent pathogens from entering the body.
+- **Cellular Defenses**:
+  - **Phagocytes** (e.g., macrophages, neutrophils): These cells engulf and destroy pathogens.
+  - **Natural Killer (NK) Cells**: Target and destroy infected or cancerous cells.
+- **Chemical Defenses**:
+  - **Inflammatory Response**: When tissues are damaged or infected, the body releases chemicals that increase blood flow, attract immune cells, and promote healing.
+  - **Fever**: Elevated body temperature can inhibit pathogen growth and enhance immune function.
+  - **Com

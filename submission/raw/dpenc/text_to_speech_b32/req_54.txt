@@ -1,17 +1,14 @@
-The U.S. federal government is divided into three branches, as established by the U.S. Constitution. These branches are designed to provide a system of checks and balances to prevent any one branch from becoming too powerful. The three branches are:
+The U.S. federal government is divided into three branches, as established by the U.S. Constitution:
 
-1. **Legislative Branch**:
-   - **Function**: Makes federal laws.
-   - **Composition**: Bicameral Congress, consisting of:
-     - **Senate**: 100 members (2 from each state).
-     - **House of Representatives**: 435 members (based on state population).
-   - **Key Powers**: Passes legislation, declares war, approves budgets, confirms presidential appointments, and ratifies treaties.
+1. **Legislative Branch**: Responsible for making laws. It consists of the U.S. Congress, which is a bicameral legislature made up of two chambers:
+   - The **Senate** (100 members, 2 from each state)
+   - The **House of Representatives** (435 members, apportioned based on state population)
 
-2. **Executive Branch**:
-   - **Function**: Enforces federal laws and manages the day-to-day operations of the government.
-   - **Composition**:
-     - **President**: Head of state and government, commander-in-chief of the armed forces.
-     - **Vice President**: Presides over the Senate and assumes presidency if needed.
-     - **Cabinet**: Heads of federal executive departments (e.g., Secretary of State, Secretary of Defense).
-     - **Federal Agencies and Departments**: Implement and administer laws (e.g., FBI, EPA, Department of Education).
-  
+2. **Executive Branch**: Responsible for enforcing and implementing laws. It is headed by the **President of the United States**, who is also the Commander-in-Chief of the armed forces. The branch includes the Vice President, the Cabinet (heads of federal executive departments), and various federal agencies and departments.
+
+3. **Judicial Branch**: Responsible for interpreting laws and ensuring they are applied fairly. It is headed by the **Supreme Court** and includes lower federal courts such as:
+   - U.S. Courts of Appeals
+   - U.S. District Courts
+   - Specialized courts (e.g., Tax Court, Court of International Trade)
+
+These three branches operate under a system of **checks and balances**, ensuring that no single branch becomes too powerful.<|im_end|>

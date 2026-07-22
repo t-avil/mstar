@@ -1,9 +1,10 @@
-Based on the visual evidence in the photo, the cuisine is **Chinese**, and the dishes are two classic preparations of roasted duck.
+Based on the visual evidence in the photo, the cuisine is **Chinese**, and the dish is **Roast Duck**.
 
-Here is a breakdown of the dishes:
+Here is a breakdown of the identification:
 
-1.  **Roasted Duck (Sliced):** The dish in the foreground features slices of duck with a very crispy, golden-brown skin and tender meat. This is characteristic of **Peking Duck**. It is typically served with thin pancakes, scallions, and a sweet bean sauce for wrapping. The garnish of fresh cilantro is also common.
+*   **Cuisine:** The style of the dishes, including the blue-and-white patterned plates and the accompanying dipping sauces (one dark, one light orange), is characteristic of Chinese restaurants. The main dish itself is a classic of Chinese cuisine.
 
-2.  **Steamed Duck (Whole):** The dish in the background shows a whole duck that has been cooked and is being carved. This preparation is known as **Steamed Duck** or **Braised Duck**. The skin appears plump and moist rather than crispy, which is typical for this style of cooking. It is often served with a dipping sauce, such as the dark soy-based sauce visible in the small bowl.
-
-In summary, the photo displays two different ways to prepare duck in Chinese cuisine: the crispy, roasted style (Peking Duck) and the tender, moist, steamed style.<|im_end|>
+*   **Dish:** The dish is clearly **Roast Duck**. This is identifiable by several key features:
+    *   **Crispy Skin:** The duck in the foreground has a deep, glossy, reddish-brown skin that appears very crispy, a hallmark of Peking duck or Cantonese roast duck.
+    *   **Preparation Style:** The duck is served in two ways, which is common for this dish. The foreground shows the roasted duck with crispy skin, while the plate in the background contains duck that has been sliced and appears to be served with a sauce, possibly as a different preparation like "Sliced Roast Duck" or "Duck with Soy Sauce."
+    *   **Accompaniments:** The dish is garnished with fresh cilantro (coriander) and served with dipping sauces, which is typical for

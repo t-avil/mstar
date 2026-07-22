@@ -1,17 +1,17 @@
-A neural network learns through a process called **training**, which involves adjusting its internal parameters (weights and biases) to minimize the difference between its predictions and the actual target values. This process is typically done using **supervised learning** and relies on **backpropagation** and **optimization algorithms**. Here's a step-by-step breakdown:
+A neural network learns through a process called **training**, which involves adjusting its internal parameters (weights and biases) to minimize the difference between its predictions and the actual target values. This process is typically done using **supervised learning**, where the network is provided with labeled data (input-output pairs). Here's a step-by-step breakdown of how a neural network learns:
 
-1. **Forward Propagation**:
-   - Input data is passed through the network layer by layer.
-   - Each neuron applies a weighted sum of its inputs, adds a bias, and passes the result through an activation function (e.g., ReLU, sigmoid).
-   - The final output is compared to the true label using a **loss function** (e.g., mean squared error for regression, cross-entropy for classification).
+### 1. **Forward Propagation**
+- The network takes an input (e.g., an image, a sentence, or numerical data).
+- It processes the input through layers of interconnected nodes (neurons), applying weights and activation functions.
+- The final output is a prediction (e.g., class label, continuous value).
 
-2. **Loss Calculation**:
-   - The loss function quantifies how wrong the network's prediction was.
-   - The goal of training is to minimize this loss.
+### 2. **Loss Calculation**
+- The network compares its prediction to the true target value using a **loss function** (e.g., mean squared error for regression, cross-entropy for classification).
+- The loss quantifies how "wrong" the prediction is.
 
-3. **Backpropagation**:
-   - The gradients of the loss with respect to each weight and bias are computed using the **chain rule** of calculus.
-   - This tells us how much each parameter contributed to the error.
+### 3. **Backpropagation**
+- The network calculates how much each weight contributed to the error using **gradient descent** and the **chain rule** of calculus.
+- This process computes the **gradient** of the loss with respect to each weight.
 
-4. **Parameter Update (Optimization)**:
-   - An **optimizer** (e.g.,
+### 4. **Weight Update**
+- The weights are

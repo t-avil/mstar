@@ -7,6 +7,6 @@ Here are the key details that lead to this conclusion:
     *   **Shrimp:** Whole, pink shrimp are clearly visible on top.
     *   **Mussels:** Shells of mussels can be seen mixed in with the rice.
     *   **Rice:** The base of the dish is a bed of rice, which appears to be infused with a reddish-orange color, typical of paella made with saffron.
-*   **Garnish:** A wedge of lemon is placed on top, a common garnish for paella to be squeezed over the dish before eating.
+*   **Garnish:** A wedge of lemon is placed on top, a common garnish for paella that is squeezed over the dish before eating to add a fresh, acidic note.
 
-The combination of rice cooked in a specialized pan with a mix of seafood like shrimp and mussels strongly indicates that this is a seafood paella.<|im_end|>
+The combination of rice cooked in a specialized pan with a mix of seafood like shrimp and mussels is the defining characteristic of paella.<|im_end|>

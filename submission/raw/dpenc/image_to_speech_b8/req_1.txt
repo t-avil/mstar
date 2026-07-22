@@ -2,7 +2,7 @@ Based on the image provided, here is a description of the food item:
 
 This is a stack of blueberry pancakes served for breakfast.
 
-*   **Main Item:** The central focus is a stack of two or three fluffy, golden-brown pancakes. They appear to be made with a thick batter, giving them a soft and airy texture.
-*   **Ingredients:** Blueberries are a key ingredient, visible both on the surface of the top pancake and baked into the layers below. The top pancake has a slightly uneven, rustic surface with some darker, caramelized spots, indicating it was cooked on a griddle.
-*   **Toppings:** The stack is garnished with a single, round pat of butter melting on the top pancake, which will add richness and flavor. To the left of the stack, there is a small white bowl containing a dark, glossy sauce, which is most likely blueberry syrup or a similar fruit compote to complement the pancakes.
-*   **Presentation:** The entire dish is presented on a plain white plate, which makes the colors of the food stand out.<|im_end|>
+*   **Main Item:** The central focus is a stack of two or three thick, fluffy pancakes. They have a golden-brown, slightly crispy-looking surface with some darker, caramelized spots from cooking. The pancakes are studded with dark blueberries that have burst during the cooking process, releasing their juice and creating a speckled pattern.
+*   **Toppings:** A single, round pat of pale yellow butter sits on the top pancake, beginning to melt and pool slightly.
+*   **Accompaniments:** To the left of the pancake stack is a small, white ceramic bowl containing a dark, glossy sauce, which is most likely blueberry syrup or a similar fruit compote.
+*   **Presentation:** The entire dish is presented on a plain white plate, which contrasts with the warm colors of the food.<|im_end|>

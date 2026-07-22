@@ -1,4 +1,4 @@
-Based on the visual elements in the image, the dish shown is a **Grilled Cheese Sandwich with French Fries**.
+Based on the visual information in the image, the dish shown is a **Grilled Cheese Sandwich with French Fries**.
 
 Here is a breakdown of the components:
 

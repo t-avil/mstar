@@ -1,3 +1,3 @@
-Of course, here is a caption for the food image:
+Of course. Based on the food in the image, here is a caption:
 
-A beautifully plated dish featuring a seared steak topped with a creamy sauce, served with a side of vibrant green beans, a dollop of whipped potatoes, and a fresh strawberry garnish.<|im_end|>
+A beautifully plated dish featuring a piece of seared meat, likely duck or steak, served with a creamy sauce, a vibrant pink beet puree, and a side of green beans.<|im_end|>

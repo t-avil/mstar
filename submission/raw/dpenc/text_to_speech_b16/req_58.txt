@@ -4,14 +4,13 @@ CRISPR (Clustered Regularly Interspaced Short Palindromic Repeats) is a revoluti
 
 1. **Natural Origin in Bacteria**:
    - Bacteria use CRISPR sequences as part of an adaptive immune system.
-   - When a virus infects a bacterium, the bacterium captures a small piece of the viral DNA and inserts it into its own genome within CRISPR arrays.
-   - These sequences act as a "memory" of past infections.
+   - When a virus infects a bacterium, the bacterium captures a small piece of the viral DNA and inserts it into its own genome as a "spacer" between CRISPR repeats.
+   - If the same virus attacks again, the bacterium uses the stored viral DNA to recognize and destroy the invader.
 
 2. **CRISPR-Cas9 System**:
-   - The most widely used CRISPR tool is **CRISPR-Cas9**, where:
-     - **CRISPR** refers to the DNA sequences that store the viral DNA "memories."
-     - **Cas9** is an enzyme that acts like molecular scissors, cutting DNA at specific locations.
+   - The most widely used CRISPR tool is **CRISPR-Cas9**, which consists of two key components:
+     - **Guide RNA (gRNA)**: A synthetic RNA molecule designed to match the DNA sequence of the target gene.
+     - **Cas9 Enzyme**: A molecular "scissors" that cuts DNA at the location specified by the gRNA.
 
-3. **How Scientists Use It**:
-   - Scientists design a **guide RNA (gRNA)** that matches the DNA sequence they want to edit.
-   - The gRNA directs the Cas9 enzyme
+3. **Gene Editing Process**:
+   -

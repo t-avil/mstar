@@ -1,14 +1,11 @@
-The human immune system is a complex network of cells, tissues, and organs that work together to defend the body against harmful pathogens such as bacteria, viruses, fungi, and parasites, as well as abnormal cells like cancer. It functions through two main branches: the **innate immune system** (rapid, non-specific response) and the **adaptive immune system** (slower, highly specific response).
-
-Here’s a breakdown of how it works:
+The human immune system is a complex network of cells, tissues, and organs that work together to defend the body against harmful pathogens such as bacteria, viruses, fungi, and parasites, as well as abnormal cells like cancer. It can be broadly divided into two main parts: the **innate immune system** and the **adaptive immune system**.
 
 ### 1. **Innate Immune System (First Line of Defense)**
-This is the body’s immediate, non-specific response to invaders.
+This is the body’s immediate, non-specific response to pathogens. It acts within minutes to hours of infection and includes:
 
-- **Physical Barriers**: Skin and mucous membranes (in the nose, mouth, lungs, and gut) act as the first line of defense by blocking pathogens.
-- **Cellular Defenses**:
-  - **Phagocytes** (like macrophages and neutrophils) engulf and destroy pathogens.
-  - **Natural Killer (NK) Cells** detect and kill infected or cancerous cells.
-- **Chemical Defenses**:
-  - **Inflammatory Response**: When tissues are damaged or infected, blood vessels dilate, allowing immune cells and proteins to reach the site. This causes redness, heat, swelling, and pain.
-  - **Complement
+- **Physical Barriers**: Skin and mucous membranes (in the nose, mouth, lungs, and gut) prevent pathogens from entering the body.
+- **Secretions**: Saliva, tears, and mucus contain enzymes (like lysozyme) and antibodies (like IgA) that can destroy or trap microbes.
+- **Phagocytes**: Cells like **neutrophils** and **macrophages** engulf and digest pathogens.
+- **Natural Killer (NK) Cells**: Destroy infected or cancerous cells.
+- **Inflammatory Response**: When tissues are damaged or infected, blood vessels dilate, allowing immune cells to reach the site. This causes redness, heat, swelling, and pain.
+-

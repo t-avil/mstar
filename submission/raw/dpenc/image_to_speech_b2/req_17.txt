@@ -1,12 +1,5 @@
-Based on the visual evidence in the image, the dish is **raw oysters on the half shell**.
+Based on the visual evidence in the image, here is an identification of the cuisine and dish:
 
-Here is a breakdown of the identification:
+*   **Dish:** The dish is **raw oysters on the half shell**. This is a classic appetizer where the oysters are served in their natural, open shells, typically on a bed of crushed ice to keep them cold and fresh. They are garnished with lemon wedges and a sprig of parsley.
 
-*   **The Dish:** The main components are oysters served in their shells, which is known as being "on the half shell." They are presented on a bed of crushed ice to keep them cold and fresh, a standard practice for serving raw oysters. The oysters appear plump and glistening, indicating they are raw and ready to eat.
-
-*   **The Cuisine:** This is a classic dish in **seafood cuisine**. It is particularly popular in:
-    *   **French cuisine:** Known as *huîtres*.
-    *   **American cuisine:** Especially in coastal regions like the East Coast and Gulf Coast.
-    *   **Japanese cuisine:** Known as *hotate* or *kaki*, often served raw or lightly grilled.
-
-The dish is typically served with a garnish of lemon wedges for squeezing over the oysters to add acidity and a touch of citrus flavor. A small sprig of parsley is also used as a garnish in the center of the plate.<|im_end|>
+*   **Cuisine:** This dish is a staple in **French cuisine**. It is famously known as **"Huîtres"** in French. It is also a very popular dish in other coastal cuisines, including **American (especially New England and Gulf Coast)**, **British**, and **Japanese**.<|im_end|>

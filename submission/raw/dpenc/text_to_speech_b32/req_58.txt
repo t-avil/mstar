@@ -1,14 +1,17 @@
-CRISPR (Clustered Regularly Interspaced Short Palindromic Repeats) is a revolutionary gene-editing technology that allows scientists to precisely modify DNA within living organisms. It is derived from a natural defense mechanism found in bacteria, which they use to protect themselves against viruses.
+CRISPR (Clustered Regularly Interspaced Short Palindromic Repeats) is a revolutionary gene-editing technology that allows scientists to precisely modify DNA within living organisms. It is derived from a natural defense mechanism found in bacteria, which use CRISPR sequences and associated proteins (like Cas9) to recognize and cut the DNA of invading viruses.
 
 ### How CRISPR Works:
 
-1. **Natural Origin in Bacteria**:
-   - Bacteria use CRISPR sequences as part of an adaptive immune system.
-   - When a virus infects a bacterium, the bacterium captures a small piece of the viral DNA and inserts it into its own genome as a "spacer" within the CRISPR array.
-   - If the same virus attacks again, the bacterium transcribes the CRISPR array into RNA, which guides a protein called Cas9 to recognize and cut the matching viral DNA, disabling the virus.
+1. **Targeting the DNA:**
+   - Scientists design a short RNA sequence called **guide RNA (gRNA)** that matches the specific DNA sequence they want to edit.
+   - The gRNA is combined with a Cas protein (most commonly **Cas9**) to form a complex.
 
-2. **Adaptation for Gene Editing**:
-   - Scientists have repurposed this system to edit genes in any organism, including humans.
-   - The key components are:
-     - **Guide RNA (gRNA)**: A synthetic RNA molecule designed to match the DNA sequence of the target gene.
-     - **Cas9 Protein**: An enzyme that cuts DNA at the location specified by the gRNA
+2. **Finding the Target:**
+   - The CRISPR-Cas9 complex scans the genome until it finds a DNA sequence that matches the gRNA.
+   - The matching sequence must also be adjacent to a short DNA sequence called a **PAM (Protospacer Adjacent Motif)**, which is required for Cas9 to bind.
+
+3. **Cutting the DNA:**
+   - Once the correct sequence is found, Cas9 cuts both strands of the DNA double helix at the target site.
+
+4. **DNA Repair and Editing:**
+   - The cell

@@ -1,14 +1,26 @@
 The stock market is a complex system where shares of publicly traded companies are issued, bought, and sold. Here's a simplified explanation of how it works:
 
 ### 1. **What is a Stock?**
-A stock represents ownership in a company. When you buy a share of stock, you own a small piece of that company. The more shares you own, the larger your ownership stake.
+A stock represents ownership in a company. When you buy a share of stock, you become a partial owner (a shareholder) of that company. The more shares you own, the larger your ownership stake.
 
-### 2. **Primary vs. Secondary Markets**
-- **Primary Market**: This is where companies issue new shares to raise capital. The most common way is through an **Initial Public Offering (IPO)**, where a private company sells its shares to the public for the first time.
-- **Secondary Market**: After the IPO, shares are traded among investors. This is where most stock trading happens. Examples include the **New York Stock Exchange (NYSE)** and **Nasdaq**.
+### 2. **Why Do Companies Issue Stocks?**
+Companies issue stocks to raise capital (money) for various purposes, such as:
+- Expanding operations
+- Developing new products
+- Paying off debt
+- Funding research and development
 
-### 3. **How Trading Works**
-- **Buyers and Sellers**: Investors buy and sell stocks through brokers (individuals or firms that execute trades on their behalf).
-- **Stock Exchanges**: These are platforms where buyers and sellers meet. Prices are determined by supply and demand.
-- **Market Orders vs. Limit Orders**:
-  - **Market Order**: Buy or sell immediately at
+In exchange for money, investors receive shares in the company.
+
+### 3. **Stock Exchanges**
+Stocks are traded on organized marketplaces called **stock exchanges**. The most well-known include:
+- **New York Stock Exchange (NYSE)**
+- **Nasdaq**
+- **London Stock Exchange (LSE)**
+- **Tokyo Stock Exchange (TSE)**
+
+These exchanges provide a regulated environment where buyers and sellers can trade stocks efficiently.
+
+### 4. **How Are Stock Prices Determined?**
+Stock prices are determined by **supply and demand**:
+- If many people want to buy

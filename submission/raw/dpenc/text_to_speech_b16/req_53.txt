@@ -10,7 +10,7 @@ Inflation refers to the general increase in prices of goods and services over ti
 2. **Cost-Push Inflation**:
    - Happens when the costs of production (such as wages, raw materials, or energy) increase.
    - Businesses pass these higher costs onto consumers in the form of higher prices.
-   - Example: A sudden spike in oil prices increases transportation and manufacturing costs, leading to higher prices across many products.
+   - Example: A sudden spike in oil prices increases transportation and manufacturing costs, leading to higher prices for many products.
 
 3. **Built-In Inflation (Wage-Price Spiral)**:
    - A situation where workers demand higher wages to keep up with rising living costs.

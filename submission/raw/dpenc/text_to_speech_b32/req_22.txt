@@ -1,12 +1,12 @@
-GPS (Global Positioning System) is a satellite-based navigation system that provides location and time information anywhere on Earth. It works by using a network of satellites orbiting the Earth, ground control stations, and GPS receivers. Here's a step-by-step explanation of how it works:
+GPS (Global Positioning System) is a satellite-based navigation system that provides location and time information anywhere on Earth. It works by using a network of satellites orbiting the Earth to determine the precise position of a GPS receiver. Here's a step-by-step explanation of how it works:
 
-1. **Satellite Network**: The GPS system consists of at least 24 operational satellites (plus several spares) orbiting the Earth at an altitude of about 20,200 kilometers. These satellites are arranged in six orbital planes, ensuring that at least four satellites are visible from any point on Earth at any time.
+1. **Satellite Network**: The GPS system consists of at least 24 operational satellites (plus spares) orbiting the Earth at an altitude of about 20,200 kilometers (12,550 miles). These satellites are arranged in six orbital planes, ensuring that at least four satellites are visible from any point on Earth at any time.
 
 2. **Signal Transmission**: Each GPS satellite continuously transmits radio signals that include:
    - The satellite's precise location (ephemeris data).
    - The exact time the signal was sent (using highly accurate atomic clocks onboard the satellites).
-   - Information about the health and status of the satellite.
 
-3. **Receiver Operation**: A GPS receiver (such as in your smartphone, car, or handheld device) picks up signals from multiple satellites. To determine its position, the receiver needs signals from at least four satellites.
+3. **Receiver Operation**: A GPS receiver (such as in your smartphone, car, or handheld device) picks up signals from multiple satellites. To calculate its position, the receiver needs signals from at least four satellites.
 
-4. **Trilateration**: The receiver calculates its distance from each satellite by measuring how long it takes for the signal to travel from
+4. **Trilateration**: The receiver uses a process called trilateration to determine its location:
+   - **Distance Calculation**: The receiver calculates the

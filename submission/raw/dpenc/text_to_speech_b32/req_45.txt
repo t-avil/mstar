@@ -2,7 +2,7 @@ Natural selection is a fundamental mechanism of evolution, first articulated by 
 
 Here’s a breakdown of the key components of natural selection:
 
-1. **Variation**: Within any population, individuals exhibit variation in traits—such as size, color, speed, or resistance to disease. This variation arises from genetic differences due to mutations, gene recombination during sexual reproduction, and other sources.
+1. **Variation**: Within any population, individuals exhibit variation in traits—such as size, color, speed, or resistance to disease. This variation arises from genetic differences due to mutations, genetic recombination during sexual reproduction, and other sources.
 
 2. **Inheritance**: Many of these traits are heritable, meaning they can be passed from parents to offspring through genes.
 

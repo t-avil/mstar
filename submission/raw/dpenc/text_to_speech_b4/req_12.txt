@@ -2,12 +2,13 @@ Certainly! The concept of **supply and demand** is a fundamental principle in ec
 
 ### 1. **Demand**
 - **Definition**: Demand refers to the quantity of a good or service that consumers are willing and able to purchase at various prices during a given period.
-- **Law of Demand**: There is an inverse relationship between price and quantity demanded. As the price of a good increases, the quantity demanded decreases, and vice versa (assuming all other factors remain constant).
-- **Demand Curve**: This relationship is typically represented graphically as a downward-sloping curve, where the price is on the vertical axis and quantity demanded is on the horizontal axis.
+- **Law of Demand**: There is an inverse relationship between price and quantity demanded. As the price of a good increases, the quantity demanded decreases (and vice versa), assuming all other factors remain constant.
+- **Example**: If the price of apples drops, more people will likely buy them. If the price rises, fewer people will buy them.
 
 ### 2. **Supply**
-- **Definition**: Supply refers to the quantity of a good or service that producers are willing and able to sell at various prices during a given period.
-- **Law of Supply**: There is a direct relationship between price and quantity supplied. As the price of a good increases, the quantity supplied also increases, and vice versa.
-- **Supply Curve**: This relationship is shown as an upward-sloping curve, with price on the vertical axis and quantity supplied on the horizontal axis.
+- **Definition**: Supply refers to the quantity of a good or service that producers are willing and able to offer for sale at various prices.
+- **Law of Supply**: There is a direct relationship between price and quantity supplied. As the price of a good increases, producers are more willing to supply more of it (and vice versa).
+- **Example**: If the price of smartphones increases, manufacturers may produce and sell more units to take advantage of higher profits.
 
-### 3. **Market
+### 3. **Market Equilibrium**
+- **Definition**: The point where the quantity

@@ -2,14 +2,23 @@ The terms **CV** (Curriculum Vitae) and **resume** are often used interchangeabl
 
 ### 1. **Length**
 - **CV**: Typically **longer**, often **2+ pages** (can be longer depending on experience).
-- **Resume**: Usually **shorter**, ideally **1 page** (2 pages max for experienced professionals).
+- **Resume**: Usually **shorter**, ideally **1 page** for early-career professionals, up to **2 pages** for experienced candidates.
 
-### 2. **Purpose & Usage**
-- **CV**: Commonly used in **academic, research, medical, or international contexts** (especially in Europe, Asia, Africa, and Australia). It's standard for job applications in academia, teaching, or research roles.
-- **Resume**: Preferred in **industry, business, and corporate environments**, especially in the **United States and Canada**.
+### 2. **Purpose**
+- **CV**: A **comprehensive document** that details your **entire academic and professional history**. It's used to showcase your **scholarly achievements** and **research experience**.
+- **Resume**: A **concise summary** of your **most relevant skills and experiences** tailored to a specific job.
 
 ### 3. **Content**
-- **CV**:
-  - Includes **education**, **research**, **publications**, **presentations**, **teaching experience**, **awards**, **grants**, **conferences**, and **professional affiliations**.
-  - More **comprehensive** and **detailed**.
-  - Often includes **personal information** like date of birth, nationality
+- **CV** includes:
+  - Full work history
+  - Education (including thesis/dissertation topics)
+  - Publications
+  - Research projects
+  - Grants and fellowships
+  - Teaching experience
+  - Conferences and presentations
+  - Awards and honors
+  - Professional memberships
+  - Languages and other relevant skills
+
+- **Resume

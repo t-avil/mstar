@@ -1,10 +1,7 @@
 Based on the visual evidence in the image, the food dish shown is a slice of **pie**.
 
-Here are the specific details that lead to this conclusion:
+Here are the details that lead to this conclusion:
 
-*   **Shape and Form:** The food is a single, triangular slice, which is the typical way a round pie is served.
-*   **Crust:** It has a visible crust along the bottom and one side. The crust appears to be made of a crumbly, pressed dough, characteristic of a **crumb crust** (like a graham cracker crust) rather than a rolled pastry crust.
-*   **Filling:** The filling is a pale, yellowish color and has a dense, slightly grainy texture. This appearance is very similar to a **cheesecake** filling.
-*   **Topping:** The top of the slice is dark and appears to be slightly browned or caramelized, which could be a topping like a fruit compote, a chocolate layer, or simply the result of baking.
-
-Therefore, the dish is most likely a **crumb-crust cheesecake**.<|im_end|>
+*   **Shape and Presentation:** The food is a single, wedge-shaped slice served on a plate, which is the typical way pies are cut and served.
+*   **Crust:** The bottom and sides of the slice have a golden-brown, baked crust, characteristic of a pie crust.
+*   **Filling:** The filling appears to be a light, creamy, and slightly crumbly texture, which is common for custard pies (like a lemon or key lime pie) or certain types of fruit pies (like apple or peach).<|im_end|>

@@ -1,11 +1,11 @@
-A **primary source** is an original, firsthand account or evidence of an event, topic, or time period. It is created at the time of the event by someone who directly experienced or witnessed it. Primary sources provide raw, uninterpreted information and are often used by researchers to analyze and understand historical or scientific events.
+A **primary source** is an original, firsthand account or evidence of an event, topic, or time period. It is created at the time of the event by someone who directly experienced or observed it. Primary sources provide raw, uninterpreted data and are often used by researchers to analyze and draw conclusions.
 
 **Examples of primary sources include:**
 - Diaries, letters, or personal journals
 - Photographs, videos, or audio recordings
-- Original research articles or experimental data
+- Original research articles or scientific experiments
 - Government documents or legal records
-- Artifacts, tools, or clothing from a specific time period
+- Artifacts, tools, or clothing from a historical period
 - Interviews or oral histories
 
 A **secondary source**, on the other hand, interprets, analyzes, or summarizes primary sources. It is created after the event by someone who did not experience it firsthand. Secondary sources often provide context, evaluation, or synthesis of information from multiple primary sources.
@@ -21,3 +21,4 @@ A **secondary source**, on the other hand, interprets, analyzes, or summarizes p
 - **Primary sources** are direct evidence or firsthand accounts.
 - **Secondary sources** are interpretations or analyses of primary sources.
 
+In research, both

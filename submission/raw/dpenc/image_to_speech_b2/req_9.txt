@@ -1,3 +1,3 @@
-Of course. Based on the visual details in the image, here is a caption for the dish:
+Of course, here is a caption for the image:
 
-A beautifully presented ceviche served in a rustic, dark green bowl. The dish features a creamy white base, likely made with coconut milk or a similar ingredient, topped with a colorful mix of finely diced vegetables, including vibrant green peas and purple onions. It is garnished with fresh microgreens and a delicate yellow flower petal. A large, golden, crispy plantain chip rests on the side, ready to be dipped into the flavorful mixture. The setting, with a pitcher of red sangria in the background, suggests a relaxed and enjoyable dining experience.<|im_end|>
+A beautifully presented dish of ceviche served in a rustic, dark green bowl. The dish features chunks of white fish in a creamy, milky sauce, garnished with vibrant green microgreens, purple onion slivers, and a bright yellow edible flower. A golden, crispy plantain chip rests on the side, ready to be dipped. The setting appears to be a restaurant, with a pitcher of red sangria and a glass in the background, suggesting a relaxed and enjoyable dining experience.<|im_end|>

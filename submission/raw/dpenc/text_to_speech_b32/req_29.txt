@@ -1,20 +1,13 @@
-The terms "democracy" and "republic" are often used interchangeably, but they refer to different aspects of government systems and can overlap in practice. Here's a breakdown of the key differences:
+The terms "democracy" and "republic" are often used interchangeably, but they refer to different concepts—**democracy** describes a system of government based on the will of the people, while **republic** refers to a specific form of government where the head of state is not a hereditary monarch. Here's a breakdown of the key differences:
 
-### 1. **Definition and Core Principles**
+### 1. **Definition**
+- **Democracy**: A system of government where power is held by the people, either directly or through elected representatives. The core principle is popular sovereignty—rule by the people.
+- **Republic**: A form of government where the head of state is an elected or appointed official (not a monarch), and the country is considered a "public matter" (from the Latin *res publica*), not a private domain of a ruler.
 
-- **Democracy**:
-  - A system of government where the authority of the government is created and sustained by the people, typically through voting.
-  - The term comes from the Greek *dēmokratia*, meaning "rule by the people."
-  - In a democracy, the people have the power to make decisions, either directly or through elected representatives.
+### 2. **Focus**
+- **Democracy** emphasizes **how decisions are made**—through voting, participation, and majority rule.
+- **Republic** emphasizes **the structure of government**—specifically, the absence of a monarchy and the presence of elected leaders.
 
-- **Republic**:
-  - A form of government where the country is considered a "public matter" (res publica in Latin), not the private property of a ruler.
-  - The head of state is not a monarch and is usually elected (e.g., a president), rather than inherited.
-  - Power is derived from the people, but the system may or may not involve direct voting.
-
-### 2. **Key Differences**
-
-| Feature | Democracy | Republic |
-|--------|-----------|---------|
-| **Focus** | Power of the people | Form of government (non-monarchical) |
-| **Head of State** | Can be
+### 3. **Can a country be both?**
+Yes. Most modern democracies are also republics. For example:
+- The **United States**

@@ -2,7 +2,8 @@ Based on the visual characteristics of the food in the image, this dish is **Xia
 
 Here are the key features that identify it:
 
-*   **Steamed Dumplings:** They are small, round dumplings that have been cooked by steaming, as indicated by the condensation on the bamboo steamer basket.
-*   **Pleated Top:** The dumplings have a distinctive pleated top, which is pinched to seal the filling inside.
-*   **Thin Skin:** The skin appears thin and translucent, which is characteristic of the delicate dough used for Xiaolongbao.
-*   **Soup Filling:** The primary feature of Xiaolongbao is the hot, savory soup inside. The pleating helps to create a sealed pocket that traps the soup and meat filling during cooking.<|im_end|>
+*   **Pleated, Dome-Shaped Wrapper:** The dumplings have a distinctive pleated top, which is pinched to seal the filling inside. This is a hallmark of Xiaolongbao.
+*   **Steamed Preparation:** They are served in a bamboo steamer basket, which is the traditional method for cooking them.
+*   **Delicate Dough:** The wrapper appears thin and translucent, which is necessary to contain the hot soup filling without breaking during steaming.
+
+Xiaolongbao is a famous type of soup dumpling originating from the Jiangnan region of China, particularly associated with the city of Wuxi. The name "Xiaolongbao" literally translates to "small dragon bun," with the "dragon" referring to the pleats on the top of the dumpling.<|im_end|>

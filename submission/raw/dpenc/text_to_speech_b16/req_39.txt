@@ -8,12 +8,14 @@ Great question! The terms *hypothesis* and *theory* are often used interchangeab
 - Example: "If plants are exposed to more sunlight, then they will grow faster."
 
 ### Theory:
-- A **well-substantiated explanation** of some aspect of the natural world that is based on a body of evidence.
-- It has been **extensively tested and supported** by multiple lines of evidence.
-- It is **broad in scope** and can explain many related phenomena.
-- It is **not just a guess**—it is a framework that has withstood rigorous testing.
-- Example: The **Theory of Evolution** explains how species change over time through natural selection, supported by fossil records, genetics, and observations.
+- A **well-substantiated explanation** of some aspect of the natural world that is supported by a large body of evidence.
+- It is **broad in scope** and explains a wide range of phenomena.
+- It has been **tested and confirmed repeatedly** through observation and experimentation.
+- A scientific theory is **not just a guess**—it is a robust framework that explains *why* things happen.
+- Example: The **Theory of Evolution** explains how species change over time through natural selection.
 
 ### Key Difference:
-- A **hypothesis** is a starting point—a "what if?" question.
-- A **theory** is a well-established explanation that has survived
+- A **hypothesis** is a starting point—a possible explanation that needs testing.
+- A **theory** is the result of extensive testing and validation of many hypotheses.
+
+### Anal

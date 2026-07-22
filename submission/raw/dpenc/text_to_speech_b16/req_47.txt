@@ -3,7 +3,7 @@ A combustion engine, also known as an internal combustion engine (ICE), is a mac
 ### 1. **Fuel and Air Intake**
 - The engine draws in a mixture of air and fuel (typically gasoline or diesel) into the combustion chamber.
 - In gasoline engines, this mixture is created in the intake manifold or directly in the cylinder.
-- In diesel engines, only air is drawn in, and fuel is injected later.
+- In diesel engines, only air is drawn in during the intake stroke, and fuel is injected later.
 
 ### 2. **Compression**
 - The piston moves upward in the cylinder, compressing the air-fuel mixture (in gasoline engines) or just air (in diesel engines).
@@ -11,8 +11,8 @@ A combustion engine, also known as an internal combustion engine (ICE), is a mac
 
 ### 3. **Ignition**
 - **Gasoline Engines**: A spark plug ignites the compressed air-fuel mixture, causing a controlled explosion.
-- **Diesel Engines**: The high temperature from compression ignites the fuel when it's injected into the cylinder (no spark plug needed).
+- **Diesel Engines**: The high temperature from compression ignites the fuel when it is injected into the cylinder (no spark plug needed).
 
-### 4. **Power Stroke (Combustion)**
+### 4. **Power Stroke**
 - The explosion forces the piston downward, turning the crankshaft.
-- This is the
+- This is the only

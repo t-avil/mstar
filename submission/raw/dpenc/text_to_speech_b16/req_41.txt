@@ -1,4 +1,4 @@
-The mitochondrion (plural: mitochondria) is often referred to as the "powerhouse" of the cell because its primary role is to generate adenosine triphosphate (ATP), the main energy currency of the cell. This process occurs through cellular respiration, which involves several key steps:
+The mitochondrion is often referred to as the "powerhouse" of the cell because its primary role is to generate adenosine triphosphate (ATP), the main energy currency of the cell. This process occurs through cellular respiration, which involves several key steps:
 
 1. **Glycolysis**: Although this process occurs in the cytoplasm, it produces pyruvate, which is transported into the mitochondrion for further processing.
 
@@ -6,4 +6,6 @@ The mitochondrion (plural: mitochondria) is often referred to as the "powerhouse
 
 3. **Citric Acid Cycle (Krebs Cycle)**: This cycle takes place in the mitochondrial matrix and generates high-energy electron carriers (NADH and FADH₂) and a small amount of ATP.
 
-4. **Oxidative Phosphorylation**: This occurs on the inner mitochondrial membrane and includes the electron transport chain and chemiosmosis. Electrons from NADH and FADH₂ are passed through a series of protein complexes, ultimately reducing oxygen to water. The energy released during this process pumps protons across the
+4. **Electron Transport Chain (ETC) and Oxidative Phosphorylation**: Located in the inner mitochondrial membrane, the ETC uses electrons from NADH and FADH₂ to create a proton gradient across the membrane. This gradient drives ATP synthase to produce large amounts of ATP.
+
+In addition to energy production, mitochondria are involved in

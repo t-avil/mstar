@@ -1,17 +1,11 @@
-Black holes form primarily through the **gravitational collapse of massive stars** at the end of their life cycles. Here's a step-by-step explanation of how this happens:
+Black holes form primarily through the gravitational collapse of massive stars. Here's a step-by-step explanation of how this process typically occurs:
 
-1. **Massive Star Lifecycle**:
-   - Stars much more massive than our Sun (typically more than about **8 times the mass of the Sun**) burn through their nuclear fuel (hydrogen and helium) over millions of years.
-   - As the star ages, it fuses heavier elements in its core, eventually forming an iron core.
+1. **Massive Star Lifecycle**: Black holes usually begin as stars with at least 20–25 times the mass of our Sun. These stars burn through their nuclear fuel (hydrogen and helium) much faster than smaller stars.
 
-2. **Core Collapse**:
-   - Iron cannot undergo fusion to produce energy, so it no longer supports the star against gravity.
-   - Without outward pressure from fusion, the core collapses under its own gravity in a fraction of a second.
+2. **End of Nuclear Fusion**: When the star exhausts its nuclear fuel, it can no longer produce the outward pressure needed to counteract the inward pull of gravity.
 
-3. **Supernova Explosion**:
-   - The outer layers of the star rebound off the collapsing core and explode outward in a **supernova**.
-   - This explosion can outshine entire galaxies for a short time.
+3. **Core Collapse**: Without this balance, the core of the star collapses under its own gravity. For very massive stars, this collapse is so intense that it overcomes all known forces, including neutron degeneracy pressure.
 
-4. **Formation of a Black Hole**:
-   - If the remaining core is more than about **3 times the mass of the Sun**, no known force (neutron degeneracy pressure or any other) can stop the collapse.
-   - The core collapses into an infinitely dense
+4. **Supernova Explosion**: The outer layers of the star are violently expelled in a supernova explosion, while the core continues to collapse inward.
+
+5. **Formation of a Black Hole**: If the remaining core is more than about 2–3 times the mass of the Sun (the Tolman–Oppenheimer–Volkoff limit), no known force can stop the collapse. The core collapses into a singularity—a point of infinite density—and forms an event horizon around it, creating

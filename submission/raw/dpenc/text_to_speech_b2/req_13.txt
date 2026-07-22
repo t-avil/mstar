@@ -2,10 +2,8 @@ Quantum entanglement is a phenomenon in quantum physics where two or more partic
 
 Here are some key points about quantum entanglement:
 
-1. **Linked States**: When particles are entangled, measuring the state of one (such as its spin, polarization, or position) instantly determines the state of the other(s), even if they are light-years apart. This happens faster than the speed of light, which initially led Einstein to call it "spooky action at a distance."
+1. **Linked States**: When particles are entangled, measuring the state of one (such as its spin, polarization, or momentum) instantly determines the state of the other, even if they are light-years apart. This happens faster than the speed of light, which initially raised concerns about violating Einstein's theory of relativity.
 
-2. **Superposition**: Entangled particles exist in a combined quantum state that is a superposition of multiple possibilities until measured. For example, two entangled electrons might be in a state where one is spin-up and the other is spin-down—but until measured, both possibilities coexist.
+2. **Einstein's "Spooky Action at a Distance"**: Albert Einstein famously referred to entanglement as "spooky action at a distance" because it seemed to contradict classical intuitions about locality and causality. However, experiments have confirmed that entanglement is real and does not allow for faster-than-light communication.
 
-3. **Non-locality**: Entanglement demonstrates that quantum mechanics is non-local, meaning that physical effects can be correlated across space without any direct interaction. This challenges classical intuitions about how information and influence travel.
-
-4. **No Faster-Than-Light
+3. **No Hidden Variables**: Experiments based on Bell's theorem have shown that the correlations between entangled particles cannot be explained by any local hidden variable theory. This supports the idea that quantum mechanics is fundamentally probabilistic and non-local

@@ -1,26 +1,18 @@
-Dehydration occurs when your body loses more fluid than it takes in, leading to an imbalance in essential bodily functions. The symptoms of dehydration can vary depending on its severity, ranging from mild to severe. Here are the common symptoms:
+Dehydration occurs when your body loses more fluids than it takes in, leading to an imbalance in essential electrolytes and fluids. The symptoms of dehydration can vary depending on its severity, ranging from mild to severe. Here are the common symptoms:
 
-**Mild to Moderate Dehydration:**
-- Thirst
-- Dry mouth and dry skin
-- Decreased urine output or dark yellow urine
-- Fatigue or weakness
-- Headache
-- Dizziness or lightheadedness
-- Muscle cramps
-- Dry eyes or reduced tear production
-- Constipation
+### Mild to Moderate Dehydration:
+- **Thirst** – One of the earliest and most common signs.
+- **Dry mouth and dry skin** – Reduced saliva production and decreased skin elasticity.
+- **Decreased urine output** – Urine becomes darker in color (amber or yellow) and is produced less frequently.
+- **Fatigue or weakness** – Lack of fluids can reduce energy levels.
+- **Headache** – Dehydration can cause or worsen headaches.
+- **Dizziness or lightheadedness** – Especially when standing up quickly.
+- **Dry eyes** – Reduced tear production.
+- **Muscle cramps** – Often due to electrolyte imbalance.
 
-**Severe Dehydration:**
-- Very dry skin and mucous membranes
-- Rapid heartbeat and low blood pressure
-- Rapid, shallow breathing
-- Sunken eyes
-- Low urine output or no urine for several hours
-- Confusion or irritability
-- Fainting or loss of consciousness
-- In infants: sunken soft spot (fontanelle), no tears when crying, dry mouth, and fewer wet diapers
-
-**Special Considerations:**
-- **Infants and young children:** May show signs like dry mouth, crying without tears, sunken eyes, and fewer wet diapers.
-- **Elderly individuals:** May not feel thirsty even when dehydrated, so watch for confusion, d
+### Severe Dehydration:
+- **Very dark or little urine** – Urine may be almost absent.
+- **Rapid heartbeat and breathing** – The body tries to compensate for low blood volume.
+- **Low blood pressure** – Can lead to shock in extreme cases.
+- **Sunken eyes** – A visible sign of fluid loss.
+-

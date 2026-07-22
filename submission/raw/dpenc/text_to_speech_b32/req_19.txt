@@ -5,8 +5,8 @@ Dehydration occurs when your body loses more fluid than it takes in, disrupting 
 - Dry mouth and dry skin
 - Decreased urine output or dark yellow urine
 - Fatigue or weakness
-- Headache
 - Dizziness or lightheadedness
+- Headache
 - Dry eyes or reduced tear production
 - Muscle cramps
 
@@ -20,9 +20,15 @@ Dehydration occurs when your body loses more fluid than it takes in, disrupting 
 - Fainting or loss of consciousness
 - In infants: sunken soft spot (fontanelle), no tears when crying, dry mouth, and fewer wet diapers
 
-**Special Considerations:**
-- **Infants and young children:** May show signs like irritability, lethargy, dry mouth, no tears when crying, and fewer wet diapers.
-- **Elderly individuals:** May not feel thirsty even when dehydrated, so watch for confusion, dizziness, or low blood pressure.
+**Infants and Young Children:**
+- No tears when crying
+- Dry mouth and lips
+- Sunken eyes or cheeks
+- No wet diapers for 3 or more hours
+- Lethargy or irritability
+- High fever
 
-**When to Seek Medical Help:**
-Seek
+**Older Adults:**
+- May not feel thirsty even when dehydrated
+- Increased confusion or disorientation
+- D

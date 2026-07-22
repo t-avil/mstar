@@ -1,9 +1,13 @@
-An airplane generates lift primarily through the shape of its wings and the movement of air over and under them. This process is explained by **Bernoulli's principle** and **Newton's third law of motion**. Here's how it works:
+An airplane generates lift primarily through the shape of its wings and the movement of air over and under them. This process is explained by the **principles of aerodynamics**, particularly **Bernoulli's principle** and **Newton's third law of motion**.
 
-1. **Airfoil Shape**: The wings of an airplane are designed with a specific shape called an **airfoil**. The top surface of the wing is curved, while the bottom is relatively flat. This shape causes air to move faster over the top of the wing than underneath.
+Here’s how it works:
 
-2. **Bernoulli's Principle**: According to this principle, as the speed of a fluid (like air) increases, its pressure decreases. Because air moves faster over the curved top surface, the pressure above the wing is lower than the pressure below it. This pressure difference creates an upward force called **lift**.
+1. **Airfoil Shape**: The wings of an airplane are designed with an **airfoil shape**—curved on the top and flatter on the bottom. This shape causes air to move faster over the top surface than the bottom.
 
-3. **Newton's Third Law**: As the wing pushes air downward (due to its angle of attack and shape), the air pushes back upward on the wing with an equal and opposite force. This is another component of lift.
+2. **Bernoulli’s Principle**: According to this principle, faster-moving air has lower pressure. So, the faster-moving air above the wing creates **lower pressure** compared to the slower-moving air below the wing. This pressure difference results in an upward force called **lift**.
 
-4. **Angle of Attack**: The angle at which the wing meets the oncoming air (angle of attack) also affects lift. Increasing the angle of attack increases lift up to a point, but
+3. **Newton’s Third Law**: As the wing pushes air downward (due to its angle of attack), the air pushes back upward on the wing. This reaction force also contributes to lift.
+
+4. **Angle of Attack**: The angle at which the wing meets the oncoming air (angle of attack) affects lift. Increasing the angle increases lift up to a point, but too much can cause airflow separation and lead to a stall.
+
+5. **

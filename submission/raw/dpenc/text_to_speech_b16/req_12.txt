@@ -2,10 +2,12 @@ Certainly! The concept of **supply and demand** is a fundamental principle in ec
 
 ### 1. **Demand**
 - **Definition**: Demand refers to the quantity of a good or service that consumers are willing and able to purchase at various prices during a given period.
-- **Law of Demand**: There is an inverse relationship between price and quantity demanded. As the price of a good increases, the quantity demanded decreases, and vice versa—assuming all other factors remain constant (ceteris paribus).
-- **Demand Curve**: This relationship is typically illustrated with a downward-sloping demand curve on a graph where price is on the vertical axis and quantity is on the horizontal axis.
+- **Law of Demand**: There is an inverse relationship between price and quantity demanded. As the price of a good increases, the quantity demanded decreases (and vice versa), assuming all other factors remain constant.
+- **Demand Curve**: This is a graphical representation of the relationship between price and quantity demanded. It typically slopes downward from left to right.
 
 ### 2. **Supply**
 - **Definition**: Supply refers to the quantity of a good or service that producers are willing and able to offer for sale at various prices during a given period.
-- **Law of Supply**: There is a direct relationship between price and quantity supplied. As the price of a good increases, the quantity supplied also increases, and vice versa.
-- **Supply Curve**: This is shown as an upward-sloping curve on a graph, with price on the vertical axis and quantity on the horizontal
+- **Law of Supply**: There is a direct relationship between price and quantity supplied. As the price of a good increases, the quantity supplied also increases (and vice versa), assuming all other factors remain constant.
+- **Supply Curve**: This is a graphical representation of the relationship between price and quantity supplied. It typically slopes upward from left to right.
+
+### 3. **Market Equilibrium**

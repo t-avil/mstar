@@ -8,7 +8,7 @@ The time complexity of **quicksort** depends on the choice of pivot and the dist
 2. **Average Case**:  
    - On average, the pivot divides the array into two parts of roughly equal size.  
    - **Time Complexity**: **O(n log n)**  
-   - This is the typical performance for random input.
+   - This is the typical performance for random input data.
 
 3. **Worst Case**:  
    - When the pivot is the smallest or largest element every time (e.g., already sorted array with poor pivot selection).  
@@ -16,8 +16,7 @@ The time complexity of **quicksort** depends on the choice of pivot and the dist
    - This happens when the partitioning is highly unbalanced.
 
 ### Summary:
-- **Best Case**: O(n log n)  
-- **Average Case**: O(n log n)  
-- **Worst Case**: O(n²)
+- **Best/Average**: **O(n log n)**  
+- **Worst**: **O(n²)**
 
-Quicksort is generally efficient in practice due to its low overhead and good cache performance, despite its worst-case quadratic time complexity.<|im_end|>
+Quicksort is generally efficient in practice due to its low constant factors and good cache performance, despite its worst-case complexity.<|im_end|>

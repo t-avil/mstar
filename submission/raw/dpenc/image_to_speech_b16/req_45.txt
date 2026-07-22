@@ -1,7 +1,9 @@
-Based on the visual information in the image, the dish shown is a breakfast plate featuring:
+Based on the visual elements in the image, the dish shown is a **waffle breakfast plate**.
 
-*   **Waffles:** The main component is a waffle, cut into quarters. It appears to be a Belgian-style waffle, characterized by its deep, square pockets. The waffle is topped with a white, shredded ingredient, which is most likely toasted coconut flakes.
+Here is a breakdown of the components visible in the image:
+
+*   **Waffles:** The main component is a waffle, which has been cut into quarters. It appears to be a Belgian-style waffle, characterized by its deep, square pockets. The waffle is topped with a white, shredded ingredient, which is most likely **coconut flakes**.
 *   **Fresh Fruit:** There is a small white bowl filled with fresh, sliced strawberries.
-*   **Butter:** A pat of butter is placed on the plate next to the strawberries.
+*   **Butter:** A small, clear plastic container holds a pat of butter, ready to be melted over the hot waffles.
 
 This combination of waffles, fresh fruit, and butter is a classic and popular breakfast or brunch dish.<|im_end|>

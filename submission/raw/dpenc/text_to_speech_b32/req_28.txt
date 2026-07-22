@@ -2,10 +2,10 @@ Vaccines work by training your immune system to recognize and fight off specific
 
 1. **Introduction of Antigens**: Vaccines contain harmless parts of the pathogen (like proteins or sugars) or a weakened or inactivated version of the whole pathogen. These components are called antigens.
 
-2. **Immune System Activation**: When you receive a vaccine, your immune system detects these antigens as foreign invaders. This triggers an immune response, similar to what would happen if you were infected with the actual disease.
+2. **Immune System Activation**: When you get vaccinated, your immune system detects these antigens as foreign invaders. This triggers an immune response, similar to what would happen if you were infected with the actual disease.
 
-3. **Production of Antibodies and Memory Cells**: Your body produces antibodies—proteins that specifically target the pathogen. At the same time, immune cells called memory B cells and T cells are created. These cells "remember" the pathogen.
+3. **Production of Immune Cells and Antibodies**: Your body produces specialized immune cells, including B cells and T cells. B cells create antibodies that can bind to the pathogen and neutralize it. T cells help destroy infected cells and coordinate the immune response.
 
-4. **Long-Term Protection**: If you're exposed to the real pathogen later, your immune system can respond quickly and effectively. The memory cells recognize the pathogen immediately and launch a strong defense, often preventing illness or reducing its severity.
+4. **Memory Cell Formation**: After the immune response, some of the immune cells become memory cells. These cells "remember" the pathogen and can respond much faster and more effectively if you're exposed to it again in the future.
 
-In essence, vaccines prepare your immune system to be ready for future infections, providing protection without the risks of getting the actual disease
+5. **Protection Against Future Infections**: If you're later exposed to the real pathogen, your immune system can quickly recognize

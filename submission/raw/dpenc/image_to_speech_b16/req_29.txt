@@ -1,3 +1,3 @@
-Of course. Based on the image provided, here is a caption for the dish:
+Of course, here is a caption for the food image:
 
-A beautifully presented prime rib roast, cooked to a perfect medium-rare with a rich, dark crust, is served on a white plate. It is accompanied by a side of golden, crispy roasted potatoes in a small cast-iron skillet and a small metal cup of creamy horseradish sauce for dipping.<|im_end|>
+A beautifully presented prime rib roast, cooked to a perfect medium-rare with a rich, dark crust, is the centerpiece of this dish. It's served on a white plate with a side of golden, crispy roasted potatoes in a small cast-iron skillet. A small metal cup holds a creamy horseradish sauce for dipping, and the plate is garnished with a slice of zucchini and a piece of carrot.<|im_end|>

@@ -1,4 +1,4 @@
-A **sonnet** is a type of poem that originated in Italy during the 13th century and became especially popular in England during the Renaissance. It is traditionally composed of **14 lines**, written in **iambic pentameter** (a rhythmic pattern of five pairs of unstressed and stressed syllables per line). Sonnets are known for their structured form and thematic depth, often exploring topics like love, beauty, time, and mortality.
+A **sonnet** is a type of poem that originated in Italy during the 13th century and became especially popular in England during the Renaissance. It is traditionally composed of **14 lines**, written in **iambic pentameter** (a rhythmic pattern of five pairs of unstressed and stressed syllables per line). Sonnets are known for their structured form and emotional depth, often exploring themes like love, beauty, time, and mortality.
 
 There are three main types of sonnets:
 
@@ -8,6 +8,6 @@ There are three main types of sonnets:
    - The octave presents a problem or theme, and the sestet offers a resolution or reflection.
 
 2. **English (or Shakespearean) Sonnet**:
-   - Consists of **three quatrains** (4-line stanzas) and a final **couplet** (2 lines).
+   - Composed of **three quatrains** (4-line stanzas) and a final **couplet** (2 lines).
    - Rhyme scheme: **ABABCDCDEFEFGG**.
    - Often explores a theme in the qu

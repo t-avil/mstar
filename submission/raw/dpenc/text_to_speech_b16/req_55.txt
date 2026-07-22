@@ -1,13 +1,11 @@
 Wi-Fi (short for Wireless Fidelity) is a technology that allows electronic devices to connect to a wireless local area network (WLAN) using radio waves. It enables devices like smartphones, laptops, tablets, and smart home appliances to access the internet and communicate with each other without physical cables. Here's a simplified explanation of how Wi-Fi works:
 
 ### 1. **Basic Components**
-- **Router**: The central device that connects to your modem (which gets internet from your ISP) and broadcasts a Wi-Fi signal.
-- **Modem**: Connects to your internet service provider (ISP) and brings the internet into your home.
-- **Wi-Fi Devices**: Devices like phones, laptops, or smart TVs that can receive and send data wirelessly.
+- **Router**: The central device that connects to your internet service provider (ISP) via a modem. It broadcasts a Wi-Fi signal and manages network traffic.
+- **Modem**: Connects your home network to the internet (usually via cable, DSL, or fiber).
+- **Wi-Fi Devices**: Devices like phones, laptops, or smart TVs that can receive and transmit Wi-Fi signals.
 
 ### 2. **Radio Waves and Frequencies**
-Wi-Fi uses **radio frequency (RF) signals** to transmit data. These signals travel through the air and are picked up by Wi-Fi receivers in devices. Wi-Fi typically operates on two frequency bands:
-- **2.4 GHz**: Offers better range but slower speeds.
-- **5 GHz**: Faster speeds but shorter range and more easily blocked by walls.
-
-Some modern routers also support **6 GHz** (Wi-Fi 6E), offering even faster speeds and less
+Wi-Fi uses **radio frequency (RF) signals** to transmit data wirelessly. These signals travel through the air and are picked up by Wi-Fi receivers in devices. Wi-Fi typically operates on two frequency bands:
+- **2.4 GHz**: Offers better range but slower speeds and more interference (from microwaves, Bluetooth, etc.).
+- **5 GHz**: Faster speeds and less interference, but shorter range and weaker penetration through walls

@@ -3,9 +3,9 @@ Net neutrality is the principle that all internet traffic should be treated equa
 Key aspects of net neutrality include:
 
 1. **No Blocking**: ISPs cannot block access to legal content, applications, services, or non-harmful devices.
-2. **No Throttling**: ISPs cannot slow down specific internet traffic based on content, application, or service.
-3. **No Paid Prioritization**: ISPs cannot create "fast lanes" for companies that pay extra, which would give them an unfair advantage over competitors.
+2. **No Throttling**: ISPs cannot slow down or degrade the performance of specific websites or services.
+3. **No Paid Prioritization**: ISPs cannot create "fast lanes" for companies that pay extra, giving them an advantage over competitors.
 
-The goal of net neutrality is to ensure an open and fair internet where innovation, free expression, and competition can thrive. It supports the idea that the internet should be a level playing field, allowing startups and small businesses to compete with larger corporations on equal footing.
+The goal of net neutrality is to ensure an open and fair internet where innovation, competition, and free expression can thrive. It supports the idea that the internet should be a level playing field, allowing startups and small businesses to compete with larger corporations on equal footing.
 
-Net neutrality has been a subject of debate and regulation in various countries. For example, in the United States, the Federal Communications Commission (FCC) has changed its stance on net neutrality multiple times, with rules being introduced and
+Net neutrality has been a subject of debate and regulation in various countries. For example, in the United States, the Federal Communications Commission (FCC) has changed its stance on net neutrality multiple times, with rules being introduced and later repealed depending on the

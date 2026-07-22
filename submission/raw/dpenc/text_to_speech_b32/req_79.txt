@@ -1,15 +1,11 @@
-The key principles of object-oriented programming (OOP) are fundamental concepts that guide the design and implementation of software using objects. These principles promote code reusability, maintainability, and scalability. The four main principles are:
+The key principles of object-oriented programming (OOP) are fundamental concepts that guide the design and implementation of software using objects. These principles promote code reusability, maintainability, and scalability. The four main principles of OOP are:
 
 1. **Encapsulation**  
-   - **Definition**: Bundling data (attributes) and methods (functions) that operate on the data into a single unit called a class.  
-   - **Purpose**: To hide internal implementation details and expose only necessary interfaces.  
-   - **Example**: A `BankAccount` class might have private variables like `balance` and public methods like `deposit()` and `withdraw()` to control access.
+   - **Definition**: Bundling data (attributes) and methods (functions) that operate on the data into a single unit called an object. It also involves restricting direct access to some of an object's components, which is typically achieved using access modifiers like private, protected, and public.
+   - **Purpose**: To hide internal implementation details and protect the integrity of the data. This allows for better control over how data is accessed and modified.
+   - **Example**: A `BankAccount` class might have a private balance variable and public methods like `deposit()` and `withdraw()` to modify it safely.
 
 2. **Abstraction**  
-   - **Definition**: Hiding complex implementation details and exposing only essential features.  
-   - **Purpose**: To reduce complexity and allow users to interact with objects without knowing how they work internally.  
-   - **Example**: A user interacts with a `Car` object using methods like `start()` and `stop()` without needing to understand the engine mechanics.
-
-3. **Inheritance**  
-   - **Definition**: A mechanism where a new class (subclass) inherits properties and behaviors from an existing class (superclass).  
-   - **Purpose**: To promote code reuse and establish
+   - **Definition**: Hiding complex implementation details and exposing only the essential features of an object. It allows users to interact with objects through a simplified interface without needing to understand the underlying complexity.
+   - **Purpose**: To reduce complexity and increase efficiency by focusing on what an object does rather than how it does it.
+   - **Example**: A user interacts with

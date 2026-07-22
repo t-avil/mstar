@@ -1,22 +1,19 @@
 The Electoral College is the system used in the United States to elect the President and Vice President. It was established by the U.S. Constitution and is designed to balance the influence of populous and less populous states in the presidential election process. Here's how it works:
 
 ### 1. **Electoral Votes Allocation**
-Each state is allocated a number of **electoral votes** equal to the total number of its U.S. Senators and Representatives in Congress:
-- **2 Senators** per state (regardless of size)
-- **Representatives** based on population (determined by the census every 10 years)
+Each state is allocated a number of electoral votes equal to the total number of its U.S. Senators and Representatives in Congress:
+- All states have 2 Senators.
+- The number of Representatives is based on population and is determined every 10 years by the U.S. Census.
+- For example:
+  - California has 53 Representatives + 2 Senators = 55 electoral votes.
+  - Wyoming has 1 Representative + 2 Senators = 3 electoral votes.
 
-For example:
-- California has 53 Representatives + 2 Senators = **55 electoral votes**
-- Wyoming has 1 Representative + 2 Senators = **3 electoral votes**
-
-The District of Columbia also gets **3 electoral votes** (per the 23rd Amendment), even though it is not a state.
+The District of Columbia also gets 3 electoral votes (under the 23rd Amendment), even though it is not a state.
 
 ### 2. **Total Electoral Votes**
-There are **538 electoral votes** in total:
+There are a total of **538 electoral votes**:
 - 435 Representatives
 - 100 Senators
 - 3 for D.C.
 
-To win the presidency, a candidate needs a **majority of electoral votes**: **270 or more**.
-
-### 
+To win the presidency, a candidate must receive a **majority of electoral votes**, which is **at least 270**

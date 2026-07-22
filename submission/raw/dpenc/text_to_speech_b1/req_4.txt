@@ -1,14 +1,13 @@
 Climate change is primarily driven by human activities that increase the concentration of greenhouse gases (GHGs) in the Earth's atmosphere. The main causes include:
 
-1. **Burning of Fossil Fuels**: The combustion of coal, oil, and natural gas for energy and transportation releases large amounts of carbon dioxide (CO₂), the most significant long-term greenhouse gas. This is the largest contributor to climate change.
+1. **Burning of Fossil Fuels**: The combustion of coal, oil, and natural gas for energy and transportation releases large amounts of carbon dioxide (CO₂), the most significant greenhouse gas contributing to global warming.
 
-2. **Deforestation and Land Use Changes**: Trees absorb CO₂ from the atmosphere. When forests are cleared for agriculture, logging, or urban development, not only is this carbon sink lost, but the stored carbon is often released back into the atmosphere through burning or decomposition.
+2. **Deforestation and Land Use Changes**: Trees absorb CO₂ from the atmosphere. When forests are cleared or burned, not only is this carbon-absorbing capacity lost, but stored carbon is also released back into the atmosphere.
 
-3. **Agriculture**: Agricultural practices contribute to climate change through:
-   - Methane (CH��) emissions from livestock digestion (enteric fermentation) and manure management.
-   - Nitrous oxide (N₂O) emissions from synthetic fertilizers and manure.
-   - Land-use changes associated with farming.
+3. **Industrial Processes**: Manufacturing, cement production, and chemical processing emit GHGs such as CO₂, methane (CH��), and nitrous oxide (N₂O), which have high global warming potentials.
 
-4. **Industrial Processes**: Manufacturing, cement production, and chemical processing release CO₂ and other GHGs directly into the atmosphere.
+4. **Agriculture**: Livestock farming produces methane through enteric fermentation (digestive processes in animals). Rice cultivation also releases methane, while synthetic fertilizers emit nitrous oxide.
 
-5. **Waste Management**: Landfills produce methane as organic waste decomposes anaerobically. Wastewater treatment also emits methane
+5. **Waste Management**: Landfills and wastewater treatment generate methane and other GHGs as organic waste decomposes anaerobically.
+
+6. **Transportation**: Cars, trucks, ships, and airplanes rely heavily on fossil fuels, contributing significantly to CO

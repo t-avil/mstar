@@ -2,7 +2,7 @@ Based on the visual characteristics of the dish, this food is most likely **maca
 
 Here are the key features that lead to this identification:
 
-*   **Pasta:** The dish is composed of small, curved pasta shells, which are commonly known as conchiglie or shell pasta.
-*   **Sauce:** The pasta is coated in a thick, creamy, and rich sauce that is a vibrant yellow-orange color, which is characteristic of a cheese sauce, typically made with cheddar or a blend of cheeses.
-*   **Texture:** The texture appears soft and creamy, suggesting it's a baked or stovetop mac and cheese dish.
-*   **Garnish:** There are small green specks sprinkled on top, which are likely a fresh herb such as chives or parsley, used to add a touch of color and freshness.<|im_end|>
+*   **Pasta Shape:** The dish is made with elbow macaroni, a short, curved pasta that is the classic choice for this recipe.
+*   **Cheese Sauce:** The macaroni is coated in a thick, creamy, and golden-yellow sauce, which is characteristic of a cheese sauce made with melted cheese (like cheddar) and a roux base.
+*   **Baked Appearance:** The top of the dish has a slightly browned and bubbly texture, suggesting it has been baked in an oven, a common method for preparing macaroni and cheese.
+*   **Garnish:** The dish is garnished with finely chopped green herbs, likely parsley, which is a common addition to enhance flavor and presentation.<|im_end|>

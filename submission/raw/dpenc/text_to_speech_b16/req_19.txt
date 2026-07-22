@@ -1,26 +1,33 @@
-Dehydration occurs when your body loses more fluid than it takes in, leading to an imbalance in essential bodily functions. The symptoms of dehydration can vary depending on its severity, ranging from mild to severe. Here are the common symptoms:
+Dehydration occurs when your body loses more fluids than it takes in, leading to an insufficient amount of water to carry out normal functions. Symptoms of dehydration can vary depending on severity but generally include:
 
 **Mild to Moderate Dehydration:**
-- Thirst
-- Dry mouth and dry skin
+- Dry mouth and lips
+- Increased thirst
 - Decreased urine output or dark yellow urine
+- Dry skin
 - Fatigue or weakness
 - Headache
 - Dizziness or lightheadedness
 - Muscle cramps
-- Dry eyes or reduced tear production
 - Constipation
 
 **Severe Dehydration:**
 - Very dry skin and mucous membranes
-- Rapid heartbeat and low blood pressure
-- Rapid, shallow breathing
 - Sunken eyes
+- Rapid heartbeat and breathing
+- Low blood pressure
 - Low urine output or no urine for several hours
-- Confusion or irritability
-- Fainting or loss of consciousness
-- In infants: sunken soft spot (fontanelle), no tears when crying, dry mouth, and fewer wet diapers
+- Irritability or confusion
+- Fainting or lethargy
+- In infants: sunken soft spot (fontanelle), no tears when crying, dry mouth
 
-**Special Considerations:**
-- **Infants and young children:** May show signs like dry mouth, crying without tears, sunken eyes, and fewer wet diapers.
-- **Elderly individuals:** May not feel thirsty even when dehydrated, so watch for confusion, d
+**Infants and Young Children:**
+- No wet diapers for 3 or more hours
+- Dry mouth and tongue
+- Sunken eyes or cheeks
+- No tears when crying
+- High fever
+- Lethargy or irritability
+
+**When to Seek Medical Help:**
+Seek immediate medical attention if you or someone else shows signs of severe dehydration, especially if accompanied

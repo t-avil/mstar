@@ -1,19 +1,21 @@
-The **trolley problem** is a famous ethical thought experiment in philosophy, particularly in the field of moral psychology and ethics. It presents a hypothetical scenario designed to explore how people make moral decisions, especially in situations involving harm and sacrifice.
+The **trolley problem** is a famous thought experiment in ethics and moral philosophy, first introduced by British philosopher Philippa Foot in 1967. It is used to explore the differences between various ethical theories, particularly **utilitarianism** and **deontological ethics**.
 
-### The Scenario:
-Imagine you are standing next to a railway track. A runaway trolley (or train) is hurtling down the track toward five people who are tied up and unable to move. You are standing next to a lever that can divert the trolley onto a different track. However, on that second track, there is one person tied up, also unable to move.
+### Scenario:
+Imagine you are standing next to a railway track. A runaway trolley (or train) is hurtling down the track toward five people who are tied up and unable to move. You are standing next to a lever that can divert the trolley onto a different track. However, on that second track, there is one person tied up as well.
 
 You have two choices:
-1. **Do nothing** — the trolley continues on its current track, killing the five people.
-2. **Pull the lever** — the trolley is diverted to the second track, killing the one person instead.
+1. **Do nothing**: The trolley continues on its current path, killing the five people.
+2. **Pull the lever**: The trolley is diverted to the second track, killing the one person instead.
 
-### The Moral Question:
-Which choice is morally right? Is it better to sacrifice one life to save five, or is it wrong to actively cause harm (pulling the lever) even if it results in fewer deaths?
+### The Question:
+**Which choice is morally right?**
 
 ---
 
-### Variations of the Trolley Problem:
-Philosophers have created variations to explore different aspects of moral reasoning:
+### Philosophical Implications:
 
-1. **The Footbridge Variant**:
-   - You are on a
+1. **Utilitarian Perspective**:
+   - Focuses on maximizing overall happiness or minimizing harm.
+   - Pulling the lever is the morally correct choice because it results in fewer deaths (1 instead of 5).
+   - The value is in the outcome: saving more lives is better.
+

@@ -1,13 +1,12 @@
-Sleep plays a crucial role in memory consolidation, which is the process by which newly acquired information is stabilized and integrated into long-term memory. Here's how sleep affects this process:
+Sleep plays a crucial role in memory consolidation, which is the process by which newly acquired information is stabilized and integrated into long-term memory. During sleep, the brain actively processes and strengthens memories formed during wakefulness, particularly through specific stages of sleep, such as **slow-wave sleep (SWS)** and **rapid eye movement (REM) sleep**.
 
-1. **Strengthening Neural Connections**: During sleep, especially during slow-wave sleep (SWS), the brain replays and strengthens neural patterns associated with newly learned information. This replay helps solidify memories by reinforcing synaptic connections.
+Here’s how sleep affects memory consolidation:
 
-2. **Synaptic Plasticity**: Sleep promotes synaptic plasticity—the brain's ability to adapt and reorganize itself. This is essential for forming and maintaining long-term memories.
+1. **Slow-Wave Sleep (SWS) and Declarative Memory**:
+   - SWS, also known as deep sleep, is especially important for consolidating **declarative memories**, which include facts, events, and information that can be consciously recalled (e.g., remembering a list of words or a historical date).
+   - During SWS, the brain replays neural activity patterns associated with learning, effectively "rehearsing" the information.
+   - This replay strengthens synaptic connections and transfers memories from the hippocampus (temporary storage) to the neocortex (long-term storage).
 
-3. **Memory Transfer**: Sleep facilitates the transfer of memories from the hippocampus (responsible for short-term memory) to the neocortex (responsible for long-term storage). This process is particularly active during deep sleep.
-
-4. **Different Sleep Stages, Different Functions**:
-   - **Slow-Wave Sleep (SWS)**: Critical for consolidating declarative memories (facts and events).
-   - **Rapid Eye Movement (REM) Sleep**: Important for consolidating procedural memories (skills and habits) and emotional memories.
-
-5. **Clearing Metabolic Waste**: During sleep, the brain's glymphatic system becomes more active, clearing out metabolic waste products that can
+2. **REM Sleep and Procedural & Emotional Memory**:
+   - REM sleep is linked to the consolidation of **procedural memories** (skills and habits, like riding a bike or playing piano) and **emotional memories**.
+   - REM sleep may help integrate new

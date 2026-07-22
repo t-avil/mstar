@@ -2,8 +2,8 @@ Based on the visual characteristics of the food in the image, this dish is **Xia
 
 Here are the key features that identify it:
 
-*   **Steamed Dumplings:** They are small, round dumplings with a thin, translucent wrapper, which is characteristic of dumplings steamed in a bamboo basket, as shown in the photo.
-*   **Pleated Top:** The dumplings have a distinct pleated top, which is a signature of the xiaolongbao preparation method.
-*   **Soup Filling:** The name "soup dumpling" comes from the fact that they are filled with a savory meat filling (usually pork) and a hot, flavorful broth. When steamed, the gelatin from the pork skin or bones melts into a liquid, creating a soup inside the dumpling.
+*   **Steamed Dumplings:** They are small, round dumplings that have been cooked by steaming, as indicated by the condensation on the dumpling skins and the bamboo steamer basket they are served in.
+*   **Pleated Top:** The dumplings have a distinctive pleated top, which is pinched to seal the filling inside.
+*   **Filling:** This is the most defining characteristic. Xiaolongbao are famous for containing a hot, savory broth (often made from pork gelatin) and minced meat (typically pork) inside the thin, delicate wrapper. When you bite into them, the broth bursts out.
 
-Xiaolongbao is a famous type of **Shanghai cuisine** and is a popular dish in Chinese dim sum.<|im_end|>
+In summary, the combination of the steamed, pleated dumpling form and the expectation of a savory broth filling is the hallmark of Xiaolongbao.<|im_end|>

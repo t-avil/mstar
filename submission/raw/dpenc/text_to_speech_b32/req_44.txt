@@ -1,11 +1,11 @@
 **Moore's Law** is an observation and prediction made by **Gordon Moore**, co-founder of Intel, in 1965. He noted that the number of transistors on a microchip doubles approximately every two years, leading to exponential growth in computing power.
 
 ### Key Points:
-- **Original Observation**: In 1965, Moore observed that the number of components (like transistors) on integrated circuits had doubled every year, and he predicted this trend would continue for at least a decade.
+- **Original Observation**: In 1965, Moore observed that the number of components (like transistors) on integrated circuits had doubled every year, and he predicted this trend would continue for at least another decade.
 - **Revised Prediction**: In 1975, Moore revised the timeline to **every two years**, which became the widely accepted version of "Moore's Law."
-- **Impact**: This trend has driven rapid advancements in computing, enabling smaller, faster, and more affordable electronic devices.
+- **Impact**: This trend has driven rapid advancements in computing, enabling smaller, faster, and more affordable electronic devices over decades.
 
 ### Important Notes:
-- **Not a Physical Law**: Moore's Law is an empirical observation, not a scientific law. It reflects a trend in technological progress rather than a fundamental physical principle.
+- **Not a Physical Law**: Moore's Law is not a scientific law but rather an empirical observation and industry trend.
 - **Challenges to Sustainability**: As transistors approach atomic scales, physical limitations (like quantum tunneling and heat dissipation) make it increasingly difficult to maintain this pace.
-- **Current Status**: While the pace has slowed, the industry has adapted with
+- **Current Status**: While the pace has slowed, the industry has adapted with innovations like **multi-core processors**, **

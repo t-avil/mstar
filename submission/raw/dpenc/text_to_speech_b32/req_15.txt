@@ -2,18 +2,18 @@ The time complexity of **quicksort** depends on the choice of pivot and the dist
 
 1. **Best Case**:  
    - **O(n log n)**  
-   - Occurs when the pivot divides the array into two nearly equal halves at each step. This leads to a balanced recursion tree of depth **log n**, with **n** work done at each level.
+   - Occurs when the pivot divides the array into two nearly equal halves at each step. This leads to a balanced recursion tree with depth log n, and each level takes O(n) time.
 
 2. **Average Case**:  
    - **O(n log n)**  
-   - On average, the pivot splits the array into roughly equal parts, even with random pivot selection. This is the typical performance in practice.
+   - On average, the pivot splits the array into roughly equal parts, leading to the same logarithmic depth and linear work per level.
 
 3. **Worst Case**:  
    - **O(n²)**  
-   - Happens when the pivot is consistently the smallest or largest element (e.g., already sorted array with first/last element as pivot). This results in unbalanced partitions, leading to **n** recursive calls with **n, n-1, n-2, ...** elements.
+   - Happens when the pivot is consistently the smallest or largest element (e.g., already sorted array with poor pivot selection). This results in unbalanced partitions, leading to n levels of recursion, each requiring O(n) work.
 
 ### Summary:
-- **Best/Average**: **O(n log n)**  
-- **Worst**: **O(n²)**
+- **Best/Average**: O(n log n)  
+- **Worst**: O(n²)
 
-Quicksort is often preferred in practice due to its **in-place sorting** and **good average-case performance**, despite its worst-case inefficiency
+Quicksort is often preferred in practice due to its excellent average-case performance and low overhead, despite its worst-case inefficiency.<|im_end|>

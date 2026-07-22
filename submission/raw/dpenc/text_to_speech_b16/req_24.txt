@@ -24,6 +24,5 @@ Where:
 ### Example:
 Suppose you invest $1,000 at an annual interest rate of 5%, compounded annually for 3 years.
 
-Using the formula:
 \[
-A = 1000 \left(1 + \frac{0.05}{1}\right)^{1 \times 3
+A = 1000 \left(1 + \frac{0.05}{1}\right)^{1 \times 3} = 1

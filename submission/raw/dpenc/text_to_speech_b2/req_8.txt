@@ -3,7 +3,7 @@ Photosynthesis is the process by which green plants, algae, and some bacteria co
 Here’s a step-by-step explanation of how photosynthesis works:
 
 ### 1. **Light Absorption**
-- Chlorophyll in the chloroplasts absorbs light energy, primarily from the blue and red parts of the visible light spectrum.
+- Chlorophyll in the chloroplasts absorbs light energy, mainly from the blue and red parts of the light spectrum.
 - This energy is used to power the chemical reactions of photosynthesis.
 
 ### 2. **Water Splitting (Photolysis)**
@@ -11,7 +11,7 @@ Here’s a step-by-step explanation of how photosynthesis works:
 - In the **thylakoid membranes** of the chloroplasts, light energy splits water into oxygen (O₂), protons (H⁺), and electrons (e⁻).
 - The reaction is:  
   **2H₂O → 4H⁺ + 4e⁻ + O₂**
-- Oxygen is released as a byproduct into the atmosphere.
+- The oxygen is released as a byproduct into the atmosphere.
 
 ### 3. **Electron Transport Chain**
-- The excited electrons from chlorophyll move through a series of proteins called the **electron transport
+- The excited electrons from chlorophyll move through a series of proteins in the thylak

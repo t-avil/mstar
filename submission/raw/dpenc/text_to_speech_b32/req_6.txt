@@ -1,25 +1,25 @@
-The **Pythagorean theorem** is a fundamental principle in Euclidean geometry that describes the relationship between the three sides of a right triangle. It states:
+The **Pythagorean theorem** is a fundamental principle in Euclidean geometry that applies to right triangles. It states:
 
 > In a right triangle, the square of the length of the hypotenuse (the side opposite the right angle) is equal to the sum of the squares of the lengths of the other two sides (legs).
 
-This can be written as the formula:
+Mathematically, if $ a $ and $ b $ are the lengths of the legs and $ c $ is the length of the hypotenuse, then:
 
-\[
+$$
 a^2 + b^2 = c^2
-\]
+$$
 
-Where:
-- \( a \) and \( b \) are the lengths of the two legs (the sides that form the right angle),
-- \( c \) is the length of the hypotenuse.
+This theorem is named after the ancient Greek mathematician **Pythagoras**, although it was known to earlier civilizations such as the Babylonians and Indians.
 
 ### Example:
-If a right triangle has legs of lengths 3 and 4, then the hypotenuse \( c \) is:
+If a right triangle has legs of lengths 3 and 4, then the hypotenuse $ c $ is:
 
-\[
+$$
 c = \sqrt{3^2 + 4^2} = \sqrt{9 + 16} = \sqrt{25} = 5
-\]
+$$
 
-So, the sides are 3, 4, and 5 — a well-known Pythagorean triple.
+So, the sides are 3, 4, and 5 — a classic example of a **Pythagorean triple**.
 
-### Origin:
-The theorem is named after the ancient Greek mathematician **Pythagoras**, who lived around 570–4
+### Applications:
+- Calculating distances in coordinate geometry
+- Trigonometry
+- Physics

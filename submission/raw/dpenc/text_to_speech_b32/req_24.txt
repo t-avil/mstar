@@ -1,18 +1,28 @@
-Certainly! **Compound interest** is a financial concept where interest is calculated not only on the initial principal amount but also on the accumulated interest from previous periods. This leads to exponential growth of your investment or debt over time, as opposed to simple interest, which is calculated only on the original principal.
+Certainly! **Compound interest** is a financial concept where interest is calculated not only on the initial principal amount but also on the accumulated interest from previous periods. This means that your money grows at an increasing rate over time because you earn interest on both the original amount and the interest that has already been added.
 
-### How It Works:
-Let’s say you invest $1,000 at an annual interest rate of 5%, compounded annually.
+### Key Idea:
+With compound interest, your investment or debt grows exponentially rather than linearly.
 
-- **Year 1**:  
-  Interest = 5% of $1,000 = $50  
-  New balance = $1,000 + $50 = $1,050
+---
 
-- **Year 2**:  
-  Interest = 5% of $1,050 = $52.50  
-  New balance = $1,050 + $52.50 = $1,102.50
+### Formula for Compound Interest:
+The formula to calculate the future value of an investment with compound interest is:
 
-- **Year 3**:  
-  Interest = 5% of $1,102.50 = $55.13  
-  New balance = $1,102.50 + $55.13 = $1,157.63
+\[
+A = P \left(1 + \frac{r}{n}\right)^{nt}
+\]
 
-As you can see,
+Where:
+- \( A \) = final amount (principal + interest)
+- \( P \) = principal (initial amount)
+- \( r \) = annual interest rate (as a decimal)
+- \( n \) = number of times interest is compounded per year
+- \( t \) = number of years
+
+---
+
+### Example:
+Suppose you invest $1,000 at an annual interest rate of 5%, compounded annually for 3 years.
+
+\[
+A = 1000 \left(1 + \frac{0.05}{1}\right)^{1 \times 3} = 1

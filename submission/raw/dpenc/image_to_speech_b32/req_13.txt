@@ -1,7 +1,9 @@
-Based on the visual characteristics of the dish, this is a **cassoulet**.
+Based on the visual characteristics of the dish, this is most likely **Tortellini in Brodo**.
 
-Here are the key features that lead to this identification:
+Here is a breakdown of the clues that lead to this identification:
 
-*   **Main Ingredients:** The dish prominently features large, white beans, which are characteristic of the white beans (haricots blancs) used in cassoulet. The beans are mixed with what appears to be a rich, tomato-based sauce and chunks of meat, likely pork sausages (such as Toulouse sausage) and possibly duck confit.
-*   **Preparation Method:** The dish is baked in a deep, round earthenware dish, known as a *cassole* or *cassole*, which is the traditional vessel for this dish. The top has a golden-brown, slightly crispy crust, which is the result of being baked until the surface is browned.
-*   **Origin:** Cassoulet is a famous slow-cooked casserole from the Languedoc region in southern France.<|im_end|>
+1.  **The Pasta:** The dish features small, ring-shaped pasta. This is the defining characteristic of tortellini, a traditional Italian stuffed pasta from the Emilia-Romagna region.
+2.  **The Sauce:** The tortellini are swimming in a clear, golden-colored broth. This is the "brodo" (broth) part of the name. It is typically made from a rich meat or chicken stock, which gives it its color and flavor.
+3.  **The Garnish:** The dish is garnished with finely chopped fresh herbs, which appear to be chives or parsley. This is a common finishing touch for this dish.
+
+While it could be a variation of other stuffed pastas like ravioli, the distinct ring shape is the strongest indicator that this is tortellini.<|im_end|>

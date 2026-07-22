@@ -1,17 +1,16 @@
 The main difference between **Roman numerals** and **Arabic numerals** lies in their **origin, structure, and usage**:
 
-### 1. **Origin**
-- **Roman numerals**: Developed by the ancient Romans around 500 BCE. They are based on letters from the Latin alphabet.
-- **Arabic numerals**: Originated in India around the 5th century CE and were later adopted and spread by Arab mathematicians. They are now the standard numeral system used worldwide.
+### 1. **Origin and History**
+- **Roman numerals**: Developed by the ancient Romans around 500 BCE. They were used throughout the Roman Empire and remained in use in Europe for centuries.
+- **Arabic numerals**: Originated in India around the 5th century CE and were later adopted and spread by Arab mathematicians. They became the standard numeral system in Europe by the 12th century.
 
-### 2. **Symbols**
-- **Roman numerals** use letters to represent numbers:
+### 2. **Symbols and Representation**
+- **Roman numerals** use **letters** from the Latin alphabet:
   - I = 1, V = 5, X = 10, L = 50, C = 100, D = 500, M = 1000
-  - Example: **XIV** = 14 (10 + 4)
-- **Arabic numerals** use digits 0–9:
-  - Example: **14** = 14
+  - Numbers are formed by combining these letters, often using **subtractive notation** (e.g., IV = 4, IX = 9).
+  - Example:  
+    - 16 = XVI  
+    - 19 = XIX  
+    - 2024 = MMXXIV
 
-### 3. **Number System**
-- **Roman numerals**: Use an **additive and subtractive** system.
-  - Additive: III = 3 (1+1+1)
-  - Sub
+- **Arabic numerals

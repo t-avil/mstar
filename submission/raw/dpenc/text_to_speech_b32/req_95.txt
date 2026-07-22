@@ -3,16 +3,15 @@ Python and JavaScript are both high-level, interpreted programming languages, bu
 ### 1. **Primary Use Cases**
 - **Python**: 
   - General-purpose language with a focus on readability and simplicity.
-  - Widely used in data science, machine learning, artificial intelligence, scientific computing, automation, scripting, and backend development (via frameworks like Django and Flask).
+  - Widely used in data science, machine learning, artificial intelligence, scientific computing, automation, scripting, and backend development (with frameworks like Django and Flask).
 - **JavaScript**:
   - Originally designed for web development.
-  - Dominates client-side scripting in web browsers (DOM manipulation, animations, etc.).
-  - Also used on the server-side via Node.js, and increasingly in mobile (React Native) and desktop (Electron) applications.
+  - Dominates in front-end web development (running in browsers), but also used for back-end development (Node.js), mobile apps (React Native), and desktop apps (Electron).
 
 ### 2. **Syntax and Style**
 - **Python**:
+  - Emphasizes code readability with clean, minimal syntax.
   - Uses indentation (whitespace) to define code blocks (no braces `{}`).
-  - Emphasizes clean, readable syntax.
   - Example:
     ```python
     if x > 0:
@@ -23,4 +22,5 @@ Python and JavaScript are both high-level, interpreted programming languages, bu
   - More verbose and flexible syntax.
   - Example:
     ```javascript
-    if (x > 0
+    if (x > 0) {
+        console.log("

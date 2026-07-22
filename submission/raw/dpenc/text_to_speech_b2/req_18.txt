@@ -1,20 +1,19 @@
-The **water cycle**, also known as the **hydrologic cycle**, is the continuous movement of water on, above, and below the surface of the Earth. It is a natural process that ensures the distribution and recycling of water across the planet, supporting all forms of life. The water cycle involves several key processes:
+The water cycle, also known as the **hydrologic cycle**, is the continuous movement of water on, above, and below the surface of the Earth. It is a natural process that ensures the distribution and recycling of water across the planet, supporting all forms of life. The cycle involves several key processes:
 
 1. **Evaporation**:
-   - Water from oceans, rivers, lakes, and other water bodies is heated by the sun and turns into water vapor (gas).
+   - Water from oceans, rivers, lakes, and other bodies of water is heated by the sun and turns into water vapor (a gas).
    - This vapor rises into the atmosphere.
 
 2. **Transpiration**:
    - Plants absorb water from the soil through their roots and release it into the air as water vapor through small pores in their leaves.
-   - This process contributes to the amount of water vapor in the atmosphere.
+   - This process contributes to the overall evaporation from land surfaces.
 
 3. **Condensation**:
-   - As water vapor rises and cools in the atmosphere, it changes back into tiny liquid droplets, forming clouds.
-   - This process is the opposite of evaporation.
+   - As water vapor rises and cools in the atmosphere, it changes back into tiny liquid droplets.
+   - These droplets gather to form clouds.
 
 4. **Precipitation**:
-   - When cloud droplets grow large enough, they fall back to the Earth as precipitation.
-   - Precipitation can take various forms, including rain, snow, sleet, or hail.
+   - When the water droplets in clouds become too heavy, they fall back to the Earth as precipitation.
+   - This can take the form of rain, snow, sleet, or hail, depending on temperature and atmospheric conditions.
 
-5. **Collection (or Accumulation)**:
-  
+5. **Collection (or Accumulation)**

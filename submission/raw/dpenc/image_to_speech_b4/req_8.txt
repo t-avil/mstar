@@ -2,8 +2,8 @@ Based on the visual characteristics of the food in the image, this dish is most 
 
 Here are the key features that lead to this identification:
 
-*   **Wrapping:** The food is wrapped in a thin, translucent, and slightly shiny wrapper. This is characteristic of rice paper, which is used to make fresh spring rolls (also known as summer rolls).
-*   **Filling:** The filling is clearly visible and consists of fresh, colorful ingredients, including green lettuce, shredded carrots, and other vegetables. This indicates a fresh, uncooked filling, which is typical for spring rolls.
-*   **Preparation:** The rolls are cut in half, a common way to serve them to display the colorful filling inside.
+*   **Wrapping:** The rolls are encased in a thin, translucent wrapper that appears to be rice paper, which is characteristic of fresh spring rolls (also known as summer rolls).
+*   **Filling:** The filling is clearly visible and consists of fresh, colorful ingredients, including green lettuce, shredded carrots, and other vegetables. The presence of what looks like a pinkish ingredient, possibly pickled radish or a type of fish cake, is also common.
+*   **Preparation:** The rolls are served cold and fresh, not fried. They are typically cut in half to display the colorful filling inside.
 
-This dish is a popular appetizer in many Asian cuisines, particularly Vietnamese (where they are called *gỏi cuốn*), Thai, and Chinese.<|im_end|>
+This dish is a popular appetizer in Southeast Asian cuisine, particularly Vietnamese.<|im_end|>

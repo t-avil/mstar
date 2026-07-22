@@ -1,8 +1,6 @@
-Based on the visual evidence, the dish is **donuts**.
+Based on the visual evidence, the dish shown is **donuts**.
 
-The cuisine is **American**.
+Here is a breakdown of the identification:
 
-Here's a breakdown of the identification:
-
-*   **Dish:** The items are clearly donuts. They are round, fried pastries with a hole in the center. The ones in the foreground are coated in granulated sugar, while the ones in the background appear to be plain or glazed.
-*   **Cuisine:** Donuts are a quintessential American food item, with a long history in the United States. They are a staple of American bakeries, diners, and coffee shops.<|im_end|>
+*   **Dish:** The items are classic ring-shaped donuts. They have a golden-brown, fried appearance and are coated with granulated sugar, which is a very common preparation for this type of pastry.
+*   **Cuisine:** Donuts are a quintessential food of **American cuisine**. While similar fried dough pastries exist in many cultures around the world (such as the Polish *pączki* or the French *beignets*), the specific style of a sugar-coated, ring-shaped donut is most strongly associated with the United States.<|im_end|>

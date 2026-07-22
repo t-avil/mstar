@@ -1,7 +1,7 @@
 The stock market is a complex system where shares of publicly traded companies are issued, bought, and sold. Here's a simplified explanation of how it works:
 
 ### 1. **What is a Stock?**
-A stock represents ownership in a company. When you buy a share of a company's stock, you become a partial owner (a shareholder) of that company. The more shares you own, the larger your ownership stake.
+A stock represents ownership in a company. When you buy a share of stock, you become a partial owner (a shareholder) of that company. The more shares you own, the larger your ownership stake.
 
 ### 2. **Why Do Companies Issue Stocks?**
 Companies issue stocks to raise capital (money) for various purposes, such as:
@@ -10,16 +10,17 @@ Companies issue stocks to raise capital (money) for various purposes, such as:
 - Paying off debt
 - Funding research and development
 
-This process is called an **Initial Public Offering (IPO)** when a private company first sells shares to the public.
+In exchange for money, investors receive shares in the company.
 
 ### 3. **Stock Exchanges**
-Stocks are traded on **stock exchanges**, which are organized marketplaces where buyers and sellers meet. Major exchanges include:
+Stocks are traded on organized marketplaces called **stock exchanges**. The most well-known include:
 - **New York Stock Exchange (NYSE)**
 - **Nasdaq**
 - **London Stock Exchange (LSE)**
 - **Tokyo Stock Exchange (TSE)**
 
-These exchanges provide rules, infrastructure, and transparency to ensure fair trading.
+These exchanges provide a regulated environment where buyers and sellers can trade stocks efficiently.
 
-### 4. **How Are Stocks Traded?**
-Stock
+### 4. **How Are Stock Prices Determined?**
+Stock prices are determined by **supply and demand**:
+- If many people want to buy

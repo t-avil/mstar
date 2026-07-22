@@ -1,19 +1,30 @@
-A **simile** and a **metaphor** are both figures of speech used to make comparisons, but they do so in different ways:
+Great question! Both **similes** and **metaphors** are figures of speech used to make comparisons, but they do so in different ways:
 
-### **Simile**:
-- A simile **explicitly compares** two things using words like **"like"** or **"as"**.
-- It makes the comparison clear and direct.
-- **Example**: *"Her smile is as bright as the sun."*  
-  → Here, the smile is compared to the sun using "as."
+### **Simile**
+A simile **explicitly compares two things** using words like **"like"** or **"as."**
 
-### **Metaphor**:
-- A metaphor **directly states** that one thing **is** another, without using "like" or "as."
-- It creates a more implicit or symbolic comparison.
-- **Example**: *"Her smile is the sun."*  
-  → This suggests her smile *is* the sun, not just similar to it.
+- **Example:**  
+  *"Her smile is as bright as the sun."*  
+  *"He runs like a cheetah."*
 
-### Key Difference:
-- **Simile**: Uses "like" or "as" to compare.
-- **Metaphor**: Makes a direct comparison without those words.
+👉 The use of "like" or "as" makes it clear that the comparison is not literal.
 
-Both are used to add imagery and emotion to language, but metaphors tend to be more powerful and evocative because they create a stronger sense of identity between the two things being compared.<|im_end|>
+---
+
+### **Metaphor**
+A metaphor **directly states that one thing is another**, without using "like" or "as." It implies the comparison more strongly.
+
+- **Example:**  
+  *"Time is a thief."*  
+  *"The world is a stage."*
+
+👉 This suggests that time *is* a thief (stealing moments), or that life *is* a theatrical performance.
+
+---
+
+### **Key Difference:**
+| Feature | Simile | Metaphor |
+|--------|--------|---------|
+| **Comparison word** | Uses "like" or "as" | No "like" or "as" |
+| **Directness** | More indirect | More direct and powerful |
+| **

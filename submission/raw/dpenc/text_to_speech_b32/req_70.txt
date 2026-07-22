@@ -1,16 +1,16 @@
 Empathy and sympathy are both emotional responses to another person's situation, but they differ in depth and nature:
 
 1. **Empathy**:
-   - **Definition**: Empathy is the ability to understand and share the feelings of another person. It involves putting yourself in someone else's shoes and experiencing their emotions as if they were your own.
+   - **Definition**: Empathy involves deeply understanding and sharing the feelings of another person. It's about putting yourself in someone else's shoes and experiencing their emotions as if they were your own.
    - **Types**:
-     - **Cognitive Empathy**: Understanding another person's perspective or mental state.
-     - **Emotional Empathy**: Sharing the emotional experience of another person.
-     - **Compassionate Empathy**: Understanding and sharing emotions, coupled with a desire to help.
-   - **Example**: If a friend loses a loved one, you not only recognize their sadness but also feel a sense of sorrow yourself, and you might want to offer support.
+     - **Cognitive Empathy**: Understanding another person's perspective or thoughts.
+     - **Emotional Empathy**: Feeling what another person feels.
+     - **Compassionate Empathy**: Understanding and feeling another's emotions, and being motivated to help.
+   - **Example**: If a friend loses a loved one, you might feel their grief and sadness as if it were your own, and you may want to support them emotionally.
 
 2. **Sympathy**:
    - **Definition**: Sympathy is feeling concern or sorrow for someone else's misfortune, but without necessarily sharing their emotional experience. It's more about acknowledging their pain from a distance.
-   - **Example**: If a friend loses a loved one, you might say, "I'm so sorry for your loss," but you don't necessarily feel the same depth of grief.
+   - **Example**: If a friend loses a loved one, you might say, "I'm so sorry for your loss," and feel sad for them, but you don't necessarily feel their grief.
 
 **Key Difference**:
 - Emp

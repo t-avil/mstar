@@ -6,7 +6,7 @@ Sure! Let's break down **recursion** in a simple and beginner-friendly way.
 
 Think of it like this:
 
-> "To solve a big problem, break it into smaller versions of the same problem until you reach a simple case that you can solve directly."
+> "To solve a big problem, break it into smaller versions of the same problem until it becomes simple enough to solve directly."
 
 ---
 
@@ -18,7 +18,7 @@ Every recursive function has two main parts:
    This is the condition that stops the recursion. Without it, the function would keep calling itself forever (like an infinite loop), which would crash your program.
 
 2. **Recursive Case**  
-   This is where the function calls itself with a smaller or simpler version of the original problem.
+   This is where the function calls itself with a smaller or simpler version of the problem.
 
 ---
 
@@ -30,6 +30,7 @@ Let’s say you want to count down from 5 to 1.
 def countdown(n):
     # Base case: stop when n is 0
     if n == 0:
-        print("Blast off!")
+        print("Done!")
         return
-    # Recursive case: print n and call countdown with
+    # Recursive case: print n and call countdown with n-1
+    print

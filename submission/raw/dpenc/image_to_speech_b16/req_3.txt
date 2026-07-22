@@ -1,8 +1,10 @@
-Based on the visual characteristics of the dish, this is a popular street food known as **Snail Porridge** or **Snail Congee**.
+Based on the visual characteristics of the dish, this food is most likely **Escargot en Croute**.
 
-Here are the key details that lead to this identification:
+Here is a breakdown of the clues that lead to this identification:
 
-*   **The Snails:** The small, round, golden-brown items are cooked snails. They are typically prepared by boiling or steaming them until tender, then sautéing them with a rich, savory sauce.
-*   **The Porridge Base:** The snails are served in a thick, savory broth that is the "porridge" or "congee." This base is often made from rice, giving it a creamy and slightly grainy texture.
-*   **The Garnish:** The green flecks mixed into the porridge are finely chopped herbs, most commonly cilantro (coriander) or green onions, which add a fresh aroma and flavor.
-*   **The Presentation:** This dish is traditionally served in a large, round metal bowl, which helps to keep the food warm. It is a very common and beloved dish in Guangdong province, China, especially in the city of Chaozhou.<|im_end|>
+*   **The Snails:** The small, round, golden-brown items are characteristic of cooked snails, known as escargots.
+*   **The Crust:** The snails are individually wrapped in a thin, flaky pastry, which is the "croute" (crust) in the name.
+*   **The Preparation:** This is a classic French preparation where escargots are cooked in their shells, then wrapped in puff pastry and baked until golden and crisp.
+*   **The Herb Butter:** The greenish, buttery sauce surrounding the pastry is likely a garlic and herb butter, a traditional accompaniment for escargots.
+
+In summary, this is a baked dish of snails wrapped in puff pastry, a popular appetizer in French cuisine.<|im_end|>

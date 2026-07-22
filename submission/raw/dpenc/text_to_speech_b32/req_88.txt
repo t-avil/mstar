@@ -1,21 +1,18 @@
-The **Heisenberg Uncertainty Principle** is one of the foundational concepts in quantum mechanics, formulated by German physicist **Werner Heisenberg** in 1927. It fundamentally changed our understanding of the physical world by showing that there are inherent limits to how precisely certain pairs of physical properties of a particle can be known simultaneously.
+The Heisenberg Uncertainty Principle is a fundamental concept in quantum mechanics, formulated by German physicist Werner Heisenberg in 1927. It states that certain pairs of physical properties, such as position and momentum, cannot both be known with arbitrary precision at the same time. The more precisely one property is measured, the less precisely the other can be known.
 
-### Core Idea:
-The principle states that **it is impossible to simultaneously know both the exact position and the exact momentum (mass × velocity) of a particle**. The more precisely one property is measured, the less precisely the other can be known.
+Mathematically, the principle is expressed as:
 
-Mathematically, this is expressed as:
-
-\[
-\Delta x \cdot \Delta p \geq \frac{\hbar}{2}
-\]
+Δx · Δp ≥ ��/2
 
 Where:
-- \(\Delta x\) is the uncertainty in position,
-- \(\Delta p\) is the uncertainty in momentum,
-- \(\hbar\) is the reduced Planck's constant (\(\hbar = h / 2\pi\)).
+- Δx is the uncertainty in position,
+- Δp is the uncertainty in momentum,
+- �� (h-bar) is the reduced Planck constant (ħ = h/2π).
 
-### Significance:
+### Significance of the Heisenberg Uncertainty Principle:
 
-1. **Limits of Measurement**:
-   - The uncertainty principle is not due to limitations in measurement tools or techniques. It is a **fundamental property of nature**.
-   - It reflects the wave-particle duality of quantum objects:
+1. **Limits of Measurement**: It establishes a fundamental limit on the precision with which certain pairs of physical properties can be simultaneously known. This is not due to technological limitations but is an inherent feature of quantum systems.
+
+2. **Wave-Particle Duality**: The principle reflects the dual nature of quantum objects. Particles like electrons exhibit both particle-like and wave-like behavior. A particle with a well-defined position is described by a localized wave packet, which requires a broad range of momenta (wavelengths), and vice versa.
+
+3.

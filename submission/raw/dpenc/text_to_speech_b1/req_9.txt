@@ -9,8 +9,8 @@ Viruses and bacteria are both microscopic organisms, but they differ significant
    - **Viruses**: Cannot reproduce on their own. They must infect a host cell and hijack its machinery to replicate.
 
 3. **Size**:
-   - **Bacteria**: Typically larger, ranging from about 0.2 to 2 micrometers in size.
-   - **Viruses**: Much smaller, usually between 20 and 300 nanometers.
+   - **Bacteria**: Typically larger, ranging from about 0.2 to 2.0 micrometers in size.
+   - **Viruses**: Much smaller, usually between 20 and 300 nanometers. They are too small to be seen with a light microscope.
 
 4. **Treatment**:
-   - **Bacteria**: Can often be treated with antibiotics, which target bacterial structures or processes
+   - **Bacteria

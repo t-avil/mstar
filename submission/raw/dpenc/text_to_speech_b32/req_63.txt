@@ -7,12 +7,13 @@
 
 ### Example:
 Imagine you have $100 and must choose between:
-1. Buying a new laptop (worth $100), or  
-2. Going on a vacation (costing $100).
+1. Buying a new laptop for $100, or  
+2. Investing that $100 in the stock market, which might grow to $120 in a year.
 
-If you choose the laptop, the **opportunity cost** is the **value of the vacation** you gave up.  
-If you choose the vacation, the **opportunity cost** is the **value of the laptop** you didn't buy.
+If you choose the laptop, the **opportunity cost** is the **$20 profit** you could have earned from the investment.
 
-Even if you don't pay money for the vacation (e.g., it's free), the opportunity cost is still the **value of the time and experience** you could have had with the laptop.
+Even if you don't spend the money, the opportunity cost is still the **potential benefit** you missed.
 
-### Why
+### Why It Matters:
+- Helps evaluate **trade-offs** in personal choices (e.g., going to college vs. working).
+- Guides **business decisions**

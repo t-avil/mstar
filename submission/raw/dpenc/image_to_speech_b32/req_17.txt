@@ -4,9 +4,9 @@ Here is a breakdown of the identification:
 
 *   **The Dish:** The main components are oysters served in their shells, which is known as being "on the half shell." They are presented on a bed of crushed ice to keep them cold and fresh, a standard practice for serving raw oysters. The oysters appear plump and glistening, indicating they are raw and ready to eat.
 
-*   **The Cuisine:** This is a classic preparation found in many cuisines around the world, particularly in:
-    *   **French cuisine:** Often served as an *amuse-bouche* or appetizer.
-    *   **American cuisine:** A very popular appetizer, especially in coastal regions.
-    *   **Japanese cuisine:** Known as *hotate* or *kaki*, they are frequently served raw with a squeeze of lemon or soy sauce.
+*   **The Cuisine:** This is a classic dish in **seafood cuisine**. It is particularly popular in:
+    *   **French cuisine:** Where they are known as *huîtres* and are a staple of the cuisine.
+    *   **American cuisine:** Especially in coastal regions like the East Coast and the Gulf Coast.
+    *   **Japanese cuisine:** Where they are known as *hotate* and are often served raw, grilled, or in hot pots.
 
-The dish is typically enjoyed raw, with the addition of lemon wedges to add acidity and enhance the briny flavor of the oyster. The small garnish of parsley in the center is a common presentation touch.<|im_end|>
+The dish is typically enjoyed raw, with the addition of lemon wedges for a citrusy flavor and a garnish of parsley for color.<|im_end|>
