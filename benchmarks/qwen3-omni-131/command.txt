@@ -1,0 +1,12 @@
+# Boot (all MSTAR_* winning flags exported; see PR description for the full list):
+CUDA_VISIBLE_DEVICES=6,7 python -m mstar.cli.main serve qwen3_omni \
+  --config configs/qwen3omni_2gpu_dpenc.yaml --host 0.0.0.0 --port 8296 \
+  --tensor-comm-protocol SHM
+
+# Sweep cell (example i2t B32, n=128):
+python -m benchmark.runner --url http://127.0.0.1:8296 --model qwen3omni \
+  --request-type image_to_text --dataset food101 --profiling-type closed_loop \
+  --max-concurrency 32 --num-requests 128 --num-warmup 8 --inference-system ours \
+  --output-dir raw/this-work/image_to_text_b32
+
+# n cadence: text 64/64/96/96/96/128, speech 12/20/24/40/64/96  (B=1/2/4/8/16/32)
