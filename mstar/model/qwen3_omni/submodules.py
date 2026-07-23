@@ -80,13 +80,6 @@ def _refresh_prep_flags() -> None:
     ).strip().lower() in ("1", "true", "yes", "on")
 
 
-try:
-    from mstar.utils import dynflags as _dynflags
-    _dynflags.register_cache_clear(_refresh_prep_flags)
-except Exception:
-    pass
-
-
 def _prep_pos_count() -> None:
     _PREP_POS_HITS[0] += 1
     if _PREP_POS_HITS[0] % 2000 == 0:

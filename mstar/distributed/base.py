@@ -3,6 +3,8 @@ import os as _os
 from collections import defaultdict
 from dataclasses import dataclass, field
 
+from mstar.graph.base import GraphEdge, NodeAndGraphWalk
+
 # MSTAR_FAST_ROUTE (default OFF): memoize replicated fanout decisions per
 # request instance in fanout_graph_edges. Read once at import.
 _FAST_ROUTE = _os.environ.get("MSTAR_FAST_ROUTE", "0").strip().lower() in (
@@ -11,21 +13,12 @@ _FAST_ROUTE = _os.environ.get("MSTAR_FAST_ROUTE", "0").strip().lower() in (
 
 
 def _refresh_route_flags() -> None:
-    """MSTAR_DYNFLAGS hook (safe: memo replay is value-identical; flipping
-    only toggles whether the memo is consulted/built)."""
+    """Re-read MSTAR_FAST_ROUTE (safe: memo replay is value-identical;
+    flipping only toggles whether the memo is consulted/built)."""
     global _FAST_ROUTE
     _FAST_ROUTE = _os.environ.get(
         "MSTAR_FAST_ROUTE", "0"
     ).strip().lower() in ("1", "true", "yes", "on")
-
-
-try:
-    from mstar.utils import dynflags as _dynflags
-    _dynflags.register_cache_clear(_refresh_route_flags)
-except Exception:
-    pass
-
-from mstar.graph.base import GraphEdge, NodeAndGraphWalk  # noqa: E402  (after optional dynflags hook)
 
 
 @dataclass

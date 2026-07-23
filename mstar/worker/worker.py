@@ -4519,34 +4519,17 @@ class Worker:
             )
             phase_buf.clear()
 
-        from mstar.utils import dynflags as _dynflags
-        _dyn_ctr = 0
+        _watch_ctr = 0
         while True:
             from mstar.utils.profiler import range_pop, range_push
             try:
                 _iter_start = _time.perf_counter() if phase_period else 0.0
-                # MSTAR_DYNFLAGS triage hook: refresh runtime-mutable env flags
-                # every 50 iters (mtime stat when unchanged — ~1µs).
-                _dyn_ctr += 1
-                if _dyn_ctr % 50 == 0:
-                    if _dynflags.enabled() and _dynflags.maybe_refresh():
-                        self._refresh_dynamic_flags()
-                        # A/B hook: re-read the spec-yield knobs so
-                        # MSTAR_MAX_CONSECUTIVE_SPEC_STEPS / MSTAR_SPEC_PEEK_FOR_FAIRNESS
-                        # become dynflag-tunable (encode-admission frequency A/B, no
-                        # reboot). Output-neutral: these change only WHEN decode yields
-                        # to encode, never the sampled tokens.
-                        max_consecutive_spec = int(
-                            os.environ.get("MSTAR_MAX_CONSECUTIVE_SPEC_STEPS", "1024")
-                        )
-                        spec_peek_for_fairness = (
-                            os.environ.get("MSTAR_SPEC_PEEK_FOR_FAIRNESS", "1") == "1"
-                        )
-                    # MSTAR_EMIT_SIDECAR death watch (SIDECAR_DESIGN §7):
-                    # same cadence as the dynflags stat (~0.4 s at the
-                    # 8.8 ms B32 step). A dead sidecar (or an earlier HWM
-                    # trip) flips us to the legacy path with a CRITICAL log
-                    # and fail-fast aborts — never a hang.
+                # EMIT_SIDECAR death watch, ~every 50 iters (~0.4 s at the B32
+                # step). A dead sidecar (or an earlier HWM trip) flips us to the
+                # legacy path with a CRITICAL log and fail-fast aborts — never a
+                # hang.
+                _watch_ctr += 1
+                if _watch_ctr % 50 == 0:
                     if (
                         self._sidecar_client is not None
                         and not self._sidecar_client.healthy()

@@ -48,9 +48,9 @@ class _RecordingTensorManager:
     def dereference(self, request_id, uuid, n=1):
         self.deref_calls.append((request_id, uuid, n))
 
-    def register_for_send(self, request_id, uuids, skip_cuda_sync=False):
+    def register_for_send(self, request_id, tensor_infos, skip_cuda_sync=False):
         self.register_calls.append(
-            (request_id, frozenset(uuids), skip_cuda_sync)
+            (request_id, frozenset(info.uuid for info in tensor_infos), skip_cuda_sync)
         )
 
     def set_persist(self, request_id, uuid, persist):
@@ -193,7 +193,7 @@ def _observable_state(worker: _StubWorker, collector: list) -> bytes:
         "sent": worker.communicator.sent,
         "per_request": {
             rid: (
-                info.pending_new_tokens,
+                info.pending_new_token_counts,
                 info.current_output_chunks,
                 info.output_loop_indices,
                 info.pending_persist_signals,

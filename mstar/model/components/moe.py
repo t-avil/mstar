@@ -49,18 +49,16 @@ except Exception as e:  # pragma: no cover -- exercised only when triton missing
     logger.warning(f"Could not load fused MoE kernel: {e}")
 
 # Fused softmax+topk router kernel (sgl_kernel). Replaces the
-# softmax -> torch.topk -> renorm chain (3 kernels incl. a bitonic sort,
-# ~28us/layer at decode) with one kernel (~11us). Bit-identical expert ids,
-# weights equal to float rounding. MSTAR_FUSED_TOPK=0 restores torch ops.
+# softmax -> torch.topk -> renorm chain (three separate kernel launches,
+# one a bitonic sort) with a single kernel. Bit-identical expert ids,
+# weights equal to float rounding, so it's used whenever available; falls
+# back to the torch ops below when sgl_kernel isn't importable.
 try:
     from sgl_kernel import topk_softmax as _topk_softmax
 except Exception:  # pragma: no cover
     _topk_softmax = None
 
-_FUSED_TOPK = (
-    _topk_softmax is not None
-    and os.environ.get("MSTAR_FUSED_TOPK", "1") == "1"
-)
+_FUSED_TOPK = _topk_softmax is not None
 
 
 class TopKRouter(nn.Module):
@@ -93,10 +91,17 @@ class TopKRouter(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Returns:
-            router_logits: ``(tokens, num_experts)`` softmax distribution.
+            router_logits: ``(tokens, num_experts)`` softmax distribution,
+                or ``None`` on the fused kernel path (see below) -- no
+                caller uses this value in that case, so it isn't
+                materialized.
             routing_weights: ``(tokens, top_k)`` top-k probabilities
                 (optionally renormalized).
-            selected_experts: ``(tokens, top_k)`` int64 indices.
+            selected_experts: ``(tokens, top_k)`` indices, dtype depends on
+                the path taken: the fused sgl_kernel path (``_FUSED_TOPK``
+                available and CUDA input) returns int32 and ``None`` for
+                ``router_logits``; the torch fallback returns int64
+                alongside the full softmax distribution.
         """
         hidden_states = hidden_states.reshape(-1, hidden_states.shape[-1])
         router_logits = F.linear(hidden_states, self.weight)

@@ -850,6 +850,13 @@ class MicroScheduler:
         # Require at least one decode row AND the chunk row to have popped;
         # a lone chunk is just a normal prefill and should go the normal path.
         if chunk_entry.request_id not in node_objects or len(node_objects) < 2:
+            # Push back anything already popped so those requests are not
+            # stranded off the ready queue (mirrors the requeue in
+            # _apply_encoder_step_budget).
+            for rid, node in node_objects.items():
+                worker_graphs_manager.queues[
+                    request_to_worker_graph[rid]
+                ].push_back_node(rid, node)
             return None
 
         self.batch_number += 1

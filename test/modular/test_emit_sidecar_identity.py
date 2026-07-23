@@ -72,9 +72,9 @@ class _RecordingTensorManager:
     def dereference(self, request_id, uuid, n=1):
         self.deref_calls.append((request_id, uuid, n))
 
-    def register_for_send(self, request_id, uuids, skip_cuda_sync=False):
+    def register_for_send(self, request_id, tensor_infos, skip_cuda_sync=False):
         self.register_calls.append(
-            (request_id, frozenset(uuids), skip_cuda_sync)
+            (request_id, frozenset(info.uuid for info in tensor_infos), skip_cuda_sync)
         )
 
     def set_persist(self, request_id, uuid, persist):
@@ -405,7 +405,7 @@ def _assert_worker_never_wrote_accumulators(worker: _StubWorker) -> None:
     """The design's hardest invariant (§0): wholesale ownership — for scoped
     rids the worker's PerRequestInfo accumulators are never written."""
     for info in worker.worker_graphs_manager.per_request_info.values():
-        assert info.pending_new_tokens == {}
+        assert info.pending_new_token_counts == {}
         assert info.current_output_chunks == []
         assert info.output_loop_indices == {}
 
@@ -611,8 +611,8 @@ def test_mixed_population_step_per_fifo_identical():
     # The legacy rid's accumulators ARE written on the worker; the scoped
     # rid's never are.
     infos = worker.worker_graphs_manager.per_request_info
-    assert infos[scoped].pending_new_tokens == {}
-    assert infos[legacy_rid].pending_new_tokens == {TOKEN_EDGE: [0, 1, 2]}
+    assert infos[scoped].pending_new_token_counts == {}
+    assert infos[legacy_rid].pending_new_token_counts == {TOKEN_EDGE: 3}
 
 
 def test_fast_send_flag_invariant_on_sidecar_path():

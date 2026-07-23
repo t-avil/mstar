@@ -31,37 +31,12 @@ _FAST_ROUTE2 = _os.environ.get("MSTAR_FAST_ROUTE2", "0").strip().lower() in (
 
 
 def _refresh_route2_flag() -> None:
-    """MSTAR_DYNFLAGS hook (safe: plan replay is value-identical; flipping
-    only toggles whether the plan cache is consulted/built)."""
+    """Re-read MSTAR_FAST_ROUTE2 (safe: plan replay is value-identical;
+    flipping only toggles whether the plan cache is consulted/built)."""
     global _FAST_ROUTE2
     _FAST_ROUTE2 = _os.environ.get(
         "MSTAR_FAST_ROUTE2", "0"
     ).strip().lower() in ("1", "true", "yes", "on")
-
-
-try:
-    from mstar.utils import dynflags as _dynflags
-    _dynflags.register_cache_clear(_refresh_route2_flag)
-except Exception:
-    pass
-
-
-def _read_native_wgio_mode() -> str:
-    """MSTAR_NATIVE_WGIO (default off), read ONCE at import. Off is a strict
-    no-op: the bridge module (and the native .so) are never imported and the
-    worker path is byte-identical. "shadow" = run C++ port alongside Python,
-    assert equal state, use the Python result. "1"/"native" = use the C++
-    result where the worker graph is fully backable, else fall back to Python.
-    """
-    v = _os.environ.get("MSTAR_NATIVE_WGIO", "0").strip().lower()
-    if v == "shadow":
-        return "shadow"
-    if v in ("1", "true", "yes", "on", "native"):
-        return "native"
-    return "off"
-
-
-_NATIVE_WGIO_MODE = _read_native_wgio_mode()
 
 
 @dataclass
@@ -131,37 +106,10 @@ class WorkerGraphQueues:
         self.nodes = set(self.worker_graph.section.get_nodes().keys())
         self.loops = set(self.worker_graph.section.get_loops().keys())
 
-        # MSTAR_NATIVE_WGIO: optional C++ state-machine bridge. Default off =>
-        # _native_bridge stays None and every method below takes the untouched
-        # Python path (guarded by a single ``is None`` check). Any construction
-        # failure or an unrepresentable graph falls back to Python and logs —
-        # never crashes the worker.
+        # _native_bridge stays None (no C++ state-machine bridge on this path);
+        # every method below takes the untouched Python path (guarded by a
+        # single ``is None`` check).
         self._native_bridge = None
-        if _NATIVE_WGIO_MODE != "off":
-            try:
-                from mstar.worker.native_wgio_bridge import NativeWGIOBridge
-                bridge = NativeWGIOBridge(
-                    self.worker_graph.section, self.worker_graph_id,
-                    _NATIVE_WGIO_MODE,
-                )
-                # In native mode a worker graph the C++ port cannot fully back
-                # (has loops) is dropped to the pure-Python path (logged once)
-                # so the hot decode path is never risked. Shadow keeps it active
-                # to validate the state machine end-to-end.
-                if _NATIVE_WGIO_MODE == "native" and not bridge.native_capable:
-                    logger.warning(
-                        "MSTAR_NATIVE_WGIO=native: worker graph %s has loops; "
-                        "C++ payload reconstruction unsupported — using Python.",
-                        self.worker_graph_id,
-                    )
-                    bridge = None
-                self._native_bridge = bridge
-            except Exception as e:  # never break boot
-                logger.warning(
-                    "MSTAR_NATIVE_WGIO=%s: bridge init failed for wg %s (%s); "
-                    "using Python.", _NATIVE_WGIO_MODE, self.worker_graph_id, e,
-                )
-                self._native_bridge = None
 
     def process_new_inputs(
         self, request_id: str, inputs: list[GraphEdge],
@@ -752,7 +700,7 @@ class WorkerGraphsManager:
             # cleanly; record the decisions for replay.
             self._route_plans[(request_id, node_name, graph_walk)] = (
                 self._build_route_plan(
-                    request_id, node_name, outputs, graph_walk,
+                    request_id, outputs, graph_walk,
                     is_first_tp_rank,
                 )
             )
@@ -775,12 +723,16 @@ class WorkerGraphsManager:
     def invalidate_route_plan(self, request_id: str):
         """Drop the MSTAR_FAST_ROUTE2 route plans for an rid.
 
-        Conservative by design: every plan for the rid is dropped. Called by
-        the worker on ANY structural change (loop stop, spec drop — the same
-        sites that call invalidate_populate_plan), by add_request when an
-        existing rid's worker_graph_ids grows, and by remove_request. Dropping
-        a plan simply means the next step rebuilds it from the slow path —
-        never a correctness hazard. No-op when the cache is empty / flag off.
+        Conservative by design: every plan for the rid is dropped. Called at
+        the known invalidation sites — the worker's loop-stop handling (the
+        same sites that call invalidate_populate_plan), add_request when an
+        existing rid's worker_graph_ids grows, and remove_request. This is not
+        the only safety net: any OTHER structural change shows up as a changed
+        per-edge signature on the next call, and process_node_outputs' own
+        edge-signature check (not this method) is what catches that case and
+        falls back to the slow path. Dropping a plan here simply means the
+        next step rebuilds it from the slow path — never a correctness hazard.
+        No-op when the cache is empty / flag off.
         """
         if not self._route_plans:
             return
@@ -788,7 +740,7 @@ class WorkerGraphsManager:
             self._route_plans.pop(key, None)
 
     def _build_route_plan(
-        self, request_id: str, node_name: str,
+        self, request_id: str,
         outputs: list[GraphEdge], graph_walk: str,
         is_first_tp_rank: bool,
     ) -> _RoutePlan:

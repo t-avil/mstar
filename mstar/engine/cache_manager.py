@@ -1329,6 +1329,7 @@ class DenseGenCacheManager(FlashInferCacheManager):
         write_store: bool=True,
         label: str | None = None,
         dense_gen: bool = False,
+        publish_manager: bool = True,
         **kwargs,
     ):
         """As ``FlashInferCacheManager.plan_attention``, plus ``dense_gen``:
@@ -1341,10 +1342,15 @@ class DenseGenCacheManager(FlashInferCacheManager):
                 is_causal=is_causal,
                 write_store=write_store,
                 label=label,
+                publish_manager=publish_manager,
                 **kwargs,
             )
         from mstar.utils.profiler import range_pop, range_push
         self._batched_cfg_info = None
+        # Same custom-op contract as the base path: make this manager the one
+        # the custom ops resolve to (skipped only for the off-thread pre-plan).
+        if publish_manager:
+            compile_ops.set_active_manager(self)
 
         if self.enable_nvtx:
             range_push("cache.plan_attention", synchronize=False)

@@ -385,11 +385,6 @@ def _refresh_sampler_flags() -> None:
     ).strip().lower() in ("1", "true", "yes", "on")
 
 
-try:
-    from mstar.utils import dynflags as _dynflags
-    _dynflags.register_cache_clear(_refresh_sampler_flags)
-except Exception:
-    pass
 
 
 @dataclass
