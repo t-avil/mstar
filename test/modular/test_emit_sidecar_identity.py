@@ -1,6 +1,6 @@
 """MSTAR_EMIT_SIDECAR: byte-identity of the sidecar path vs the legacy path.
 
-The mandated Stage-1 harness (SIDECAR_DESIGN §8, validation recipe 1): drive
+The mandated byte-identity harness: drive
 recorded fake step streams through BOTH paths —
 
 - legacy: the real ``Worker._register_outputs`` + ``Worker._send_outputs``
@@ -18,10 +18,10 @@ documented relaxation: the step's inline items split across two batch
 messages, one per FIFO, each byte-identical to a single-population legacy
 run).
 
-Also asserts the wholesale-ownership invariant (design §0/§4.3): the worker's
-PerRequestInfo accumulators are NEVER written for a scoped rid; and the
-record-cheapness invariant (§4.2): steady-state records carry no GraphEdge
-and no NestedLoopIndices objects.
+Also asserts the wholesale-ownership invariant: the worker's PerRequestInfo
+accumulators are NEVER written for a scoped rid; and the record-cheapness
+invariant: steady-state records carry no GraphEdge and no NestedLoopIndices
+objects.
 
 Pure CPU, no GPU, no server (the lifecycle test spawns the real sidecar
 process, still CPU-only with CUDA_VISIBLE_DEVICES="").
@@ -129,12 +129,10 @@ class _StubWorker:
         self._slim_emit2 = True
         self._fast_send = False
         # Pre-existing drift fix: MSTAR_SCHED_PACK landed after this stub was
-        # written and _inline_emit_uuids now reads it unconditionally
-        # (worker.py:1461). Default off, matching the flag's own default, so
-        # this stub exercises the byte-identical-off path like every other
-        # flag here.
+        # written and _inline_emit_uuids now reads it unconditionally. Default
+        # off, matching the flag's own default, so this stub exercises the
+        # byte-identical-off path like every other flag here.
         self._sched_pack = False
-        self._inline_dual = False
         self._slim_emit_sent: set[tuple[str, str]] = set()
         self._slim_emit_loop_layout: dict[tuple[str, str], tuple] = {}
         self._sidecar_client: SidecarRecordBuilder | None = None
@@ -402,7 +400,7 @@ def _assert_byte_identical(
 
 
 def _assert_worker_never_wrote_accumulators(worker: _StubWorker) -> None:
-    """The design's hardest invariant (§0): wholesale ownership — for scoped
+    """The hardest invariant — wholesale ownership: for scoped
     rids the worker's PerRequestInfo accumulators are never written."""
     for info in worker.worker_graphs_manager.per_request_info.values():
         assert info.pending_new_token_counts == {}
@@ -411,7 +409,7 @@ def _assert_worker_never_wrote_accumulators(worker: _StubWorker) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Byte-identity scenarios (design §8, recipe 1).
+# Byte-identity scenarios.
 # ---------------------------------------------------------------------------
 
 RIDS = ["rid-a", "rid-b", "rid-c"]
@@ -429,7 +427,7 @@ def test_steady_decode_byte_identical():
     legacy, sidecar_worker, state, records = _run_scenario(RIDS, steps)
     _assert_byte_identical(legacy, sidecar_worker, state)
     _assert_worker_never_wrote_accumulators(sidecar_worker)
-    # Record cheapness (§4.2): post-template steady records carry no
+    # Record cheapness: post-template steady records carry no
     # GraphEdge and no NestedLoopIndices — ints, indices, token lists only.
     for rec in records[1:]:
         for _, _new_tokens, items, boundary in rec.entries:
@@ -465,7 +463,9 @@ def test_completion_wgd_byte_identical():
     assert state.wgd_sent == len(RIDS)
     wgd = [m for d, m in state.communicator.sent if d == "conductor"]
     body = wgd[0].body
-    assert body.new_tokens == {TOKEN_EDGE: [1000, 1001, 1002, 1003]}
+    # Since #149 the WGD carries per-signal token COUNTS (numel), not values:
+    # 4 tokens accumulated for TOKEN_EDGE across the 4 steps.
+    assert body.new_token_counts == {TOKEN_EDGE: 4}
     assert body.output_signal_names == [TOKEN_EDGE] * 4 + [FINAL_EDGE]
 
 
@@ -483,8 +483,9 @@ def test_multi_partition_wgd_flush_byte_identical():
     legacy, sidecar_worker, state, _ = _run_scenario([rid], steps)
     _assert_byte_identical(legacy, sidecar_worker, state)
     wgd = [m for d, m in state.communicator.sent if d == "conductor"]
-    assert wgd[0].body.new_tokens == {TOKEN_EDGE: [7, 8]}
-    assert wgd[1].body.new_tokens == {TOKEN_EDGE: [9, 10]}
+    # Per-signal token counts (numel): 2 tokens per completion window.
+    assert wgd[0].body.new_token_counts == {TOKEN_EDGE: 2}
+    assert wgd[1].body.new_token_counts == {TOKEN_EDGE: 2}
 
 
 def test_non_inline_shared_uuid_byte_identical():
@@ -616,7 +617,7 @@ def test_mixed_population_step_per_fifo_identical():
 
 
 def test_fast_send_flag_invariant_on_sidecar_path():
-    """The Stage-1 rider (design §4.4) is re-landing FAST_SEND's
+    """The rider re-landing FAST_SEND's
     empty-register skip by launching with MSTAR_FAST_SEND=1 alongside the
     sidecar. The sidecar path must be byte-invariant to that flag: with it
     on, _send_outputs_sidecar reuses the inline set stashed by
@@ -869,7 +870,7 @@ def test_prefill_shaped_then_inline_template_pickle_gap_is_preexisting():
 
 
 # ---------------------------------------------------------------------------
-# Lifecycle (design §7).
+# Lifecycle.
 # ---------------------------------------------------------------------------
 
 def test_client_hwm_trip_marks_failed_never_blocks():

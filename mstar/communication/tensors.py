@@ -443,9 +443,9 @@ class TensorCommunicationManager(ABC):
             tuple[str, str | None, str | None], _FastPopulatePlan
         ] = {}
 
-        # MSTAR_INT_UUID: the per-tensor storage handle was str(uuid4()) — ~10%
-        # of the decode-step self-time (uuid4 CSPRNG + hex format, per tensor
-        # per rid per step). It is a pure internal key (per_req_tensors[rid][uuid],
+        # MSTAR_INT_UUID: the per-tensor storage handle was str(uuid4()), which
+        # measurably adds to decode-step self-time (uuid4 CSPRNG + hex format,
+        # per tensor per rid per step). It is a pure internal key (per_req_tensors[rid][uuid],
         # uuid_to_shard_dim, uuid_to_edge_name) looked up only against its
         # originating store, so a monotonic counter suffices. Namespaced by pid
         # so keys stay unique per-worker AND per-boot (uuids ride SHM to peers).

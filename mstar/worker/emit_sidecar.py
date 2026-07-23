@@ -1,4 +1,4 @@
-"""MSTAR_EMIT_SIDECAR — Stage 1 of docs/SIDECAR_DESIGN.md (design @ f0fd9e4).
+"""MSTAR_EMIT_SIDECAR.
 
 One pure-CPU sidecar PROCESS per worker owns the client-bound emit path for
 "sidecar-scoped" requests: emit message construction (full/slim items and the
@@ -11,29 +11,30 @@ indices; a GraphEdge rides a record only at boundary rate (first inline
 template per (rid, name), or a non-inline edge whose fresh tensor_info the
 consumer must fetch via SHM).
 
-Ownership contract (design §4.3, all-or-nothing per structure):
+Ownership contract (all-or-nothing per structure):
 
 - The worker NEVER writes the three accumulators for a scoped rid — every
   write becomes a record field, on the steady, boundary, and non-inline
-  paths alike (see ``Worker._send_outputs_sidecar``).
+  paths alike (see ``Worker._send_outputs_sidecar``). WGD is thus assembled
+  by a single owner.
 - Scoping is decided ONCE per rid at admission, from the full
   ``worker_graph_to_workers`` map (which covers every partition), so a later
   partition's add can never flip a rid between owners mid-flight — the
-  split-brain trap called out in design §0.
+  split-brain trap this avoids.
 - Tensor lifecycle (register_for_send / SHM-skip / producer-ref release) and
-  route/store/check_stop stay on the worker (§3.2/§4.3); each record item's
-  inline flag is derived from the worker's SHM-skip decision.
+  route/store/check_stop stay on the worker; each record item's inline flag
+  is derived from the worker's SHM-skip decision.
 
-One-way data flow (§6.1): the sidecar produces nothing the worker, scheduler,
-or tensor_manager ever reads. Transport (§4.1/§6.3): a single ZMQ PUSH/PULL
-pair per worker — FIFO gives template-before-slim and token order per rid for
-free. Never add a second worker→sidecar socket.
+One-way data flow: the sidecar produces nothing the worker, scheduler, or
+tensor_manager ever reads — this is the central safety invariant. Transport:
+a single ZMQ PUSH/PULL pair per worker — FIFO gives template-before-slim and
+token order per rid for free. Never add a second worker→sidecar socket.
 
-Ordering audit (§6.3 / open question 1): besides WORKER_GRAPHS_DONE, the
-worker sends the conductor only SETUP_DONE (startup, before any request
-exists) and — on sidecar failure — ABORT_REQUEST for stranded rids. Nothing
-else implies partition completion, so moving WGD into the sidecar cannot
-reorder it against other completion-implying worker→conductor traffic.
+Ordering audit: besides WORKER_GRAPHS_DONE, the worker sends the conductor
+only SETUP_DONE (startup, before any request exists) and — on sidecar
+failure — ABORT_REQUEST for stranded rids. Nothing else implies partition
+completion, so moving WGD into the sidecar cannot reorder it against other
+completion-implying worker→conductor traffic.
 
 Flags: MSTAR_EMIT_SIDECAR (default "0") is read ONCE at worker init. The
 sidecar is a spawned process, so this flag cannot follow MSTAR_DYNFLAGS flips
@@ -42,17 +43,17 @@ dyn_ab). Scoped-rid construction is pinned to the winning emit stack
 (MSTAR_BATCH_EMIT + MSTAR_SLIM_EMIT + MSTAR_SLIM_EMIT2 semantics); the worker
 refuses to enable the sidecar unless those flags are on, so the flag-on
 stream is byte-identical to the legacy stack's and the flag-off code paths
-stay untouched. Because the scoped construction is static, the design's
-dynflags flip rule (§6.3, "a flip forces full-template re-emission") has no
-trigger in Stage 1: neither MSTAR_EMIT_SIDECAR nor the scoped slim semantics
-can flip at runtime.
+stay untouched. Because the scoped construction is static, a "a flip forces
+full-template re-emission" rule has no trigger here: neither
+MSTAR_EMIT_SIDECAR nor the scoped slim semantics can flip at runtime.
 
-Failure policy (§7): the worker never blocks on the sidecar. The PUSH socket
-has a bounded SNDHWM and sends NOBLOCK; an HWM trip or a dead process is a
-permanent drain-and-disable — legacy path for new work, ABORT_REQUEST for
-rids whose emit/WGD state is stranded in the sidecar. Per-step fallback is
-forbidden: interleaving two producers would break the per-(rid, name) FIFO
-the slim-template protocol needs.
+Failure policy — a dead sidecar fails fast, it never hangs the client: the
+worker never blocks on the sidecar. The PUSH socket has a bounded SNDHWM and
+sends NOBLOCK; an HWM trip or a dead process is a permanent drain-and-disable
+— legacy path for new work, ABORT_REQUEST for rids whose emit/WGD state is
+stranded in the sidecar. Per-step fallback is forbidden: interleaving two
+producers would break the per-(rid, name) FIFO the slim-template protocol
+needs.
 """
 
 import logging
@@ -84,7 +85,7 @@ from mstar.utils.ipc_format import (
 
 logger = logging.getLogger(__name__)
 
-# Walk gate (design §4.1, the E4b lesson): only the text paths are ever
+# Walk gate (the E4b lesson): only the text paths are ever
 # sidecar-scoped. Talker/Code2Wav emit rides streaming edges, not this path,
 # and must stay exactly flat. A rid is scoped only if EVERY walk its worker
 # graphs can run on the owning worker is in this set.
@@ -101,8 +102,8 @@ SIDECAR_WALKS = frozenset({"thinker_decode", "prefill_text", "thinker_mixed"})
 # qwen3_omni_model.py's prefill_vision/prefill_multimodal Sequentials). It was
 # simply never in Stage 1's validated coverage (LEARNINGS_TTFT.md #12) and
 # was left conservatively flat pending its own walk-gating coverage guard,
-# the same way s2t/i2s were guarded for Stage 1 (SIDECAR_DESIGN.md §8 recipe
-# 5). The item-processing code path itself is already exercised for a
+# the same way s2t/i2s were guarded for Stage 1. The item-processing code
+# path itself is already exercised for a
 # prefill-shaped row (non-inline, D2H-fallback new_token — see
 # test_mixed_walk_rows_byte_identical's prem-less chunk row, which has the
 # identical shape to a prefill_vision Thinker emit): only the admission gate
@@ -136,19 +137,19 @@ SIDECAR_WALKS_I2T_EXTRA = frozenset({
     "prefill_vision", "prefill_multimodal", "encode_vision",
 })
 
-# Bounded send queue (design §7): ~512 steps ≈ 4.5 s of buffer at the 8.8 ms
+# Bounded send queue: ~512 steps ≈ 4.5 s of buffer at the 8.8 ms
 # B32 step. The sidecar has 4-7x headroom per step, so the queue only grows
 # when the sidecar has degraded — treat a trip as failure, not backpressure.
 SIDECAR_SNDHWM = 512
 
-# StepRecord item flags (bit field, plain int per design §4.2).
+# StepRecord item flags (bit field, plain int).
 ITEM_INLINE = 1  # inline-qualifying: values carried, no SHM fetch downstream
 
 
 @dataclass
 class RidRegister:
     """Admission record: binds a rid string to its session-interned index
-    (design §4.2 "rid-registration record on admission"). Sent once per
+    (a rid-registration record on admission). Sent once per
     scoped rid, before any step record can reference the index (FIFO)."""
     rid_idx: int
     rid: str
@@ -185,7 +186,7 @@ class StepRecord:
       NestedLoopIndices decomposed to ints against an interned layout;
       ``edge`` is the GraphEdge when it must ride the record (see module
       docstring) or None on the steady path.
-    - ``boundary``: None, or the worker-only WGD fields (design §4.2)::
+    - ``boundary``: None, or the worker-only WGD fields::
 
           (completed_worker_graph_ids, is_first_tp_rank, persist_signals,
            per_label_seq_info, partition_name, partition_done,
@@ -293,7 +294,7 @@ class SidecarClient(SidecarRecordBuilder):
     """Worker-side handle: spawns the sidecar process and owns the bounded,
     never-blocking PUSH socket. All failure modes collapse into
     ``healthy() == False`` / ``send() == False``; the worker reacts with the
-    permanent fallback in ``Worker._disable_sidecar`` (design §7)."""
+    permanent fallback in ``Worker._disable_sidecar``."""
 
     def __init__(
         self,
@@ -308,7 +309,7 @@ class SidecarClient(SidecarRecordBuilder):
         self.hwm_trips = 0
         self.records_sent = 0
 
-        # Spawn, not fork: the worker holds a CUDA context (design §7).
+        # Spawn, not fork: the worker holds a CUDA context.
         # daemon=True is the backstop against orphaned sidecars; graceful
         # shutdown (SIGTERM → 5 s drain) goes through shutdown().
         ctx = mp.get_context("spawn")
@@ -329,7 +330,7 @@ class SidecarClient(SidecarRecordBuilder):
             worker_id, self.proc.pid,
         )
 
-        # Single PUSH/PULL pair (design §4.1/§6.3) with a bounded send
+        # Single PUSH/PULL pair with a bounded send
         # queue; sends are NOBLOCK so the worker can never stall on the
         # sidecar. The endpoint scheme matches ZMQCommunicator's, so the
         # sidecar's plain communicator PULL binds the other end.
@@ -375,7 +376,7 @@ class SidecarClient(SidecarRecordBuilder):
 
     def shutdown(self, timeout: float = 5.0) -> None:
         """SIGTERM the sidecar (it drains its queue with its own 5 s
-        deadline) and wait at most ``timeout`` (design §7)."""
+        deadline) and wait at most ``timeout``."""
         if self.proc.is_alive():
             self.proc.terminate()
             self.proc.join(timeout=timeout)
@@ -405,7 +406,7 @@ class SidecarState:
         self.layouts: dict[int, tuple] = {}
 
         # The three WGD-feeding accumulators — ownership moved WHOLESALE
-        # from PerRequestInfo (design §4.3). Keyed by rid_idx.
+        # from PerRequestInfo. Keyed by rid_idx.
         self.pending_new_tokens: dict[int, dict[str, list[int]]] = {}
         self.current_output_chunks: dict[int, list[str]] = {}
         self.output_loop_indices: dict[int, dict[str, NestedLoopIndices]] = {}
@@ -421,21 +422,7 @@ class SidecarState:
         # happen on a healthy Stage-1 stream; belt for future flip paths).
         self.edge_templates: dict[tuple[int, int], object] = {}
 
-        # MSTAR_EMIT_SEQNUMS: per-rid_idx emit sequence counter. For a
-        # sidecar-scoped rid the sidecar process is the SOLE ordering authority
-        # (all of that rid's client-bound emits ride the FIFO record stream and
-        # are rebuilt here in build order), so numbering here matches the order
-        # the consumer must deliver. Scoped rids are text-only (SIDECAR_WALKS is
-        # all text; Talker/Code2Wav emit rides streaming edges, not this path),
-        # so rid_idx alone identifies the (rid, "text") stream — the same
-        # stream the consumer keys as (rid, "text"). Read once: the sidecar is a
-        # spawned process and cannot follow MSTAR_DYNFLAGS (module docstring),
-        # so this flag is effectively static per server boot. Cleared in
-        # ``_remove``.
-        self._emit_seqnums = os.environ.get("MSTAR_EMIT_SEQNUMS", "0") == "1"
-        self._emit_seq: dict[int, int] = {}
-
-        # Mechanism-alive counters (design §8 validation recipe 3). The
+        # Mechanism-alive counters. The
         # drain size per poll is the observable proxy for queue depth (ZMQ
         # doesn't expose it): >1 means the sidecar fell behind the producer
         # within a poll interval.
@@ -466,7 +453,6 @@ class SidecarState:
 
     def _remove(self, rid_idx: int) -> None:
         self.rids.pop(rid_idx, None)
-        self._emit_seq.pop(rid_idx, None)
         self.pending_new_tokens.pop(rid_idx, None)
         self.current_output_chunks.pop(rid_idx, None)
         self.output_loop_indices.pop(rid_idx, None)
@@ -529,14 +515,6 @@ class SidecarState:
                 ) in items:
                     self.items_seen += 1
                     name = self.names[name_idx]
-                    # MSTAR_EMIT_SEQNUMS: one seqnum per emitted edge, in the
-                    # record's edge order (== the worker's build order), before
-                    # the inline/non-inline split — mirrors the legacy
-                    # _send_outputs stamping so both paths number identically.
-                    emit_seq = None
-                    if self._emit_seqnums:
-                        emit_seq = self._emit_seq.get(rid_idx, 0)
-                        self._emit_seq[rid_idx] = emit_seq + 1
                     # buffer_output_signals: one chunk name per emit edge,
                     # in edge order.
                     chunks.append(name)
@@ -567,7 +545,6 @@ class SidecarState:
                                     None if loop_key is not None else nli
                                 ),
                                 loop_key=loop_key,
-                                emit_seq=emit_seq,
                             ))
                         else:
                             # Template step: first full ResultTensors for
@@ -584,7 +561,6 @@ class SidecarState:
                                 graph_edge=tmpl_edge,
                                 loop_indices=nli,
                                 metadata={"inline_values": {name: values}},
-                                emit_seq=emit_seq,
                             ))
                     else:
                         # Non-inline edge: full ResultTensors sent
@@ -599,7 +575,6 @@ class SidecarState:
                                 graph_edge=edge,
                                 loop_indices=nli,
                                 metadata={},
-                                emit_seq=emit_seq,
                             ),
                         ))
 
@@ -642,11 +617,17 @@ class SidecarState:
             per_label_seq_info, partition_name, partition_done,
             stream_tokens_consumed, graph_timings, rx_info, tx_info,
         ) = boundary
-        # Flush semantics identical to WorkerGraphsManager.flush_new_tokens /
-        # flush_output_signals: hand off the dict, copy-then-clear the list,
-        # pass the live output_loop_indices dict (legacy never clears it).
+        # Flush semantics identical to
+        # WorkerGraphsManager.flush_new_token_counts / flush_output_signals:
+        # since #149 the WGD carries only per-signal token COUNTS (numel), not
+        # the materialized values — the values reach the client via the emit
+        # items. Derive the count per signal from the accumulated tokens (one
+        # per emitted new token, exactly numel), reset the accumulator, then
+        # copy-then-clear the chunk-name list and pass the live
+        # output_loop_indices dict (legacy never clears it).
         new_tokens = self.pending_new_tokens[rid_idx]
         self.pending_new_tokens[rid_idx] = {}
+        new_token_counts = {name: len(toks) for name, toks in new_tokens.items()}
         chunks = self.current_output_chunks[rid_idx]
         out_chunks = list(chunks)
         chunks.clear()
@@ -657,7 +638,7 @@ class SidecarState:
                 worker_graph_ids=worker_graph_ids,
                 is_first_tp_rank=is_first_tp_rank,
                 persist_signals=persist_signals,
-                new_tokens=new_tokens,
+                new_token_counts=new_token_counts,
                 output_signal_names=out_chunks,
                 per_label_seq_info=per_label_seq_info,
                 partition_name=partition_name,
@@ -681,7 +662,7 @@ def run_sidecar(
     """Sidecar process target. Module-level for spawn picklability (same
     pattern as the conductor's _worker_process_target)."""
     # FIRST: make CUDA unreachable. The sidecar is a pure-CPU process with
-    # its own GIL; torch.cuda must never initialize here (design §4.1/§7).
+    # its own GIL; torch.cuda must never initialize here.
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
     logging.basicConfig(
@@ -707,7 +688,7 @@ def run_sidecar(
         stop_requested = True
 
     # SIGTERM (from SidecarClient.shutdown / worker teardown): drain the
-    # queue with a 5 s deadline, then exit (design §7).
+    # queue with a 5 s deadline, then exit.
     signal.signal(signal.SIGTERM, _request_stop)
     signal.signal(signal.SIGINT, _request_stop)
 
@@ -728,7 +709,7 @@ def run_sidecar(
             try:
                 state.handle(rec)
             except Exception:
-                # Loud fail-fast (design §7): a corrupted record stream must
+                # Loud fail-fast: a corrupted record stream must
                 # not half-process silently. Exiting flips the worker to the
                 # legacy path via its death watch.
                 logger.critical(

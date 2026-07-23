@@ -433,10 +433,6 @@ class APIServer:
             graph_edge=edge,
             loop_indices=loop_indices,
             metadata={"inline_values": {item.name: item.values}},
-            # MSTAR_EMIT_SEQNUMS: carry the slim item's own producer seqnum onto
-            # the synthesized full item (the template's seqnum belongs to an
-            # earlier step); the data worker orders on this.
-            emit_seq=getattr(item, "emit_seq", None),
         )
 
     def _route_result_tensors(self, body: "ResultTensors") -> None:

@@ -52,8 +52,9 @@ class RMSNorm(nn.Module):
             return normed.to(orig_dtype)
         if torch.compiler.is_compiling():
             # Under torch.compile the FlashInfer call below is untraceable and
-            # graph-breaks at EVERY norm (~311 breaks/boot measured), which
-            # prevents Inductor from fusing the norm->residual->proj chains.
+            # graph-breaks at EVERY norm (measured as a large number of breaks
+            # per boot), which prevents Inductor from fusing the
+            # norm->residual->proj chains.
             # The pure-torch form traces cleanly and fuses; Inductor's fused
             # kernel replaces FlashInfer's here. Numerics: float32 rsqrt path,
             # same as the gemma branch — ULP-level drift vs FlashInfer is

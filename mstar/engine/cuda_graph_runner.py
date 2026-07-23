@@ -442,10 +442,10 @@ class CudaGraphRunner:
         plain prefill packed configs keep the single prefill wrapper.
 
         The env is snapshotted on first call (process-static): capture bakes
-        the fixed-region layout into the graphs, so a runtime flag flip (e.g.
-        via MSTAR_DYNFLAGS) must NOT change bucket selection afterwards — a
-        desynced OFF-flip would route a 258-token fold back to the 288 bucket
-        and overflow the split wrapper's 257-token chunk window."""
+        the fixed-region layout into the graphs, so a runtime flag flip must
+        NOT change bucket selection afterwards — a desynced OFF-flip would
+        route a 258-token fold back to the 288 bucket and overflow the split
+        wrapper's 257-token chunk window."""
         if cls._split_attn_env_snapshot is None:
             from mstar.model.qwen3_omni.qwen3_omni_model import (
                 mixed_split_attn_enabled,
@@ -1340,7 +1340,7 @@ class CudaGraphRunner:
     # / reset_pre_plan_state_for_slot) all key on _get_basic_batched_key_for,
     # which returns None for FLASH_INFER_PACKED — so a chain-folded thinker_mixed
     # step reserves no slot and gets no pre-plan, and its prefill-wrapper plan
-    # (~0.75-1.5ms for a 32-row bucket) runs inline on the GPU thread. The trio
+    # (non-trivial for a full bucket) runs inline on the GPU thread. The trio
     # below mirrors the decode pattern for packed configs, gated by
     # MSTAR_MIXED_PREPLAN at the worker layer. The KEY DIFFERENCES from decode:
     #   * key lookup uses _get_key_for (num_tokens-aware) not the BASIC-only
@@ -1941,8 +1941,8 @@ class CudaGraphRunner:
         config_labels = graph_data.config.labels
 
         # MSTAR_MIXED_SPLIT_ATTN fixed-region layout. Detected from the slot's
-        # persistent wrapper TYPE (ground truth — immune to runtime flag flips
-        # via dynflags desyncing from what capture built). Real request rows
+        # persistent wrapper TYPE (ground truth — immune to a runtime flag
+        # flip desyncing from what capture built). Real request rows
         # arrive as [decode..., chunk]; the split wrapper needs decode rows in
         # slots [0, bs-1) (real + qo=1 dummies) and the chunk at slot bs-1, so
         # replay maps request i -> slot via slot_map and pads the middle with

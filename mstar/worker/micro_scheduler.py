@@ -13,7 +13,7 @@ from mstar.worker.node_manager_utils import WorkerGraphsManager
 
 logger = logging.getLogger(__name__)
 
-# W5-P2/P3 mixed-batch chunk grid (MSTAR_MIXED_CHUNK_SIZES). Kept as a
+# Mixed-batch chunk grid (MSTAR_MIXED_CHUNK_SIZES). Kept as a
 # scheduler-local duplicate of ThinkerSubmodule.MIXED_BATCH_CHUNK_SIZES (same
 # pattern as qwen3_omni_model._PREFILL_CHUNK_BUCKETS mirroring
 # ThinkerSubmodule.PREFILL_TOKEN_BUCKETS) so the scheduler does not import the
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 #
 # Boot-time only (the grid IS the CUDA-graph capture buckets — see
 # ThinkerSubmodule.get_cuda_graph_configs / MIXED_BATCH_CHUNK_SIZES): resolved
-# once and cached for the process lifetime, not refreshed on a dynflags flip.
+# once and cached for the process lifetime, not re-resolved at runtime.
 _MIXED_CHUNK_SIZES_DEFAULT = (256, 288, 512)
 _mixed_chunk_sizes_cache: tuple[int, ...] | None = None
 
@@ -67,7 +67,8 @@ def _resolve_mixed_chunk_sizes() -> tuple[int, ...]:
 # the encoded buffer is already populated — zero encoder wait.
 #
 # Bounding the in-flight depth prevents the encoder from monopolizing the
-# GPU under heavy admission and is the K=4 ceiling from the experiment spec.
+# GPU under heavy admission; the default depth of 4 is a conservative
+# ceiling chosen for that reason.
 # ---------------------------------------------------------------------------
 def _encoder_async_enabled() -> bool:
     return os.environ.get("MSTAR_ENCODER_ASYNC", "0") in ("1", "true", "True")
@@ -139,34 +140,34 @@ class MicroScheduler:
         self.sched_type = sched_type
 
         # lockstep-parallel (TP / SP instance) scheduling. Upstream (#154/#176)
-        # renamed tp_rank_zero_nodes -> parallel_leader_nodes; our W5-P2
-        # mixed-batch code still references self.tp_rank_zero_nodes, so alias
+        # renamed tp_rank_zero_nodes -> parallel_leader_nodes; the mixed-batch
+        # code below still references self.tp_rank_zero_nodes, so alias
         # both names to the same set (identical concept: the rank-0 / leader
         # node of each lockstep-parallel instance).
         self.parallel_leader_nodes = parallel_leader_nodes
         self.tp_rank_zero_nodes = parallel_leader_nodes
-        # Nodes with TP world_size > 1. Used to keep W5-P2 mixed-batch assembly
+        # Nodes with TP world_size > 1. Used to keep mixed-batch assembly
         # off TP nodes: a mixed batch's per-request walks are heterogeneous and
         # TP fan-out (ScheduleTPNode / sharding group lookup) is keyed by a
         # single batch walk, so a "thinker_mixed" TP batch has no sharding
-        # group. TP mixed is P3.
+        # group. TP mixed batching is not yet supported.
         self.tp_nodes = tp_nodes or set()
         self.tp_batches_pending_schedule = deque()
         self.num_consec_tp_follower_batches = 0
         self.max_consec_tp_follower_batches = max_consec_tp_follower_batches
 
         self.node_and_walk_to_last_batch_num = {}
-        # W5-P2 mixed-batch: count of thinker_mixed batches assembled by this
+        # Mixed-batch: count of thinker_mixed batches assembled by this
         # scheduler. Surfaced in the per-assembly INFO log; a monotonic counter
         # gives runtime evidence the mixed path is firing without DEBUG.
         self.mixed_batches_assembled = 0
-        # EAGER FOLD (MSTAR_EAGER_FOLD, idea o1): one-shot arm set by the worker
+        # EAGER FOLD (MSTAR_EAGER_FOLD): one-shot arm set by the worker
         # right before the get_next_batch that should assemble a LARGE-chunk
-        # (C > _MIXED_MAX_CHUNK_TOKENS) mixed step to run EAGER. Read-and-cleared
+        # (C > _max_chunk_tokens()) mixed step to run EAGER. Read-and-cleared
         # by _try_assemble_mixed so exactly one assembly relaxes the chunk cap;
-        # every other assembly (and the whole flag-off path) keeps the 512 cap,
-        # so a large chunk can never reach the CAPTURED spec-fold pop. Default
-        # False -> byte-identical.
+        # every other assembly (and the whole flag-off path) keeps the captured
+        # cap, so a large chunk can never reach the CAPTURED spec-fold pop.
+        # Default False -> byte-identical.
         self._eager_fold_armed = False
         # request_id -> monotonic time until which the request is held
         self.held_until: dict[str, float] = {}
@@ -374,12 +375,12 @@ class MicroScheduler:
         )
 
 
-    # W5-P2 mixed-batch walk names + capacity. Kept as module-adjacent
+    # Mixed-batch walk names + capacity. Kept as module-adjacent
     # constants (mirroring ThinkerSubmodule.MIXED_BATCH_*) so the scheduler
     # does not import the model submodule. If those change, change these.
     _MIXED_DECODE_WALK = "thinker_decode"
     _MIXED_CHUNK_WALK = "prefill_text"
-    # W5-P3-lite: a VISION prefill chunk may also serve as the mixed step's
+    # A VISION prefill chunk may also serve as the mixed step's
     # single chunk row when MSTAR_MIXED_BATCH_VISION is on. Same C caps; the
     # Thinker's mixed capture then carries deepstack statics + the MRoPE
     # side-channel (see ThinkerSubmodule.preprocess / get_cuda_graph_configs).
@@ -391,7 +392,7 @@ class MicroScheduler:
         """Largest captured mixed-step chunk bucket (C). Was a hardcoded 512
         constant; now derives from the same MSTAR_MIXED_CHUNK_SIZES-resolved
         grid ThinkerSubmodule captured at boot (_resolve_mixed_chunk_sizes),
-        so the G1 chunk-size gate below — and MSTAR_COADMIT's budget clamp in
+        so the chunk-size gate below — and MSTAR_COADMIT's budget clamp in
         worker.py, which reads this via the class, not an instance — track any
         grid growth automatically instead of silently going stale. Callable as
         both ``self._max_chunk_tokens()`` and ``MicroScheduler._max_chunk_tokens()``
@@ -401,18 +402,17 @@ class MicroScheduler:
     def _mixed_min_decode(self) -> int:
         """Occupancy floor for chain-folding (see has_mixed_opportunity).
 
-        Default 0 (no floor — preserves the measured-positive P2 behavior,
-        including small-batch s2t folds) UNLESS an EAGER (every-step) fold policy
-        is on — MSTAR_MIXED_SINGLE_CHUNK or MSTAR_MIXED_BUDGET_TOKENS — where
-        every admission depends on fold slots and a small decode side means
-        folding throttles admission: default 24 there. The occupancy floor is
-        the graveyard's second anti-lesson (single-chunk starved decode ~10%),
-        so the eager budget policy inherits it.
+        Default 0 (no floor — preserves the previously-validated default
+        behavior, including small-batch s2t folds) UNLESS an EAGER (every-step)
+        fold policy is on — MSTAR_MIXED_SINGLE_CHUNK or MSTAR_MIXED_BUDGET_TOKENS
+        — where every admission depends on fold slots and a small decode side
+        means folding throttles admission: default 24 there. The occupancy floor
+        exists because unconditional single-chunk folding was found to starve
+        decode occupancy, so the eager budget policy inherits it.
 
         Overrides (precedence): MSTAR_MIXED_BUDGET_MIN_DECODE (the V2 knob) wins,
         else MSTAR_MIXED_MIN_DECODE (the general one), else the default above.
-        Cached after first read; reset by _refresh_dynamic_flags on a dynflags
-        flip so a runtime budget toggle re-derives the floor."""
+        Cached after first read (read once at init)."""
         v = getattr(self, "_mixed_min_decode_cached", None)
         if v is None:
             import os
@@ -470,18 +470,19 @@ class MicroScheduler:
         Shared by the assembler (_try_assemble_mixed) and the read-only peek
         (has_mixed_opportunity) so the two never diverge on what counts as a
         mixable chunk. Gates (see _try_assemble_mixed docstring): chunk metadata
-        present (P1 chunked, not a full unchunked prefill), C within the largest
+        present (chunked, not a full unchunked prefill), C within the largest
         captured bucket, and repetition_penalty == 1.0 (a discarded chunk sample
         must not perturb penalty state).
 
-        ``eager_ok`` (MSTAR_EAGER_FOLD, idea o1): raise the chunk-size ceiling
-        from the largest CAPTURED bucket (_MIXED_MAX_CHUNK_TOKENS = 512) to
+        ``eager_ok`` (MSTAR_EAGER_FOLD): raise the chunk-size ceiling
+        from the largest CAPTURED bucket (``_max_chunk_tokens()``) to
         MSTAR_EAGER_FOLD_MAX_CHUNK, because an eager-fold mixed step is run
         UNCAPTURED (a dynamic varlen forward), so it is not bound by the capture
         grid. Passed True ONLY by _try_assemble_mixed when the worker armed an
         eager fold; NEVER by pop_mixed_chunk_for_spec (the spec-fold pop targets a
-        CAPTURED replay, so its chunk must stay <= 512 or it would route to an
-        uncaptured graph = IMA). Default False keeps the captured cap."""
+        CAPTURED replay, so its chunk must stay within the captured cap or it
+        would route to an uncaptured graph = IMA). Default False keeps the
+        captured cap."""
         fwd_info = worker_graphs_manager.get_fwd_info(
             entry.request_id, node_partition,
         )
@@ -539,7 +540,7 @@ class MicroScheduler:
         ``n_decode``: size of the in-flight decode chain, when the caller knows
         it. Folding admits at most ONE chunk per step, so during ramp-up (small
         decode side, many requests still prefilling) folding THROTTLES admission
-        and starves decode occupancy — measured 6.18 -> 3.48 req/s at i2t B32
+        and starves decode occupancy — measured to substantially reduce req/s
         when every short span became foldable (MSTAR_MIXED_SINGLE_CHUNK).
         Standalone prefill fills the batch faster there. Gate: fold only when
         n_decode >= MSTAR_MIXED_MIN_DECODE (default 24); None skips the gate
@@ -548,15 +549,15 @@ class MicroScheduler:
         ``budget_tokens``: V2 per-step token budget (MSTAR_MIXED_BUDGET_TOKENS).
         When > 0, a chunk only counts as an opportunity if n_decode + C fits the
         budget; the scan keeps looking for a smaller chunk otherwise. 0 = off
-        (no cap), so P2 / yield-boundary behavior is byte-identical.
+        (no cap), so the default yield-boundary behavior is byte-identical.
 
-        ``bypass_floor``: MSTAR_COADMIT (fix #1) sets this when a BRAND-NEW
+        ``bypass_floor``: MSTAR_COADMIT sets this when a BRAND-NEW
         request is ready, to skip the occupancy floor for that arrival — vLLM
         co-admits a new prefill into the decode step regardless of how many
         decodes are in flight. Only the fold-vs-standalone timing changes: the
         spec-fold pop (``pop_mixed_chunk_for_spec``) carries no floor, so a True
-        here maps to a real fold. Default False keeps P2 / budget-policy behavior
-        byte-identical.
+        here maps to a real fold. Default False keeps the default budget-policy
+        behavior byte-identical.
         """
         from mstar.model.qwen3_omni.qwen3_omni_model import mixed_batch_enabled
         if not mixed_batch_enabled():
@@ -572,7 +573,7 @@ class MicroScheduler:
         if decode_walk != self._MIXED_DECODE_WALK:
             return False
         if decode_node_name in self.tp_nodes:
-            return False  # TP mixed batches are P3
+            return False  # TP mixed batching is not yet supported
 
         chunk_walks = self._mixed_chunk_walks()
         node_partition = worker_graphs_manager.get_partition_for_node(
@@ -619,9 +620,9 @@ class MicroScheduler:
         worker_graphs_manager: WorkerGraphsManager,
         decode_target: tuple[str, str],
     ) -> bool:
-        """Read-only peek (MSTAR_EAGER_FOLD, idea o1): is a BRAND-NEW request's
+        """Read-only peek (MSTAR_EAGER_FOLD): is a BRAND-NEW request's
         first prefill chunk ready that is TOO LARGE for the captured mixed fold
-        (C > _MIXED_MAX_CHUNK_TOKENS) but within the eager cap
+        (C > ``_max_chunk_tokens()``) but within the eager cap
         (<= MSTAR_EAGER_FOLD_MAX_CHUNK), on the in-flight decode's node?
 
         The worker calls this while a decode spec chain is live (decode rids
@@ -636,8 +637,9 @@ class MicroScheduler:
           * a chunk walk allowed by _mixed_chunk_walks() (prefill_text always;
             prefill_vision only when MSTAR_MIXED_BATCH_VISION booted — a vision
             chunk otherwise lacks the deepstack the mixed preprocess needs);
-          * 512 < C <= eager cap (a chunk that already fits the captured fold is
-            left to the normal captured/spec/coadmit path, not made eager).
+          * capture_cap < C <= eager cap (a chunk that already fits the
+            captured fold is left to the normal captured/spec/coadmit path,
+            not made eager).
 
         Returns False when the flag is off (so the worker never breaks a chain for
         it), keeping flag-off byte-identical. Does not pop or mutate queue state;
@@ -653,7 +655,7 @@ class MicroScheduler:
         if decode_walk != self._MIXED_DECODE_WALK:
             return False
         if decode_node_name in self.tp_nodes:
-            return False  # TP mixed batches are P3
+            return False  # TP mixed batching is not yet supported
 
         eager_cap = eager_fold_max_chunk()
         capture_cap = self._max_chunk_tokens()
@@ -706,7 +708,7 @@ class MicroScheduler:
         node_name_to_requests: dict[str, list["ReadyNodeEntry"]],
         max_batch_size: int | None,
     ) -> "ScheduledBatch | None":
-        """Assemble a mixed thinker_decode + prefill_text-chunk batch (W5-P2).
+        """Assemble a mixed thinker_decode + prefill_text-chunk batch.
 
         Returns a ScheduledBatch with graph_walk="thinker_mixed" covering all
         ready decode rows on a node plus ONE ready prefill_text chunk row, or
@@ -718,26 +720,26 @@ class MicroScheduler:
         what the submodule's prepare_inputs / postprocess dispatch on. Only the
         batch-level graph_walk is "thinker_mixed" (drives config + runner).
 
-        Gates (any failing → None, fall back to P1 alternation):
+        Gates (any failing → None, fall back to plain alternation):
           * MSTAR_MIXED_BATCH on.
           * A node with BOTH a decode group and >=1 prefill_text chunk row.
-          * The chunk row carries P1 chunk metadata (prefill_chunk_len set): a
+          * The chunk row carries chunk metadata (prefill_chunk_len set): a
             full unchunked prefill is not mixed (it would blow the token bucket).
           * Chunk C <= _max_chunk_tokens() so (n + C) fits a captured bucket.
           * Chunk request repetition_penalty == 1.0: a non-last chunk row's
             sampled token is discarded (postprocess drops it), but Sampler.sample
             adds every sampled token to the seen-token mask + advances the RNG
             when any rep-penalty is active, which would corrupt the chunk
-            request's penalty state. Decode rows are unaffected. (design D gate)
+            request's penalty state. Decode rows are unaffected.
         """
         from mstar.model.qwen3_omni.qwen3_omni_model import mixed_batch_enabled
         if not mixed_batch_enabled():
             self._eager_fold_armed = False  # one-shot arm can't outlive a no-op
             return None
 
-        # EAGER FOLD (MSTAR_EAGER_FOLD, idea o1): read-and-CLEAR the one-shot arm
+        # EAGER FOLD (MSTAR_EAGER_FOLD): read-and-CLEAR the one-shot arm
         # the worker set before this get_next_batch. When armed, the chunk gate
-        # accepts a chunk up to MSTAR_EAGER_FOLD_MAX_CHUNK (> the captured 512
+        # accepts a chunk up to MSTAR_EAGER_FOLD_MAX_CHUNK (> the captured
         # cap) and we prefer such a large chunk, so the assembled thinker_mixed
         # step's token count matches no captured graph and execute_forward runs it
         # EAGER. Clearing it here guarantees exactly ONE assembly relaxes the cap;
@@ -745,15 +747,15 @@ class MicroScheduler:
         eager_ok = self._eager_fold_armed
         self._eager_fold_armed = False
 
-        # W5-P3-lite: allow a prefill_vision chunk row alongside prefill_text
+        # Allow a prefill_vision chunk row alongside prefill_text
         # when the vision flag is on. A vision chunk carries deepstack + the
         # MRoPE side-channel, which only the vision-capable mixed capture can
-        # replay; with the flag off the chunk row stays prefill_text (P2).
+        # replay; with the flag off the chunk row stays prefill_text.
         chunk_walks = self._mixed_chunk_walks()
 
         for node_name, entries in node_name_to_requests.items():
             if node_name in self.tp_nodes:
-                continue  # TP mixed batches are P3 (see __init__ note)
+                continue  # TP mixed batching is not yet supported (see __init__ note)
             decode_entries = [
                 e for e in entries if e.graph_walk == self._MIXED_DECODE_WALK
             ]
@@ -765,7 +767,7 @@ class MicroScheduler:
             # Occupancy floor (see _mixed_min_decode): a small decode side
             # makes the mixed step poor value AND throttles admission (one
             # chunk per step). Let prefills run standalone instead. Floor is
-            # 0 unless MSTAR_MIXED_SINGLE_CHUNK, so P2 behavior is unchanged.
+            # 0 unless MSTAR_MIXED_SINGLE_CHUNK, so default behavior is unchanged.
             if len(decode_entries) < self._mixed_min_decode():
                 continue
 
@@ -919,7 +921,7 @@ class MicroScheduler:
         if decode_walk != self._MIXED_DECODE_WALK:
             return None
         if decode_node_name in self.tp_nodes:
-            return None  # TP mixed batches are P3
+            return None  # TP mixed batching is not yet supported
 
         chunk_walks = self._mixed_chunk_walks()
         node_partition = worker_graphs_manager.get_partition_for_node(
@@ -971,7 +973,7 @@ class MicroScheduler:
         return None
 
     # -----------------------------------------------------------------------
-    # MSTAR_ENC_STEP_BUDGET (fix #2 — encoder step budget)
+    # MSTAR_ENC_STEP_BUDGET — encoder step budget
     #
     # vLLM-Omni packs ALL images scheduled in a step into ONE varlen eager ViT
     # forward, bounded by a per-step embed-token budget (32768) rather than a
@@ -986,7 +988,7 @@ class MicroScheduler:
     # budget into the single varlen forward, and push the remainder back onto
     # their ready queues so they form the next wave.
     #
-    # Read per-call (not cached at import) so ``MSTAR_DYNFLAGS`` can toggle it at
+    # Read per-call (not cached at import) so the flag can be toggled at
     # runtime without a reboot. Default unset -> ``None`` -> the whole path is a
     # no-op, byte-identical to today. Also skipped when ``MSTAR_MERGED_PREFILL``
     # is on (the merged walk owns encode+prefill as one bs=1 walk; there is no
@@ -1158,7 +1160,7 @@ class MicroScheduler:
         if not node_name_to_requests:
             return None
 
-        # W5-P2 mixed prefill+decode batch (MSTAR_MIXED_BATCH). Before the
+        # Mixed prefill+decode batch (MSTAR_MIXED_BATCH). Before the
         # normal one-walk-per-batch selection, try to assemble a mixed batch
         # (N thinker_decode rows + 1 prefill_text chunk row) so the captured
         # thinker_mixed graph runs both kinds in one forward. Returns None
@@ -1202,9 +1204,9 @@ class MicroScheduler:
         if not node_objects:
             return None
 
-        # MSTAR_ENC_STEP_BUDGET (fix #2): cap the eager encoder wave by summed
+        # MSTAR_ENC_STEP_BUDGET: cap the eager encoder wave by summed
         # embed tokens and defer the over-budget tail to the next wave. Read the
-        # flag per-call so MSTAR_DYNFLAGS can toggle it live; no-op / byte-
+        # flag per-call so it can be toggled live; no-op / byte-
         # identical when unset (or under MSTAR_MERGED_PREFILL), and only ever
         # touches the standalone encoder nodes.
         if best_node_name in _ENCODER_NODE_NAMES:
@@ -1324,7 +1326,7 @@ class MicroScheduler:
     ) -> bool:
         """Cheap peek: is a BRAND-NEW request ready on its FIRST prefill walk?
 
-        Used by MSTAR_ADMIT_FASTPATH (fix #4): a request that has never run a
+        Used by MSTAR_ADMIT_FASTPATH: a request that has never run a
         forward pass (``fwd_index == 0`` -> no KV state) and is waiting on a
         prefill walk should become eligible for scheduling at the NEXT decision
         point instead of sitting behind the spec-chain yield gate (which today

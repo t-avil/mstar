@@ -65,12 +65,12 @@ _PREP_POS_HITS = [0]  # prep_pos_device_hits (mechanism-alive counter)
 
 
 def _refresh_prep_flags() -> None:
-    """MSTAR_DYNFLAGS hook: re-read the flags at runtime. Safe to flip mid-run —
+    """Re-read the flags at runtime. Safe to flip mid-run —
     they only change how the pos_ids INPUT tensor is built (pinned async vs
     pageable torch.tensor), nothing baked into the CUDA-graph capture; the value
-    fed to the graph is byte-identical either way. Enables a clean SINGLE-BOOT
-    dynflag A/B (cross-boot A/Bs carry the warm-in/ordering noise documented
-    2026-07-05)."""
+    fed to the graph is byte-identical either way. Enables a clean single-boot
+    A/B of the two paths without the warm-in/ordering noise a cross-boot A/B
+    would carry."""
     global _PREP_DEVICE_POS, _PREP_DEVICE_POS_BATCHED
     _PREP_DEVICE_POS = os.environ.get(
         "MSTAR_PREP_DEVICE_POS", "0"
@@ -640,16 +640,25 @@ class ThinkerSubmodule(ARNodeSubmodule):
             pi.get("main", PositionInfo()).position_id_start for pi in pos_infos
         ]
         if _PREP_DEVICE_POS_BATCHED:
-            # Sync-free: write starts into a reusable PINNED host buffer, then a
-            # genuinely async H2D. Replaces the pageable torch.tensor(starts)
-            # whose non_blocking=True was a no-op (unpinned src -> blocking copy).
-            # start_pos values are read FRESH from pos_infos each step (the
-            # advance_seq_lens source of truth), so positions can't drift.
+            # Sync-free: write starts into a PINNED host buffer, then a genuinely
+            # async H2D (replaces the pageable torch.tensor(starts) whose
+            # non_blocking=True was a no-op). Cycle a small ring of buffers so a
+            # step's host write never overwrites the source of a prior step's
+            # still-in-flight async copy when the CPU runs ahead of the GPU. The
+            # ring depth exceeds the copy-in-flight depth, so a reused buffer's
+            # prior H2D has always completed. start_pos values are read FRESH from
+            # pos_infos each step, so positions can't drift.
             n = len(starts)
-            host = getattr(self, "_pos_host_buf", None)
+            ring = getattr(self, "_pos_host_ring", None)
+            if ring is None:
+                ring = [None] * 4
+                self._pos_host_ring = ring
+                self._pos_host_idx = 0
+            self._pos_host_idx = (self._pos_host_idx + 1) % len(ring)
+            host = ring[self._pos_host_idx]
             if host is None or host.numel() < n:
                 host = torch.empty(max(n, 32), dtype=torch.float, pin_memory=True)
-                self._pos_host_buf = host
+                ring[self._pos_host_idx] = host
             host.numpy()[:n] = starts                    # host-side write, no sync
             pos = host[:n].to(device, non_blocking=True)  # async H2D from pinned
             _prep_pos_count()
@@ -679,7 +688,7 @@ class ThinkerSubmodule(ARNodeSubmodule):
         device = self.get_device()
         start_pos = pos_info.get("main", PositionInfo()).position_id_start
 
-        # W5-P2 mixed batch: the batch-level ``graph_walk`` is "thinker_mixed",
+        # Mixed batch: the batch-level ``graph_walk`` is "thinker_mixed",
         # but each request in the batch carries its OWN walk (a decode row or
         # the single prefill-chunk row). ``prepare_inputs`` runs once per
         # request, so dispatch on the request's real walk from ``fwd_info``,
@@ -843,8 +852,8 @@ class ThinkerSubmodule(ARNodeSubmodule):
         identical modulo kernel-tiling ULP drift). The resulting signature
         (``input_embeds`` + pos_ids + per-layer ``deepstack_<i>`` +
         ``mrope_pos_advance``) matches ``prefill_vision``, so this replays on the
-        ``prefill_vision`` capture (text rows zero-fill deepstack — the W5-P3
-        zero-rows pattern).
+        ``prefill_vision`` capture (text rows zero-fill deepstack, the same
+        zero-rows pattern the mixed-batch vision path uses).
         """
         vision_first = bool(fwd_info.step_metadata.get("merged_vision_first"))
         num_deepstack = len(self.config.vision.deepstack_visual_indexes)
@@ -1006,11 +1015,6 @@ class ThinkerSubmodule(ARNodeSubmodule):
         stays byte-identical."""
         audio_embeds = inputs["audio_embeds"][0].to(device)  # (audio_tokens, hidden)
         audio_len = audio_embeds.shape[0]
-
-        # Env-gated dump of the audio-encoder last_hidden_state for the
-        # cross-system tensor comparison (no-op unless MSTAR_DUMP_DIR set).
-        from mstar.model.qwen3_omni.qwen3_omni_model import _dump_obj
-        _dump_obj("mstar_audio_encoder_last_hidden_state.pt", audio_embeds)
 
         mm_mask = torch.ones(audio_len + 2, dtype=torch.bool, device=device)
         mm_mask[[0, -1]] = 0
@@ -1252,14 +1256,14 @@ class ThinkerSubmodule(ARNodeSubmodule):
         cache_manager.plan_rope(seq_lens=seq_lens, pos_ids=None, label="main")
 
         extra_inputs = {}
-        # W5-P2 mixed batch: the concatenation above already produces the mixed
+        # Mixed batch: the concatenation above already produces the mixed
         # [decode embeds (n,H); chunk embeds (C,H)] layout and the
         # ``seq_lens=[1]*n+[C]`` that plan_attention needs. For a TEXT chunk row
         # nothing further is required — the packed tensor signature is
         # input_embeds + cos_3d + sin_3d only, so decode + prefill_text rows
         # concatenate byte-identically to a plain prefill step.
         #
-        # W5-P3-lite (MSTAR_MIXED_BATCH_VISION): a VISION chunk row additionally
+        # MSTAR_MIXED_BATCH_VISION: a VISION chunk row additionally
         # carries per-layer ``deepstack_<i>`` tensor_inputs and a
         # ``mrope_pos_advance`` kwarg (built by ``_vision_chunk_inputs``). Two
         # things then differ from the text case:
@@ -1274,7 +1278,7 @@ class ThinkerSubmodule(ARNodeSubmodule):
         #     chunk supplies its 3D-grid span, padding rows supply 0.
         if graph_walk == "thinker_mixed":
             from mstar.model.qwen3_omni.qwen3_omni_model import (
-                mixed_batch_vision_enabled,
+                mixed_vision_capture_provisioned,
             )
             # Structure of a mixed batch: n decode rows (seq_len 1) followed by
             # exactly one chunk row (seq_len C > 1). Padding rows (seq_len 0)
@@ -1290,7 +1294,11 @@ class ThinkerSubmodule(ARNodeSubmodule):
                 any(k.startswith("deepstack_") for k in inp.tensor_inputs)
                 for inp in inputs
             )
-            vision_capture = mixed_batch_vision_enabled()
+            # Gate the packed deepstack emission on what the capture ACTUALLY
+            # provisioned, not the live flag: emitting deepstack for a step whose
+            # captured graph lacks the per-layer static buffers is an illegal
+            # memory access. The scheduler routes on the same latch.
+            vision_capture = mixed_vision_capture_provisioned()
             logger.debug(
                 "thinker_mixed step: n_decode=%d C=%s total_tokens=%d bucket=%d "
                 "vision_chunk=%s vision_capture=%s",
@@ -1578,23 +1586,22 @@ class ThinkerSubmodule(ARNodeSubmodule):
             return default
         return vals or default
 
-    # W5-P2 mixed prefill+decode CAPTURED batch (MSTAR_MIXED_BATCH). Each bucket
+    # Mixed prefill+decode CAPTURED batch (MSTAR_MIXED_BATCH). Each bucket
     # is (padded_bs, total_tokens) where total_tokens = padded_bs decode-row
     # tokens (1 each) + one prefill-chunk row of C tokens minus the one row the
     # chunk occupies. Concretely: a mixed step has N decode rows + 1 chunk row,
     # padded to bs=32, so the row count is fixed at 32 and total_tokens =
     # (N decode tokens) + C. With N up to 31 and the chunk row replacing the
-    # 32nd, the captured token bucket is 32 + C for the two P2 chunk sizes:
+    # 32nd, the captured token bucket is 32 + C for the default chunk sizes:
     #   C=256 -> 288,  C=512 -> 544.
     # Padding to bs=32 contributes zero-length rows (input_seq_len=0), so a
     # step with fewer decode rows still lands on the same bucket; the packed
-    # path walks only real_num_tokens (see _run_flashinfer_packed). Grid
-    # expansion (more bs / C buckets) is P3.
+    # path walks only real_num_tokens (see _run_flashinfer_packed). Growing the
+    # (bs, C) grid further is a separate lever from the fixed set below.
     MIXED_BATCH_BS = 32
     # 288 covers tail-merged chunks (C=256+tail<=32, e.g. the ubiquitous
-    # 258-token vision span): 31 decodes + 258 = 289 tokens overflowed the
-    # 288 bucket by ONE token and padded to 544 (~88% waste) — measured as
-    # the main cost of the first spec-fold A/B at B32.
+    # 258-token vision span): 31 decodes + 258 = 289 tokens would otherwise
+    # overflow the 288 bucket by ONE token and pad all the way to 544.
     _MIXED_BATCH_CHUNK_SIZES_DEFAULT = [256, 288, 512]
 
     @property
@@ -1602,21 +1609,21 @@ class ThinkerSubmodule(ARNodeSubmodule):
         """Boot-time capture grid for the ``thinker_mixed`` chunk row C
         (``MSTAR_MIXED_CHUNK_SIZES``, comma ints, e.g. "256,288,512,1024,2048").
 
-        P3 lever (see fix20/reports/fix1_coadmit.md gate G1): the mixed step is
-        a captured CUDA graph whose only chunk buckets are this list, so a
-        chunk larger than ``max(MIXED_BATCH_CHUNK_SIZES)`` can never fold into a
-        decode step no matter how large the admission budget is — routing it
-        into an uncaptured shape is the UNCAP-IMA failure the memory manager
-        cross-references. Raising the ceiling here is the only way past it.
+        The mixed step is a captured CUDA graph whose only chunk buckets are
+        this list, so a chunk larger than ``max(MIXED_BATCH_CHUNK_SIZES)`` can
+        never fold into a decode step no matter how large the admission budget
+        is — routing it into an uncaptured shape is an illegal memory access
+        on an uncaptured bucket. Raising the ceiling here is the only way past
+        it.
 
         Parsed values are UNIONed with the default set, never replacing it —
         an override can only GROW the grid. This protects the 288 bucket
-        (the measured fix for the 258-token vision-span tail-merge case)
+        (the fix for the 258-token vision-span tail-merge case)
         from being silently dropped by a caller who only meant to add a
         bigger bucket on top. Each added size is one more capture in
         ``get_cuda_graph_configs`` below (one more (bs=32, num_tokens) shape
-        for the CUDA-graph runner to warm up) — see the s4 report for the
-        GPU-memory and boot-time cost of growing this list.
+        for the CUDA-graph runner to warm up), so grow it deliberately: more
+        buckets means more GPU memory and longer boot time.
 
         Unset/empty/unparseable -> the untouched default (byte-identical).
         Boot-time only: capture happens once at process start, so this is
@@ -1653,7 +1660,7 @@ class ThinkerSubmodule(ARNodeSubmodule):
 
     @property
     def PREFILL_VISION_TOKEN_BUCKETS(self) -> list[int]:
-        if os.environ.get("MSTAR_VISION_GRAPH_ALIGN", "0") in ("1", "true", "True"):
+        if os.environ.get("MSTAR_VISION_GRAPH_ALIGN", "0").strip().lower() in ("1", "true", "yes", "on"):
             return self._PREFILL_VISION_TOKEN_BUCKETS_ALIGNED
         return self._PREFILL_VISION_TOKEN_BUCKETS_BASE
 
@@ -1910,7 +1917,7 @@ class ThinkerSubmodule(ARNodeSubmodule):
             ),
         ]
 
-        # W5-P2 mixed prefill+decode CAPTURED batch (MSTAR_MIXED_BATCH). Only
+        # Mixed prefill+decode CAPTURED batch (MSTAR_MIXED_BATCH). Only
         # register the capture when the flag is ON so flag-off is byte-identical
         # (no extra captures, no ``thinker_mixed`` graph in the runner's table,
         # so the scheduler could never route to it even if it tried).
@@ -1923,7 +1930,7 @@ class ThinkerSubmodule(ARNodeSubmodule):
         # ``_build_prefill_text_packed`` helper. The token buckets are
         # ``MIXED_BATCH_BS + C`` (see MIXED_BATCH_* above).
         #
-        # W5-P3-lite (MSTAR_MIXED_BATCH_VISION): to let a ``prefill_vision``
+        # MSTAR_MIXED_BATCH_VISION: to let a ``prefill_vision``
         # chunk ride the mixed step, the SAME captured bucket must additionally
         # carry per-layer ``deepstack_<i>`` statics (shape (num_tokens, hidden))
         # so ``preprocess``'s replay-time deepstack assembly has a static buffer
@@ -1934,7 +1941,7 @@ class ThinkerSubmodule(ARNodeSubmodule):
         # additive splice, see thinker._deepstack_process). So when the vision
         # flag is on we build the mixed buckets with the vision packed builder
         # (adds deepstack_<i>) and the vision-shaped zero_padding_input.
-        # IMA safety (W5-P3-lite): record the ONE capture's ground truth so the
+        # Illegal-memory-access safety: record the ONE capture's ground truth so the
         # scheduler routes a prefill_vision chunk into thinker_mixed ONLY when the
         # deepstack statics were actually baked in here. False whenever no
         # thinker_mixed graph exists (mixed_batch off) or it is the text-only
@@ -2064,7 +2071,7 @@ class ThinkerSubmodule(ARNodeSubmodule):
         # entries), so for prefill walks we recover mrope_section from the
         # class constant when the kwarg is missing. Decode goes through
         # preprocess which does pass it explicitly.
-        # ``thinker_mixed`` (W5-P2) is packed exactly like a prefill walk: the
+        # ``thinker_mixed`` is packed exactly like a prefill walk: the
         # forward runs over ``total_tokens = n + C`` packed rows and the
         # per-request last-token logits are gathered via ``qo_indptr[1:]-1``
         # (decode rows: their single token; chunk row: its last token). So it
@@ -2689,12 +2696,12 @@ class TalkerSubmodule(ARNodeSubmodule):
           matching eager.
 
         Last-prefill path (``talker_last_prefill``; fixed 6 tokens per request,
-        ``hidden`` shape ``(bs * 9, hidden)``):
+        ``hidden`` shape ``(bs * 6, hidden)``):
           Same _forward_decode_like as decode but uses the ``last_token_indices``
           tensor produced by ``preprocess`` (``cumsum(seq_lens) - 1``) to
           ``index_select`` the per-request last hidden before codec_head.
           Captured under ``BasicBatchedCudaGraphConfig`` (single bucket per bs:
-          total_tokens = bs * 9), which routes ``_create_persistent_wrappers``
+          total_tokens = bs * 6), which routes ``_create_persistent_wrappers``
           through ``FlashInferPrefillWrapper`` (since total_tokens != bs);
           per-rid output construction matches the decode branch.
         """
@@ -2819,12 +2826,12 @@ class TalkerSubmodule(ARNodeSubmodule):
         input — runner does not call preprocess at capture).
 
         ``talker_last_prefill``: ``BasicBatchedCudaGraphConfig`` (one capture per
-        bs; single_request_inputs has input_seq_len=9 so total_tokens = bs * 9).
+        bs; single_request_inputs has input_seq_len=6 so total_tokens = bs * 6).
         ``total_tokens != bs`` forces ``_create_persistent_wrappers`` to use a
         ``FlashInferPrefillWrapper`` instead of the decode wrapper, which means
         ``cache_handle.get_qo_indptr_buf("main")`` is non-None at replay so
         ``forward_batched`` can ``index_select`` per-request last hidden out of
-        the packed ``(bs * 9, talker_hidden)`` LLM output before codec_head.
+        the packed ``(bs * 6, talker_hidden)`` LLM output before codec_head.
         """
         talker_prefill_packed = {
             num_tokens: self._build_talker_prefill_packed(num_tokens, device)

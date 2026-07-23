@@ -152,7 +152,7 @@ class ZMQCommunicator(BaseCommunicator):
         events = dict(self.poller.poll(timeout=timeout_ms))
         # self.event is None unless register_event_for_poll was called (the
         # worker registers one; the conductor doesn't) — the unguarded
-        # attribute access killed the conductor loop on N2's first smoke.
+        # attribute access killed the conductor loop during an early smoke test.
         if self.event is not None and self.event.fd in events:
             self.event.drain()
 

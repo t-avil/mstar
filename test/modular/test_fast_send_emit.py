@@ -25,6 +25,8 @@ from __future__ import annotations
 import pickle
 from types import SimpleNamespace
 
+import torch
+
 from mstar.api_server.request_types import ResultTensorsBatch
 from mstar.graph.base import GraphEdge, TensorPointerInfo
 from mstar.graph.loop_indices import NestedLoopIndices
@@ -56,6 +58,12 @@ class _RecordingTensorManager:
     def set_persist(self, request_id, uuid, persist):
         self.persist_calls.append((request_id, uuid, persist))
 
+    def get_tensor(self, request_id, uuid):
+        # Since #149, _send_outputs derives per-signal new-token COUNTS from
+        # tensor.numel(); a deterministic single-element tensor gives count 1
+        # per new-token signal, identically under both flag settings.
+        return torch.tensor([sum(uuid.encode()) % 1000], dtype=torch.int64)
+
 
 class _RecordingCommunicator:
     def __init__(self):
@@ -79,6 +87,10 @@ class _StubWorker:
         self._slim_emit = True
         self._slim_emit2 = True
         self._fast_send = fast_send
+        # MSTAR_SCHED_PACK landed after this stub was written and
+        # _inline_emit_uuids reads it unconditionally; default off matches the
+        # flag's own default (byte-identical-off path).
+        self._sched_pack = False
         self._slim_emit_sent: set[tuple[str, str]] = set()
         self._slim_emit_loop_layout: dict[tuple[str, str], tuple] = {}
         self.tensor_manager = _RecordingTensorManager()

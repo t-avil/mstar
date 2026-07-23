@@ -49,14 +49,6 @@ class ResultTensors:
     graph_edge: GraphEdge
     loop_indices: NestedLoopIndices
     metadata: dict = field(default_factory=dict)
-    # MSTAR_EMIT_SEQNUMS (default None = flag off): a per-(request_id, modality)
-    # monotonically increasing sequence number stamped by the PRODUCER at
-    # emission time, before the inline/SHM transport split. The consumer
-    # (data_worker) delivers per stream in this order via a small reorder
-    # buffer, so ordering no longer depends on transport arrival order (the
-    # assumption MSTAR_ORDERED_EMIT's FIFO relied on). None on every legacy /
-    # flag-off message; readers ignore it unless the flag is on.
-    emit_seq: int | None = None
 
 
 @dataclass
@@ -82,11 +74,6 @@ class SlimResultTokens:
     values: list
     loop_indices: NestedLoopIndices | None
     loop_key: tuple | None = None
-    # MSTAR_EMIT_SEQNUMS: same per-(request_id, modality) producer sequence
-    # number as ResultTensors.emit_seq (a slim item is just an inline emit that
-    # reuses a cached template). Copied onto the synthesized ResultTensors when
-    # the api server inflates this item. None when the flag is off.
-    emit_seq: int | None = None
 
 
 @dataclass

@@ -48,15 +48,13 @@ from mstar.utils.sampling import SamplingConfig
 
 logger = logging.getLogger(__name__)
 
-# N2: block the conductor loop on the ZMQ poller instead of sleeping 1ms
+# Block the conductor loop on the ZMQ poller instead of sleeping 1ms
 # per iteration. Default ON; MSTAR_CONDUCTOR_POLL=0 restores the sleep.
-import os as _os  # noqa: E402  (feature-flag import kept beside its rationale)
-
-# First smoke wedged on an unguarded self.event.fd in wait_for_work (the
-# conductor registers no EventWakeup; AttributeError at the loop tail
-# killed the conductor thread while the API server stayed "ready").
-# Fixed in communicator.wait_for_work; default back ON pending re-smoke.
-_CONDUCTOR_POLL = _os.environ.get(
+# Requires an EventWakeup registered on the conductor's wait_for_work path:
+# without one, an unguarded access to self.event.fd raises AttributeError at
+# the loop tail, silently killing the conductor thread while the API server
+# still reports "ready". Fixed in communicator.wait_for_work.
+_CONDUCTOR_POLL = os.environ.get(
     "MSTAR_CONDUCTOR_POLL", "1"
 ).strip().lower() in ("1", "true", "yes", "on")
 
@@ -236,14 +234,14 @@ class Conductor:
         self.tensor_comm_protocol = tensor_comm_protocol
         self.tcp_transfer_device = tcp_transfer_device
 
-        # MSTAR_WGD_PACK (board #11): coalesce this main-loop iteration's
+        # MSTAR_WGD_PACK: coalesce this main-loop iteration's
         # worker-bound WorkerMessage sends (INPUT_SIGNALS from
         # _send_partition_inputs / _send_producer_done) per destination
         # worker into ONE packed send instead of one per partition/request.
         # A single iteration can process several requests' WORKER_GRAPHS_DONE
         # and fan out inputs to the same worker multiple times; this
         # collapses those into 1 conductor hop per worker per iteration.
-        # Read once per iteration (see run()) so a dynflags flip mid-
+        # Read once per iteration (see run()) so a flag flip mid-
         # iteration can't split one iteration's sends across wire formats.
         # Off (default): byte-identical per-message immediate sends.
         self._wgd_pack = os.environ.get("MSTAR_WGD_PACK", "0") == "1"
@@ -509,7 +507,8 @@ class Conductor:
             embedding handoff is LOCAL -> reproduces the base topology AND
             avoids the cross-rank prefill provisioning gap.
           * text output -> rank 0, the Talker/Code2Wav rank (idle-for-text;
-            the bottleneck is the Thinker on rank 1) -> reproduces encoff.
+            the bottleneck is the Thinker on rank 1) -> keeps encoding off
+            the Talker/Code2Wav rank's critical path.
         Byte-identical (same weights, same input compute the same encode);
         this is a pure scheduling decision. Text output — including when
         ``output_modalities`` is None — routes deterministically to rank 0;
@@ -1201,7 +1200,7 @@ class Conductor:
         elif message.message_type == ConductorMessageType.PACKED:
             # Understood unconditionally regardless of this conductor's own
             # flag state (see PackedConductorMessage) — a sender-side
-            # dynflags lag can never desync the wire protocol.
+            # flag-state lag can never desync the wire protocol.
             for inner in message.body.messages:
                 self._dispatch_message(inner, done_partition_forwards)
         elif message.message_type == ConductorMessageType.WORKER_GRAPHS_DONE:
@@ -1303,13 +1302,13 @@ class Conductor:
                 if self.enable_nvtx:
                     range_pop()
 
-            # N2 (MSTAR_CONDUCTOR_POLL, default ON): the conductor is purely
+            # MSTAR_CONDUCTOR_POLL (default ON): the conductor is purely
             # message-driven — block on the ZMQ poller instead of an
             # unconditional 1ms sleep per loop. The sleep taxed EVERY
             # conductor hop (one per prefill chunk, admission, WGD, stop)
-            # with an avg ~0.5-1ms tail + timer slack; chunked prompts paid
-            # it N times. 50ms timeout = safety net, identical to the
-            # worker's wait_for_work.
+            # with scheduling/timer-slack overhead on each wakeup; chunked
+            # prompts paid it N times. 50ms timeout = safety net, identical
+            # to the worker's wait_for_work.
             if _CONDUCTOR_POLL:
                 self.communicator.wait_for_work(timeout_ms=50)
             else:

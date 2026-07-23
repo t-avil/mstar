@@ -490,13 +490,13 @@ class FlashInferSplitMixedWrapper:
     A mixed batch's rows are laid out in FIXED regions so a static CUDA graph
     can slice them: rows [0, bs-1) are decode rows (real requests padded with
     qo=1 dummies), row bs-1 is the single prefill-chunk row whose tokens occupy
-    q[bs-1 : bs-1+C]. One BatchPrefill plan over that mixed shape measures
-    6.1 ms of attention per 48-layer forward on H200; planning the decode rows
-    on a (tensor-core) decode wrapper and the chunk row on its own prefill
-    wrapper measures 1.84 ms (mb_split_attn.py, in-graph). This class exposes
-    the same plan/run/set_kv_cache surface as the single wrappers and does the
-    split at the fixed boundary internally, so BatchedCacheManager treats it
-    as just another persistent wrapper.
+    q[bs-1 : bs-1+C]. Measured on H200: one BatchPrefill plan over that mixed
+    shape is measurably slower per forward than planning the decode rows on a
+    (tensor-core) decode wrapper and the chunk row on its own prefill
+    wrapper, in-graph. This class exposes the same plan/run/set_kv_cache
+    surface as the single wrappers and does the split at the fixed boundary
+    internally, so BatchedCacheManager treats it as just another persistent
+    wrapper.
 
     ``n_decode_rows`` = bs-1 is FIXED at construction (capture) time: run()
     always slices q at the same offsets, which is what makes it replayable.

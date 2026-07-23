@@ -1,5 +1,4 @@
-"""MSTAR_SIDECAR_CHECKSTOP (Stage 2, docs/SIDECAR_DESIGN.md §6.2): unit tests
-for the deferred-consume check_stop offload.
+"""MSTAR_SIDECAR_CHECKSTOP: unit tests for the deferred-consume check_stop offload.
 
 Scope of this build is the deferred-consume + SAME-STEP decision only (the
 fuller sidecar-EOS/StopFeedback path is not built — see the worker flag

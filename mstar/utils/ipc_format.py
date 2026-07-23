@@ -36,7 +36,7 @@ class WorkerMessageType(Enum):
     TENSOR_RECEIVED = "tensor_received"
     SCHEDULE_TP = "schedule_tp"
     STOP_LOOPS = "stop_loops"
-    # MSTAR_WGD_PACK (board #11): envelope for a batch of WorkerMessage,
+    # MSTAR_WGD_PACK: envelope for a batch of WorkerMessage,
     # coalesced by the conductor into one send per destination worker per
     # main-loop iteration. See PackedWorkerMessage.
     PACKED = "packed"
@@ -105,7 +105,7 @@ class WorkerMessage:
 
 @dataclass
 class PackedWorkerMessage(MessageBody):
-    """MSTAR_WGD_PACK (board #11): a batch of ``WorkerMessage`` envelopes,
+    """MSTAR_WGD_PACK: a batch of ``WorkerMessage`` envelopes,
     coalesced by the conductor into ONE ``communicator.send`` per
     destination worker per main-loop iteration instead of one send per
     partition/request. The receiver unpacks ``messages`` and dispatches each
@@ -115,7 +115,7 @@ class PackedWorkerMessage(MessageBody):
 
     Only emitted when MSTAR_WGD_PACK=1 on the sender; the receiver
     understands WorkerMessageType.PACKED unconditionally (not gated by its
-    own copy of the flag), so a dynflags refresh lag between the conductor
+    own copy of the flag), so a flag-refresh lag between the conductor
     and a worker can never desync the wire protocol.
     """
     messages: list["WorkerMessage"] = field(default_factory=list)
@@ -130,7 +130,7 @@ class ConductorMessageType(Enum):
     WORKER_GRAPHS_DONE = "worker_graphs_done"
     SETUP_DONE = "setup_done"
     ABORT_REQUEST = "abort_request"
-    # MSTAR_WGD_PACK (board #11): envelope for a batch of ConductorMessage,
+    # MSTAR_WGD_PACK: envelope for a batch of ConductorMessage,
     # coalesced by a worker into one send per step. See PackedConductorMessage.
     PACKED = "packed"
 
@@ -181,7 +181,7 @@ class ConductorMessage:
 
 @dataclass
 class PackedConductorMessage(MessageBody):
-    """MSTAR_WGD_PACK (board #11) twin of ``PackedWorkerMessage`` for the
+    """MSTAR_WGD_PACK twin of ``PackedWorkerMessage`` for the
     worker-to-conductor direction: a batch of ``ConductorMessage`` envelopes
     (typically WORKER_GRAPHS_DONE, one per rid whose graph completed this
     step) coalesced into one send instead of one per rid. Unpacked and

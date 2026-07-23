@@ -207,29 +207,30 @@ def fused_temperature_softmax(
 # MSTAR_SAMPLER_CFG_CACHE (default ON): cache the per-batch device config
 # tensors in Sampler.sample keyed by batch membership. Each uncached call
 # does SIX pageable H2D copies, each forcing a cudaStreamSynchronize that
-# drains the in-flight decode pipeline (~9 ms of a ~19 ms i2t B32 step).
+# drains the in-flight decode pipeline.
 # Off-switch kept for A/B only; outputs are byte-identical either way.
 import os as _os  # noqa: E402  (feature-flag import kept beside its rationale)
 
-# DEFAULT OFF after A/B (2026-07-03): killing the syncs REGRESSED e2e ~5-7%
-# at i2t B32 (4/4 adjacent pairs) despite being 2x faster in isolation and
-# token-identical. The blocked gpu-thread RELEASED THE GIL during those
-# pipeline-drain waits, and the main thread's ~10ms of per-step postprocess
-# Python ran in that shade; without the waits the two threads contend and
-# wall time gets worse. Lesson: on this two-thread GIL architecture,
-# removing gpu-thread waits only pays if main-thread Python is removed or
-# moved off-GIL FIRST. Keep for re-test after postprocess work shrinks.
+# DEFAULT OFF after evaluation: killing the syncs regressed end-to-end
+# performance despite being faster in isolation and token-identical. The
+# blocked GPU-thread RELEASED THE GIL during those pipeline-drain waits,
+# and the main thread's per-step postprocess Python ran in that window;
+# without the waits the two threads contend and wall time gets worse.
+# Lesson: on this two-thread GIL architecture, removing GPU-thread waits
+# only pays off if main-thread Python work is removed or moved off-GIL
+# FIRST. Keep for re-test after postprocess work shrinks.
 _SAMPLER_CFG_CACHE = _os.environ.get(
     "MSTAR_SAMPLER_CFG_CACHE", "0"
 ).strip().lower() in ("1", "true", "yes", "on")
 
 # MSTAR_SAMPLER_CFG_CACHE_V2 (default OFF): membership-CHURN-proof successor.
-# The V1 cache keys on tuple(request_ids) — exact membership — so at B32
-# closed-loop the admission churn misses nearly every step and the six pageable
-# H2D syncs come back (profiled 2026-07-05: sample @ this line = 22% of wall).
-# V2 holds each config field in a PERSISTENT per-request-SLOT device tensor
-# (written once at admission/set_config via pinned non_blocking, no per-step
-# H2D) and assembles the batch by index_select on a slot-index tensor — the
+# The V1 cache keys on tuple(request_ids) — exact membership — so under
+# closed-loop admission churn the cache misses nearly every step and the six
+# pageable H2D syncs come back (profiling showed this cost a significant
+# share of per-step wall time). V2 holds each config field in a PERSISTENT
+# per-request-SLOT device tensor (written once at admission/set_config via
+# pinned non_blocking, no per-step H2D) and assembles the batch by
+# index_select on a slot-index tensor — the
 # slot-index is the only per-step device object, rebuilt sync-free (pinned +
 # non_blocking) on a membership change, else cached. rand_offset is an
 # on-device per-slot counter (index_add each step). No pageable sync on any
@@ -257,7 +258,7 @@ _ARGMAX_FAST = _os.environ.get(
 
 
 # MSTAR_SLIM_SAMPLE (default OFF): per-step Python-body reduction around
-# sampling (fix-20 item #10). Two things, both output-preserving:
+# sampling. Two things, both output-preserving:
 #
 #  1. ``Sampler.sample`` fuses the up-to-six separate ``any()``/``all()``
 #     generator scans over the per-request config list (the ARGMAX_FAST
@@ -271,7 +272,7 @@ _ARGMAX_FAST = _os.environ.get(
 #     identical FlashInfer-buffer-aliasing comment in both files). They now
 #     both call ``sample_batched_and_unpack`` in this module.
 #
-# Read per-call (not cached) so MSTAR_DYNFLAGS edits apply immediately,
+# Read per-call (not cached) so a runtime flag flip applies immediately,
 # matching the ``_envflag`` convention in qwen3_omni_model.py — no
 # register_cache_clear needed since nothing here is cached across calls.
 # Flag off takes the untouched original code path at every call site: same
@@ -291,7 +292,7 @@ def _scan_sampling_configs(
     one. B is small (<=32 in practice) so the per-call saving is a handful
     of microseconds, but this runs on every decode step — pure interpreter
     overhead, not device work — so it composes with the rest of the
-    fix-20 per-step CPU cuts.
+    per-step CPU cuts.
 
     Returns:
         ``(all_greedy, any_greedy, any_rep_pen, any_top_k_zero, all_top_k_zero)``
@@ -369,7 +370,7 @@ def sample_batched_and_unpack(
 
 
 def _refresh_sampler_flags() -> None:
-    """MSTAR_DYNFLAGS hook: re-read the cache flags at runtime (safe — both
+    """Re-read the cache flags at runtime (safe — both
     caches are semantics-free; flipping only changes assembly, not values.
     MSTAR_ARGMAX_FAST is likewise output-preserving: it only fires on all-greedy
     batches, where its argmax equals the sampled token either way)."""
@@ -501,7 +502,7 @@ class Sampler(BaseSampler):
     _v2_pinned_idx: "torch.Tensor | None" = None          # [RING, n] pinned staging
     _v2_idx_ring: int = 0                                 # rotates pinned staging rows
     _v2_ones: "torch.Tensor | None" = None                # device ones for rand advance
-    _v2_stats: dict = field(default_factory=dict)         # WALK_STATS-style counters
+    _v2_stats: dict = field(default_factory=dict)         # periodic-logging counters
     _v2_was_on: bool = False                              # last-seen V2 flag (flip detect)
 
     # Static per-request config fields carried in per-slot device tensors, plus
@@ -634,9 +635,9 @@ class Sampler(BaseSampler):
             if len(self._v2_slot_index_cache) > 64:
                 self._v2_slot_index_cache.clear()
             self._v2_slot_index_cache[key] = slot_index
-        # Direct index_select gathers (no per-call lambda closure — it showed up
-        # as a bs=1 hot line, ~3% of wall, in b1prof2: sample() runs per step so
-        # the closure allocated 188x/request).
+        # Direct index_select gathers (no per-call lambda closure — profiling
+        # showed it as a hot line at small batch sizes: sample() runs per step
+        # so the closure allocated repeatedly per request).
         dev = self._v2_dev
         temperature = dev["temperature"].index_select(0, slot_index)
         top_k = dev["top_k"].index_select(0, slot_index)
@@ -649,7 +650,7 @@ class Sampler(BaseSampler):
         self._v2_dev["rand"].index_add_(0, slot_index, self._v2_ones[: len(slots)])
         self._v2_inc("cfgv2_calls")
         if self._v2_stats["cfgv2_calls"] % 2000 == 0:
-            # Surface the churn counters in server.log (WALK_STATS cadence):
+            # Surface the churn counters in server.log periodically:
             # cfgv2_rebuilds/cfgv2_calls ~ the miss rate the V1 cache suffered;
             # a healthy V2 keeps this high (churn) but sync-free (no regression).
             logger.warning(
@@ -760,9 +761,8 @@ class Sampler(BaseSampler):
         # Per-batch config tensors. Building these from Python lists with
         # torch.tensor(..., device=...) does a PAGEABLE H2D copy each — torch
         # issues cudaStreamSynchronize per copy, and on the decode hot path
-        # each such sync drains the whole in-flight pipeline (measured: SIX
-        # syncs x ~1.5 ms = ~9 ms of a ~19 ms i2t B32 step; repro'd exactly
-        # with set_sync_debug_mode). Configs are static per request, so cache
+        # each such sync drains the whole in-flight pipeline (confirmed with
+        # set_sync_debug_mode). Configs are static per request, so cache
         # the FIVE static tensors keyed by batch membership; rand_offset
         # advances by exactly 1 for every rid on every sample() call (the
         # loop at the bottom), so the cached device tensor is add_(1)'d
@@ -842,8 +842,8 @@ class Sampler(BaseSampler):
 
         # TODO: make this scatter async. Currently runs 2 kernels per rid
         # (broadcast-True + index_put) on the default stream, serializing N=bs
-        # small launches that add up (~500 µs at bs=8 for Orpheus with
-        # repetition_penalty=1.3). Two options to fix:
+        # small launches that add up measurably for larger batches with
+        # repetition penalty enabled. Two options to fix:
         #   (a) Shared [max_concurrent, V] buffer with rid→slot mapping; replace
         #       the loop with a single batched `buf[slots, tokens] = True`
         #       scatter — one launch instead of N.
@@ -1090,8 +1090,8 @@ class CudaGraphableSampler(BaseSampler):
         # depth loop). ``deterministic=True`` should already produce
         # bit-equal output, but tied-probability sorts can still resolve
         # differently across GPUs in edge cases — one diverging code
-        # cascades into garbled audio with no recovery, so we pay the
-        # ~5µs in-place broadcast (no-op for trivial groups) to guarantee
+        # cascades into garbled audio with no recovery, so we pay the small
+        # in-place broadcast cost (no-op for trivial groups) to guarantee
         # agreement. Mirrors ``CudaGraphableSampler.sample``.
         return self._broadcast_tokens(tokens)
 

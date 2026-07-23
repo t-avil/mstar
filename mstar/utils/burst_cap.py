@@ -1,12 +1,12 @@
 """MSTAR_BURST_CAP — coordinated host-CPU budget across M* processes.
 
-WHY THIS EXISTS (see LEARNINGS_TTFT.md "the real phenomenon"):
-    M* at i2t B32 bursts ~21 CPU cores (measured 2126% CPU) during a
-    prefill/admission wave — a burst *orchestrated across processes*
-    (api_server preprocess + conductor + per-rank workers). vLLM stays flat
-    because its host-CPU demand per step is small and constant. Under
-    *same-priority* neighbor CPU load our burst stalls stochastically, giving
-    multi-second, bimodal TTFT. The variance — not the mean — is the gap.
+WHY THIS EXISTS:
+    Under a prefill/admission wave, M* bursts many CPU cores at once — a
+    burst *orchestrated across processes* (api_server preprocess + conductor
+    + per-rank workers). vLLM stays flat because its host-CPU demand per
+    step is small and constant. Under *same-priority* neighbor CPU load our
+    burst stalls stochastically, giving multi-second, bimodal TTFT. The
+    variance — not the mean — is the gap.
 
 THE ROOT FAN-OUT:
     Nothing in the codebase ever calls ``torch.set_num_threads``. So every
@@ -36,7 +36,7 @@ CONTRACT:
       preserved BYTE-FOR-BYTE. ``apply_process_thread_cap`` returns None.
     - Boot-time, per process: torch's thread-pool size is a process property
       set once at startup, so the cap is applied at each process's entry
-      point and does NOT follow MSTAR_DYNFLAGS. A/B is via two boots. (The
+      point and cannot be changed at runtime. A/B is via two boots. (The
       value is still read from the environment, so per-role overrides work.)
     - Sizing: MSTAR_BURST_THREADS (default 8) is the per-process budget; a
       role may override with MSTAR_BURST_THREADS_<ROLE> (e.g.

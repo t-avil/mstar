@@ -8,11 +8,11 @@ tokenizer decode — inline on the uvicorn/serve process, and a py-spy profile p
 GIL the HTTP serving loop also needs.
 
 This module moves that work to a dedicated child process. The serve-side data
-worker keeps ALL request-context state and ALL emit ordering (MSTAR_ORDERED_EMIT
-/ MSTAR_EMIT_SEQNUMS reorder buffers, per-rid cleanup, the tensor-read
-accounting) exactly where it was; only the leaf ``model.postprocess`` call for
-TEXT chunks crosses the process boundary. Because the reorder machinery already
-operates on opaque ``ResultChunk`` objects, deferring a chunk's ``data`` changes
+worker keeps ALL request-context state and ALL emit ordering (the MSTAR_ORDERED_EMIT
+FIFO, per-rid cleanup, the tensor-read accounting) exactly where it was; only the
+leaf ``model.postprocess`` call for TEXT chunks crosses the process boundary.
+Because the ordering machinery already operates on opaque ``ResultChunk`` objects,
+deferring a chunk's ``data`` changes
 nothing it does — the chunk is reordered as before and its bytes are filled in
 later, off-process.
 

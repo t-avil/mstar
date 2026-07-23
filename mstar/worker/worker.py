@@ -179,23 +179,6 @@ class Worker:
         # transport. Default OFF. See _inline_emit_uuids / _send_outputs.
         self._inline_emit = os.environ.get("MSTAR_INLINE_EMIT", "0") == "1"
 
-        # MSTAR_INLINE_DUAL: also carry inline values for prematerialized
-        # emit edges whose uuid has NON-emit consumers (loop-back /
-        # persist / streaming). The SHM write + registration is KEPT for
-        # those consumers; only the api_server-bound copy switches to the
-        # inline transport. Closes the first-token latency hole exposed by
-        # MSTAR_ORDERED_EMIT: the prefill step's sampled token uuid also
-        # feeds the prefill->decode loop-back edge, so under plain inline
-        # emit it rides the async SHM fetch — ordered emit then (correctly)
-        # gates the whole stream on that fetch, putting seconds of B32
-        # fetch latency on every request's TTFT/JCT. With dual transport
-        # the client copy is inline (fast, ordered) and the loop-back
-        # consumer still reads SHM. Ref economy: the emit reference is
-        # released locally exactly as for pure-inline uuids (the api_server
-        # never fetches/acks an inline item); non-emit references ack via
-        # their consumers as always. Default OFF.
-        self._inline_dual = os.environ.get("MSTAR_INLINE_DUAL", "0") == "1"
-
         # Fast path: coalesce all qualifying inline emit_to_client messages of
         # one decode step (across every rid in the batch) into ONE
         # result_tensors_batch APIServerMessage, fanned out on the api_server
@@ -252,21 +235,20 @@ class Worker:
         )
         self.mixed_single_chunk = _msce()
         # Static for the process — capture bakes the split layout, so this
-        # must NOT follow dynflags flips (_refresh_dynamic_flags skips it).
+        # is read once at init.
         self.mixed_split_attn = _msae()
         # V2 budgeted admission (MSTAR_MIXED_BUDGET_TOKENS, 0=off): fold a ready
         # chunk into the spec chain on EVERY step (subject to the budget + the
         # occupancy floor) instead of only at yield boundaries. Unlike the
         # single-chunk / split flags this bakes nothing into capture (it only
-        # changes fold TIMING), so it IS dynflags-refreshable below.
+        # changes fold timing).
         self._mixed_budget_tokens = _mbt()
         # MSTAR_COADMIT (fix #1): one-step co-admission of a brand-new request's
         # first chunk into the running decode step (vLLM's unified per-step
         # admission). The effective fold budget under COADMIT
         # (MSTAR_COADMIT_BUDGET_TOKENS, default 32768 = vLLM's ~32k) is HARD-
         # CLAMPED to the largest captured mixed step so a fold can never route to
-        # an uncaptured bucket (the UNCAP IMA lesson). Cached here; refreshed by
-        # _refresh_dynamic_flags on a dynflags flip.
+        # an uncaptured bucket (the UNCAP IMA lesson). Cached here (read once at init).
         self._coadmit_budget_tokens = self._compute_coadmit_budget()
         # Eager-fold peek backoff state (see the fold_probe site).
         self._peek_backoff = 0
@@ -350,8 +332,7 @@ class Worker:
         # (a) the two sum(routing.*.values(), start=[]) flattens per rid per
         # step are computed once in _inline_emit_uuids and stashed on the
         # routing object for _register_outputs (same step, same object;
-        # recomputed if absent, so a mid-step dynflags flip degrades to the
-        # old behavior, never a wrong set); (b) the per-chain-step fairness
+        # recomputed if absent, never a wrong set); (b) the per-chain-step fairness
         # peek (has_ready_excluding — a full ready-scan) backs off
         # exponentially after consecutive negative peeks (cap
         # MSTAR_SCHED_PACK_PEEK_CAP steps, default 8) — same bounded-
@@ -402,7 +383,7 @@ class Worker:
             os.environ.get("MSTAR_CODEC_CHUNK_EMIT", "0") == "1"
         )
 
-        # MSTAR_EMIT_SIDECAR — Stage 1 of docs/SIDECAR_DESIGN.md: exile emit
+        # MSTAR_EMIT_SIDECAR: exile emit
         # message construction, the api_server transport, the WGD-feeding
         # accumulators (pending_new_tokens / current_output_chunks /
         # output_loop_indices), and WGD assembly to a per-worker pure-CPU
@@ -411,9 +392,8 @@ class Worker:
         # every code path below is untouched.
         #
         # Read ONCE — static for the process. The sidecar is a spawned
-        # process, so this flag cannot follow MSTAR_DYNFLAGS flips
-        # (_refresh_dynamic_flags deliberately skips it); A/B via two-server
-        # alternation, not dyn_ab.
+        # process, so this flag is read once at init; A/B via two-server
+        # alternation.
         #
         # Requires the winning emit stack: sidecar-side construction is
         # pinned to BATCH+SLIM+SLIM2 semantics, so enabling it without those
@@ -465,18 +445,6 @@ class Worker:
         self._sidecar_condemned: set[str] = set()
         self._sidecar_client: SidecarClient | None = None
 
-        # MSTAR_EMIT_SEQNUMS: per-(request_id, modality) emit sequence counter
-        # for the LEGACY emit path (_send_outputs). This worker's main thread is
-        # the single authoritative ordering point for every non-sidecar rid, so
-        # one counter here gives each (rid, modality) stream a monotonic seqnum
-        # assigned before the inline/SHM transport split. Sidecar-scoped rids do
-        # NOT use this counter — their (text-only) emits are numbered in the
-        # sidecar process (SidecarState), the sole ordering authority for those
-        # rids. A rid is pinned to exactly one path for its whole life
-        # (scoping is decided once at admission), so the two counters never
-        # both number the same (rid, modality) stream. Cleared per-rid on
-        # request removal. Flag itself is read per-call in _send_outputs.
-        self._emit_seq_counters: dict[tuple[str, str], int] = {}
         if self._emit_sidecar:
             # Spawned here so the child's import cost (~seconds) hides
             # behind weight load / CUDA-graph capture (~minutes).
@@ -488,10 +456,10 @@ class Worker:
                 ),
             )
 
-        # MSTAR_SIDECAR_CHECKSTOP — Stage 2 of docs/SIDECAR_DESIGN.md (§6.2):
-        # deferred-consume of the check_stop D→H. Instead of blocking the main
-        # thread on ``side.synchronize()`` (the ~1.1-2.1 ms graph-tail wait,
-        # design §2 row 4), record an event after the side-stream copy, run the
+        # MSTAR_SIDECAR_CHECKSTOP — deferred-consume of the check_stop D→H.
+        # Instead of blocking the main
+        # thread on ``side.synchronize()`` (the ~1.1-2.1 ms graph-tail wait),
+        # record an event after the side-stream copy, run the
         # cheap per-rid Python that follows, then POLL ``event.query()`` at the
         # consumption point. Ready => consume this step with no wait; not ready
         # => fall back to a blocking wait (counted) so the stop DECISION is
@@ -500,7 +468,7 @@ class Worker:
         # only the WAIT moves. max_tokens enforcement is a pure counter and
         # never touches this D→H, so a stalled copy can never cause runaway.
         #
-        # This is a GIL-valve removal (design §6.2 / Law 2): it converts only if
+        # This is a GIL-valve removal (Law 2): it converts only if
         # the main thread is still the wall after the emit sidecar. The
         # checkstop_deferred_consume / checkstop_sync_fallback counters make the
         # conversion observable; if fallbacks dominate, the wait was
@@ -508,17 +476,18 @@ class Worker:
         # regression (the fallback path is byte-identical to flag-off).
         #
         # SCOPE (this build): the deferred-consume + same-step decision above,
-        # ONLY. The fuller design §6.2 offload (EOS decided in the sidecar and
+        # ONLY. The fuller offload (EOS decided in the sidecar and
         # returned via a StopFeedback message, stops landing 2-3 steps late, a
         # persistent multi-step overstay set) is deliberately NOT built here:
         # it requires a sidecar->worker reverse channel that breaks the one-way
-        # data-flow invariant the design calls its central safety property
-        # (§6.1), and under the same-step-decision rule the worker still decides
+        # data-flow invariant that is the sidecar's central safety property
+        # (it produces nothing the worker reads), and under the
+        # same-step-decision rule the worker still decides
         # authoritatively so that feedback would be redundant. See the report /
         # DESIGN notes; that path needs GPU shadow validation before it can
         # safely replace the worker's stop authority.
         #
-        # Read ONCE (static; no dynflags — it changes the postprocess control
+        # Read ONCE (static — it changes the postprocess control
         # flow, not a tunable). Requires CUDA; on a CPU worker it is a no-op
         # because there is no completion event to defer on.
         self._sidecar_checkstop = (
@@ -537,7 +506,7 @@ class Worker:
             self._sidecar_checkstop
             and os.environ.get("MSTAR_SKIP_REDUNDANT_SYNC", "0") == "1"
         )
-        # Shadow mode (design §8, mandatory before any perf cell): when on, the
+        # Shadow mode (mandatory before any perf cell): when on, the
         # legacy SYNCHRONOUS check_stop is recomputed alongside the deferred
         # path and the two stop sets are asserted equal, mismatches logged at
         # WARNING with a checkstop_shadow_mismatch counter. Legacy stays
@@ -916,7 +885,7 @@ class Worker:
         # FULL worker_graph_to_workers map (the conductor sends the same map
         # on every partition's NewRequest), so a later partition's add can
         # never flip a rid between owners mid-flight — the split-brain trap
-        # of SIDECAR_DESIGN §0. Scoped ⇔ every walk this rid can EVER run on
+        # this prevents. Scoped ⇔ every walk this rid can EVER run on
         # THIS worker is in self._sidecar_walks (base text walks, plus the
         # i2t vision walks when MSTAR_SIDECAR_I2T=1 — audio/Talker/Code2Wav
         # walks stay exactly flat either way: one set-membership test per
@@ -1013,15 +982,6 @@ class Worker:
         self.tensor_manager.cleanup_request(body.request_id)
         self.profile_info.pop_request(body.request_id)
         self.streaming_buffers.pop(body.request_id, None)
-
-        # MSTAR_EMIT_SEQNUMS: drop this rid's legacy per-(rid, modality) emit
-        # counters. Unconditional (cheap no-op when the flag was never on) so a
-        # mid-run toggle-off cannot leak counter state.
-        if self._emit_seq_counters:
-            for key in [
-                k for k in self._emit_seq_counters if k[0] == body.request_id
-            ]:
-                self._emit_seq_counters.pop(key, None)
 
         # MSTAR_EMIT_SIDECAR: rid teardown drops the sidecar's per-rid state
         # (accumulators, slim protocol entries, cached edge templates).
@@ -1528,8 +1488,6 @@ class Worker:
         non-inline edge.
         """
         if not self._inline_emit or not prematerialized_new_tokens:
-            if self._inline_dual:
-                routing.pure_inline_uuids = set()
             return set()
 
         inline_candidates: set[str] = set()
@@ -1542,8 +1500,6 @@ class Worker:
             inline_candidates.update(info.uuid for info in edge.tensor_info)
 
         if not inline_candidates:
-            if self._inline_dual:
-                routing.pure_inline_uuids = set()
             return set()
 
         # Any uuid also referenced by a non-inline consumer must keep its
@@ -1566,14 +1522,6 @@ class Worker:
             non_inline_uuids.update(info.uuid for info in edge.tensor_info)
 
         pure_inline = inline_candidates - non_inline_uuids
-        if self._inline_dual:
-            # MSTAR_INLINE_DUAL: the EMIT transport goes inline for every
-            # prematerialized candidate, but only PURE-inline uuids (no
-            # other consumer) may skip SHM registration — stash the pure
-            # set for _register_outputs so dual uuids keep their SHM write
-            # for the non-emit consumers.
-            routing.pure_inline_uuids = pure_inline
-            return inline_candidates
         return pure_inline
 
     def _register_outputs(
@@ -1634,15 +1582,7 @@ class Worker:
             # Inline-emit uuids skip SHM registration entirely: no file
             # write, no remote fetch, no ack. Their producer-side ref is
             # released locally in _send_outputs instead.
-            # MSTAR_INLINE_DUAL: dual-consumer uuids carry inline values on
-            # the emit message but MUST keep their SHM registration (the
-            # loop-back/persist consumers still read+ack it) — only the
-            # pure-inline subset skips.
-            if self._inline_dual:
-                skip = routing.__dict__.get("pure_inline_uuids")
-                skip = skip if skip is not None else inline_uuids
-            else:
-                skip = inline_uuids
+            skip = inline_uuids
             for _u in skip:
                 infos_by_uuid.pop(_u, None)
             # MSTAR_FAST_SEND: an empty registration is a no-op (the loop
@@ -1663,21 +1603,6 @@ class Worker:
                         request_id=request_id, uuid=info.uuid, persist=True
                     )
 
-
-    def _next_emit_seq(self, request_id: str, modality: str) -> int:
-        """MSTAR_EMIT_SEQNUMS: next per-(rid, modality) producer sequence number
-        for the legacy emit path. Starts at 0 for each stream and increments by
-        one per emitted client-bound edge (inline and SHM alike), in
-        ``_send_outputs``'s edge order — the exact order the consumer must
-        deliver. Keyed per modality (not per rid) because a given
-        (rid, modality) stream has a single producer worker, whereas two
-        modalities of one rid may be emitted by different worker processes; a
-        per-rid counter would then collide across processes. Cleared in
-        ``_remove_request``."""
-        key = (request_id, modality)
-        seq = self._emit_seq_counters.get(key, 0)
-        self._emit_seq_counters[key] = seq + 1
-        return seq
 
     def _send_outputs(
         self, request_id: str, outputs: NodeOutputRouting,
@@ -1798,15 +1723,6 @@ class Worker:
             # the data worker would have sent via TENSOR_RECEIVED).
             local_release: dict[str, int] = {}
             for graph_edge in outputs.emit_to_client:
-                # MSTAR_EMIT_SEQNUMS: stamp one seqnum per emitted edge, in edge
-                # order, BEFORE the inline/SHM/slim split below, so the consumer
-                # can reorder independent of transport arrival. Read per-call
-                # (dynflag-toggleable; a mid-stream flip is unsafe — see report).
-                emit_seq = (
-                    self._next_emit_seq(request_id, graph_edge.output_modality)
-                    if os.environ.get("MSTAR_EMIT_SEQNUMS", "0") == "1"
-                    else None
-                )
                 if fast_info is not None:
                     # Inline of
                     # worker_graphs_manager.register_output_loop_indices.
@@ -1858,7 +1774,6 @@ class Worker:
                         graph_edge=graph_edge,
                         loop_indices=nested_loop_indices,
                         metadata=metadata,
-                        emit_seq=emit_seq,
                     )
                 if batch_collector is not None and edge_inline:
                     # Coalesced path: defer to a single result_tensors_batch
@@ -1908,7 +1823,6 @@ class Worker:
                                     else nested_loop_indices
                                 ),
                                 loop_key=loop_key,
-                                emit_seq=emit_seq,
                             ))
                         else:
                             self._slim_emit_sent.add(tkey)
@@ -2014,7 +1928,7 @@ class Worker:
         Every worker-side effect of ``_send_outputs`` is kept byte-identical
         — peer-worker INPUT_SIGNALS sends, persist buffering, streaming
         routing, the inline-emit producer-ref release — and every
-        client-bound effect becomes a record field (SIDECAR_DESIGN §4.3):
+        client-bound effect becomes a record field:
 
         - ``buffer_new_tokens``            -> entry new-token field
         - ``buffer_output_signals``        -> derived by the sidecar from
@@ -2027,7 +1941,9 @@ class Worker:
         The worker NEVER writes pending_new_tokens / current_output_chunks /
         output_loop_indices for a scoped rid — steady, boundary and
         non-inline paths alike ride the record, so WGD is assembled from a
-        single owner (the design's hardest invariant, §0).
+        single owner (the hardest invariant here: WORKER_GRAPHS_DONE must
+        have exactly one assembler, or two producers race the same rid's
+        accumulator state).
 
         ``build_record=False`` (rid condemned by a sidecar failure): perform
         only the worker-side effects and return None — the client-bound
@@ -2035,17 +1951,17 @@ class Worker:
         ABORT_REQUEST (a resumed stream would need the dead sidecar's
         accumulator state).
 
-        Record cheapness (§4.2): items are tuples of ints and interned
+        Record cheapness: items are tuples of ints and interned
         indices; the only non-scalar payloads are the token lists (the SAME
         list objects as the new-token field, so the record pickle memoizes
         them) and a GraphEdge at boundary rate (first inline template per
         (rid, name), or a non-inline edge whose fresh tensor_info the
         consumer must fetch via SHM — the record just moves that pickle one
-        hop, per open question 4).
+        hop).
         """
         client = self._sidecar_client
         # Peer-worker routing stays on the worker: it feeds next-step
-        # readiness on other workers (scheduler contract, design §3.2).
+        # readiness on other workers (scheduler contract).
         for worker_id, edges in outputs.to_workers.items():
             message = WorkerMessage(
                 message_type=WorkerMessageType.INPUT_SIGNALS,
@@ -2058,8 +1974,8 @@ class Worker:
             )
             self.communicator.send(worker_id, message)
 
-        # Persist accumulation stays worker-side (§4.3 moves only the three
-        # WGD accumulators); the flushed dict ships in the boundary field
+        # Persist accumulation stays worker-side (the sidecar owns only the
+        # three WGD accumulators); the flushed dict ships in the boundary field
         # below so the sidecar's WGD carries it exactly as legacy's did.
         if outputs.persist:
             self.worker_graphs_manager.buffer_persist_signals(
@@ -2099,7 +2015,7 @@ class Worker:
         if outputs.emit_to_client:
             # Same inline set as _register_outputs' SHM-skip decision (the
             # FAST_SEND stash when present) — the record's inline flag is
-            # DERIVED from the worker's tensor-lifecycle decision (§4.3).
+            # DERIVED from the worker's tensor-lifecycle decision.
             inline_uuids = outputs.inline_emit_uuids
             if not self._fast_send or inline_uuids is None:
                 inline_uuids = self._inline_emit_uuids(
@@ -2168,7 +2084,7 @@ class Worker:
             for edge_name, sbuf in req_info.stream_buffers.items():
                 stream_consumed[edge_name] = sbuf._consumed
             if build_record:
-                # The worker-only WGD fields (design §4.2 boundary record).
+                # The worker-only WGD fields (boundary record).
                 # The sidecar merges them with ITS accumulators and sends
                 # the WORKER_GRAPHS_DONE (the conductor tolerates late WGD:
                 # conductor.py's unknown-rid guard).
@@ -2192,8 +2108,9 @@ class Worker:
         return (client.rid_idx(request_id), new_tokens_field, items, boundary)
 
     def _disable_sidecar(self, reason: str) -> None:
-        """Permanent fallback (SIDECAR_DESIGN §7): the sidecar died or its
-        queue hit HWM. Legacy path for all new work; in-flight sidecar-owned
+        """Permanent fallback: the sidecar died or its
+        queue hit HWM. A dead sidecar must fail fast, never hang the client.
+        Legacy path for all new work; in-flight sidecar-owned
         rids have emit/WGD state stranded in the dead process and cannot be
         reconstructed — fail them fast via the conductor's abort path rather
         than letting them ride the api_server's 15 s TTL. No
@@ -2211,8 +2128,7 @@ class Worker:
             len(self._sidecar_rids),
         )
         if client.hwm_trips:
-            # Mechanism counter rides WALK_STATS (design §7) — no counter,
-            # no verdict.
+            # Mechanism counter rides WALK_STATS — no counter, no verdict.
             self._ws_inc("_sidecar_hwm_trips")
         for rid in self._sidecar_rids:
             self.communicator.send("conductor", ConductorMessage(
@@ -2275,81 +2191,6 @@ class Worker:
         )
         return min(want, max_captured)
 
-    def _refresh_dynamic_flags(self) -> None:
-        """Re-derive init-cached flag values after a MSTAR_DYNFLAGS refresh.
-        Keep in sync with the flags cached in __init__ / the scheduler."""
-        from mstar.model.qwen3_omni.qwen3_omni_model import (
-            mixed_budget_tokens,
-            mixed_single_chunk_enabled,
-        )
-        self.mixed_single_chunk = mixed_single_chunk_enabled()
-        # MSTAR_COADMIT budget: safe to flip mid-run (fold-timing only, bakes
-        # nothing into capture); the clamp keeps it IMA-safe regardless.
-        self._coadmit_budget_tokens = self._compute_coadmit_budget()
-        # V2 budget: safe to flip mid-run — it only gates whether/when an
-        # already-mixable chunk folds; it bakes nothing into capture, and the
-        # bucket math (chunk C <= MicroScheduler._max_chunk_tokens()) is unchanged. Reset
-        # the min-decode cache too since its default keys on the budget being on.
-        self._mixed_budget_tokens = mixed_budget_tokens()
-        if hasattr(self.scheduler, "_mixed_min_decode_cached"):
-            self.scheduler._mixed_min_decode_cached = None
-        # Winning-stack flags, made runtime-refreshable so one-server dyn_ab
-        # A/Bs cover them (each is semantics-free to flip: slim emit falls
-        # back to full items; fast checkstop falls back to engine path).
-        self._slim_emit = (
-            os.environ.get("MSTAR_SLIM_EMIT", "0") == "1" and self._batch_emit
-        )
-        # Safe to flip mid-run: ON with a missing layout falls back to the
-        # full loop_indices object; OFF leaves in-flight loop_key items valid
-        # (the consumer decodes them independently of this flag).
-        self._slim_emit2 = (
-            os.environ.get("MSTAR_SLIM_EMIT2", "0") == "1" and self._slim_emit
-        )
-        self._fast_checkstop = (
-            os.environ.get("MSTAR_FAST_CHECKSTOP", "0") == "1"
-        )
-        # Safe to flip mid-run: ON walk-gates the batched talker stop check to
-        # talker_decode steps; OFF falls straight back to the per-rid engine
-        # check_stop. Semantics-free either way (same stop set).
-        self._fast_checkstop_talker = (
-            os.environ.get("MSTAR_FAST_CHECKSTOP_TALKER", "0") == "1"
-        )
-        # Safe to flip mid-run: ON stages local codec frames and batches the
-        # buffer write per chunk; OFF routes each frame immediately. The
-        # per-frame route flushes any staged remainder first (see
-        # _route_streaming_local_edge), so a flip never strands pending frames.
-        self._codec_chunk_emit = (
-            os.environ.get("MSTAR_CODEC_CHUNK_EMIT", "0") == "1"
-        )
-        # Safe to flip mid-run: ON stashes inline_emit_uuids on the step's
-        # routing object; OFF simply ignores the stash and recomputes. The
-        # register/send halves of one step run under one flag read each, and
-        # a flip between them degrades to a recompute (never a wrong set).
-        self._fast_send = os.environ.get("MSTAR_FAST_SEND", "0") == "1"
-        # Safe to flip mid-run: (a) the flatten stash falls back to a
-        # recompute when absent; (b) the peek-backoff state lives in run-loop
-        # locals and simply stops being consulted when the flag turns off.
-        self._sched_pack = os.environ.get("MSTAR_SCHED_PACK", "0") == "1"
-        # Safe to flip mid-run: per-step branch choosing which source feeds
-        # the spec batch's loop-back text_inputs; both sources carry
-        # identical values (E9 correctness record) and the registry/route
-        # path runs unchanged under either.
-        self._direct_feed = os.environ.get("MSTAR_DIRECT_FEED", "0") == "1"
-        # Safe to flip mid-run: register/send halves of one step share the
-        # stash (pure_inline_uuids / inline_emit_uuids) pinned at register
-        # time; a flip between steps just changes the next step's transport
-        # split, values identical either way.
-        self._inline_dual = os.environ.get("MSTAR_INLINE_DUAL", "0") == "1"
-        # Safe to flip mid-run at a step boundary: the buffer (if any) is
-        # built and flushed atomically inside one _process_step call (see
-        # the call site around _send_outputs), so a flip between steps never
-        # leaves a half-packed buffer in flight or splits one step's sends
-        # across the packed/unpacked wire formats.
-        self._wgd_pack = os.environ.get("MSTAR_WGD_PACK", "0") == "1"
-        # MSTAR_EMIT_SIDECAR is deliberately NOT refreshed: the sidecar is a
-        # process spawned at init, so the flag is static (see __init__).
-        # Sidecar-scoped construction is likewise pinned to the slim stack,
-        # so the slim flips above only affect legacy-population rids.
 
     def _ws_inc(self, key: str) -> None:
         """MSTAR_WALK_STATS: bump a named diagnostic counter (no-op when off).
@@ -3608,7 +3449,7 @@ class Worker:
             range_pop(synchronize=False)
             range_push("worker.postprocess.check_stop", synchronize=False)
 
-        # Check for stops. MSTAR_SIDECAR_CHECKSTOP (design §6.2): enqueue the
+        # Check for stops. MSTAR_SIDECAR_CHECKSTOP: enqueue the
         # side-stream check_stop D→H WITHOUT blocking, run the cheap per-rid
         # dynamic-loop-iter Python (overlapping the in-flight copy), then poll
         # the copy event and decide THIS step. Flag off: prematerialize blocks
@@ -3634,13 +3475,13 @@ class Worker:
         # Same-step barrier: the stop DECISION must read this step's tokens, so
         # poll the deferred copy (or fall back to a counted blocking wait) before
         # computing stops. No deferred/late decision — that is the V1 identity
-        # failure the design forbids (§6.2).
+        # failure (a late stop decision reads the wrong step's tokens).
         if self._sidecar_checkstop:
             self._await_checkstop(cpu_output)
 
         new_stops = self._compute_new_stops(batch_N, engine, cpu_output)
 
-        # Shadow (design §8, mandatory pre-perf): recompute the stop set from a
+        # Shadow (mandatory pre-perf): recompute the stop set from a
         # forced-synchronous D→H of the SAME GPU outputs and assert agreement.
         # Legacy stays authoritative — a bug surfaces as a logged mismatch +
         # counter, never a corrupted stream. A mismatch here means the deferred
@@ -3815,20 +3656,7 @@ class Worker:
         # buffer path, just without the SHM-skip optimization. Extending prem to
         # the mixed batch's decode rows (chunk row has no new token unless last)
         # is a P3 perf follow-up; correctness is unaffected.
-        # MSTAR_INLINE_DUAL additionally prematerializes the THINKER PREFILL
-        # walks: the final prefill step samples the request's FIRST token, and
-        # without prem it can never be an inline candidate — the whole point
-        # of dual transport (the ordered-emit stream otherwise gates on that
-        # token's SHM fetch). Talker/Code2Wav walks stay excluded exactly as
-        # before (the measured i2s regression was about those, not thinker
-        # prefills). Flag-off: byte-identical to the old thinker_decode-only
-        # behavior.
-        _prem_walks = (
-            ("thinker_decode", "prefill_text", "prefill_audio",
-             "prefill_vision", "prefill_multimodal",
-             "prefill_multimodal_audio")
-            if self._inline_dual else ("thinker_decode",)
-        )
+        _prem_walks = ("thinker_decode",)
         if batch_N.graph_walk in _prem_walks:
             prem_per_request: dict[str, dict[str, list[int]] | None] = {
                 rid: self._prematerialized_new_tokens(cpu_output, rid)
@@ -3885,8 +3713,8 @@ class Worker:
         # MSTAR_WGD_PACK: this step's conductor-bound WORKER_GRAPHS_DONE
         # messages, collected across every (non-sidecar-scoped) rid and
         # flushed as one packed send below instead of one send per rid.
-        # Read once per step (a natural iteration boundary) so a dynflags
-        # flip mid-step can't split one step's sends across the two wire
+        # Read once per step (a natural iteration boundary) so one step's
+        # sends never split across the two wire
         # formats.
         wgd_pack_buffer: list[ConductorMessage] | None = (
             [] if self._wgd_pack else None
@@ -3943,7 +3771,7 @@ class Worker:
                 ),
             )
         if sidecar_entries:
-            # One compact record per step (design §4.2). A failed NOBLOCK
+            # One compact record per step. A failed NOBLOCK
             # send is a sidecar failure: permanent fallback, never a block.
             if self._sidecar_client.send(
                 self._sidecar_client.build_step(sidecar_entries)
@@ -3975,7 +3803,7 @@ class Worker:
     def _compute_new_stops(
         self, batch_N: PendingBatch, engine, cpu_output: NodeOutput,
     ) -> dict:
-        """Stop-state COMPUTATION (design §3.2/§6.2): pure int/counter compares
+        """Stop-state COMPUTATION: pure int/counter compares
         over the prematerialized CPU tokens. Extracted verbatim from
         ``_postprocess_batch`` so MSTAR_SIDECAR_CHECKSTOP_SHADOW can recompute it
         against a forced-synchronous D→H. No CUDA reads here beyond ``.tolist()``
@@ -4284,7 +4112,7 @@ class Worker:
                     k for k in self._slim_emit_sent if k[0] != rid
                 }
             # MSTAR_SLIM_EMIT2 layout entries ride the same lifecycle; not
-            # nested under _slim_emit so a dynflags flip can't strand them.
+            # nested under _slim_emit.
             if self._slim_emit_loop_layout:
                 self._slim_emit_loop_layout = {
                     k: v for k, v in self._slim_emit_loop_layout.items()

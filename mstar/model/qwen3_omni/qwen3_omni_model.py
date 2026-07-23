@@ -113,7 +113,7 @@ def vllm_audio_sentinels_enabled() -> bool:
 
 
 def chunked_prefill_v2_enabled() -> bool:
-    """W5-P1 chunked Thinker prefill. When ON, a long Thinker prefill walk is
+    """Chunked Thinker prefill. When ON, a long Thinker prefill walk is
     split into <=C-token chunks run as separate normal prefill steps, so the
     worker round-robin interleaves them with decode steps instead of stalling
     every decoder for one ~27.5ms mega-step. Default OFF -> flag-off is
@@ -121,7 +121,7 @@ def chunked_prefill_v2_enabled() -> bool:
 
     Gated to ``audio_output=False`` requests (i2t/t2t): when the Talker is
     conditioned the per-walk ``thinker_states`` accounting forbids splitting a
-    walk. See DESIGN_chunked_prefill_v2.md.
+    walk.
     """
     return _envflag("MSTAR_CHUNKED_PREFILL_V2")
 
@@ -145,10 +145,10 @@ def chunked_prefill_v2_assert() -> bool:
 
 
 def mixed_batch_enabled() -> bool:
-    """W5-P2 mixed prefill+decode CAPTURED batch. When ON, the worker scheduler
+    """Mixed prefill+decode CAPTURED batch. When ON, the worker scheduler
     may assemble ONE fully-captured forward covering N ``thinker_decode`` rows
     (1 token each) plus ONE prefill-chunk row (C tokens), eliminating the
-    decode/prefill-chunk alternation that P1 (chunked prefill) still leaves.
+    decode/prefill-chunk alternation that chunked prefill alone still leaves.
 
     Default OFF -> flag-off is byte-identical: the scheduler never emits a
     ``thinker_mixed`` batch, so assembly / preprocess / dispatch changes are
@@ -160,18 +160,10 @@ def mixed_batch_enabled() -> bool:
     return _envflag("MSTAR_MIXED_BATCH")
 
 
-def mixed_batch_assert() -> bool:
-    """DEBUG validation for the mixed batch: after a mixed step, assert each
-    decode rid's seq_len advanced by exactly 1 and the chunk rid's by exactly
-    C. Cheap worker-side check; default OFF.
-    """
-    return _envflag("MSTAR_MIXED_BATCH_ASSERT")
-
-
 def mixed_batch_spec_enabled() -> bool:
-    """W5 spec-chain integration: fold a mixed step INTO the running decode
+    """Spec-chain integration: fold a mixed step INTO the running decode
     speculation chain instead of breaking the chain to run mixed on the
-    non-speculative path (0cc7c71). When ON, and a decode spec chain is live and
+    non-speculative path. When ON, and a decode spec chain is live and
     a mixable prefill chunk becomes ready, the NEXT speculative batch is
     assembled as MIXED (the decode rids continue exactly as the normal
     continuation + the chunk row injected), submitted through the normal spec
@@ -180,17 +172,17 @@ def mixed_batch_spec_enabled() -> bool:
     threads decode tokens out of the mixed step's outputs).
 
     Default OFF, and a strict extension of ``MSTAR_MIXED_BATCH``: with this flag
-    off the worker keeps 0cc7c71's behavior (break the chain → non-spec mixed
-    step → chain re-warm), byte-identical. Measured: 0cc7c71 loses 4-9% per
-    admission (each mixed step trades ~9ms of stall savings for ~15-25ms of lost
-    speculation overlap); riding the chain recovers that. Implies
+    off the worker keeps the non-folded behavior (break the chain → non-spec
+    mixed step → chain re-warm), byte-identical. Without folding, each mixed
+    step trades ~9ms of stall savings for ~15-25ms of lost speculation overlap
+    (a net loss); riding the chain recovers that. Implies
     ``MSTAR_MIXED_BATCH`` (there is nothing to fold in without mixed steps).
     """
     return _envflag("MSTAR_MIXED_SPEC") and mixed_batch_enabled()
 
 
 def mixed_batch_preplan_enabled() -> bool:
-    """W5-P2 residual: pre-plan a chain-folded ``thinker_mixed`` step's packed
+    """Pre-plan a chain-folded ``thinker_mixed`` step's packed
     FlashInfer attention on the plan_executor thread, exactly like decode
     pre-plan, so the GPU thread's mixed submission finds the prefill wrapper
     already planned and skips its inline plan.
@@ -202,7 +194,7 @@ def mixed_batch_preplan_enabled() -> bool:
     32-row bucket: qo_indptr + paged indices + CUB scan) plus the packed input
     prep run INLINE on the GPU thread between replay(N) and the mixed replay —
     a serial bubble the uniform decode chain otherwise hides via plan_executor
-    overlap. This is the ~unity i2t B32 residual (measured 0.969-1.032 band).
+    overlap.
 
     When ON, the mixed fold reserves a packed slot at fold time and dispatches
     the packed plan on plan_executor gated on N's advance_event, mirroring
@@ -215,7 +207,7 @@ def mixed_batch_preplan_enabled() -> bool:
 
 
 def mixed_batch_vision_enabled() -> bool:
-    """W5-P3-lite: allow a VISION prefill chunk (not just ``prefill_text``) to
+    """Allow a VISION prefill chunk (not just ``prefill_text``) to
     ride a captured ``thinker_mixed`` step. When ON, the scheduler may pick a
     ``prefill_vision`` chunk row as the mixed batch's single chunk row, and the
     Thinker's mixed capture carries per-layer ``deepstack_<i>`` statics + the
@@ -224,7 +216,7 @@ def mixed_batch_vision_enabled() -> bool:
 
     Default OFF, and a strict extension of ``MSTAR_MIXED_BATCH``: with this
     flag off the mixed capture stays text-signature only and the scheduler
-    gates the chunk row to ``prefill_text`` (P2 behavior, byte-identical).
+    gates the chunk row to ``prefill_text`` (the text-only behavior, byte-identical).
     Only meaningful when BOTH ``MSTAR_MIXED_BATCH`` (produces mixed steps) and
     ``MSTAR_CHUNKED_PREFILL_V2_VISION`` (produces vision chunk rows via the
     encoder-split walk + staged embeds/pos_ids/deepstack) are also ON; with
@@ -237,23 +229,24 @@ def mixed_batch_vision_enabled() -> bool:
     )
 
 
-# --- W5-P3-lite capture-provisioning latch (IMA safety) ----------------------
-# ``mixed_batch_vision_enabled()`` reads the env LIVE, and MSTAR_DYNFLAGS mutates
-# os.environ mid-run for one-server A/Bs. So a boot-OFF -> runtime-ON flip of
-# MSTAR_MIXED_BATCH_VISION could make the scheduler start routing a
-# ``prefill_vision`` chunk into a ``thinker_mixed`` capture that was built WITHOUT
-# the per-layer ``deepstack_<i>`` static buffers. Those buffers are baked into the
-# graph's ``static_input_keys`` at capture time (submodules.get_cuda_graph_configs
-# / _build_prefill_vision_packed) and CANNOT be added afterwards; replaying a
-# vision chunk there gives ``preprocess`` no static buffer to copy deepstack into
-# — the UNCAP-IMA failure the project memory warns about.
+# --- Capture-provisioning latch (illegal-memory-access safety) --------------
+# ``mixed_batch_vision_enabled()`` reads the env LIVE, and the env can be
+# mutated mid-run (e.g. to A/B a flag on a single running server). So a
+# boot-OFF -> runtime-ON flip of MSTAR_MIXED_BATCH_VISION could make the
+# scheduler start routing a ``prefill_vision`` chunk into a ``thinker_mixed``
+# capture that was built WITHOUT the per-layer ``deepstack_<i>`` static
+# buffers. Those buffers are baked into the graph's ``static_input_keys`` at
+# capture time (submodules.get_cuda_graph_configs / _build_prefill_vision_packed)
+# and CANNOT be added afterwards; replaying a vision chunk there gives
+# ``preprocess`` no static buffer to copy deepstack into — an illegal memory
+# access on an uncaptured bucket.
 #
 # Routing therefore must gate on what the capture ACTUALLY provisioned, not on the
 # live flag. ``get_cuda_graph_configs`` records the truth once at boot via
 # ``mark_mixed_vision_provisioned``; the scheduler consults
 # ``mixed_vision_capture_provisioned`` (see MicroScheduler._mixed_chunk_walks).
 # This mirrors CudaGraphRunner._split_attn_env_snapshot, which process-statics the
-# same class of capture-baked flag against the same dynflag desync hazard.
+# same class of capture-baked flag against the same live-env desync hazard.
 _MIXED_VISION_PROVISIONED: bool | None = None
 
 
@@ -263,7 +256,7 @@ def mark_mixed_vision_provisioned(provisioned: bool) -> None:
     ``prefill_vision`` chunk row). Called once from ``get_cuda_graph_configs``.
 
     Immutable-by-convention after boot: the value reflects the ONE capture that
-    ran and must NOT track later env / dynflag changes — that immutability is the
+    ran and must NOT track later env changes — that immutability is the
     whole point of the latch."""
     global _MIXED_VISION_PROVISIONED
     _MIXED_VISION_PROVISIONED = bool(provisioned)
@@ -286,11 +279,10 @@ def mixed_vision_capture_provisioned() -> bool:
 
 
 def mixed_split_attn_enabled() -> bool:
-    """W5 split attention (MSTAR_MIXED_SPLIT_ATTN): captured thinker_mixed
+    """Split attention (MSTAR_MIXED_SPLIT_ATTN): captured thinker_mixed
     steps plan their decode rows on a tensor-core DECODE wrapper and the chunk
     row on its own prefill wrapper instead of one BatchPrefill plan over the
-    whole mixed shape. In-graph microbench (mb_split_attn.py): 6.11 -> 1.84 ms
-    of attention per 48-layer forward (4.27 ms per mixed step) — the single
+    whole mixed shape. In-graph microbenchmarking showed the single
     mixed-shape PLAN is what's slow, not the kernel (the decode wrapper is
     tensor-core = prefill kernel inside; plain decode kernel rejects GQA
     group 7). Requires the fixed-region row layout in _run_flashinfer_packed
@@ -300,12 +292,12 @@ def mixed_split_attn_enabled() -> bool:
 
 
 def mixed_single_chunk_enabled() -> bool:
-    """W5 fold-rate: let a prefill span that FITS in one chunk still take the
+    """Fold-rate: let a prefill span that FITS in one chunk still take the
     chunked path as a single chunk, so it carries ``prefill_chunk_len``
     metadata and becomes ELIGIBLE to fold into a ``thinker_mixed`` step.
 
-    Motivation (WALK_STATS, i2t B32 encoff, 2026-07-02): only ~35% of prefill
-    steps folded; the mixable gate excludes any step without chunk metadata,
+    Motivation: only a minority of prefill steps folded; the mixable gate
+    excludes any step without chunk metadata,
     which is every short span (span <= MSTAR_PREFILL_CHUNK_TOKENS) — e.g. the
     question-text walk of an i2t prompt. A one-chunk chunked prefill runs the
     same math over [0, span) and pads to the same capture bucket when it does
@@ -331,8 +323,8 @@ def mixed_budget_tokens() -> int:
     rows + the ``C``-token chunk) so raised fold volume never assembles an
     oversized step. 0 (the default) disables it — flag-off is byte-identical.
 
-    CRITICAL distinction from the graveyard ``MSTAR_MIXED_SINGLE_CHUNK`` (CLOSED,
-    net-negative): that flag ALSO routed short standalone prefills through the
+    CRITICAL distinction from the deprecated ``MSTAR_MIXED_SINGLE_CHUNK``
+    (net-negative): that flag ALSO routed short standalone prefills through the
     chunk planner (``allow_single_chunk``) so every short span became foldable —
     which capped admission throughput and starved decode occupancy ~10%. This
     budget does NOT touch ``allow_single_chunk``; the mixable gate
@@ -348,8 +340,8 @@ def mixed_budget_tokens() -> int:
     accelerate without it, and thus ``MSTAR_MIXED_BATCH``); the worker ANDs it
     with ``mixed_batch_spec_enabled()``. Unlike the split-attn / single-chunk
     flags this does NOT bake anything into the CUDA-graph capture (it only
-    changes WHEN an existing chunk folds), so it is safe to flip via
-    ``MSTAR_DYNFLAGS`` mid-run.
+    changes WHEN an existing chunk folds), so it is safe to flip at runtime
+    mid-run.
     """
     import os as _os
     raw = _os.environ.get("MSTAR_MIXED_BUDGET_TOKENS")
@@ -363,7 +355,7 @@ def mixed_budget_tokens() -> int:
 
 
 def eager_fold_enabled() -> bool:
-    """EAGER FOLD FALLBACK (idea o1): co-admit a brand-new request's FIRST
+    """EAGER FOLD FALLBACK: co-admit a brand-new request's FIRST
     prefill chunk into the running decode step even when the chunk is LARGER than
     the largest captured mixed bucket (``MicroScheduler._MIXED_MAX_CHUNK_TOKENS``
     = 512), by running that ONE step EAGER — a single uncaptured varlen forward
@@ -534,7 +526,7 @@ def merged_prefill_enabled() -> bool:
     ``prefill_vision`` (``input_embeds`` + ``cos_3d`` + ``sin_3d`` +
     per-layer ``deepstack_<i>``; ``mrope_pos_advance`` via the ``_PlanState``
     side-channel), so it REUSES the ``prefill_vision`` CUDA-graph capture — no
-    new capture, no extra warmup. See ``DESIGN_merged_prefill.md``.
+    new capture, no extra warmup.
 
     Default OFF -> flag-off is byte-identical: the walk is never registered, the
     schedule is never collapsed, so no i2t admission can route to it. Merge is
@@ -597,35 +589,6 @@ def merged_prefill_audio_max_bs() -> int:
     except ValueError:
         return 24
     return v
-
-
-def _tensor_dump_dir() -> str | None:
-    """Directory for env-gated intermediate-tensor / token dumps, or None."""
-    import os as _os
-
-    return _os.environ.get("MSTAR_DUMP_DIR") or None
-
-
-def _dump_obj(name: str, obj) -> None:
-    """Best-effort dump of a tensor / python object to MSTAR_DUMP_DIR."""
-    d = _tensor_dump_dir()
-    if not d:
-        return
-    try:
-        import os as _os
-
-        _os.makedirs(d, exist_ok=True)
-        path = _os.path.join(d, name)
-        if isinstance(obj, torch.Tensor):
-            torch.save(obj.detach().cpu(), path)
-        else:
-            import json as _json
-
-            with open(path, "w") as f:
-                _json.dump(obj, f, indent=2)
-        logger.info("MSTAR_DUMP: wrote %s", path)
-    except Exception as e:  # never let instrumentation break a run
-        logger.warning("MSTAR_DUMP failed for %s: %s", name, e)
 
 
 def _hf_encoder_attn_impl() -> str:
@@ -1035,7 +998,7 @@ class Qwen3OmniModel(Model):
         # vision token count from vision_embeds.dims and re-emit the Thinker
         # walk in chunks) followed by a Thinker-only prefill_vision walk that
         # consumes them from persist (image_grid_thw rides on the Thinker
-        # schedule entry). Mirrors the June audio encoder-split (af836ee). Only
+        # schedule entry). Mirrors the audio encoder-split. Only
         # registered when the flag is ON, so flag-off keeps the Sequential above
         # byte-identical.
         encode_vision = GraphNode(
@@ -1916,7 +1879,7 @@ class Qwen3OmniModel(Model):
         return edges
 
     # -----------------------------------------------------------------------
-    # Resumable chunked prefill (W5-P1, MSTAR_CHUNKED_PREFILL_V2)
+    # Resumable chunked prefill (MSTAR_CHUNKED_PREFILL_V2)
     # -----------------------------------------------------------------------
 
     def _text_chunk_bounds(
@@ -1990,17 +1953,14 @@ class Qwen3OmniModel(Model):
         if not chunked_prefill_v2_vision_enabled():
             return None
         if metadata.kwargs.get("audio_output", True):
-            logger.debug("VCHUNK gate: audio_output kwargs=%s", metadata.kwargs.get("audio_output"))
             return None
         walk = schedule[step][0]
         if walk != "prefill_vision":
             return None
         if persist_signals is None:
-            logger.debug("VCHUNK gate: persist_signals None")
             return None
         infos = persist_signals.get("vision_embeds", [])
         if not infos:
-            logger.debug("VCHUNK gate: no vision_embeds persist; keys=%s", list(persist_signals.keys()))
             return None
         dims = getattr(infos[0], "dims", None)
         if not dims:
@@ -2038,7 +1998,8 @@ class Qwen3OmniModel(Model):
         self, schedule: list, step: int,
     ) -> int | None:
         """The full token count the Thinker sees for the walk at ``step``, or
-        None if not statically known (encoder-output walks). Text only in P1."""
+        None if not statically known (encoder-output walks). Text-only walks
+        are the only ones chunked prefill splits."""
         walk, tensor_dict = schedule[step]
         if walk != "prefill_text":
             return None
@@ -2547,8 +2508,6 @@ class Qwen3OmniModel(Model):
         # Functionally, both approaches end up with the same set of
         # embeddings in the KV cache (text + modality content).  Stripping
         # the placeholders avoids noise from the unfilled embeddings.
-        # if self._processor is not None:
-            # try:
         system_text = (
             "You are Qwen, a virtual human developed by the "
             "Qwen team, Alibaba Group, capable of perceiving "
@@ -2623,25 +2582,6 @@ class Qwen3OmniModel(Model):
                 prefix_ids = input_ids[:split]
                 suffix_ids = input_ids[split:]
                 result["text_inputs"] = [prefix_ids, suffix_ids]
-                _dump_obj("mstar_thinker_prefix_ids.pt", prefix_ids)
-                _dump_obj("mstar_thinker_suffix_ids.pt", suffix_ids)
-                _dump_obj(
-                    "mstar_thinker_layout.json",
-                    {
-                        "layout": "vllm_user_turn_audio_before_instruction",
-                        "prefix_ids": prefix_ids.tolist(),
-                        "suffix_ids": suffix_ids.tolist(),
-                        "split_index": int(split),
-                        "audio_sentinels": (
-                            [151669, 151670]
-                            if vllm_audio_sentinels_enabled()
-                            else [
-                                self.config.thinker.audio_start_token_id,
-                                self.config.thinker.audio_end_token_id,
-                            ]
-                        ),
-                    },
-                )
             else:
                 logger.warning(
                     "MSTAR_VLLM_PROMPT_LAYOUT=1 but could not locate the user "
@@ -2651,14 +2591,6 @@ class Qwen3OmniModel(Model):
                 result["text_inputs"] = [input_ids]
         else:
             result["text_inputs"] = [input_ids]
-            _dump_obj("mstar_thinker_input_ids.pt", input_ids)
-            _dump_obj(
-                "mstar_thinker_layout.json",
-                {
-                    "layout": "legacy_audio_separate_block",
-                    "input_ids": input_ids.tolist(),
-                },
-            )
 
         result["pixel_values"] = []
         result["image_grid_thw"] = []

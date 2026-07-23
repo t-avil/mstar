@@ -454,7 +454,7 @@ class KVCacheEngine(BaseEngine):
         # capture-derived cap below would let the scheduler pack several
         # merged walks into one step and crash every step ("Batching not
         # implemented for merged multimodal prefill" — observed as a worker
-        # main-loop assert storm on the pd2 boot). Cap them at 1 here until
+        # main-loop assert storm at boot). Cap them at 1 here until
         # a batched merge is actually implemented.
         if str(graph_walk) in ("prefill_multimodal", "prefill_multimodal_audio"):
             return 1
@@ -463,18 +463,20 @@ class KVCacheEngine(BaseEngine):
         if submod_mg.cuda_graph_runner is None:
             return submod_max_bs
 
-        # IDEA #1 (bounded packed prefill, dynflag-tunable): MSTAR_UNCAP_PREFILL=<N>
+        # Bounded packed prefill: MSTAR_UNCAP_PREFILL=<N>
         # raises the per-step prefill batch from the captured-graph cap (<=4) to N, so up
         # to N ready requests run as ONE eager varlen forward (vLLM-style) instead of
         # ceil(count/4) serial captured steps. BOUNDED (not None/unbounded): the FlashInfer
         # prefill workspace is a fixed buffer, so an unbounded packed forward overflows it
-        # on large audio prefills (the s2t illegal-access class). Parity-safe for text/audio:
-        # per-request causal via qo_indptr; minibatching a varlen prefill is identical per
-        # request. Not applied to vision prefill (asserts single-request unless BATCH_VISION).
+        # on large audio prefills (an illegal-memory-access failure mode for multi-request
+        # audio batches). Parity-safe for text/audio: per-request causal via qo_indptr;
+        # minibatching a varlen prefill is identical per request. Not applied to vision
+        # prefill (asserts single-request unless BATCH_VISION).
         # Exclude prefill_audio: the eager packed AUDIO prefill path illegal-accesses
-        # (untested multi-request audio KV layout). s2t already wins req/s, so gating it
-        # out costs nothing and keeps the i2t path (prefill_text/vision) — the cell we
-        # actually lose — packing safely.
+        # (untested multi-request audio KV layout). The audio-output path already performs
+        # well without this batching, so gating it out costs nothing and keeps the
+        # text/vision prefill path — where this batching is actually needed — packing
+        # safely.
         # ALLOWLIST, not a name-prefix blacklist: new prefill walks (e.g. the
         # merged prefill_multimodal, whose audio variant carries the exact
         # multi-request audio KV layout the exclusion exists for) must OPT IN
