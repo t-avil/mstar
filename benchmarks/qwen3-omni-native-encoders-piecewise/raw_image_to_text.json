@@ -1,0 +1,365 @@
+{
+ "_source": "fork/encoders-implemeneted-benchmarked:benchmarks/qwen3-omni-native-encoders/NUMBERS.md (vLLM = 0.21-era) + 6 piecewise cells",
+ "aggregates": {
+  "B1": {
+   "mstar_new": {
+    "recomputed": {
+     "text_token_throughput": 125.2309,
+     "request_throughput": 0.7546
+    },
+    "harness": {
+     "ttft_text": {
+      "p50": 0.2147
+     },
+     "itl_text": {
+      "mean": 0.0068
+     }
+    }
+   },
+   "mstar_old": {
+    "recomputed": {
+     "text_token_throughput": 109.5898,
+     "request_throughput": 0.6349
+    },
+    "harness": {
+     "ttft_text": {
+      "p50": 0.401
+     },
+     "itl_text": {
+      "mean": 0.007
+     }
+    }
+   },
+   "vllm": {
+    "recomputed": {
+     "text_token_throughput": 77.2263,
+     "request_throughput": 0.3727
+    },
+    "harness": {
+     "ttft_text": {
+      "p50": 0.1499
+     },
+     "itl_text": {
+      "mean": 0.0123
+     }
+    }
+   },
+   "mstar_piecewise": {
+    "recomputed": {
+     "text_token_throughput": 119.21191493269764,
+     "request_throughput": 0.6846341130377466,
+     "audio_throughput": null,
+     "rtf_p50": null
+    },
+    "harness": {
+     "ttft_text": {
+      "p50": 0.2993272078456357
+     },
+     "itl_text": {
+      "mean": 0.006698901007004042
+     }
+    }
+   }
+  },
+  "B2": {
+   "mstar_new": {
+    "recomputed": {
+     "text_token_throughput": 194.1596,
+     "request_throughput": 1.1646
+    },
+    "harness": {
+     "ttft_text": {
+      "p50": 0.2755
+     },
+     "itl_text": {
+      "mean": 0.0086
+     }
+    }
+   },
+   "mstar_old": {
+    "recomputed": {
+     "text_token_throughput": 167.3596,
+     "request_throughput": 0.969
+    },
+    "harness": {
+     "ttft_text": {
+      "p50": 0.448
+     },
+     "itl_text": {
+      "mean": 0.0092
+     }
+    }
+   },
+   "vllm": {
+    "recomputed": {
+     "text_token_throughput": 110.2096,
+     "request_throughput": 0.5272
+    },
+    "harness": {
+     "ttft_text": {
+      "p50": 0.1355
+     },
+     "itl_text": {
+      "mean": 0.0175
+     }
+    }
+   },
+   "mstar_piecewise": {
+    "recomputed": {
+     "text_token_throughput": 191.4365854841641,
+     "request_throughput": 1.1300444079493177,
+     "audio_throughput": null,
+     "rtf_p50": null
+    },
+    "harness": {
+     "ttft_text": {
+      "p50": 0.3332680610474199
+     },
+     "itl_text": {
+      "mean": 0.008461205579881727
+     }
+    }
+   }
+  },
+  "B4": {
+   "mstar_new": {
+    "recomputed": {
+     "text_token_throughput": 308.2474,
+     "request_throughput": 1.8355
+    },
+    "harness": {
+     "ttft_text": {
+      "p50": 0.2978
+     },
+     "itl_text": {
+      "mean": 0.011
+     }
+    }
+   },
+   "mstar_old": {
+    "recomputed": {
+     "text_token_throughput": 253.1901,
+     "request_throughput": 1.4765
+    },
+    "harness": {
+     "ttft_text": {
+      "p50": 0.5197
+     },
+     "itl_text": {
+      "mean": 0.0123
+     }
+    }
+   },
+   "vllm": {
+    "recomputed": {
+     "text_token_throughput": 149.7732,
+     "request_throughput": 0.7191
+    },
+    "harness": {
+     "ttft_text": {
+      "p50": 0.1501
+     },
+     "itl_text": {
+      "mean": 0.0257
+     }
+    }
+   },
+   "mstar_piecewise": {
+    "recomputed": {
+     "text_token_throughput": 296.10895357393287,
+     "request_throughput": 1.7260586279129004,
+     "audio_throughput": null,
+     "rtf_p50": null
+    },
+    "harness": {
+     "ttft_text": {
+      "p50": 0.3569143359782174
+     },
+     "itl_text": {
+      "mean": 0.011019396421741354
+     }
+    }
+   }
+  },
+  "B8": {
+   "mstar_new": {
+    "recomputed": {
+     "text_token_throughput": 451.2516,
+     "request_throughput": 2.5199
+    },
+    "harness": {
+     "ttft_text": {
+      "p50": 0.3436
+     },
+     "itl_text": {
+      "mean": 0.0151
+     }
+    }
+   },
+   "mstar_old": {
+    "recomputed": {
+     "text_token_throughput": 348.5283,
+     "request_throughput": 2.0361
+    },
+    "harness": {
+     "ttft_text": {
+      "p50": 0.5401
+     },
+     "itl_text": {
+      "mean": 0.0185
+     }
+    }
+   },
+   "vllm": {
+    "recomputed": {
+     "text_token_throughput": 211.6748,
+     "request_throughput": 1.0181
+    },
+    "harness": {
+     "ttft_text": {
+      "p50": 0.1866
+     },
+     "itl_text": {
+      "mean": 0.036
+     }
+    }
+   },
+   "mstar_piecewise": {
+    "recomputed": {
+     "text_token_throughput": 423.2537211776554,
+     "request_throughput": 2.4207540800151874,
+     "audio_throughput": null,
+     "rtf_p50": null
+    },
+    "harness": {
+     "ttft_text": {
+      "p50": 0.44633700198028237
+     },
+     "itl_text": {
+      "mean": 0.015710403915640665
+     }
+    }
+   }
+  },
+  "B16": {
+   "mstar_new": {
+    "recomputed": {
+     "text_token_throughput": 608.3984,
+     "request_throughput": 3.4715
+    },
+    "harness": {
+     "ttft_text": {
+      "p50": 0.4053
+     },
+     "itl_text": {
+      "mean": 0.0224
+     }
+    }
+   },
+   "mstar_old": {
+    "recomputed": {
+     "text_token_throughput": 466.4692,
+     "request_throughput": 2.7368
+    },
+    "harness": {
+     "ttft_text": {
+      "p50": 0.6884
+     },
+     "itl_text": {
+      "mean": 0.0276
+     }
+    }
+   },
+   "vllm": {
+    "recomputed": {
+     "text_token_throughput": 318.8622,
+     "request_throughput": 1.5347
+    },
+    "harness": {
+     "ttft_text": {
+      "p50": 0.1906
+     },
+     "itl_text": {
+      "mean": 0.0476
+     }
+    }
+   },
+   "mstar_piecewise": {
+    "recomputed": {
+     "text_token_throughput": 573.1526668888889,
+     "request_throughput": 3.3028786854753185,
+     "audio_throughput": null,
+     "rtf_p50": null
+    },
+    "harness": {
+     "ttft_text": {
+      "p50": 0.5308204450411722
+     },
+     "itl_text": {
+      "mean": 0.021714055144711555
+     }
+    }
+   }
+  },
+  "B32": {
+   "mstar_new": {
+    "recomputed": {
+     "text_token_throughput": 780.4883,
+     "request_throughput": 4.4604
+    },
+    "harness": {
+     "ttft_text": {
+      "p50": 0.5757
+     },
+     "itl_text": {
+      "mean": 0.0341
+     }
+    }
+   },
+   "mstar_old": {
+    "recomputed": {
+     "text_token_throughput": 565.969,
+     "request_throughput": 3.2168
+    },
+    "harness": {
+     "ttft_text": {
+      "p50": 1.0291
+     },
+     "itl_text": {
+      "mean": 0.0453
+     }
+    }
+   },
+   "vllm": {
+    "recomputed": {
+     "text_token_throughput": 528.8366,
+     "request_throughput": 2.554
+    },
+    "harness": {
+     "ttft_text": {
+      "p50": 0.2058
+     },
+     "itl_text": {
+      "mean": 0.0574
+     }
+    }
+   },
+   "mstar_piecewise": {
+    "recomputed": {
+     "text_token_throughput": 761.3008936540319,
+     "request_throughput": 4.464698725726935,
+     "audio_throughput": null,
+     "rtf_p50": null
+    },
+    "harness": {
+     "ttft_text": {
+      "p50": 0.7792257085675374
+     },
+     "itl_text": {
+      "mean": 0.028355591569109755
+     }
+    }
+   }
+  }
+ }
+}
