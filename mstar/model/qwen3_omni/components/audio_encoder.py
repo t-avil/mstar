@@ -222,7 +222,9 @@ def note_encoder_layout(kind: str, n_seg: int, total_tokens: int, fitted: bool) 
 
     The warning is the actionable signal that capture buckets are mis-sized — the
     failure mode that otherwise hides as a silent eager fallback."""
-    if not fitted and kind not in _WARNED_NO_BUCKET:
+    # Probe mode has no buckets by construction, so a miss there is expected and
+    # the "widen your buckets" advice would be noise.
+    if not fitted and not _encoder_probe() and kind not in _WARNED_NO_BUCKET:
         _WARNED_NO_BUCKET.add(kind)
         logger.warning(
             "%s encoder: NO capture bucket fits segments=%d total_tokens=%d — "
@@ -604,6 +606,17 @@ class NativeQwen3OmniAudioEncoder(nn.Module):
                 set_fi_override(None)
             return {"x": x}
 
+        # Buckets are MEASURED, not derived: a MSTAR_ENCODER_CG_PROBE=1 run over
+        # libri s2t observed segments 1..7 and total_tokens 36..426, every sample a
+        # distinct layout. Note the encoder is invoked per REQUEST, not once per
+        # batch, so neither figure scales with benchmark concurrency.
+        # ONE bs value, not a ladder: capture_batch_sizes is crossed with
+        # total_tokens, so each extra value multiplies captured graphs and their
+        # 128 MiB workspaces, while padding a small run up to a larger bs is free
+        # (the trailing segments are zero-length and plan_attn_fn excludes them
+        # from the block-diagonal attention). So bs carries the headroom and the
+        # token ladder carries the resolution. A layout past the top bucket logs
+        # the NO-bucket WARNING and falls back to eager rather than failing.
         return PiecewisePackedConfig(
             capture_fn=capture_fn,
             make_static_inputs=make_static_inputs,
@@ -611,9 +624,9 @@ class NativeQwen3OmniAudioEncoder(nn.Module):
             plan_attn_fn=plan_attn_fn,
             uses_kv_cache=False,
             total_tokens=_encoder_int_list("MSTAR_ENCODER_CG_TOKENS_AUDIO",
-                                           "1024,2048,4096"),
+                                           "48,64,96,128,192,256,320,448,640"),
             capture_batch_sizes=_encoder_int_list("MSTAR_ENCODER_CG_BS_AUDIO",
-                                                  "1,2,4,8"),
+                                                  "32"),
         )
 
     @torch.no_grad()

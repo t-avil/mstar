@@ -323,16 +323,31 @@ class NativeQwen3OmniVisionEncoder(nn.Module):
                 out[f"deepstack_{i}"] = d
             return out
 
+        # Buckets are MEASURED, not derived: a MSTAR_ENCODER_CG_PROBE=1 run over
+        # food101 i2t at concurrency 32 observed segments=1 on EVERY sample and
+        # total_tokens in {576, 704, 768, 896, 1024}. The encoder is invoked once
+        # per IMAGE, not once per batch, so neither figure scales with benchmark
+        # concurrency — an earlier estimate of ~B*1024 tokens (32k at B32) was
+        # wrong by more than an order of magnitude.
+        # The ladder names the observed layouts exactly, so the common case pads
+        # by zero, plus headroom rungs for larger images (a bigger image just
+        # lands on the next rung; past the top one it logs the NO-bucket WARNING
+        # and runs eager). ONE bs value, generously above the observed 1: bs is
+        # crossed with total_tokens, so extra values multiply captured graphs and
+        # their 128 MiB workspaces, whereas padding bs up is free (trailing
+        # segments are zero-length and plan_attn_fn drops them).
+        # Token buckets MUST stay divisible by spatial_merge_size**2 (=4).
         return PiecewisePackedConfig(
             capture_fn=capture_fn,
             make_static_inputs=make_static_inputs,
             make_attn_state=make_attn_state,
             plan_attn_fn=plan_attn_fn,
             uses_kv_cache=False,
-            total_tokens=AE._encoder_int_list("MSTAR_ENCODER_CG_TOKENS_VISION",
-                                              "2048,4096,8192"),
+            total_tokens=AE._encoder_int_list(
+                "MSTAR_ENCODER_CG_TOKENS_VISION",
+                "576,704,768,896,1024,1152,1280"),
             capture_batch_sizes=AE._encoder_int_list("MSTAR_ENCODER_CG_BS_VISION",
-                                                     "1,2,4,8"),
+                                                     "8"),
         )
 
     @torch.no_grad()
