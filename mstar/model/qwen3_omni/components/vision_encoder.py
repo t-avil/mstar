@@ -323,16 +323,17 @@ class NativeQwen3OmniVisionEncoder(nn.Module):
                 out[f"deepstack_{i}"] = d
             return out
 
-        # Buckets are MEASURED, not derived: a MSTAR_ENCODER_CG_PROBE=1 run over
-        # food101 i2t at concurrency 32 observed segments=1 on EVERY sample and
-        # total_tokens in {576, 704, 768, 896, 1024}. The encoder is invoked once
-        # per IMAGE, not once per batch, so neither figure scales with benchmark
-        # concurrency — an earlier estimate of ~B*1024 tokens (32k at B32) was
-        # wrong by more than an order of magnitude.
-        # The ladder names the observed layouts exactly, so the common case pads
-        # by zero, plus headroom rungs for larger images (a bigger image just
-        # lands on the next rung; past the top one it logs the NO-bucket WARNING
-        # and runs eager). ONE bs value, generously above the observed 1: bs is
+        # Buckets are MEASURED, not derived, from MSTAR_ENCODER_CG_PROBE=1 runs.
+        # Probing i2t ALONE was not enough and shipped a bug: i2t sends one image
+        # per request (segments=1, tokens in {576,704,768,896,1024}), so a ladder
+        # topping out near 1280 looked ample — but i2s sends up to FOUR images per
+        # request (segments=4, ~3840-4096 tokens), which fit no bucket and silently
+        # fell back to eager. Probe every modality that reaches an encoder, not a
+        # convenient one.
+        # The low rungs name the single-image layouts exactly (zero padding in the
+        # common case); the upper rungs cover multi-image requests. Past the top
+        # rung it logs the NO-bucket WARNING and runs eager. ONE bs value,
+        # generously above the observed max of 4: bs is
         # crossed with total_tokens, so extra values multiply captured graphs and
         # their 128 MiB workspaces, whereas padding bs up is free (trailing
         # segments are zero-length and plan_attn_fn drops them).
@@ -345,7 +346,7 @@ class NativeQwen3OmniVisionEncoder(nn.Module):
             uses_kv_cache=False,
             total_tokens=AE._encoder_int_list(
                 "MSTAR_ENCODER_CG_TOKENS_VISION",
-                "576,704,768,896,1024,1152,1280"),
+                "576,704,768,896,1024,1280,1536,2048,3072,4096"),
             capture_batch_sizes=AE._encoder_int_list("MSTAR_ENCODER_CG_BS_VISION",
                                                      "8"),
         )

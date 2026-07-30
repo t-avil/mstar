@@ -606,10 +606,14 @@ class NativeQwen3OmniAudioEncoder(nn.Module):
                 set_fi_override(None)
             return {"x": x}
 
-        # Buckets are MEASURED, not derived: a MSTAR_ENCODER_CG_PROBE=1 run over
-        # libri s2t observed segments 1..7 and total_tokens 36..426, every sample a
-        # distinct layout. Note the encoder is invoked per REQUEST, not once per
-        # batch, so neither figure scales with benchmark concurrency.
+        # Buckets are MEASURED, not derived, from MSTAR_ENCODER_CG_PROBE=1 runs.
+        # s2t alone was not a representative sample (segments 1..7, tokens 36..426);
+        # s2s reaches segments 1..16 and tokens up to ~1057, so a ladder sized to
+        # s2t left long-audio requests with no bucket, silently falling back to
+        # eager. Probe every modality that reaches this encoder.
+        # Token values are near-continuous (62 distinct in one short run), so the
+        # ladder is deliberately coarse: exact-matching is hopeless here and each
+        # rung costs a captured graph plus a 128 MiB workspace.
         # ONE bs value, not a ladder: capture_batch_sizes is crossed with
         # total_tokens, so each extra value multiplies captured graphs and their
         # 128 MiB workspaces, while padding a small run up to a larger bs is free
@@ -623,8 +627,9 @@ class NativeQwen3OmniAudioEncoder(nn.Module):
             make_attn_state=make_attn_state,
             plan_attn_fn=plan_attn_fn,
             uses_kv_cache=False,
-            total_tokens=_encoder_int_list("MSTAR_ENCODER_CG_TOKENS_AUDIO",
-                                           "48,64,96,128,192,256,320,448,640"),
+            total_tokens=_encoder_int_list(
+                "MSTAR_ENCODER_CG_TOKENS_AUDIO",
+                "48,64,96,128,192,256,384,512,704,896,1088"),
             capture_batch_sizes=_encoder_int_list("MSTAR_ENCODER_CG_BS_AUDIO",
                                                   "32"),
         )
