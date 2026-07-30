@@ -20,7 +20,11 @@ from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
     get_vision_position_ids,
 )
 
-from mstar.model.qwen3_omni.components.audio_encoder import varlen_attention
+from mstar.model.qwen3_omni.components import audio_encoder as AE
+from mstar.model.qwen3_omni.components.audio_encoder import (
+    _encoder_legacy_cg,
+    varlen_attention,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -250,9 +254,91 @@ class NativeQwen3OmniVisionEncoder(nn.Module):
             except Exception:
                 logger.warning("vision CG warmup failed for bs=%d", k, exc_info=True)
 
+    def get_piecewise_cuda_graph_config(self, device, autocast_dtype):
+        """Build the ``PiecewisePackedConfig`` migrating the block-loop CUDA graph
+        onto ``PiecewiseCudaGraphRunner``.
+
+        The captured region is ``_block_loop_tail`` (block loop + DeepStack
+        mergers + final merger) over a packed ``[total_tokens, hidden_size]``
+        hidden state. Unlike the legacy per-grid capture, ``position_embeddings``
+        (cos/sin) and ``cu_seqlens`` become STATIC inputs copied per replay — that
+        is what lets one bucket serve many grid layouts — while the FlashInfer
+        ragged wrapper is re-planned per replay with the real per-segment lengths.
+
+        Returns None (eager path) when FlashInfer isn't the active varlen backend
+        or the legacy path is selected. Bucket lists are env-overridable
+        (``MSTAR_ENCODER_CG_BS_VISION`` segment counts,
+        ``MSTAR_ENCODER_CG_TOKENS_VISION`` token counts); each bucket owns a
+        persistent 128 MiB workspace, so keep the product modest. Token buckets
+        MUST be divisible by ``spatial_merge_size**2`` (the merger reshapes
+        ``[total_tokens, H] -> [total_tokens/merge_sq, H*merge_sq]``); a bucket
+        that isn't simply fails capture and falls back to eager."""
+        import mstar.model.qwen3_omni.components.audio_encoder as AE
+        from mstar.engine.cuda_graph_config import PiecewisePackedConfig
+        if AE._encoder_legacy_cg() or not (
+            AE._FLASHINFER_AVAILABLE and AE._VARLEN_BACKEND == "flashinfer"
+        ):
+            return None
+
+        hidden_size = self.config.hidden_size
+        num_heads = self.config.num_heads
+        head_dim = hidden_size // num_heads
+        scale = head_dim ** -0.5
+
+        def make_static_inputs(shape):
+            # x in autocast dtype (same-dtype replay copy). cos/sin are per-layout
+            # and float32 (RoPE precision), so they MUST be static inputs copied
+            # per replay, not constants baked into the graph. cu_seqlens likewise
+            # static (the graph can no longer bake in one layout).
+            return {
+                "x": torch.zeros(shape.total_tokens, hidden_size,
+                                 dtype=autocast_dtype, device=device),
+                "cu_seqlens": torch.zeros(shape.bs + 1, dtype=torch.int32,
+                                          device=device),
+                "pos_cos": torch.zeros(shape.total_tokens, head_dim,
+                                       dtype=torch.float32, device=device),
+                "pos_sin": torch.zeros(shape.total_tokens, head_dim,
+                                       dtype=torch.float32, device=device),
+            }
+
+        def make_attn_state(shape):
+            return AE.make_fi_graph_state(device, shape.bs)
+
+        def plan_attn_fn(state, shape, seq_lens):
+            AE.plan_fi_graph_state(state, seq_lens, num_heads, head_dim, scale,
+                                   autocast_dtype)
+
+        def capture_fn(static_inputs, static_cm=None, attn_state=None, **kw):
+            # max_seqlen unused (FI-external path ignores it; capture never takes
+            # the flash-attn branch). Route attention through the runner wrapper.
+            pos = (static_inputs["pos_cos"], static_inputs["pos_sin"])
+            AE.set_fi_override(attn_state)
+            try:
+                merged, deepstack = self._block_loop_tail(
+                    static_inputs["x"], static_inputs["cu_seqlens"], 0, pos)
+            finally:
+                AE.set_fi_override(None)
+            out = {"merged": merged}
+            for i, d in enumerate(deepstack):
+                out[f"deepstack_{i}"] = d
+            return out
+
+        return PiecewisePackedConfig(
+            capture_fn=capture_fn,
+            make_static_inputs=make_static_inputs,
+            make_attn_state=make_attn_state,
+            plan_attn_fn=plan_attn_fn,
+            uses_kv_cache=False,
+            total_tokens=AE._encoder_int_list("MSTAR_ENCODER_CG_TOKENS_VISION",
+                                              "2048,4096,8192"),
+            capture_batch_sizes=AE._encoder_int_list("MSTAR_ENCODER_CG_BS_VISION",
+                                                     "1,2,4,8"),
+        )
+
     @torch.no_grad()
     def forward(self, pixel_values, grid_thw):
-        self._maybe_cg_warmup(pixel_values, grid_thw)
+        if _encoder_legacy_cg():
+            self._maybe_cg_warmup(pixel_values, grid_thw)
         dtype = self.patch_embed.proj.weight.dtype
         pixel_values = pixel_values.to(dtype)
 
@@ -273,7 +359,52 @@ class NativeQwen3OmniVisionEncoder(nn.Module):
         position_embeddings = (emb.cos(), emb.sin())
         max_seqlen = int((cu_seqlens[1:] - cu_seqlens[:-1]).max())
 
-        if self._cuda_graph_enabled():
+        # Piecewise path (default): replay the block loop on a bucketed graph,
+        # re-planning ragged attention with the real per-segment lengths and
+        # copying cos/sin + hidden state into the runner-owned static buffers. The
+        # runner is threaded on by the submodule; absent it (or no fitting bucket)
+        # we fall through to eager.
+        runner = getattr(self, "_piecewise_runner", None)
+        n_seg = cu_seqlens.shape[0] - 1
+        total_tokens = hidden_states.shape[0]
+        if AE._encoder_probe():
+            # Harvest the layout, capture nothing, run eager.
+            AE.note_encoder_layout("vision", n_seg, total_tokens, fitted=False)
+            AE.note_encoder_path("vision.probe")
+            return self._block_loop_tail(
+                hidden_states, cu_seqlens, max_seqlen, position_embeddings)
+        if not _encoder_legacy_cg() and runner is not None:
+            fitted = runner.can_run(n_seg, total_tokens)
+            AE.note_encoder_layout("vision", n_seg, total_tokens, fitted)
+            if fitted:
+                seg_lens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+                cos, sin = position_embeddings
+                out = runner.run(
+                    static_inputs={
+                        "x": hidden_states,
+                        "cu_seqlens": cu_seqlens.to(torch.int32),
+                        "pos_cos": cos,
+                        "pos_sin": sin,
+                    },
+                    seq_lens=seg_lens,
+                    real_bs=n_seg,
+                )
+                # The mergers reduce the token axis by spatial_merge_size**2, so
+                # the merged outputs have fewer rows than PiecewiseOutput's
+                # token-count real_len; re-slice to the real merged length (the
+                # leading rows — zero-padding lands in trailing merged tokens).
+                merged_len = total_tokens // (self.spatial_merge_size ** 2)
+                n_deepstack = len(self.deepstack_visual_indexes)
+                merged = out.get_view("merged")[:merged_len].clone()
+                deepstack = [
+                    out.get_view(f"deepstack_{i}")[:merged_len].clone()
+                    for i in range(n_deepstack)
+                ]
+                AE.note_encoder_path("vision.piecewise")
+                return merged, deepstack
+
+        # Legacy hand-rolled per-grid capture, behind MSTAR_ENCODER_LEGACY_CG.
+        if _encoder_legacy_cg() and self._cuda_graph_enabled():
             # Same key => identical cu_seqlens/position_embeddings; pixel values enter via hidden_states copy.
             key = (int(seq_len), tuple(cu_seqlens.tolist()))
             vg = self._cg_cache.get(key)
@@ -285,7 +416,9 @@ class NativeQwen3OmniVisionEncoder(nn.Module):
             if vg is not None:
                 vg.static_x.copy_(hidden_states)
                 vg.graph.replay()
+                AE.note_encoder_path("vision.legacy")
                 return (vg.out_merged.clone(),
                         [d.clone() for d in vg.out_deepstack])
 
+        AE.note_encoder_path("vision.eager")
         return self._block_loop_tail(hidden_states, cu_seqlens, max_seqlen, position_embeddings)
