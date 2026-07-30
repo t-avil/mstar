@@ -183,7 +183,10 @@ export CUDA_VISIBLE_DEVICES="$GPUS"
 export HF_HOME="$HF_HOME_DIR"
 export HF_DATASETS_CACHE="$HF_DATASETS"
 export PYTHONPATH="$WORKTREE"
-export PATH="/home/tim/mstar-encoders/.venv/bin:${PATH}"
+# Server venv. The client venv (mstar-encoders) carries torch but NOT uvicorn or
+# the rest of the server deps, so booting the API server through it dies with
+# ModuleNotFoundError. The client PYTHON= further down still uses the client venv.
+export PATH="${MSTAR_SERVER_VENV:-/m-coriander/coriander/tim/mstar-new/.venv}/bin:${PATH}"
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 
 # Export optimization flags
@@ -219,9 +222,13 @@ trap cleanup EXIT INT TERM
 
 # Wait for server ready (poll /v1/models)
 echo "[$(date -u +%H:%M:%S)] Waiting for server on port $PORT..."
-for i in $(seq 1 120); do
+# 120*3s = 360s is not enough for builds that capture many CUDA graphs before
+# serving (24 Talker configs + the encoders' piecewise buckets took ~486s); the
+# server was still mid-capture, with no error, when the old ceiling fired.
+# Override with SERVER_READY_TRIES.
+for i in $(seq 1 "${SERVER_READY_TRIES:-400}"); do
     if curl -sf "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1; then
-        echo "[$(date -u +%H:%M:%S)] Server ready after ~${i}s"
+        echo "[$(date -u +%H:%M:%S)] Server ready after ~$((i*3))s"
         break
     fi
     if ! kill -0 "$SERVER_PID" 2>/dev/null; then
@@ -233,7 +240,7 @@ for i in $(seq 1 120); do
 done
 
 if ! curl -sf "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1; then
-    echo "ERROR: Server failed to start within 360s"
+    echo "ERROR: Server failed to start within $(( ${SERVER_READY_TRIES:-400} * 3 ))s"
     tail -30 "$SERVER_LOG"
     exit 1
 fi
