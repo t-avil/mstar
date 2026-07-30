@@ -215,6 +215,23 @@ class PiecewiseCudaGraphConfig(ABC):
     #     seq_lens for BATCHED, packed indptr for PACKED).
     uses_kv_cache: bool = False
     plan_fn: Callable[["BatchedCacheManager", PiecewiseCaptureShape], None] | None = None
+    # (5) attention planning WITHOUT a KV cache. A captured region can run
+    #     FlashInfer *ragged* varlen attention that owns no KV cache but still
+    #     must be re-planned with the real per-request seq_lens before every
+    #     replay — e.g. a multimodal encoder's bidirectional block loop, where
+    #     the plan is host-side and therefore cannot live inside the graph.
+    #     ``make_attn_state(shape)`` builds ONE persistent, capture-safe wrapper
+    #     per bucket at capture time (it must be built with fixed-size index
+    #     buffers, i.e. FlashInfer's ``use_cuda_graph=True``, so replanning
+    #     never reallocates what the graph captured). The runner threads it into
+    #     ``capture_fn`` as ``attn_state=`` and calls
+    #     ``plan_attn_fn(attn_state, shape, seq_lens)`` before each replay, with
+    #     ``seq_lens`` zero-padded to ``shape.bs`` so the planned indptr sums to
+    #     the REAL token count and the bucket's pad tail is left in no segment.
+    #     Both are ignored when ``uses_kv_cache`` is True (that path plans via
+    #     ``plan_fn`` / the type default instead).
+    make_attn_state: Callable[[PiecewiseCaptureShape], Any] | None = None
+    plan_attn_fn: Callable[[Any, PiecewiseCaptureShape, list[int]], None] | None = None
     # Whether the runner advances cache seq_lens (Python-only, post-replay) after
     # each ``run``. True suits the common case where the captured region consumes
     # its planned tokens once per step. Set False when the caller advances the
