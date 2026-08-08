@@ -45,6 +45,14 @@ from mstar.engine.kv_store import KVCacheConfig
 from mstar.graph.base import GraphEdge, GraphNode, Loop, Sequential, TensorPointerInfo
 from mstar.graph.special_destinations import EMIT_TO_CLIENT, EMPTY_DESTINATION
 from mstar.model.base import MAX_OUTPUT_TOKENS, ForwardPassArgs, Model, TensorAndMetadata
+from mstar.model.multimodal import (
+    PromptPart,
+    check_plan,
+    find_media_spans,
+    parts_from_modalities,
+    prefill_plan,
+    split_around_spans,
+)
 from mstar.model.qwen3_omni.components.talker import Qwen3OmniCodePredictor
 from mstar.model.submodule_base import NodeSubmodule
 from mstar.model.utils import Operation, WeightConverter
@@ -100,7 +108,6 @@ def _hf_encoder_attn_impl() -> str:
 
 # Marks where modality content belongs inside the templated user turn.
 # Split out before tokenization, so it never reaches the tokenizer.
-_MM_SPLIT_SENTINEL = "<<<mstar_modality_split>>>"
 
 
 # ---------------------------------------------------------------------------
@@ -1219,30 +1226,6 @@ class Qwen3OmniModel(Model):
             )
         )
 
-    def _user_turn_audio_split_index(
-        self, input_ids: torch.Tensor
-    ) -> int | None:
-        """Index in ``input_ids`` right after ``<|im_start|>user\\n`` where the
-        audio block must be inserted to match vLLM's layout.
-
-        The Qwen ChatML user turn tokenizes as
-        ``[<|im_start|>(151644), user(872), \\n(198), <prompt...>]``.  We locate
-        the ``[im_start, user]`` pair and return the index just past the newline
-        that follows it.  Returns None if no user turn is found.
-        """
-        im_start = self.config.im_start_token_id
-        user_tok = self.config.user_token_id
-        ids = input_ids.tolist()
-        for i in range(len(ids) - 1):
-            if ids[i] == im_start and ids[i + 1] == user_tok:
-                j = i + 2
-                # Skip the single newline token that the template emits after
-                # the role name (id 198 for "\n"); guard against absence.
-                if j < len(ids) and ids[j] == 198:
-                    j += 1
-                return j
-        return None
-
     def _audio_mel_gpu(self, waveform: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """``_audio_mel`` on CUDA, wherever the input happens to live."""
         return self._audio_mel(waveform.to("cuda"))
@@ -1281,6 +1264,15 @@ class Qwen3OmniModel(Model):
         seqlen = torch.tensor([feat.shape[1]], dtype=torch.long)
         return feat, seqlen
 
+    def _placeholder_specs(self) -> dict[str, tuple[int, int, int]]:
+        """Per-modality ``(start, pad, end)`` sentinel ids in the templated prompt."""
+        cfg = self.config.thinker
+        return {
+            "audio": (cfg.audio_start_token_id, cfg.audio_token_id, cfg.audio_end_token_id),
+            "image": (cfg.vision_start_token_id, cfg.image_token_id, cfg.vision_end_token_id),
+            "video": (cfg.vision_start_token_id, cfg.video_token_id, cfg.vision_end_token_id),
+        }
+
     def process_prompt(
         self,
         prompt: str | None,
@@ -1288,80 +1280,46 @@ class Qwen3OmniModel(Model):
         output_modalities: list[str],
         tensors: NameToTensorList | None = None,
         input_metadata: dict[str, dict] = {},
+        prompt_parts: list[PromptPart] | None = None,
         **kwargs,
     ) -> NameToTensorList:
         """Build the full ChatML prompt + derived multimodal tensors.
 
-        Uses HF's full ``AutoProcessor`` (combines tokenizer + image_processor
-        + video_processor + feature_extractor + chat template) to:
+        The chat template renders every attachment as a
+        ``<|x_start|><|x_pad|><|x_end|>`` block at its own place in the user
+        turn, so writing the parts out in request order and tokenizing the
+        result once gives the prompt vLLM-Omni would build. The modality walks
+        emit those blocks themselves (encoder output wrapped in the sentinel
+        embeddings), so the text spans handed to the Thinker are what is left
+        between them — sliced out of the single tokenization, which keeps BPE
+        merges intact across every boundary.
 
-        1. Build a ChatML-formatted prompt from ``prompt`` and any
-           multimodal inputs in ``tensors``.
-        2. Apply ``add_generation_prompt=True`` so the model receives the
-           ``<|im_start|>assistant\\n`` suffix and knows to start the
-           assistant response.
-        3. Run the image_processor / feature_extractor on the raw modality
-           tensors to produce ``pixel_values`` / ``image_grid_thw`` /
-           ``audio_features`` / ``audio_seqlens``.
-        4. Expand the single ``<|image_pad|>`` / ``<|audio_pad|>`` /
-           ``<|video_pad|>`` placeholder in the tokenized text to N copies
-           where N = number of patches after spatial merge (this is what
-           ``Qwen3OmniMoeProcessor.replace_multimodal_special_tokens`` does
-           internally).
-
-        The result has ``text_inputs`` containing the FULL templated +
-        expanded token IDs, plus the per-modality tensor outputs needed by
-        the Thinker's prefill walks.
+        Image preprocessing and log-mel run on the input's own device rather
+        than through the HF processors, so ``pixel_values`` / ``audio_features``
+        are computed separately below and the placeholders stay unexpanded:
+        their interiors are excluded from the text spans either way.
         """
         result: NameToTensorList = {}
 
         if tensors is None:
             tensors = {}
 
-        # ----- Convert raw modality tensors to PIL/numpy form for HF -----
         raw_image_inputs = tensors.get("image_inputs", [])
         raw_audio_inputs = tensors.get("audio_inputs", [])
         raw_video_inputs = tensors.get("video_inputs", [])
 
-        # Image preprocessing runs on the image's own device, so the raw tensors
-        # are kept as-is and never round-trip through CPU/numpy
-        # (see _image_preprocess).
-
-        # Our log-mel runs on the waveform's own device and beats the HF CPU
-        # feature extractor on either (2.1 vs 3.5 ms for a 5 s clip on CPU,
-        # 0.39 ms on an H200), matching it to cos>=0.9999
-        # (test_qwen3_omni_gpu_mel_parity), so it is the only path.
         _use_mel = self._processor is not None
         np_audios: list = []
         if not _use_mel:
             for waveform in raw_audio_inputs:
                 np_audios.append(waveform.cpu().numpy())
 
-        # HF puts modality content INSIDE the user turn, ahead of the prompt:
-        #
-        #   <|im_start|>user\n<|audio_start|><|audio_pad|><|audio_end|>{prompt}<|im_end|>
-        #
-        # We reproduce that layout with sequential walks.  Two mechanisms,
-        # selected by ``use_vllm_audio_layout`` below:
-        #   * AUDIO-ONLY -> token-slice path (ours): tokenize the whole templated
-        #     prompt once, then slice the ids at the user-turn boundary.  Slicing
-        #     already-tokenized ids preserves BPE merges across the split, which
-        #     re-tokenizing each half cannot.
-        #   * everything else (any vision, or mixed audio+image) ->
-        #     the #196 sentinel path: the templated prompt is split at
-        #     ``_MM_SPLIT_SENTINEL`` into text-before / text-after and each half
-        #     is tokenized separately.  Placeholders stay out of both halves:
-        #     the modality walks re-emit the start/end sentinels themselves and
-        #     the encoder embeddings take the place of the pad tokens.
         system_text = (
             "You are Qwen, a virtual human developed by the "
             "Qwen team, Alibaba Group, capable of perceiving "
             "auditory and visual inputs, as well as generating "
             "text and speech."
         )
-        messages = [
-            {"role": "system", "content": system_text},
-        ]
         if self._processor is None:
             # __init__ sets _processor=None and warns if AutoProcessor fails to
             # load. Fail fast with a clear message instead of a cryptic
@@ -1372,98 +1330,40 @@ class Qwen3OmniModel(Model):
                 "chat-template prompt. Check the checkpoint/processor files."
             )
 
-        # Modality presence is measured from the RAW inputs, not the derived
-        # np_audios list: on the GPU log-mel path that list stays empty even when
-        # audio is present, so counting it would skip the #196 split entirely.
-        num_mm_inputs = (
-            len(raw_image_inputs) + len(raw_audio_inputs) + len(raw_video_inputs)
+        # input_modalities is the layout, here and in the schedule builder;
+        # prompt_parts only supplies the text that goes in its text slots.
+        parts = parts_from_modalities(
+            input_modalities,
+            [p.text or "" for p in prompt_parts if p.modality == "text"]
+            if prompt_parts is not None else prompt,
         )
+        plan = prefill_plan(parts)
 
-        # Token-slice path only for AUDIO-ONLY requests; any image/video takes
-        # the #196 sentinel path below so its vision walk survives (a mixed
-        # audio+image request would otherwise slice and silently lose vision).
-        use_vllm_audio_layout = (
-            len(raw_audio_inputs) > 0
-            and not raw_image_inputs
-            and not raw_video_inputs
-            and prompt is not None
-        )
-
-        if use_vllm_audio_layout:
-            # vLLM token parity: flatten_messages folds the system text into the
-            # prompt blob, which we re-wrap in our own system turn -> double-
-            # counted system text.  Strip the leading system-text copy so the
-            # user turn is instruction-only and tokens match vLLM.
-            user_prompt = prompt
+        messages = [{"role": "system", "content": system_text}]
+        content = [
+            {"type": "text", "text": part.text or ""} if part.modality == "text"
+            else {"type": part.modality, part.modality: ""}
+            for part in parts
+        ]
+        # The client's own system turn is flattened into the user content
+        # upstream; drop a leading verbatim copy so it is not counted twice.
+        if content and content[0].get("type") == "text":
+            head = content[0]["text"]
             for sep in ("\n", ""):
-                dup = system_text + sep
-                if prompt.startswith(dup):
-                    user_prompt = prompt[len(dup):]
+                if head.startswith(system_text + sep):
+                    content[0] = {"type": "text", "text": head[len(system_text + sep):]}
                     break
-            messages.append({"role": "user", "content": user_prompt})
-        elif prompt is not None or num_mm_inputs:
-            # #196 sentinel path: mark where the modality content belongs inside
-            # the user turn so the templated prompt can be split there.  The
-            # placeholder never reaches the tokenizer (partitioned out below).
-            messages.append({
-                "role": "user",
-                "content": (
-                    (_MM_SPLIT_SENTINEL if num_mm_inputs else "") + (prompt or "")
-                ),
-            })
+        if content:
+            messages.append({"role": "user", "content": content})
 
         text = self._processor.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
+            messages, tokenize=False, add_generation_prompt=True,
         )
-        if use_vllm_audio_layout:
-            input_ids = self.tokenizer(text, return_tensors="pt")["input_ids"][0]
-
-            # --- audio INSIDE the user turn, BEFORE the instruction ---
-            # Legacy M* layout prefills audio as a separate bare block so the
-            # audio sits OUTSIDE any turn and the instruction governs -> the
-            # model TRANSCRIBES.  vLLM-Omni puts the audio inside the user turn
-            # before the instruction -> the trained "spoken-query -> reply"
-            # layout -> the model ANSWERS.  We slice the ALREADY-tokenized full
-            # sequence right after ``<|im_start|>user\n`` into a prefix (system
-            # turn + user-turn opener) and a suffix (instruction + ``<|im_end|>``
-            # + assistant prompt).  The schedule builder then runs
-            # [prefill_text(prefix), prefill_audio, prefill_text(suffix)], so the
-            # audio walk's BOS/AUDIO/EOS embeddings land between them.  Slicing
-            # avoids retokenizing across the boundary (which can shift BPE
-            # merges), unlike the #196 separate-tokenization path.
-            split = self._user_turn_audio_split_index(input_ids)
-            if split is not None:
-                prefix_ids = input_ids[:split]
-                suffix_ids = input_ids[split:]
-                result["text_inputs"] = [prefix_ids, suffix_ids]
-            else:
-                logger.warning(
-                    "Could not locate the user turn in the tokenized prompt; "
-                    "falling back to a single bare-block text span for this "
-                    "request."
-                )
-                result["text_inputs"] = [input_ids]
-        else:
-            # #196 sentinel path: partition the templated prompt at the sentinel
-            # into text-before / text-after and tokenize each half separately.
-            if num_mm_inputs:
-                head_text, sep, tail_text = text.partition(_MM_SPLIT_SENTINEL)
-                assert sep and _MM_SPLIT_SENTINEL not in tail_text, (
-                    "chat template did not render exactly one modality-split "
-                    f"sentinel; got {text!r}"
-                )
-                segments = [head_text, tail_text]
-            else:
-                segments = [text]
-
-            # Empty segments are dropped — a zero-length prefill walk has nothing
-            # to embed.  Neither half is empty under Qwen3-Omni's template.
-            result["text_inputs"] = [
-                self.tokenizer(seg, return_tensors="pt")["input_ids"][0]
-                for seg in segments if seg
-            ]
+        input_ids = self.tokenizer(text, return_tensors="pt")["input_ids"][0]
+        spans = find_media_spans(input_ids, self._placeholder_specs())
+        segments = split_around_spans(input_ids, spans)
+        check_plan(plan, spans, len(segments))
+        result["text_inputs"] = segments
 
         result["pixel_values"] = []
         result["image_grid_thw"] = []
