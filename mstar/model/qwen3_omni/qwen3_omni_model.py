@@ -735,12 +735,11 @@ class Qwen3OmniModel(Model):
                     "talker_prefill_done": False,
                     # The Talker consumes one thinker_states chunk per Thinker
                     # prefill walk, so this MUST equal the actual number of
-                    # Thinker prefill walks -- not len(input_modalities).  A
-                    # modality request splits its text into two prefill walks
-                    # (the #196 text-before / modality / text-after partition,
-                    # and the audio-only vLLM-layout prefix/suffix split), so
-                    # deriving the count from the real schedule keeps the
-                    # Talker's last-prefill detection aligned.
+                    # walks -- not len(input_modalities), which counts neither
+                    # the text spans an attachment splits the prompt into nor
+                    # the spans between two attachments. Deriving it from the
+                    # real schedule keeps the Talker's last-prefill detection
+                    # aligned.
                     "num_thinker_prefill_steps": len(
                         self._build_thinker_prefill_schedule(
                             input_modalities, input_signals,
@@ -831,6 +830,26 @@ class Qwen3OmniModel(Model):
             },
         )
 
+    # Per-modality walk name and the signal keys it consumes: the primary
+    # feature tensor first, then whatever auxiliary tensors that encoder needs
+    # alongside it. Video rides the vision encoder, so its tensors arrive under
+    # the vision input names.
+    _MM_WALKS: dict[str, tuple[str, dict[str, str]]] = {
+        "audio": ("prefill_audio", {
+            "audio_features": "audio_features",
+            "audio_seqlens": "audio_seqlens",
+        }),
+        "image": ("prefill_vision", {
+            "pixel_values": "pixel_values",
+            "image_grid_thw": "image_grid_thw",
+        }),
+        "video": ("prefill_vision", {
+            "pixel_values": "pixel_values_videos",
+            "image_grid_thw": "video_grid_thw",
+            "video_second_per_grid": "video_second_per_grid",
+        }),
+    }
+
     def _build_thinker_prefill_schedule(
         self,
         input_modalities: list[str],
@@ -838,106 +857,36 @@ class Qwen3OmniModel(Model):
     ) -> list[tuple[str, dict[str, TensorPointerInfo]]]:
         """Build the sequential prefill schedule for the Thinker.
 
-        Order: [text before the modality content] + [modality walks, in
-        request order] + [text after it].  ``process_prompt`` splits the
-        templated prompt into those two text segments so the Thinker sees
-        HF's layout, where modality content sits inside the user turn ahead
-        of the prompt text.  Text-only requests have a single segment and no
-        modality walks.
+        Walks the prefill plan for this request's layout, so text spans and
+        attachments prefill in the order they were written and each attachment
+        gets its own walk. ``process_prompt`` split ``text_inputs`` against the
+        same plan, so the nth text span belongs to the nth text step.
 
-        Each schedule entry is ``(walk_name, {input_name: tensor_info})``,
-        capturing all tensors needed by that step's first node.  For audio
-        and vision walks, this includes auxiliary tensors like
-        ``audio_seqlens`` and ``image_grid_thw`` that the encoder nodes
-        require alongside the primary feature tensor.
+        Each entry is ``(walk_name, {input_name: tensor_info})``, carrying every
+        tensor that step's first node needs — for the modality walks that means
+        the auxiliary tensors (``audio_seqlens``, ``image_grid_thw``) alongside
+        the primary feature tensor.
         """
+        texts = input_signals.get("text_inputs", [])
         schedule: list[tuple[str, dict[str, TensorPointerInfo]]] = []
 
-        texts = list(input_signals.get("text_inputs", []))
-        audio_features = input_signals.get("audio_features", [])
-        audio_seqlens = input_signals.get("audio_seqlens", [])
-        pixel_values = input_signals.get("pixel_values", [])
-        image_grid_thws = input_signals.get("image_grid_thw", [])
-        # video uses pixel_values_videos in HF; we accept both keys here
-        pixel_values_videos = input_signals.get("pixel_values_videos", [])
-        video_grid_thws = input_signals.get("video_grid_thw", [])
-        video_second_per_grid = input_signals.get("video_second_per_grid", [])
-
-        # --- vLLM prompt-layout schedule (AUDIO-ONLY) ----------------------
-        # process_prompt's token-slice path split text_inputs into
-        # [prefix, suffix] and wants the audio interleaved: prefill_text(prefix)
-        # -> prefill_audio -> prefill_text(suffix).  This puts the audio block
-        # INSIDE the user turn before the instruction, matching vLLM.  Guarded
-        # to AUDIO-ONLY: the #196 sentinel path ALSO produces two text spans, so
-        # without the vision guard a mixed audio+image request would match here
-        # and SILENTLY LOSE its vision walk.  Any image/video falls through to
-        # the #196 layout below.
-        if (
-            len(texts) >= 2
-            and len(audio_features) >= 1
-            and not pixel_values
-            and not pixel_values_videos
-        ):
-            audio_entry: dict[str, TensorPointerInfo] = {
-                "audio_features": audio_features[0],
-            }
-            if len(audio_seqlens) >= 1:
-                audio_entry["audio_seqlens"] = audio_seqlens[0]
-            schedule.append(("prefill_text", {"text_inputs": texts[0]}))
-            schedule.append(("prefill_audio", audio_entry))
-            schedule.append(("prefill_text", {"text_inputs": texts[1]}))
-            return schedule
-
-        # Every modality input goes between the two text segments, in
-        # request order, so image+audio prefills as
-        # ``…<|im_start|>user\n`` → vision → audio → ``{prompt}<|im_end|>…``.
-        # Text interleaved BETWEEN modality blocks isn't representable, but
-        # it never reaches here either: ``flatten_messages`` collapses each
-        # request to (files…, text), dropping their relative order.
-        if texts:
-            schedule.append(("prefill_text", {"text_inputs": texts.pop(0)}))
-
-        audio_idx = vision_idx = video_idx = 0
-        for mod in input_modalities:
-            if mod == "text":
+        # A signal the plan asks for but the prompt did not produce is already a
+        # hard error at intake, where ``check_plan`` can still fail the request;
+        # skipping here keeps a slipped-through mismatch from raising inside the
+        # conductor, where there is nobody left to return a 400 to.
+        for step in prefill_plan(parts_from_modalities(input_modalities)):
+            if step.modality == "text":
+                if step.index < len(texts):
+                    schedule.append(("prefill_text", {"text_inputs": texts[step.index]}))
                 continue
-            elif mod == "audio":
-                if audio_idx < len(audio_features):
-                    entry: dict[str, TensorPointerInfo] = {
-                        "audio_features": audio_features[audio_idx],
-                    }
-                    if audio_idx < len(audio_seqlens):
-                        entry["audio_seqlens"] = audio_seqlens[audio_idx]
-                    schedule.append(("prefill_audio", entry))
-                    audio_idx += 1
-            elif mod == "image":
-                if vision_idx < len(pixel_values):
-                    entry = {"pixel_values": pixel_values[vision_idx]}
-                    if vision_idx < len(image_grid_thws):
-                        entry["image_grid_thw"] = image_grid_thws[vision_idx]
-                    schedule.append(("prefill_vision", entry))
-                    vision_idx += 1
-            elif mod == "video":
-                # Video uses pixel_values_videos + video_grid_thw, but the
-                # graph node still consumes them under the "pixel_values" /
-                # "image_grid_thw" input names (the vision encoder is shared).
-                if video_idx < len(pixel_values_videos):
-                    entry = {"pixel_values": pixel_values_videos[video_idx]}
-                    if video_idx < len(video_grid_thws):
-                        entry["image_grid_thw"] = video_grid_thws[video_idx]
-                    if video_idx < len(video_second_per_grid):
-                        entry["video_second_per_grid"] = video_second_per_grid[video_idx]
-                    schedule.append(("prefill_vision", entry))
-                    video_idx += 1
-
-        # Trailing text segment(s).  Keying off ``texts`` (not "text" in
-        # input_modalities) also covers the empty-user-prompt case -- e.g.
-        # greedy T2S/I2S/A2S with no caption still carries a templated
-        # text_inputs, which must be prefilled so the Talker's thinker_states
-        # count stays consistent.
-        for text_info in texts:
-            schedule.append(("prefill_text", {"text_inputs": text_info}))
-
+            walk, signal_names = self._MM_WALKS[step.modality]
+            entry = {
+                name: input_signals[key][step.index]
+                for name, key in signal_names.items()
+                if step.index < len(input_signals.get(key, []))
+            }
+            if entry:
+                schedule.append((walk, entry))
         return schedule
 
     def _get_thinker_prefill_inputs(
