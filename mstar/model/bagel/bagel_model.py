@@ -69,6 +69,7 @@ from mstar.model.bagel.submodules import (
 from mstar.model.base import DECODE, ForwardPassArgs, Model
 from mstar.model.loader import iter_safetensors_file, load_hf_weights
 from mstar.model.loader.base import LLAMA_STACKED_PARAMS, StackedParamRule
+from mstar.model.multimodal import parts_from_modalities, prefill_plan
 from mstar.model.submodule_base import NodeSubmodule
 from mstar.utils.sampling import SamplingConfig
 
@@ -830,35 +831,42 @@ class BagelModel(Model):
         self, input_modalities: list[str],
         input_signals: dict[str, list[TensorPointerInfo]],
         is_understanding: bool,
+        think_mode: bool = False,
     ):
-        # Build prefill schedule: sequential list of (graph_walk_name, input tensor info)
-        schedule: list[tuple[str, TensorPointerInfo]] = []
-        texts = input_signals.get("text_inputs", [])
+        """Sequential list of ``(graph_walk_name, input tensor info)``.
+
+        Walks the prefill plan for this request's layout, so attachments
+        prefill where they were written and N of them get N walks.
+        Understanding opens with the system span ahead of the attachments;
+        generation opens straight into them, with the think-mode system span —
+        tokenized on its own, and not part of the request layout — prefilled
+        first.
+        """
+        texts = list(input_signals.get("text_inputs", []))
         images = input_signals.get("image_inputs", [])
 
-        # 1. System prompt
+        schedule: list[tuple[str, TensorPointerInfo]] = []
+        if think_mode and not is_understanding and texts:
+            schedule.append(("prefill_text", texts.pop(0)))
 
-        if len(texts) == 2:
-            # the first text block is the system prompt and should come at the very beginning
-            # (in both thinking and non-thinking mode)
-            input_modalities.insert(0, "text")
-
-        # 2. Walk through interleaved inputs, building sequential steps
-        text_idx, image_idx = 0, 0
-        for mod in input_modalities:
-            if mod == "text":
-                if text_idx >= len(texts):
-                    continue
-                schedule.append(("prefill_text", texts[text_idx]))
-                text_idx += 1
-            elif mod == "image":
-                if image_idx >= len(images):
-                    continue
+        plan = prefill_plan(
+            parts_from_modalities(input_modalities), leading_text=is_understanding,
+        )
+        for step in plan:
+            pool = texts if step.modality == "text" else images
+            if step.index >= len(pool):
+                raise ValueError(
+                    f"BAGEL cannot prefill this layout: {input_modalities} needs a "
+                    f"{step.modality} span at index {step.index}, but the prompt "
+                    f"produced {len(pool)}"
+                )
+            if step.modality == "text":
+                schedule.append(("prefill_text", texts[step.index]))
+            else:
                 if not is_understanding:
                     # Generation/editing: VAE encode the image
-                    schedule.append(("prefill_vae", images[image_idx]))
-                schedule.append(("prefill_vit", images[image_idx]))
-                image_idx += 1
+                    schedule.append(("prefill_vae", images[step.index]))
+                schedule.append(("prefill_vit", images[step.index]))
         return schedule
 
     def _requires_cfg(
@@ -1015,6 +1023,7 @@ class BagelModel(Model):
             input_modalities=input_modalities,
             input_signals=input_signals,
             is_understanding=(target_output == "text"),
+            think_mode=think_mode,
         )
 
         first_graph_walk = schedule[0][0] if schedule else DECODE
