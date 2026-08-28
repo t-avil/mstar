@@ -440,76 +440,93 @@ class PreprocessWorkerThread:
         did_work = False
         for request_id, graph_edges in self.tensor_manager.get_ready_tensors().items():
             did_work = True
-            for graph_edge in graph_edges:
-                modality = graph_edge.name.replace("_output", "")
+            try:
+                self._read_ready_graph_edges(request_id, graph_edges)
+            except Exception as exc:  # noqa: BLE001 — must reach the client
+                self._fail_request(request_id, exc, "output delivery")
+        return did_work
 
-                for tensor_info in graph_edge.tensor_info:
-                    logger.debug("Reading in OUTPUT tensor %s with uuid %s", graph_edge.name, tensor_info.uuid)
-                    # Reading and postprocessing an output tensor is per-request
-                    # work, so a raise here is attributable: fail this request
-                    # and keep draining everyone else's tensors. Letting it
-                    # escape to run()'s catch-all would abandon the rest of this
-                    # pass and leave the client waiting on the request timeout.
-                    try:
-                        tensor = self.tensor_manager.get_tensor(
-                            request_id=request_id,
-                            uuid=tensor_info.uuid
-                        )
-                        postprocessed = self.model.postprocess(
-                            tensor, modality,
-                            request_kwargs=self.request_model_kwargs.get(request_id),
-                        )
+    def _read_ready_graph_edges(self, request_id, graph_edges):
+        for graph_edge in graph_edges:
+            modality = graph_edge.name.replace("_output", "")
 
-                        chunk_metadata = self.tensor_uuid_to_metadata_per_request[request_id][
-                            tensor_info.uuid] or {}
-                        # Audio is emitted as headerless 16-bit PCM; surface the
-                        # model's output sample rate + channel count so clients can
-                        # wrap it.
-                        if modality == "audio" and self.model is not None:
-                            chunk_metadata = {
-                                **chunk_metadata,
-                                "sample_rate": self.model.get_output_sample_rate("audio"),
-                                "num_channels": self.model.get_output_audio_channels("audio"),
-                            }
-
-                        self.out_queue.put(ResultChunk(
-                            request_id=request_id,
-                            modality=modality,
-                            data=postprocessed,
-                            metadata=chunk_metadata,
-                        ))
-                    except Exception as exc:  # noqa: BLE001 — must reach the client
-                        self._fail_request(
-                            request_id, exc, f"{modality} output postprocessing",
-                        )
-                    self.tensor_uuid_to_metadata_per_request.get(
-                        request_id, {}
-                    ).pop(tensor_info.uuid, None)
-                    self.tensor_manager.dereference(
+            for tensor_info in graph_edge.tensor_info:
+                logger.debug("Reading in OUTPUT tensor %s with uuid %s", graph_edge.name, tensor_info.uuid)
+                # Reading and postprocessing an output tensor is per-request
+                # work, so a raise here is attributable: fail this request
+                # and keep draining everyone else's tensors. Letting it
+                # escape to run()'s catch-all would abandon the rest of this
+                # pass and leave the client waiting on the request timeout.
+                try:
+                    tensor = self.tensor_manager.get_tensor(
                         request_id=request_id,
                         uuid=tensor_info.uuid
                     )
-        return did_work
+                    postprocessed = self.model.postprocess(
+                        tensor, modality,
+                        request_kwargs=self.request_model_kwargs.get(request_id),
+                    )
+
+                    chunk_metadata = self.tensor_uuid_to_metadata_per_request[request_id][
+                        tensor_info.uuid] or {}
+                    # Audio is emitted as headerless 16-bit PCM; surface the
+                    # model's output sample rate + channel count so clients can
+                    # wrap it.
+                    if modality == "audio" and self.model is not None:
+                        chunk_metadata = {
+                            **chunk_metadata,
+                            "sample_rate": self.model.get_output_sample_rate("audio"),
+                            "num_channels": self.model.get_output_audio_channels("audio"),
+                        }
+
+                    self.out_queue.put(ResultChunk(
+                        request_id=request_id,
+                        modality=modality,
+                        data=postprocessed,
+                        metadata=chunk_metadata,
+                    ))
+                except Exception as exc:  # noqa: BLE001 — must reach the client
+                    self._fail_request(
+                        request_id, exc, f"{modality} output postprocessing",
+                    )
+                self.tensor_uuid_to_metadata_per_request.get(
+                    request_id, {}
+                ).pop(tensor_info.uuid, None)
+                self.tensor_manager.dereference(
+                    request_id=request_id,
+                    uuid=tensor_info.uuid
+                )
 
     def _process_messages(self):
         did_work = False
         for message in self.communicator.get_all_new_messages():
             did_work = True
-            if message.message_type == WorkerMessageType.TENSOR_RECEIVED:
-                body: TensorReceived = message.body
-                for (uuid, ref_cnt) in body.successful_tensors.items():
-                    self.tensor_manager.dereference(
-                        body.request_id, uuid, n=ref_cnt
-                    )
-            elif message.message_type == WorkerMessageType.UNPERSIST_TENSORS:
-                body: UnpersistTensors = message.body
-                for (uuid, ref_cnt) in body.uuid_to_ref_count.items():
-                    self.tensor_manager.increment_ref(
-                        body.request_id, uuid, n=ref_cnt
-                    )
-                    self.tensor_manager.set_persist(
-                        body.request_id, uuid, persist=False
-                    )
+            try:
+                self._handle_worker_message(message)
+            except Exception as exc:  # noqa: BLE001 — must reach the client
+                request_id = getattr(message.body, "request_id", None)
+                if request_id is None:
+                    logger.exception("Dropping unattributable worker message")
+                else:
+                    self._fail_request(request_id, exc, "worker message handling")
+        return did_work
+
+    def _handle_worker_message(self, message):
+        if message.message_type == WorkerMessageType.TENSOR_RECEIVED:
+            body: TensorReceived = message.body
+            for (uuid, ref_cnt) in body.successful_tensors.items():
+                self.tensor_manager.dereference(
+                    body.request_id, uuid, n=ref_cnt
+                )
+        elif message.message_type == WorkerMessageType.UNPERSIST_TENSORS:
+            body: UnpersistTensors = message.body
+            for (uuid, ref_cnt) in body.uuid_to_ref_count.items():
+                self.tensor_manager.increment_ref(
+                    body.request_id, uuid, n=ref_cnt
+                )
+                self.tensor_manager.set_persist(
+                    body.request_id, uuid, persist=False
+                )
         return did_work
 
     def run(self):
@@ -547,13 +564,19 @@ class PreprocessWorkerThread:
                     )
                 while not self.discard_tensor_queue.empty():
                     did_work = True
-                    self._discard_result_tensor(self.discard_tensor_queue.get())
+                    discard = self.discard_tensor_queue.get()
+                    try:
+                        self._discard_result_tensor(discard)
+                    except Exception:
+                        logger.exception("Discarding result tensors failed")
                 while not self.cleanup_request_queue.empty():
                     did_work = True
                     req_id = self.cleanup_request_queue.get()
-                    self.tensor_manager.cleanup_request(req_id)
-                    if req_id in self.tensor_uuid_to_metadata_per_request:
-                        del self.tensor_uuid_to_metadata_per_request[req_id]
+                    try:
+                        self.tensor_manager.cleanup_request(req_id)
+                    except Exception:
+                        logger.exception("Cleanup failed for request %s", req_id)
+                    self.tensor_uuid_to_metadata_per_request.pop(req_id, None)
                     self.request_model_kwargs.pop(req_id, None)
                 did_work = self._process_read_tensors() or did_work
                 if not self.in_queue.empty():
