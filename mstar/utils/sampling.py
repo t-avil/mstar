@@ -356,6 +356,11 @@ class Sampler(BaseSampler):
     # (seed, offset=0) draws repeat forever and stable logits never reach EOS.
     _step_offset: dict[str, int] = field(default_factory=dict)
     tp_group: "CommGroup | None" = None  # noqa: F821
+    _batch_cfg_cache: dict[tuple, tuple] = field(default_factory=dict)
+
+    # Batch membership churns as requests are admitted and retired, so the
+    # cache is bounded rather than grown for the life of the server.
+    _BATCH_CFG_CACHE_MAX = 64
 
     def add_request(self, request_id: str):
         self._sampling_config[request_id] = SamplingConfig()
@@ -378,6 +383,8 @@ class Sampler(BaseSampler):
         self._step_offset.pop(request_id, None)
 
     def set_config(self, request_id: str, **kwargs):
+        # The cached tensors hold the values being replaced here.
+        self._batch_cfg_cache.clear()
         old_vocab_size = self._sampling_config[request_id].vocab_size
         curr_config = asdict(self._sampling_config[request_id])
         kwargs = {k: arg for k, arg in kwargs.items() if k in curr_config.keys()}
@@ -393,6 +400,41 @@ class Sampler(BaseSampler):
                 device=self.device
             )
 
+    def _batch_config_tensors(self, request_ids, configs, device):
+        """Device-side sampling params for this batch, reused across steps.
+
+        Building these with ``torch.tensor(..., device=...)`` is a pageable
+        host-to-device copy each, and torch issues a ``cudaStreamSynchronize``
+        per copy: six drains of the in-flight pipeline on every decode step.
+        A request's config is fixed for its lifetime, so the tensors are cached
+        under the batch's membership and only rebuilt when that membership
+        changes or ``set_config`` rewrites one of them. ``rand_offset`` is the
+        exception — it advances by one per rid per step, matching the
+        ``_step_offset`` bookkeeping at the end of ``sample``, so the cached
+        tensor is incremented in place rather than re-uploaded.
+        """
+        key = tuple(request_ids)
+        cached = self._batch_cfg_cache.get(key)
+        if cached is not None:
+            cached[5].add_(1)
+            return cached
+
+        built = (
+            torch.tensor([c.temperature for c in configs], device=device),
+            torch.tensor([c.top_k for c in configs], device=device, dtype=torch.int32),
+            torch.tensor([c.top_p for c in configs], device=device),
+            torch.tensor([c.repetition_penalty for c in configs], device=device),
+            torch.tensor([c.seed for c in configs], device=device, dtype=torch.long),
+            torch.tensor(
+                [self._step_offset.get(rid, 0) for rid in request_ids],
+                device=device, dtype=torch.long,
+            ),
+        )
+        if len(self._batch_cfg_cache) >= self._BATCH_CFG_CACHE_MAX:
+            self._batch_cfg_cache.clear()
+        self._batch_cfg_cache[key] = built
+        return built
+
     def sample(
         self, request_ids: list[str], logits: torch.Tensor, **kwargs
     ) -> torch.Tensor:
@@ -404,14 +446,8 @@ class Sampler(BaseSampler):
         the hot path doesn't need.
         """
         configs = [self._sampling_config[rid] for rid in request_ids]
-        temperature = torch.tensor([c.temperature for c in configs], device=logits.device)
-        top_k = torch.tensor([c.top_k for c in configs], device=logits.device, dtype=torch.int32)
-        top_p = torch.tensor([c.top_p for c in configs], device=logits.device)
-        r_pen = torch.tensor([c.repetition_penalty for c in configs], device=logits.device)
-        seed = torch.tensor([c.seed for c in configs], device=logits.device, dtype=torch.long)
-        rand_offset = torch.tensor(
-            [self._step_offset.get(rid, 0) for rid in request_ids],
-            device=logits.device, dtype=torch.long,
+        temperature, top_k, top_p, r_pen, seed, rand_offset = (
+            self._batch_config_tensors(request_ids, configs, logits.device)
         )
 
         any_rep_pen = any(c.repetition_penalty != 1.0 for c in configs)
