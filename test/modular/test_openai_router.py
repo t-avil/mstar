@@ -155,6 +155,32 @@ def test_images_edits(client_and_stub):
     assert "image" in (stub.last_submit["file_paths"] or {})
 
 
+def test_images_edits_forwards_the_request_for_disconnects(client_and_stub):
+    """Its collect_results has to see the request, like every other endpoint.
+
+    Without it the call raises TypeError on an argument the handler does not
+    accept, and the router answers 500 for every edit.
+    """
+    client, stub = client_and_stub
+    stub.model_name = "bagel"
+    stub.next_chunks = [_Chunk("image", b"\x89PNGedited")]
+    seen = {}
+    original = stub.collect_results
+
+    async def recording(request_id, raw_request=None):
+        seen["raw_request"] = raw_request
+        return await original(request_id, raw_request)
+
+    stub.collect_results = recording
+    resp = client.post(
+        "/v1/images/edits",
+        files={"image": ("in.png", b"\x89PNGinput", "image/png")},
+        data={"prompt": "make it neon"},
+    )
+    assert resp.status_code == 200
+    assert seen["raw_request"] is not None
+
+
 def test_videos_generations_wan22(client_and_stub):
     # Route-level smoke for the wan22 adapter: the mp4 chunk round-trips as
     # b64_json and the first-class video fields (size -> width/height,
