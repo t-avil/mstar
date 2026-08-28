@@ -273,6 +273,15 @@ class APIServer:
             if m not in SUPPORTED_MODALITIES:
                 raise ValueError(f"Unsupported modality: {m!r}")
 
+        declared = getattr(self.model, "SUPPORTED_INPUT_MODALITIES", None)
+        if declared is not None:
+            for m in input_modalities:
+                if m not in declared:
+                    raise ValueError(
+                        f"{self.model_name} does not accept {m!r} input; "
+                        f"it accepts {', '.join(sorted(declared))}"
+                    )
+
         # Register pending request
         with self.request_lock:
             self.pending_requests[request_id] = PendingRequest(

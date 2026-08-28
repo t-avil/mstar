@@ -244,6 +244,11 @@ class ForwardPassArgs:
 
 
 class Model(ABC):
+    # Input modalities this model can actually encode. ``None`` means the
+    # model has not declared one and every modality the server knows about is
+    # accepted, as it was before models could say.
+    SUPPORTED_INPUT_MODALITIES: frozenset[str] | None = None
+
     def _get_worker_graphs_for_graph_walk(
         self,
         graph_walk: str,

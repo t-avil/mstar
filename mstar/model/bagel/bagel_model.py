@@ -466,6 +466,8 @@ class BagelModel(Model):
 
     # Image generation (T2I/I2I): bare wrapping, no system prompt or roles. Input
     # image (I2I) is positioned before this by the prefill_vae/vit walks.
+    SUPPORTED_INPUT_MODALITIES = frozenset({"text", "image"})
+
     GEN_TEMPLATE = "<|im_start|>{prompt}<|im_end|><|im_start|>"
     BOS_EOS_TEMPL = "<|im_start|>{prompt}<|im_end|>"
 
