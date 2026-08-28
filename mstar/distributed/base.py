@@ -84,6 +84,7 @@ class ShardingConfig:
         self.tp_enabled_nodes = set(self.tp_enabled_nodes)
         self.sp_enabled_nodes = set(self.sp_enabled_nodes)
         self._setup_done = False
+        self._fanout_memo: dict[tuple, list[tuple[str, int | None, int]]] = {}
 
     def assert_stream_consumer_compatibility(self, streaming_consumers: set[str]):
         """
@@ -106,6 +107,7 @@ class ShardingConfig:
         # and node_to_worker dictionaries. Now, however, it only needs to be
         # called once.
         self._setup_done = True
+        self._fanout_memo.clear()
         self.node_to_worker.update(node_to_workers)
         graph_walks = {x.graph_walk for x in node_to_workers.keys()}
 
@@ -263,6 +265,21 @@ class ShardingConfig:
         dest_graph_walk: str | None,
         source_tp_rank: int | None = None,
     ) -> dict[str, GraphEdge]: # dest worker to graph edge
+        memo_key = (
+            graph_edge.name, graph_edge.next_node, source_node,
+            source_graph_walk, dest_graph_walk, source_tp_rank,
+        )
+        hit = self._fanout_memo.get(memo_key)
+        if hit is not None:
+            replay = {}
+            for worker, shard_dim, total_fanin in hit:
+                new_edge = graph_edge.clone()
+                new_edge.tensor_info = graph_edge.tensor_info
+                new_edge._shard_dim = shard_dim
+                new_edge._total_fanin = total_fanin
+                replay[worker] = new_edge
+            return replay
+
         # canonical form: leading shard dim
         shard_dim_sizes = [
             info.dims[0] for info in graph_edge.tensor_info
@@ -318,6 +335,16 @@ class ShardingConfig:
 
                     new_edge.tensor_info.append(new_info)
             result[item.worker] = new_edge
+
+        # Only a fully replicated fanout is reusable: nothing in the cached
+        # triple then depends on this step's tensor shapes.
+        if self.shard_dim.get(graph_edge.name) is None and all(
+            item.full_tensor for item in fanout
+        ):
+            self._fanout_memo[memo_key] = [
+                (worker, edge._shard_dim, edge._total_fanin)
+                for worker, edge in result.items()
+            ]
         return result
 
     def compute_fanin(
