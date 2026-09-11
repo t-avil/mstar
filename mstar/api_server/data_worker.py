@@ -527,7 +527,6 @@ class PreprocessWorkerThread:
                 self.tensor_manager.set_persist(
                     body.request_id, uuid, persist=False
                 )
-        return did_work
 
     def run(self):
         while not self.stop_event.is_set():
